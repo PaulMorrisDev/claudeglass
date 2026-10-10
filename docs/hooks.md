@@ -142,15 +142,13 @@ session counts as having the mod when the file's `session_id` is its own
 name, its schema is 1 and `seen` is within the last 10 minutes; a session
 id that isn't letters, digits and `-` never counts. Then the hook leaves
 out the hints the mod shows, and doesn't note that it did: `cold_return`,
-`status_poll`, `drip_feed`, `big_paste`, `report_reread`, `split_run`,
-`plan_fresh` and the rating reminder. It doesn't work them out either, so
+`status_poll`, `drip_feed`, `big_paste` and `plan_fresh`. It doesn't work
+them out either, so
 a call with the mod present is a little quicker (about 39 milliseconds
 against 43 on the author's machine, with a hint due). A hint the hook
 leaves out is not marked as shown, so it is there again as soon as the mod
 isn't: it was closed, the file went stale, or it is missing, unreadable or
-of another schema. `split_run` is still recorded when an agent run ends too
-big, so a run from before the mod stopped is told once it has; only
-telling it is left to the mod, on the agent's row. The hook also reads the
+of another schema. The hook also reads the
 mod's sensor file for the session (`mod/sensor/<session id>.json`): a tip to
 start fresh that the mod showed within the cooldown rests `plan_fresh_early`,
 as one the hook showed itself would.

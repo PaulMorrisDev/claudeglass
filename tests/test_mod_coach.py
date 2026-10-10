@@ -2,12 +2,12 @@
 makes the decisions of the capture hook it ports.
 
 The capture hook decides ``cold_return``, ``status_poll``, ``drip_feed``,
-``big_paste``, ``plan_fresh`` and ``rating_reminder`` from a message after
+``big_paste`` and ``plan_fresh`` from a message after
 it is sent. When the mod runs, it decides the same things from the draft
 and the session so far. This builds cases by calling the real functions
 (``_is_status``, ``_is_change_request``, ``_ends_on_question``,
 ``_changes_file``, ``_drip_count``, ``_paste_hint``, ``_cold_hint``,
-``_background_pending``, ``_fresh_hint`` and ``_reminder_due``) on a spread
+``_background_pending`` and ``_fresh_hint``) on a spread
 of inputs, writes ``{fn, args, expect}`` for each to a file and runs
 ``tests/js/coach.test.mjs`` over it under Node, which prints every
 mismatch. It skips when Node isn't installed; CI installs it.
@@ -277,31 +277,6 @@ def _fresh_vectors(tmp_path: Path) -> list[dict]:
     return out
 
 
-# -- rating_reminder --------------------------------------------------------------------
-
-
-def _rating_vectors(tmp_path: Path) -> list[dict]:
-    rng = random.Random(9)
-    out = []
-    now = 1_700_000_000.0
-    for case in range(200):
-        th = dict(TH) if case % 2 else {**TH, "rating_min_tokens": 200_000, "rating_rest_days": 1}
-        tokens = rng.choice([0, 100_000, 199_999, 200_000, 999_999, 1_000_000, 1_800_000, 2_500_000, 6_000_000])
-        typical = rng.choice([0, 400_000, 1_000_000, 2_500_000])
-        reminded = rng.choice([None, now - 3600, now - 2 * 86400, now - 3 * 86400, now - 5 * 86400])
-        noted = rng.random() < 0.2
-        scan = {"replies": {"m": {"i": 4, "tokens": tokens, "admit": False}}, "piece": 0, "piece_key": "k1", "piece_at": None}
-        state: dict = {}
-        if reminded is not None:
-            state["feedback"] = {"reminded_at": reminded}
-        if noted:
-            capture_hook._note_made(state, "pieces", "s1", "k1")
-        text = capture_hook._reminder_due(scan, {"typical_piece_tokens": typical}, th, COACHING, state, "s1", now, tmp_path, "s1")
-        out.append(vec("ratingDue", [{"tokens": tokens, "typical": typical, "remindedAt": reminded, "noted": noted, "nowS": now, "th": th}], bool(text)))
-    assert {v["expect"] for v in out} == {True, False}
-    return out
-
-
 # -- who coaching is for -----------------------------------------------------------------------
 
 
@@ -353,7 +328,6 @@ def vectors(tmp_path_factory) -> dict[str, list[dict]]:
         "cold": _cold_vectors(),
         "background": _background_vectors(),
         "fresh": _fresh_vectors(tmp),
-        "rating": _rating_vectors(tmp / "cfg"),
         "project": _project_vectors(),
     }
 
@@ -376,7 +350,7 @@ def test_node_tests_pass_and_the_decisions_match_the_python(vectors, tmp_path: P
 
 
 def test_the_hints_the_mod_decides_are_the_ones_the_hook_leaves_to_it() -> None:
-    assert {"cold_return", "status_poll", "drip_feed", "big_paste", "plan_fresh", "rating_reminder"} <= set(capture_catalogue.MOVED_TO_MOD)
+    assert {"cold_return", "status_poll", "drip_feed", "big_paste", "plan_fresh"} <= set(capture_catalogue.MOVED_TO_MOD)
     text = COACH_LIB.read_text(encoding="utf-8")
     match = re.search(r'HINT_ORDER = (\[[^\]]*\])', text)
     assert match

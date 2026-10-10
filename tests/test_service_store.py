@@ -673,7 +673,7 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
 
     db_path = tmp_path / "roundtrip.db"
     store = Store(str(db_path))
-    store.open()  # built fresh at the real, current SCHEMA_VERSION (10)
+    store.open()  # built fresh at the real, current SCHEMA_VERSION (11)
     _seed(store)
     store.set_feedback("session-a", outcome="delivered", slow=("scope",), worth="yes", helped=("clearer-brief",))
     store.set_tag("session-a", "purpose", "refactor")
@@ -683,17 +683,17 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     )
     store.close()
 
-    # "Downgrade": a build that only knows up to v9 opens this v10 store.
-    # v10 is newer than that build's own SCHEMA_VERSION, so migrate() takes
+    # "Downgrade": a build that only knows up to v10 opens this v11 store.
+    # v11 is newer than that build's own SCHEMA_VERSION, so migrate() takes
     # the backup-then-drop-and-rebuild path (same branch as the test
-    # above), stamping the store back down to "9".
+    # above), stamping the store back down to "10".
     monkeypatch.setattr(schema, "SCHEMA_VERSION", schema.SCHEMA_VERSION - 1)
     downgraded = Store(str(db_path))
     downgraded.open()
-    assert downgraded.schema_version() == schema.SCHEMA_VERSION == 9
+    assert downgraded.schema_version() == schema.SCHEMA_VERSION == 10
     downgraded.close()
 
-    # Upgrade back to the real, current build: v9 -> v10 walks the
+    # Upgrade back to the real, current build: v10 -> v11 walks the
     # additive MIGRATIONS ladder (it never drops a table, and finds the
     # columns the rebuilt tables already carry), so this step alone was
     # never the risk -- the ratings must already have survived the
@@ -2522,6 +2522,7 @@ def test_the_migration_ladder_reaches_the_current_version() -> None:
     assert set(store_mod.MIGRATIONS) == set(range(4, schema.SCHEMA_VERSION))
     assert store_mod.MIGRATIONS[7] is store_mod._migrate_7_to_8
     assert store_mod.MIGRATIONS[9] is store_mod._migrate_9_to_10
+    assert store_mod.MIGRATIONS[10] is store_mod._migrate_10_to_11
 
 
 def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
@@ -2545,7 +2546,8 @@ def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
 
 def _mod_event(ts, event="note", **fields):
     row = {"ts": ts, "event": event, "kind": None, "surface": None, "outcome": None,
-           "kept": None, "missing": None, "added": None}
+           "kept": None, "missing": None, "added": None,
+           "instructed": None, "referenced": None, "before": None, "after": None}
     return {**row, **fields}
 
 
@@ -2570,7 +2572,7 @@ def test_migrate_upgrades_a_v9_store_with_the_mod_events_table(tmp_path) -> None
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 10
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 11
         # What was there stays; the new table works and has its indexes.
         assert upgraded.summary()["sessions"] == 1
         assert upgraded.replace_mod_events("session-a", [_note("2026-09-21T10:00:00Z")]) == 1
@@ -2580,6 +2582,81 @@ def test_migrate_upgrades_a_v9_store_with_the_mod_events_table(tmp_path) -> None
         assert {"idx_mod_events_session_ts", "idx_mod_events_event"} <= indexes
     finally:
         upgraded.close()
+
+
+def test_migrate_upgrades_a_v10_store_with_the_receipt_columns(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v10.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    conn = store._connection()
+    # A v10 table: the same columns less the four receipt ones, with a row already in it.
+    conn.execute("DROP TABLE mod_events")
+    conn.execute(
+        "CREATE TABLE mod_events (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, ts TEXT NOT NULL, "
+        "event TEXT NOT NULL, kind TEXT, surface TEXT, outcome TEXT, kept INTEGER, missing INTEGER, "
+        "added INTEGER, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO mod_events (session_id, ts, event, kind, kept, missing, added, updated_at) "
+        "VALUES ('s0', '2026-09-20T10:00:00Z', 'compaction', 'auto', 5, 1, 0, '2026-09-20T10:00:01Z')"
+    )
+    conn.execute("UPDATE meta SET value = '10' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    store.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 11
+        # The old row stays, with the new columns empty, and the new ones take values.
+        assert upgraded.read_mod_events() == [
+            {"session_id": "s0", **_mod_event("2026-09-20T10:00:00Z", "compaction", kind="auto", kept=5, missing=1, added=0)}
+        ]
+        assert upgraded.replace_mod_events("s1", [_mod_event("2026-09-21T10:00:00Z", "tweak", kind="check", before=2, after=1)]) == 1
+        assert upgraded.read_mod_events(event="tweak")[0]["before"] == 2
+    finally:
+        upgraded.close()
+
+
+def test_migrate_10_to_11_is_a_no_op_when_run_again(store: Store) -> None:
+    from claudeglass.service import store as store_mod
+
+    store.replace_mod_events("s1", [_mod_event("2026-09-21T10:00:00Z", "tweak", kind="hold", before=1, after=0)])
+    before = store.read_mod_events()
+    store_mod._migrate_10_to_11(store._connection())  # the columns are there already
+    assert store.read_mod_events() == before
+
+
+def test_the_read_only_reader_gives_the_receipt_columns_and_reads_a_v10_store(tmp_path) -> None:
+    import sqlite3
+
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "ro.db"
+    store = Store(str(db_path))
+    store.open()
+    events = [_mod_event("2026-09-21T10:06:00Z", "tweak", kind="summarise", before=9, after=7)]
+    store.replace_mod_events("s1", events)
+    store.close()
+    assert store_mod.read_mod_events(db_path) == [{"session_id": "s1", **events[0]}]
+
+    # A store from before v11 has no such columns: its events read with them empty.
+    old = tmp_path / "old.db"
+    conn = sqlite3.connect(old)
+    conn.execute(
+        "CREATE TABLE mod_events (id INTEGER PRIMARY KEY, session_id TEXT, ts TEXT, event TEXT, kind TEXT, "
+        "surface TEXT, outcome TEXT, kept INTEGER, missing INTEGER, added INTEGER, updated_at TEXT)"
+    )
+    conn.execute("INSERT INTO mod_events VALUES (1, 's0', '2026-09-20T10:00:00Z', 'compaction', 'auto', NULL, NULL, 5, 1, 0, 'x')")
+    conn.commit()
+    conn.close()
+    assert store_mod.read_mod_events(old) == [
+        {"session_id": "s0", **_mod_event("2026-09-20T10:00:00Z", "compaction", kind="auto", kept=5, missing=1, added=0)}
+    ]
 
 
 def test_migrate_9_to_10_is_a_no_op_when_run_again(store: Store) -> None:
@@ -2598,11 +2675,17 @@ def test_mod_events_round_trip_every_column(store: Store) -> None:
         _mod_event("2026-09-21T10:02:00Z", "rebuild", kind="expiry", outcome="expected"),
         _mod_event("2026-09-21T10:03:00Z", "cold_send", outcome="unwarned"),
         _mod_event("2026-09-21T10:04:00Z", "compaction", kind="auto", kept=12, missing=2, added=1),
+        _mod_event("2026-09-21T10:05:00Z", "compaction", kind="plugin", kept=9, missing=3, added=3, instructed=1, referenced=2),
+        _mod_event("2026-09-21T10:06:00Z", "tweak", kind="summarise", before=9, after=7),
+        _mod_event("2026-09-21T10:07:00Z", "tweak", kind="readd", before=3),
     ]
-    assert store.replace_mod_events("s1", events) == 5
+    assert store.replace_mod_events("s1", events) == 8
     assert store.read_mod_events() == [{"session_id": "s1", **event} for event in events]
     assert store.read_mod_events(event="note") == [{"session_id": "s1", **events[1]}]
-    assert [e["event"] for e in store.read_mod_events(since="2026-09-21T10:03:00Z")] == ["cold_send", "compaction"]
+    assert [e["event"] for e in store.read_mod_events(since="2026-09-21T10:03:00Z")] == [
+        "cold_send", "compaction", "compaction", "tweak", "tweak",
+    ]
+    assert store.read_mod_events(event="tweak") == [{"session_id": "s1", **events[6]}, {"session_id": "s1", **events[7]}]
     assert_privacy(store.read_mod_events())
 
 

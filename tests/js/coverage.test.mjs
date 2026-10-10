@@ -61,6 +61,8 @@ test("a summary that drops two constraints: those two are missing, the rest foun
     [port.id, code.id].sort(),
   );
   assert.ok(Object.values(MARK_SYMBOL).every((glyph) => glyph.length >= 1));
+  // The house style bans "~" (docs/writing-help.md): the partly mark is a half circle.
+  assert.ok(!Object.values(MARK_SYMBOL).includes("~"));
 });
 
 test("only instructions, decisions and pins are things you said: a dropped file or task does not change the count", () => {

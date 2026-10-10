@@ -1709,6 +1709,17 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   caused it, and that most sessions without the mod are from before it was
   added.
 
+  `prompting_tweaks` (`glass_effect.py`) — beside it, when a session of the
+  report has a `present`, `tweak` or `compaction` event: one row per kind of
+  tweak the mod offers (`summarise`, `readd`, `check`, `hold`) with `pressed`
+  (the `tweak` events of that kind). The `summarise` row also has
+  `kept_with` and `kept_without`, the kept rate (kept over kept plus
+  missing, pooled) of the `compaction` events with `instructed` 1 and 0; an
+  event the mod left `instructed` off is in neither. The `readd` row has
+  `referenced`, the sum of the `compaction` events' `referenced` counts.
+  With no tweak and no instructed summary the table has no rows and the
+  dashboard shows "No tweaks pressed yet."
+
   The habit rows above also leave out what you excused: a drip feed, a
   repeat or a vague correction you called Claude's miss (`why=missed`)
   or a change of mind (`why=changed`) is no habit of yours.

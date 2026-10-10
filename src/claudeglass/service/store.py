@@ -312,6 +312,16 @@ def _migrate_9_to_10(conn: sqlite3.Connection) -> None:
             conn.execute(statement)
 
 
+def _migrate_10_to_11(conn: sqlite3.Connection) -> None:
+    """v10 -> v11 (``schema.py``'s "Version 11" paragraph): the
+    ``instructed``, ``referenced``, ``before`` and ``after`` columns on
+    ``mod_events``, NULL on every row already there. Each ``ALTER`` goes
+    through :func:`_add_column_if_missing`, so a half-applied upgrade is
+    retried in full."""
+    for column in ("instructed", "referenced", "before", "after"):
+        _add_column_if_missing(conn, "mod_events", column, "INTEGER")
+
+
 #: Additive migration ladder for :meth:`Store.migrate`, keyed by the
 #: *recorded* version being migrated away from -- ``MIGRATIONS[4]`` takes
 #: a v4 store to v5. Each step may only add columns/indexes/tables, never
@@ -327,6 +337,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: _migrate_7_to_8,
     8: _migrate_8_to_9,
     9: _migrate_9_to_10,
+    10: _migrate_10_to_11,
 }
 
 
@@ -1332,7 +1343,8 @@ class Store:
             conn.execute("DELETE FROM mod_events WHERE session_id = ? AND ts >= ?", (session_id, first))
             conn.executemany(
                 "INSERT INTO mod_events (session_id, ts, event, kind, surface, outcome, kept, missing, added, "
-                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "instructed, referenced, before, after, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         session_id,
@@ -1344,6 +1356,10 @@ class Store:
                         event.get("kept"),
                         event.get("missing"),
                         event.get("added"),
+                        event.get("instructed"),
+                        event.get("referenced"),
+                        event.get("before"),
+                        event.get("after"),
                         now,
                     )
                     for event in events
@@ -1374,7 +1390,8 @@ class Store:
             params.append(since)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._connection().execute(
-            "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added FROM mod_events"
+            "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added, instructed, referenced, "
+            "before, after FROM mod_events"
             f"{where} ORDER BY ts, id",
             params,
         ).fetchall()
@@ -2586,11 +2603,14 @@ def read_mod_events(path: str | Path) -> list[dict]:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             if "mod_events" not in tables:
                 return []
+            # A store from before v11 has no receipt columns: read them as NULL.
+            have = {row[1] for row in conn.execute("PRAGMA table_info(mod_events)")}
+            receipt = ", ".join(c if c in have else f"NULL AS {c}" for c in ("instructed", "referenced", "before", "after"))
             return [
                 dict(row)
                 for row in conn.execute(
-                    "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added "
-                    "FROM mod_events ORDER BY ts, id"
+                    "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added, "
+                    f"{receipt} FROM mod_events ORDER BY ts, id"
                 )
             ]
     except sqlite3.Error:

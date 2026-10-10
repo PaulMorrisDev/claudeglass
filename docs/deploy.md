@@ -552,7 +552,9 @@ says what to do.
 ## The store's schema version
 
 `service.db` records the schema version it was written under
-(`meta.schema_version`). Version 10 adds the `mod_events` table, which
+(`meta.schema_version`). Version 11 adds four nullable counts to
+`mod_events` for the mod's tweaks; upgrading from 10 adds the columns in
+place. Version 10 adds the `mod_events` table, which
 holds what the ClaudeGlass mod showed (closed words and counts, read from
 its sensor files); upgrading from 9 creates it in place and nothing is
 read again. Version 9 adds the redesigned rating: the

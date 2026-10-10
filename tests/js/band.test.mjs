@@ -1,4 +1,4 @@
-// Tests for how the band narrows (plugin/hooks/lib/band.js).
+// Tests for the band's health line (plugin/hooks/lib/band.js).
 //
 //   node --test tests/js/band.test.mjs
 
@@ -8,68 +8,90 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
-const { narrow, SEPARATOR_CELLS } = await import(pathToFileURL(join(lib, "band.js")).href);
+const { healthOf, healthForms, healthLine, buttonCells, BUTTON_PADDING } = await import(pathToFileURL(join(lib, "band.js")).href);
 
-const context = { role: "context", key: "context", full: 50, short: 28 };
-const spend = { role: "spend", key: "spend", full: 20, short: 14 };
-const extra = (urgent) => ({ role: "extra", key: "extra", full: 55, short: 30, urgent });
+const WORDS = {
+  full: "{pct}% full",
+  replies: "about {replies} replies before a summary",
+  repliesOne: "about 1 reply before a summary",
+  point: "Claude summarises at {tokens}",
+  lost: "Summary lost {missing} of {total} items",
+  kept: "Summary kept all {total} items",
+  keptOne: "Summary kept the 1 item",
+};
 
-/** The room three pieces take with the given widths. */
-const room = (...widths) => widths.reduce((sum, w) => sum + w, 0) + SEPARATOR_CELLS * (widths.length - 1);
+/** The facts of a session with no summary yet, at the given context state. */
+const facts = (reading, over = {}) => ({ reading, summarised: false, missing: 0, pending: 0, seen: true, total: 0, replies: 4, repliesAt: null, ...over });
 
-const forms = (shape) => [shape.forms.context, shape.forms.spend, shape.forms.extra];
-
-test("everything fits at full length, and the bar fits beside it when there is room", () => {
-  const pieces = [context, spend, extra(true)];
-  const full = room(50, 20, 55);
-  assert.deepEqual(forms(narrow(pieces, full, 16)), ["full", "full", "full"]);
-  assert.equal(narrow(pieces, full, 16).bar, false);
-  assert.equal(narrow(pieces, full + 16, 16).bar, true);
-  assert.equal(narrow(pieces, full + 16, 0).bar, false);
+test("before the first reading there is no state", () => {
+  assert.equal(healthOf(facts(null)), null);
+  assert.equal(healthOf(facts(null, { summarised: true, missing: 2, pending: 2, seen: false, total: 3, repliesAt: 4 })), null);
 });
 
-test("an urgent extra: the spend goes short, then the context, then the spend goes, then the extra goes short", () => {
-  const pieces = [context, spend, extra(true)];
-  assert.deepEqual(forms(narrow(pieces, room(50, 14, 55), 16)), ["full", "short", "full"]);
-  assert.deepEqual(forms(narrow(pieces, room(28, 14, 55), 16)), ["short", "short", "full"]);
-  assert.deepEqual(forms(narrow(pieces, room(28, 55), 16)), ["short", "gone", "full"]);
-  assert.deepEqual(forms(narrow(pieces, room(28, 30), 16)), ["short", "gone", "short"]);
-  // Only the context is left, short, when even that does not fit.
-  assert.deepEqual(forms(narrow(pieces, 10, 16)), ["short", "gone", "gone"]);
+test("plenty of room and filling are Fine; soon and next are Tight", () => {
+  assert.equal(healthOf(facts("plenty")), "fine");
+  assert.equal(healthOf(facts("filling")), "fine");
+  assert.equal(healthOf(facts("soon")), "tight");
+  assert.equal(healthOf(facts("next")), "tight");
 });
 
-test("an urgent extra never goes before the spend does: between the short extra and the context alone the spend stays gone", () => {
-  const pieces = [context, spend, extra(true)];
-  // Room for the context and a short spend, but not for the short extra: the spend is not what stays.
-  for (const cells of [room(28, 14), room(28, 14) + 5, room(28, 30) - 1, room(28, 30) - 8]) {
-    assert.deepEqual(forms(narrow(pieces, cells, 16)), ["short", "gone", "gone"], `columns ${cells}`);
-  }
-  assert.deepEqual(forms(narrow(pieces, room(28, 30), 16)), ["short", "gone", "short"]);
+test("a summary that lost items nobody has looked at is Review, whatever the context", () => {
+  const lost = { summarised: true, missing: 3, pending: 3, seen: false, total: 9, repliesAt: 4 };
+  for (const reading of ["plenty", "filling", "soon", "next"]) assert.equal(healthOf(facts(reading, lost)), "review");
+  // Looked at: back to the context's own state.
+  assert.equal(healthOf(facts("soon", { ...lost, seen: true })), "tight");
+  assert.equal(healthOf(facts("plenty", { ...lost, seen: true })), "fine");
 });
 
-test("an urgent extra goes last: with room for the context and the extra, the spend is what leaves", () => {
-  const pieces = [context, spend, extra(true)];
-  for (let cells = room(28, 55); cells >= room(28, 30); cells -= 3) {
-    const shape = narrow(pieces, cells, 0);
-    assert.equal(shape.forms.extra === "gone", false, `columns ${cells}`);
-    assert.equal(shape.forms.spend, "gone", `columns ${cells}`);
-  }
+test("a summary whose lost items are all put back again is not Review", () => {
+  const back = { summarised: true, missing: 3, pending: 0, seen: false, total: 9, repliesAt: 4 };
+  assert.equal(healthOf(facts("plenty", back)), "fine");
+  assert.equal(healthOf(facts("soon", back)), "tight");
+  // Some still to put back: Review.
+  assert.equal(healthOf(facts("plenty", { ...back, pending: 1 })), "review");
 });
 
-test("an extra that is not urgent gives way before the spend does", () => {
-  const pieces = [context, spend, extra(false)];
-  assert.deepEqual(forms(narrow(pieces, room(28, 14, 55), 0)), ["short", "short", "full"]);
-  assert.deepEqual(forms(narrow(pieces, room(28, 14, 30), 0)), ["short", "short", "short"]);
-  // Dropping the extra brings the spend back.
-  assert.deepEqual(forms(narrow(pieces, room(28, 14), 0)), ["short", "short", "gone"]);
-  assert.deepEqual(forms(narrow(pieces, room(28), 0)), ["short", "gone", "gone"]);
+test("Kept shows until a reply ends after the summary, then it is Fine again", () => {
+  const kept = { summarised: true, missing: 0, seen: true, total: 9, repliesAt: 4 };
+  assert.equal(healthOf(facts("plenty", { ...kept, replies: 4 })), "kept");
+  assert.equal(healthOf(facts("plenty", { ...kept, replies: 5 })), "fine");
+  // The summary can come after the reply count was last read and before a request: the count, not a clock, decides.
+  assert.equal(healthOf(facts("plenty", { ...kept, repliesAt: null })), "fine");
+  // Nothing was checked: there is nothing to say was kept.
+  assert.equal(healthOf(facts("plenty", { ...kept, total: 0 })), "fine");
+  // Tight outranks Kept: the context is close to the point.
+  assert.equal(healthOf(facts("soon", kept)), "tight");
 });
 
-test("a piece with no short form keeps its full width, and pieces that are missing leave no gap", () => {
-  const plain = { role: "extra", key: "extra", full: 20, short: null, urgent: false };
-  assert.deepEqual(forms(narrow([context, spend, plain], room(28, 14, 20), 0)), ["short", "short", "full"]);
-  const two = narrow([context, extra(true)], room(50, 55), 0);
-  assert.deepEqual([two.forms.context, two.forms.extra], ["full", "full"]);
-  assert.equal("spend" in two.forms, false);
-  assert.deepEqual(narrow([context], 5, 16), { forms: { context: "short" }, bar: false });
+test("Fine and Tight say how full the context is and how many replies are left", () => {
+  const figures = { pct: "34", replies: 11, point: "160k", missing: 0, total: 0 };
+  assert.deepEqual(healthForms("fine", figures, WORDS), ["34% full · about 11 replies before a summary", "34% full", ""]);
+  assert.deepEqual(healthForms("tight", { ...figures, pct: "71", replies: 1 }, WORDS), ["71% full · about 1 reply before a summary", "71% full", ""]);
+});
+
+test("with no count of replies the line gives the summarising point instead", () => {
+  const figures = { pct: "71", replies: null, point: "160k", missing: 0, total: 0 };
+  assert.equal(healthForms("tight", figures, WORDS)[0], "71% full · Claude summarises at 160k");
+  assert.equal(healthForms("tight", { ...figures, replies: 0 }, WORDS)[0], "71% full · Claude summarises at 160k");
+});
+
+test("Review and Kept say what the summary did with the items", () => {
+  const figures = { pct: "34", replies: 11, point: "160k", missing: 3, total: 9 };
+  assert.deepEqual(healthForms("review", figures, WORDS), ["Summary lost 3 of 9 items", ""]);
+  assert.deepEqual(healthForms("kept", figures, WORDS), ["Summary kept all 9 items", ""]);
+  assert.deepEqual(healthForms("kept", { ...figures, total: 1 }, WORDS), ["Summary kept the 1 item", ""]);
+});
+
+test("the line is the longest form that fits, and nothing when none does", () => {
+  const figures = { pct: "34", replies: 11, point: "160k", missing: 0, total: 0 };
+  const full = "34% full · about 11 replies before a summary";
+  assert.equal(healthLine("fine", figures, WORDS, full.length), full);
+  assert.equal(healthLine("fine", figures, WORDS, full.length - 1), "34% full");
+  assert.equal(healthLine("fine", figures, WORDS, 8), "34% full");
+  assert.equal(healthLine("fine", figures, WORDS, 7), "");
+  assert.equal(healthLine("review", { ...figures, missing: 3, total: 9 }, WORDS, 10), "");
+});
+
+test("a Button takes its label and its brackets", () => {
+  assert.equal(buttonCells("Glass"), 5 + BUTTON_PADDING);
 });

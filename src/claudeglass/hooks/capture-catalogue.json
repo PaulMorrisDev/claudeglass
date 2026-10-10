@@ -344,9 +344,6 @@
    "cold_return",
    "drip_feed",
    "plan_fresh",
-   "rating_reminder",
-   "report_reread",
-   "split_run",
    "status_poll"
   ],
   "dir": "mod",

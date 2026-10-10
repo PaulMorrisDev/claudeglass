@@ -698,9 +698,10 @@ CONDITIONAL_TIP_HINTS = ("big_paste",)
 #: hook leaves their notes out then, so Claude is not asked to pass on a
 #: tip you are already shown, and nothing is stamped as shown. The first
 #: four are what you do before sending (the mod's hint line shows them
-#: before the cost is paid); ``report_reread`` and ``split_run`` become a
-#: line on the agent's row; ``plan_fresh`` a status line at plan approval;
-#: ``rating_reminder`` a note at the end of a reply. ``plan_fresh_early``
+#: before the cost is paid); ``plan_fresh`` is a status line at plan
+#: approval. ``report_reread``, ``split_run`` and ``rating_reminder`` are
+#: the hook's again: the mod no longer draws agent rows or end-of-reply
+#: notes. ``plan_fresh_early``
 #: (Claude writes it inside the plan), ``quiet_output``, ``plan_check``,
 #: the facts line and the capture note steer Claude or feed a skill, so
 #: they stay with the hook. Every name is a hint of
@@ -711,10 +712,7 @@ MOVED_TO_MOD = frozenset(
         "status_poll",
         "drip_feed",
         "big_paste",
-        "report_reread",
-        "split_run",
         "plan_fresh",
-        "rating_reminder",
     }
 )
 
@@ -764,14 +762,22 @@ MOD_PROMPT_KINDS = ("draft_topic", "draft_no_paths", "draft_read_all", "budget")
 #: any event with a word outside these, ``mod_sensor.clean``). ``event``
 #: names what happened; each event takes the ``kind``, ``surface`` and
 #: ``outcome`` words listed for it, and a ``compaction`` event also counts
-#: ``kept``, ``missing`` and ``added``. ``present``: the mod ran in the
+#: ``kept``, ``missing`` and ``added``, and may count ``instructed`` and
+#: ``referenced`` (see below). ``present``: the mod ran in the
 #: session, on this surface of Claude Code. ``note``: the mod showed a
 #: note (``kind``) in a place (``surface``), and ``outcome`` is what
 #: followed within two replies: sent anyway, ``/clear``, ``/compact`` or
 #: nothing. ``rebuild``: a cache rebuild, whether the mod had said to
 #: expect it. ``cold_send``: a message sent after the cache expired, whether
-#: the hint line had warned. ``compaction``: the review of a summary.
-SENSOR_EVENTS = ("present", "note", "rebuild", "cold_send", "compaction")
+#: the hint line had warned. ``compaction``: the review of a summary;
+#: ``instructed`` is 1 when the mod told the summariser the keep list, 0
+#: when it did not, and ``referenced`` is how many re-added items a later
+#: reply referenced, as far as the mod has settled them (both may be absent:
+#: an older mod, or nothing settled yet). ``tweak``: a button the mod
+#: offered was pressed; ``kind`` says which, ``before`` is the count it
+#: acted on (items to keep, items lost, items checked, the summaries held)
+#: and ``after`` the count that came out of it, absent until the mod knows.
+SENSOR_EVENTS = ("present", "note", "rebuild", "cold_send", "compaction", "tweak")
 SENSOR_PRESENT_SURFACES = ("desktop", "terminal", "vscode", "mobile")
 SENSOR_NOTE_SURFACES = ("note", "hint", "log", "status", "band", "agent")
 SENSOR_NOTE_KINDS = (*COACHING_HINTS, *FEEDBACK_HINTS, *MOD_NOTE_KINDS, *MOD_PROMPT_KINDS)
@@ -780,6 +786,9 @@ SENSOR_REBUILD_KINDS = ("limit", "compaction", "expiry", "prefix", "unknown")
 SENSOR_REBUILD_OUTCOMES = ("expected", "unexpected")
 SENSOR_COLD_OUTCOMES = ("warned", "unwarned")
 SENSOR_COMPACTION_KINDS = ("auto", "manual", "plugin")
+#: The tweaks the mod offers: summarise with the keep list, re-add the lost
+#: items, check a summary with a model, and hold an automatic summary.
+SENSOR_TWEAK_KINDS = ("summarise", "readd", "check", "hold")
 #: ``{event: {field: allowed words}}``, the words above by event.
 SENSOR_VOCAB: dict[str, dict[str, tuple[str, ...]]] = {
     "present": {"surface": SENSOR_PRESENT_SURFACES},
@@ -787,9 +796,20 @@ SENSOR_VOCAB: dict[str, dict[str, tuple[str, ...]]] = {
     "rebuild": {"kind": SENSOR_REBUILD_KINDS, "outcome": SENSOR_REBUILD_OUTCOMES},
     "cold_send": {"outcome": SENSOR_COLD_OUTCOMES},
     "compaction": {"kind": SENSOR_COMPACTION_KINDS},
+    "tweak": {"kind": SENSOR_TWEAK_KINDS},
 }
 #: ``{event: counts it carries}``: whole numbers, not words.
-SENSOR_COUNT_FIELDS: dict[str, tuple[str, ...]] = {"compaction": ("kept", "missing", "added")}
+SENSOR_COUNT_FIELDS: dict[str, tuple[str, ...]] = {
+    "compaction": ("kept", "missing", "added", "instructed", "referenced"),
+    "tweak": ("before", "after"),
+}
+#: ``{event: counts it may leave out}``: a count here that is absent (or not
+#: a whole number) is left empty and the event is kept; any other count of
+#: the event must be there, or the event is dropped.
+SENSOR_OPTIONAL_COUNTS: dict[str, tuple[str, ...]] = {
+    "compaction": ("instructed", "referenced"),
+    "tweak": ("after",),
+}
 
 #: The hook events whose output reaches Claude or you (``additionalContext``
 #: or ``systemMessage``). Claude Code runs a hook registered async without

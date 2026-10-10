@@ -43,6 +43,7 @@ from .capture_catalogue import (
     MOD_SENSOR_DIR,
     MOD_SENSOR_MAX_EVENTS,
     SENSOR_COUNT_FIELDS,
+    SENSOR_OPTIONAL_COUNTS,
     SENSOR_VOCAB,
 )
 
@@ -58,9 +59,12 @@ _SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _TS_MIN = 1_577_836_800
 _TS_MAX = 4_102_444_800
 
-#: The largest count a compaction event may carry (messages, files or
-#: constraints a summary kept or lost: no real review passes it).
+#: The largest count an event may carry (messages, files or constraints a
+#: summary kept or lost: no real review passes it).
 _COUNT_MAX = 1_000_000
+
+#: The counts that are a yes/no, 1 or 0, not a number of things.
+_FLAG_COUNTS = frozenset({"instructed"})
 
 #: The most bytes of a sensor file that is read: 500 events of a few dozen
 #: bytes each are about 50 KB.
@@ -96,10 +100,15 @@ def _count(value) -> int | None:
 def clean_event(raw) -> dict | None:
     """One event as the store keeps it, or ``None`` when it is not exactly
     what the vocabulary allows: ``{"ts": "<UTC ISO time>", "event", "kind",
-    "surface", "outcome", "kept", "missing", "added"}`` with ``None`` for
-    each field the event doesn't take. Every field the event takes must be
-    there and in its list, and a field it doesn't take is left out, not
-    kept."""
+    "surface", "outcome", "kept", "missing", "added", "instructed",
+    "referenced", "before", "after"}`` with ``None`` for each field the
+    event doesn't take. Every field the event takes must be there and in its
+    list, and a field it doesn't take is left out, not kept. The exception
+    is a count the event may leave out (``capture_catalogue.
+    SENSOR_OPTIONAL_COUNTS``: a ``compaction``'s ``instructed`` and
+    ``referenced``, a ``tweak``'s ``after``): absent or ``null`` it is
+    ``None`` and the event stays, but a value that is there and is not a
+    whole number (0 or 1 for ``instructed``) drops the event."""
     if not isinstance(raw, dict):
         return None
     vocab = SENSOR_VOCAB.get(raw.get("event")) if isinstance(raw.get("event"), str) else None
@@ -115,15 +124,22 @@ def clean_event(raw) -> dict | None:
         "kept": None,
         "missing": None,
         "added": None,
+        "instructed": None,
+        "referenced": None,
+        "before": None,
+        "after": None,
     }
     for field, words in vocab.items():
         word = raw.get(field)
         if not isinstance(word, str) or word not in words:
             return None
         out[field] = word
+    optional = SENSOR_OPTIONAL_COUNTS.get(raw["event"], ())
     for field in SENSOR_COUNT_FIELDS.get(raw["event"], ()):
+        if field in optional and raw.get(field) is None:
+            continue
         value = _count(raw.get(field))
-        if value is None:
+        if value is None or (field in _FLAG_COUNTS and value > 1):
             return None
         out[field] = value
     return out

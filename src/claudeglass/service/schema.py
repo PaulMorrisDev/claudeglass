@@ -190,12 +190,22 @@ changes and its events from the first one it holds on are replaced, so
 re-ingesting is idempotent and an event the mod's newest-500 file has
 since dropped stays. A v9 store gains the table in place
 (``store.MIGRATIONS[9]``).
+
+Version 11 (the mod's receipts): four nullable integer columns on
+``mod_events``. ``instructed`` (1 when the summariser was told the keep
+list, 0 when not) and ``referenced`` (how many re-added items a later reply
+referenced) are carried by a ``compaction`` event; ``before`` and ``after``
+(the counts a tweak acted on and came out with) by the new ``tweak`` event,
+whose ``kind`` is one of ``capture_catalogue.SENSOR_TWEAK_KINDS``. All
+four are NULL on a row that doesn't take them and on one the mod left them
+off (``after`` until it is known). A v10 store gains the columns in place
+(``store.MIGRATIONS[10]``).
 """
 
 from __future__ import annotations
 
 #: Bump when a table or index below changes shape. See module docstring.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 CREATE_META = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -551,8 +561,8 @@ CREATE INDEX IF NOT EXISTS idx_predictions_judged_at ON predictions(judged_at);
 
 #: What the ClaudeGlass mod's sensor file says happened in a session (v10):
 #: notes it showed and what followed, cache rebuilds, cold sends,
-#: compaction reviews, and that it ran at all. Closed words and counts
-#: only (see the module docstring's "Version 10"). ``ts`` is UTC
+#: compaction reviews, tweaks pressed, and that it ran at all. Closed words
+#: and counts only (see the module docstring's "Version 10" and "Version 11"). ``ts`` is UTC
 #: (``%Y-%m-%dT%H:%M:%SZ``) like every other time in this store.
 CREATE_MOD_EVENTS = """
 CREATE TABLE IF NOT EXISTS mod_events (
@@ -566,6 +576,10 @@ CREATE TABLE IF NOT EXISTS mod_events (
     kept        INTEGER,
     missing     INTEGER,
     added       INTEGER,
+    instructed  INTEGER,
+    referenced  INTEGER,
+    before      INTEGER,
+    after       INTEGER,
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mod_events_session_ts ON mod_events(session_id, ts);

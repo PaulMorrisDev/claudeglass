@@ -1615,12 +1615,9 @@ def _reminded(tmp_path: Path) -> bool:
     return "reminded_at" in gate or bool(gate.get("pieces"))
 
 
-def test_the_rating_reminder_is_left_out_while_the_mod_runs_and_not_stamped(tmp_path):
-    heartbeat = _mod_here(tmp_path)
-    assert _fb(tmp_path, _big(1_300_000), NEXT) == ""
-    assert not _reminded(tmp_path)
-    # When the mod stops, the reminder is all there: the piece was not marked as reminded.
-    heartbeat.unlink()
+def test_the_rating_reminder_is_the_hooks_whether_or_not_the_mod_runs(tmp_path):
+    # The mod no longer shows end-of-reply notes, so the reminder is the hook's again: the mod's presence changes nothing.
+    _mod_here(tmp_path)
     assert _hint(_fb(tmp_path, _big(1_300_000), NEXT)) == "rating_reminder"
     assert _reminded(tmp_path)
 
@@ -1648,7 +1645,7 @@ def test_the_plan_check_and_the_facts_line_come_while_the_mod_runs(tmp_path):
     assert not _reminded(tmp_path)
 
 
-def test_the_hook_adds_no_reminder_note_while_the_mod_runs(tmp_path):
+def test_the_hook_adds_the_reminder_note_while_the_mod_runs(tmp_path):
     config_dir = _config(tmp_path / "claudeglass", '[capture]\nlevel = "off"\nfeedback = ["feedback_reminder"]\n')
     # The hook runs on the real clock, so the transcript and the heartbeat are dated on it.
     now = datetime.now(timezone.utc)
@@ -1656,7 +1653,5 @@ def test_the_hook_adds_no_reminder_note_while_the_mod_runs(tmp_path):
     (config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR).mkdir(parents=True)
     heartbeat = config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR / "s1.json"
     heartbeat.write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now.timestamp()}), encoding="utf-8")
-    assert _run(config_dir, payload) == (0, "", "")
-    heartbeat.unlink()
     rc, out, err = _run(config_dir, payload)
     assert rc == 0 and err == "" and _hint(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "rating_reminder"

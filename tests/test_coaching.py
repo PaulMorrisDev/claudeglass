@@ -3639,11 +3639,8 @@ _MOVED_SCENES = {
     "status_poll": _scene_status_poll,
     "drip_feed": _scene_drip_feed,
     "big_paste": _scene_big_paste,
-    "report_reread": _scene_report_reread,
     "plan_fresh": _scene_plan_fresh,
     "plan_fresh (typed approval)": _scene_plan_fresh_typed,
-    "split_run (after the agent)": _scene_split_run_after_the_agent,
-    "split_run (with the report)": _scene_split_run_with_the_report,
 }
 
 
@@ -3652,15 +3649,12 @@ def _hint_of(scene: str) -> str:
 
 
 def test_the_moved_hints_are_the_ones_the_plan_names_and_all_real_hints():
-    assert cat.MOVED_TO_MOD == {
-        "cold_return", "status_poll", "drip_feed", "big_paste", "report_reread", "split_run", "plan_fresh",
-        "rating_reminder",
-    }
+    assert cat.MOVED_TO_MOD == {"cold_return", "status_poll", "drip_feed", "big_paste", "plan_fresh"}
     assert cat.MOVED_TO_MOD <= {*cat.COACHING_HINTS, *cat.FEEDBACK_HINTS}
     # What steers Claude, or feeds a skill, stays with the hook.
     assert not {"plan_fresh_early", "quiet_output", "plan_check"} & cat.MOVED_TO_MOD
     assert CATALOGUE["mod"]["moved"] == sorted(cat.MOVED_TO_MOD)
-    assert {_hint_of(scene) for scene in _MOVED_SCENES} | {"rating_reminder"} == cat.MOVED_TO_MOD
+    assert {_hint_of(scene) for scene in _MOVED_SCENES} == cat.MOVED_TO_MOD
     # The folder name is the one the mod's settings writer uses.
     from claudeglass import mod_settings
 
@@ -3779,26 +3773,19 @@ def test_the_hints_the_hook_keeps_are_added_while_the_mod_runs(tmp_path):
     assert _kind(note) == "plan_fresh_early"
 
 
-def test_a_run_that_ended_too_big_is_recorded_while_the_mod_runs_and_told_once_it_stops(tmp_path):
+def test_a_run_that_ended_too_big_is_told_by_the_hook_whether_or_not_the_mod_runs(tmp_path):
+    # The mod no longer draws agent rows, so split_run is the hook's again: the mod's presence changes nothing.
     session, _ = _agent_run(tmp_path, [_prompt(), _SUMMARISED, _reply(1_000, message_id="m1")])
     _heartbeat(tmp_path)
     assert _keep_run(tmp_path, _agent_stop(session)) is True
     assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
-    # The mod tells it on the agent's row: the hook says nothing, and keeps the count.
-    assert _coach(tmp_path, _after_the_agent(session)) == ""
-    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
-    # Once the mod stops, the run that ended too big while it ran is told.
-    _heartbeat_path(tmp_path).unlink()
     assert _kind(_coach(tmp_path, _after_the_agent(session))) == "split_run"
     assert _pending(tmp_path) == {}
 
 
-def test_runs_recorded_before_the_mod_started_are_kept_for_when_it_stops(tmp_path):
+def test_a_run_recorded_before_the_mod_started_is_told_while_it_runs(tmp_path):
     payload = _scene_split_run_after_the_agent(tmp_path)
     _heartbeat(tmp_path)
-    assert _coach(tmp_path, payload) == ""
-    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
-    _heartbeat_path(tmp_path).unlink()
     assert _kind(_coach(tmp_path, payload)) == "split_run"
 
 

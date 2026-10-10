@@ -61,6 +61,16 @@ always land in the "without" group whatever the mod did. They are left out of
 both groups. Most sessions without the mod are from before it was added, so
 the comparison is mostly before and after.
 
+Beside it, the ``prompting_tweaks`` table (:func:`build_tweaks_table`) counts
+the tweaks the mod's buttons made: one row per kind of ``tweak`` event with
+how often it was pressed, for ``summarise`` the share of keep-list items the
+summary kept (kept / (kept + missing), pooled over the ``compaction`` events)
+with the summariser told the keep list (``instructed`` = 1) and without
+(``instructed`` = 0), and for ``readd`` the re-added items later replies
+referenced (the ``referenced`` counts). A summary whose ``instructed`` the
+mod left out (an older mod) is in neither rate. It is counts, not a
+comparison of sessions, so it makes no claim about cause either.
+
 Privacy: only counts and the figures above leave this module; no message
 text, path or session id is kept in the table.
 """
@@ -344,4 +354,76 @@ def build_table(sessions, corpus, session_cost: dict, th: recache.RecacheThresho
         value_labels=dict(VALUE_LABELS),
         row_kinds=dict(ROW_KINDS),
         notes=notes,
+    )
+
+
+#: What each tweak is called on the page, by its ``tweak`` event ``kind``.
+TWEAK_LABELS = {
+    "summarise": "Summarise now",
+    "readd": "Re-add lost items",
+    "check": "Check with a model",
+    "hold": "Hold auto-summaries for review",
+}
+
+
+def _kept_rate(events: list[dict]) -> float | None:
+    """The share, in percent, of the keep-list items the summaries kept:
+    kept / (kept + missing) pooled over ``events``; ``None`` with none."""
+    kept = sum(e.get("kept") or 0 for e in events)
+    total = kept + sum(e.get("missing") or 0 for e in events)
+    return 100.0 * kept / total if total else None
+
+
+def build_tweaks_table(sessions, mod_events) -> Table | None:
+    """The ``prompting_tweaks`` table, or ``None`` when no session of the
+    report has an event from the mod (so a report on a machine without it
+    reads as it always did). One row per kind of tweak (:data:`TWEAK_LABELS`)
+    with ``pressed`` (the ``tweak`` events of that kind), and on the
+    ``summarise`` row the kept rate of the ``compaction`` events the
+    summariser was told the keep list for (``kept_with``) and the ones it was
+    not (``kept_without``), and on the ``readd`` row the re-added items later
+    replies referenced (``referenced``, summed over the ``compaction``
+    events that carry it). The rows are left out, and the dashboard says
+    nothing has been pressed, when there is no tweak and no summary with an
+    ``instructed`` count to show."""
+    ids = {s.session_id for s in sessions}
+    mine = [e for e in mod_events or () if e.get("session_id") in ids and e.get("event") in ("present", "tweak", "compaction")]
+    if not mine:
+        return None
+    tweaks = [e for e in mine if e.get("event") == "tweak"]
+    compactions = [e for e in mine if e.get("event") == "compaction"]
+    with_list = [e for e in compactions if e.get("instructed") == 1]
+    without_list = [e for e in compactions if e.get("instructed") == 0]
+    referenced = [e["referenced"] for e in compactions if e.get("referenced") is not None]
+    rows: list[list] = []
+    if tweaks or with_list or without_list:
+        for kind in catalogue.SENSOR_TWEAK_KINDS:
+            summarise, readd = kind == "summarise", kind == "readd"
+            rows.append([
+                kind,
+                sum(1 for e in tweaks if e.get("kind") == kind),
+                _kept_rate(with_list) if summarise else None,
+                _kept_rate(without_list) if summarise else None,
+                sum(referenced) if readd and referenced else None,
+            ])
+    return Table(
+        name="prompting_tweaks",
+        title="Tweaks",
+        columns=[
+            Column(key="tweak", label="Tweak", kind="str"),
+            Column(key="pressed", label="Pressed", kind="int"),
+            Column(key="kept_with", label="Kept with the keep list", kind="pct"),
+            Column(key="kept_without", label="Kept without it", kind="pct"),
+            Column(key="referenced", label="Re-added items used later", kind="int"),
+        ],
+        rows=rows,
+        value_labels=dict(TWEAK_LABELS),
+        notes=[
+            "Pressed counts each time you used the button. Kept is the share of keep-list items a summary still held, "
+            "found by matching words, so a reworded item may count as missing.",
+            "Kept with the keep list counts summaries where ClaudeGlass told the summariser what to keep. "
+            "Kept without it counts the ones where it did not.",
+            "Re-added items used later counts the ones a later reply of Claude's referred to. "
+            "These are counts from your own sessions and do not show that a tweak caused a change.",
+        ],
     )

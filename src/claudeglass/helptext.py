@@ -180,6 +180,7 @@ PLACEMENT: dict[str, str] = {
     "prompting_tips": "keep",
     "prompting_glass": "advanced",
     "prompting_effect": "keep",
+    "prompting_tweaks": "keep",
     "habits_playbook": "keep",
     "habits_by_task": "keep",
     "habits_briefs": "advanced",
@@ -1062,6 +1063,25 @@ TABLE_COPY: dict[str, TableCopy] = {
             "without_sessions": ("Sessions without", "How many sessions without the mod the figure covers."),
             "difference": ("Difference", "How the figure with the mod compares with the one without it."),
             "verdict": ("Measurable?", "Whether the gap is unlikely to be chance alone, or there is no measurable difference yet."),
+        },
+    ),
+    "prompting_tweaks": TableCopy(
+        title="Tweaks",
+        help=Help(
+            shows="The buttons ClaudeGlass offers and how often you pressed each one. It also shows how much of your "
+            "keep list the conversation summaries held, with and without the list given to the summariser.",
+            read="Kept is the share of keep-list items a summary still held. A higher rate with the keep list suggests "
+            "telling the summariser what to keep helps. Re-added items used later counts the ones a later "
+            "reply referred to. Kept is found by matching words, so a reworded item may count as missing. These are "
+            "counts from your own sessions, so a gap does not show that a tweak caused it.",
+            act="",
+        ),
+        columns={
+            "tweak": ("Tweak", "The button."),
+            "pressed": ("Pressed", "How many times you pressed it."),
+            "kept_with": ("Kept with the keep list", "The share of keep-list items the summaries held when ClaudeGlass told the summariser what to keep."),
+            "kept_without": ("Kept without it", "The same share for the summaries where it did not."),
+            "referenced": ("Re-added items used later", "How many re-added items a later reply referred to."),
         },
     ),
     "habits_playbook": TableCopy(

@@ -2047,6 +2047,9 @@ def build_report(
         effect_table = glass_effect.build_table(prompting_sessions, corpus, session_cost, recache_th, mod_events)
         if effect_table is not None:
             prompting_section.tables.append(effect_table)
+        tweaks_table = glass_effect.build_tweaks_table(prompting_sessions, mod_events)
+        if tweaks_table is not None:
+            prompting_section.tables.append(tweaks_table)
         sections.append(prompting_section)
 
     if _want("workflows"):

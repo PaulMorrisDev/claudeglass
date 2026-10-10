@@ -45,7 +45,6 @@ const {
   mergeRest,
   startingContext,
   freshHint,
-  ratingDue,
   projectApplies,
   projectSlug,
   latestReminder,
@@ -351,23 +350,6 @@ test("plan_fresh needs what a fresh start would drop to reach plan_fresh_tokens"
   assert.equal(freshHint(80_000, null, 0, false, 4, TH), null);
 });
 
-// -- rating_reminder --------------------------------------------------------------------
-
-test("the rating reminder needs the larger of rating_min_tokens and the factor times your typical piece", () => {
-  const due = (tokens, typical = 0, reminded = null, noted = false) => ratingDue(tokens, typical, reminded, noted, NOW, TH);
-  assert.equal(due(TH.rating_min_tokens - 1), null);
-  assert.deepEqual(due(TH.rating_min_tokens), { kind: "rating_reminder", stake: TH.rating_min_tokens, fields: { tokens: TH.rating_min_tokens } });
-  assert.equal(due(1_500_000, 1_000_000), null);
-  assert.equal(due(2_000_000, 1_000_000)?.kind, "rating_reminder");
-});
-
-test("the rating reminder rests rating_rest_days and is made once for a piece", () => {
-  const days = TH.rating_rest_days * 86400;
-  assert.equal(ratingDue(2_000_000, 0, NOW - days + 1, false, NOW, TH), null);
-  assert.equal(ratingDue(2_000_000, 0, NOW - days, false, NOW, TH)?.kind, "rating_reminder");
-  assert.equal(ratingDue(2_000_000, 0, null, true, NOW, TH), null);
-});
-
 // -- background work ----------------------------------------------------------------------
 
 test("work launched in the background is pending until a notification names it", () => {
@@ -450,7 +432,6 @@ const RUN = {
   coldHint: ([a]) => brief(coldHint(a.last, a.nowS, a.compactedSince, a.limit, a.th)),
   backgroundSteps: ([steps]) => backgroundPending(steps),
   freshHint: ([a]) => brief(freshHint(a.ctx, startingContext(a.firstCtx, a.promptChars, 4), a.planChars, a.compacted, 4, a.th)),
-  ratingDue: ([a]) => ratingDue(a.tokens, a.typical, a.remindedAt, a.noted, a.nowS, a.th) !== null,
   projectApplies: ([a]) => projectApplies(a.cwd, a.projects, a.excluded, a.name),
 };
 

@@ -321,15 +321,18 @@ can still include a session whose transcript file Claude Code's own
 `cleanupPeriodDays` retention has already removed — see "Store rebuild"
 below.
 
-`schema_version` is the store's schema: 10 since the ClaudeGlass mod's
-sensor, which added the `mod_events` table: one row per event the mod
+`schema_version` is the store's schema: 11 since the ClaudeGlass mod's
+tweaks. Version 10 added the `mod_events` table: one row per event the mod
 wrote to `mod/sensor/<session id>.json` (the session's id, the time, the
 event word, the closed words `kind`, `surface` and `outcome` that event
 takes, and for a compaction review the counts `kept`, `missing` and
-`added`; no text). The watcher reads a file when it changes and replaces
-that session's rows from the file's first event on, so reading it again
-changes nothing, and rows older than `retention_days` (180 by default) are
-removed with their files. A store at 9 gains the table in place. Version 9,
+`added`; no text). Version 11 adds four nullable counts: `instructed` and
+`referenced` on a compaction review, and `before` and `after` on the new
+`tweak` event (a button pressed in the mod). The watcher reads a file when
+it changes and replaces that session's rows from the file's first event
+on, so reading it again changes nothing, and rows older than
+`retention_days` (180 by default) are removed with their files. A store at
+9 gains the table in place, and one at 10 gains the columns. Version 9,
 from the /cg-feedback
 redesign, added the rating's `why`, `missed_in`, `tip` and
 `tip_hint` columns and the `session_plan_feedback` and `tip_feedback`

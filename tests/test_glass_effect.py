@@ -14,6 +14,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from claudeglass import capture_catalogue as catalogue
 from claudeglass import glass_effect, helptext, prompting, recache
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
@@ -76,7 +77,8 @@ def _world(specs):
 
 def _event(sid, event, **fields):
     row = {"session_id": sid, "ts": "2026-09-18T12:00:00Z", "event": event, "kind": None, "surface": None,
-           "outcome": None, "kept": None, "missing": None, "added": None}
+           "outcome": None, "kept": None, "missing": None, "added": None,
+           "instructed": None, "referenced": None, "before": None, "after": None}
     return row | fields
 
 
@@ -301,6 +303,114 @@ def test_the_table_holds_only_counts_and_figures(tmp_path):
     assert set(table.row_kinds) == set(glass_effect.FIGURES) == set(table.value_labels)
 
 
+# -- the tweaks table ---------------------------------------------------------------------------
+
+
+def _tweaks(events, ids=("g0", "g1", "g2")):
+    sessions = [prompting.SessionPrompting(session_id=sid, start=None) for sid in ids]
+    return glass_effect.build_tweaks_table(sessions, events)
+
+
+def _tweak_rows(table):
+    keys = [c.key for c in table.columns]
+    return {row[0]: dict(zip(keys, row)) for row in table.rows}
+
+
+def test_each_kind_of_tweak_is_counted_by_how_often_it_was_pressed():
+    events = [
+        _event("g0", "tweak", kind="summarise", before=9, after=7),
+        _event("g0", "tweak", kind="summarise", before=9, after=9),
+        _event("g1", "tweak", kind="readd", before=3),
+        _event("g1", "tweak", kind="check", before=2, after=1),
+        _event("g2", "tweak", kind="summarise", before=5),
+        _event("elsewhere", "tweak", kind="hold", before=1, after=0),
+    ]
+    table = _tweaks(events)
+    assert table.name == "prompting_tweaks" and table.title == "Tweaks"
+    assert [c.key for c in table.columns] == ["tweak", "pressed", "kept_with", "kept_without", "referenced"]
+    assert [row[0] for row in table.rows] == ["summarise", "readd", "check", "hold"]
+    assert tuple(row[0] for row in table.rows) == catalogue.SENSOR_TWEAK_KINDS
+    pressed = {kind: row["pressed"] for kind, row in _tweak_rows(table).items()}
+    # A session outside the report is not counted.
+    assert pressed == {"summarise": 3, "readd": 1, "check": 1, "hold": 0}
+    assert set(table.value_labels) == set(glass_effect.TWEAK_LABELS) == set(catalogue.SENSOR_TWEAK_KINDS)
+
+
+def test_the_kept_rate_is_pooled_for_summaries_with_the_keep_list_and_those_without():
+    events = [
+        _event("g0", "compaction", kind="plugin", kept=9, missing=1, added=0, instructed=1),
+        _event("g1", "compaction", kind="auto", kept=6, missing=4, added=0, instructed=1),
+        _event("g1", "compaction", kind="auto", kept=3, missing=7, added=0, instructed=0),
+        _event("g2", "compaction", kind="manual", kept=0, missing=0, added=0, instructed=0),
+        # An older mod left the count out: it is in neither rate.
+        _event("g2", "compaction", kind="auto", kept=10, missing=0, added=0),
+        _event("g2", "tweak", kind="summarise", before=9, after=9),
+    ]
+    rows = _tweak_rows(_tweaks(events))
+    assert rows["summarise"]["pressed"] == 1
+    assert rows["summarise"]["kept_with"] == pytest.approx(75.0)  # 15 of 20
+    assert rows["summarise"]["kept_without"] == pytest.approx(30.0)  # 3 of 10
+    # Only the summarise row carries the rates.
+    assert all(r["kept_with"] is None and r["kept_without"] is None for k, r in rows.items() if k != "summarise")
+
+
+def test_a_rate_with_nothing_to_divide_is_blank_not_zero():
+    events = [_event("g0", "compaction", kind="auto", kept=0, missing=0, added=0, instructed=1),
+              _event("g0", "tweak", kind="check", before=1)]
+    row = _tweak_rows(_tweaks(events))["summarise"]
+    assert row["kept_with"] is None and row["kept_without"] is None
+
+
+def test_the_re_added_items_later_replies_used_are_summed_for_the_readd_row():
+    events = [
+        _event("g0", "compaction", kind="plugin", kept=6, missing=3, added=3, instructed=1, referenced=2),
+        _event("g1", "compaction", kind="auto", kept=7, missing=2, added=2, instructed=1, referenced=0),
+        _event("g2", "compaction", kind="auto", kept=7, missing=2, added=2, instructed=1),
+        _event("g0", "tweak", kind="readd", before=3, after=2),
+    ]
+    rows = _tweak_rows(_tweaks(events))
+    assert rows["readd"]["referenced"] == 2 and rows["readd"]["pressed"] == 1
+    assert rows["summarise"]["referenced"] is None
+    # A zero from the mod is a zero; nothing settled at all is blank.
+    assert _tweak_rows(_tweaks(events[1:2] + events[3:]))["readd"]["referenced"] == 0
+    assert _tweak_rows(_tweaks(events[2:]))["readd"]["referenced"] is None
+
+
+def test_with_nothing_pressed_and_no_instructed_summary_the_table_has_no_rows_to_draw():
+    table = _tweaks([_event("g0", "present", surface="desktop"),
+                     _event("g0", "compaction", kind="auto", kept=4, missing=1, added=0)])
+    assert table is not None and table.rows == []
+    # The dashboard draws an empty table as its own note.
+    grid = (Path(__file__).resolve().parents[1] / "src/claudeglass/service/static/grid.js").read_text(encoding="utf-8")
+    assert 'prompting_tweaks: ["No tweaks pressed yet.",' in grid
+
+
+def test_a_report_on_a_machine_without_the_mod_has_no_tweaks_table():
+    for events in (None, [], [_event("elsewhere", "present", surface="desktop")],
+                   [_event("g0", "note", kind="cold_return", surface="hint", outcome="none")]):
+        assert _tweaks(events) is None
+
+
+def test_the_tweaks_table_holds_only_counts_and_its_words_keep_to_the_help_rules():
+    events = [_event("g0", "tweak", kind="summarise", before=9, after=7),
+              _event("g0", "compaction", kind="auto", kept=4, missing=1, added=0, instructed=1)]
+    table = _tweaks(events)
+    assert_privacy(table)
+    words = [*table.notes, *glass_effect.TWEAK_LABELS.values(), *(c.label for c in table.columns)]
+    sentences = [x for text in words for x in text.replace("? ", ". ").split(". ")]
+    assert all(len(x.split()) <= 25 for x in sentences)
+    blob = " ".join([table.title, *words])
+    assert "~" not in blob and "Apply" not in blob and "(est.)" not in blob
+    assert "_" not in blob  # no internal names
+
+
+def test_the_tweaks_table_has_its_words_in_the_help_and_the_placement():
+    copy = helptext.TABLE_COPY["prompting_tweaks"]
+    assert helptext.placement_for("prompting_tweaks") == "keep"
+    assert set(copy.columns) == {"tweak", "pressed", "kept_with", "kept_without", "referenced"}
+    assert "does not show that a tweak caused it" in copy.help.read
+
+
 # -- in the report, and on the dashboard --------------------------------------------------------
 
 
@@ -332,8 +442,8 @@ def test_the_report_puts_the_table_beside_the_sessions_with_the_mod_table(corpus
     report = build_report(corpus, load_pricing(), Config(), projects=("proj",), window="w", mod_events=events)
     section = next(s for s in report.sections if s.key == "prompting")
     names = [t.name for t in section.tables]
-    assert names[-2:] == ["prompting_glass", "prompting_effect"]
-    table = section.tables[-1]
+    assert names[-3:] == ["prompting_glass", "prompting_effect", "prompting_tweaks"]
+    table = section.tables[-2]
     # Annotated like every table: its words, its place on the page and its help on every column.
     assert table.title == "Sessions with and without ClaudeGlass" and table.dashboard == "keep"
     assert table.help and table.help.shows and all(c.help for c in table.columns)
@@ -354,6 +464,20 @@ def test_a_report_without_the_mod_has_no_effect_table(corpus):
         report = build_report(corpus, load_pricing(), Config(), projects=("proj",), window="w", mod_events=events)
         section = next(s for s in report.sections if s.key == "prompting")
         assert "prompting_effect" not in [t.name for t in section.tables]
+        assert "prompting_tweaks" not in [t.name for t in section.tables]
+
+
+def test_the_report_carries_the_tweaks_table_with_its_help(corpus):
+    ids = [b.session_id for b in corpus.sessions]
+    events = [_event(ids[0], "present", surface="desktop"),
+              _event(ids[0], "tweak", kind="summarise", before=9, after=7)]
+    report = build_report(corpus, load_pricing(), Config(), projects=("proj",), window="w", mod_events=events)
+    section = next(s for s in report.sections if s.key == "prompting")
+    table = next(t for t in section.tables if t.name == "prompting_tweaks")
+    assert table.title == "Tweaks" and table.dashboard == "keep"
+    assert table.help and table.help.shows and all(c.help for c in table.columns)
+    assert _tweak_rows(table)["summarise"]["pressed"] == 1
+    assert "Tweaks" in render_markdown(report)
 
 
 def test_the_table_has_its_words_in_the_help_and_the_placement():
