@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, PaneOpenArgs, Register, RenderElement, RenderInput } from 'claude-code'
 
 import type { GlassPin, GlassReview } from '../types'
-import { emptyReview, sound } from './compaction-memory'
+import { emptyReview, memory, readdMissing, sound } from './compaction-memory'
 import { COPY, GLOSSARY } from './generated/copy.js'
 import { emptySnap } from './live'
 import { heading } from './rows'
@@ -54,6 +54,11 @@ export type PageKit = {
   updatePins: (change: (pins: GlassPin[]) => GlassPin[]) => Promise<void>
   /** Changes the compaction review's state. */
   updateReview: (change: (review: GlassReview) => GlassReview) => Promise<void>
+  /**
+   * Puts back the things the last summary lost (those it marked missing or partly): Claude is told them in a system
+   * prompt section from its next request on (readd.ts). Returns how many it added; 0 when nothing was left to add.
+   */
+  readd: () => Promise<number>
   /** Turns an opt-in on or off and keeps the choice. */
   setOption: (key: string, enabled: boolean) => Promise<void>
   /** Asks a model a question: its answer and the tokens it used, or why it could not. */
@@ -225,6 +230,19 @@ export const register: Register = on => {
       },
       updateReview: async change => {
         await update($, reviewAtom, was => change(sound(was)))
+      },
+      readd: async () => {
+        const now = await $.clock.now()
+        let added = 0
+        await update($, reviewAtom, was => {
+          const review = sound(was)
+          const next = readdMissing(review, now)
+          added = next.readded.length - review.readded.length
+          return next
+        })
+        // The sensor counts these as added back when the next reply ends (drainSensor).
+        memory.added += added
+        return added
       },
       setOption: async (key, enabled) => {
         await $.store.set(key, enabled)

@@ -138,6 +138,7 @@ export const COPY = {
   "compaction.pin.empty": "Say what to pin, for example /glass pin never use port 8765",
   "compaction.pin.full": "You have {count} pins already. Remove one first with /glass unpin and a few of its words.",
   "compaction.quick": "Quick check (est.): it looks for paths, numbers and key words in the summary.",
+  "compaction.readded.note": "Claude is told these again with its next reply.",
   "compaction.review": "Review",
   "compaction.safe.anyway": "Recent files, the plan and CLAUDE.md are kept anyway ({count}).",
   "compaction.summary": "Show the summary",

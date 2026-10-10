@@ -2,8 +2,8 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { emptyReview } from '../hooks/compaction-memory'
-import type { GlassKeepItem, GlassReview } from '../types'
+import { emptyReview, readdMissing, sound, withSummary } from '../hooks/compaction-memory'
+import type { GlassKeepItem, GlassMark, GlassReview } from '../types'
 import { elements, faults, prepare, reply, SESSION, SITE, START, textOf, usageFor } from './support'
 import type { World } from './support'
 
@@ -179,6 +179,7 @@ function buttons(tree: unknown) {
 
 test('the review page opens on what may be missing and one note that puts it back; nothing is sent', async ($, on) => {
   const world = prepare(on)
+  const watch = watchReview(on)
   const seen = bottoms(on, world)
   await started($, world)
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
@@ -206,15 +207,15 @@ test('the review page opens on what may be missing and one note that puts it bac
   expect(fromLead(await desktop.drawn())).toEqual(shown)
   await desktop.unmount()
 
-  // One note for everything missing, put in the prompt box, never sent.
+  // One press puts everything missing back through the system prompt: nothing goes to the prompt box, nothing is sent.
   await mounted.press({ key: 'add-back' } as never)
-  expect(seen.filled).toHaveLength(1)
-  expect(seen.filled[0]).toMatch(/^Before compaction we agreed: .*8765.*; .*read any code.*\.$/)
-  expect(lines(await mounted.drawn()).join('\n')).toMatch(/A draft is in the prompt box/)
+  expect(watch.latest.readded.map(one => one.text)).toEqual([expect.stringMatching(/8765/), expect.stringMatching(/read any code/)])
+  expect(lines(await mounted.drawn())).toContain('Claude is told these again with its next reply.')
+  expect(seen.filled).toEqual([])
   expect(seen.submitted).toEqual([])
   await mounted.unmount()
 
-  // The draft counts as added back when the next reply's counts reach the sensor.
+  // The items put back count as added back when the next reply's counts reach the sensor.
   await reply($, world, SECOND)
   expect(sensor(world).filter(one => one.event === 'compaction')[0]).toMatchObject({ kind: 'manual', missing: 2, added: 2 })
   expect(faults(world)).toEqual([])
@@ -222,15 +223,11 @@ test('the review page opens on what may be missing and one note that puts it bac
 
 test('the second line says everything is in the summary, or that nothing needed keeping; one missing item reads in the singular; more than four are counted', async ($, on) => {
   const world = prepare(on)
-  const seen: Bottoms = { filled: [], submitted: [], compacts: [] }
+  const watch = watchReview(on)
   const written = { summary: '' }
   world.transcript = [...MESSAGES]
   // The summary each compaction writes is set before it.
   on('session.compact', () => ({ messages: [{ role: 'user', text: written.summary, toolUses: [] }], tokensBefore: 150000, tokensAfter: 30000 }) as never)
-  on('prompt.fill', (_$, e) => {
-    seen.filled.push(e.text)
-    return { isFilled: true }
-  })
   await started($, world)
 
   // The summary carries both constraints, so nothing is missing.
@@ -269,7 +266,7 @@ test('the second line says everything is in the summary, or that nothing needed 
   expect(shown.filter(line => line.startsWith('• '))).toHaveLength(4)
   expect(shown).toContain('and 2 more')
   await mounted.press({ key: 'add-back' } as never)
-  expect(seen.filled.at(-1)).toMatch(/module0x.*module5x|module5x.*module0x/)
+  expect(watch.latest.readded.map(one => one.text).sort()).toEqual(six.map((_, n) => `Never touch module${n}x.`))
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
@@ -602,32 +599,18 @@ test('straight after a summary the band reads the context as Claude Code reports
   expect(faults(world)).toEqual([])
 })
 
-/** What the test sees of the review state: the last value written, and a way to seed the items put back (no press does that yet). */
-type Watch = { readonly latest: GlassReview; seed: (items: GlassKeepItem[]) => void }
+/** What the test sees of the review state: the last value written. */
+type Watch = { readonly latest: GlassReview }
 
 function watchReview(on: On): Watch {
   let latest = emptyReview()
-  let seeded: GlassKeepItem[] | null = null
   on('state.set', async (_$, e, next) => {
-    if (e.plugin === 'claudeglass' && e.key === 'review') {
-      latest = e.value as GlassReview
-      // What the mod wrote back is the put-back items as they stand now.
-      if (seeded !== null) seeded = latest.readded
-    }
+    if (e.plugin === 'claudeglass' && e.key === 'review') latest = e.value as GlassReview
     return next(e)
-  })
-  on('state.get', async (_$, e, next) => {
-    const got = await next(e)
-    if (seeded === null || e.plugin !== 'claudeglass' || e.key !== 'review') return got
-    const held = got.value as { value?: Record<string, unknown>; version: number } | undefined
-    return { value: { version: held?.version ?? 0, value: { ...(held?.value ?? emptyReview()), readded: seeded } } } as never
   })
   return {
     get latest() {
-      return seeded === null ? latest : { ...latest, readded: seeded }
-    },
-    seed: items => {
-      seeded = items
+      return latest
     },
   }
 }
@@ -721,12 +704,15 @@ test('items put back are kept in the list and told to the summariser until a sum
   })
   await started($, world)
 
-  // The first summary drops two things the user said; they are put back (what a press will do).
+  // The first summary drops two things the user said; the press on the page puts them back.
   written.summary = 'This session is being continued. The team uses pnpm, not npm, and chose option B, the queue-based design.'
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
   const lost = (watch.latest.after?.items ?? []).filter(one => /8765|read any code/.test(one.text))
   expect(lost).toHaveLength(2)
-  watch.seed(lost)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'add-back' } as never)
+  await mounted.unmount()
+  expect(watch.latest.readded.map(one => one.id)).toEqual(lost.map(one => one.id))
 
   // The messages no longer hold them, but the next reply's list still does, once each.
   world.transcript = [{ role: 'user', text: 'Thanks, that looks right.', toolUses: [] }]
@@ -755,6 +741,7 @@ test('a review state from before items could be put back still draws', async ($,
     if (!aged || e.plugin !== 'claudeglass' || e.key !== 'review' || held?.value === undefined) return got
     const old = { ...held.value }
     delete old.readded
+    delete old.receipts
     return { value: { ...held, value: old } } as never
   })
   await started($, world)
@@ -774,4 +761,156 @@ test('a /compact drafted from the page already carries the list, so the summary 
   await $.session.compact({ trigger: 'manual', instructions: 'Keep: Never use port 8765.', messages: MESSAGES } as never)
   expect(seen.compacts.at(-1)?.instructions).toBe('Keep: Never use port 8765.')
   expect(faults(world)).toEqual([])
+})
+
+// --- Re-add: a press fills `readded`, prompt.compose tells Claude them ---
+
+const COMPOSE = { model: 'claude-sonnet-4-6', promptModel: 'claude-sonnet-4-6', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] }
+const READD = 'claudeglass:readd'
+
+/** What sits under prompt.compose: the engine's own sections. */
+function composing(on: On): void {
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' }] }) as never)
+}
+
+type Composed = { id: string; text: string; scope: string }[]
+
+async function compose($: Dollar, traits: string[] = []): Promise<Composed> {
+  return (await $.prompt.compose({ ...COMPOSE, traits } as never)).sections as unknown as Composed
+}
+
+/** A summary that drops both constraints, then the page's press that puts them back. */
+async function lossyThenReadd($: Dollar, world: World): Promise<void> {
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'add-back' } as never)
+  await mounted.unmount()
+}
+
+function item(id: string, kind: GlassKeepItem['kind'], text: string, safe = false): GlassKeepItem {
+  return { id, kind, text, safe, why: '', exact: [], at: 0 }
+}
+
+/** A review whose last check marked these items. */
+function checked(marks: Record<string, GlassMark>, items: GlassKeepItem[]): GlassReview {
+  const review = emptyReview()
+  return { ...review, after: { ts: 1, trigger: 'manual', summary: '', items, marks, judged: false, earlier: [] } }
+}
+
+test('after a press the main session is told the items again in one session section; before it, and for a teammate, there is none', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  composing(on)
+  await $.session.start(START)
+
+  // Nothing put back: the engine's sections come back as they were.
+  expect((await compose($)).map(one => one.id)).toEqual(['intro'])
+
+  await lossyThenReadd($, world)
+  const main = await compose($)
+  expect(main.map(one => one.id)).toEqual(['intro', READD])
+  const added = main[1] as Composed[number]
+  expect(added.scope).toBe('session')
+  expect(added.text).toMatch(/^Before compaction we agreed: .*8765.*; .*read any code.*\.$/)
+  expect(added.text).not.toMatch(/pnpm|option B/)
+
+  // A teammate has its own conversation.
+  expect((await compose($, ['teammate'])).map(one => one.id)).toEqual(['intro'])
+  // Other traits still get it.
+  expect((await compose($, ['lean'])).map(one => one.id)).toEqual(['intro', READD])
+  expect(faults(world)).toEqual([])
+})
+
+test('the re-add text is byte-identical across requests, whatever the time or the replies since', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  composing(on)
+  await lossyThenReadd($, world)
+  const first = (await compose($)).find(one => one.id === READD)?.text
+  expect(first).toBeDefined()
+  await world.clock.advance(120000)
+  await reply($, world, SECOND)
+  const second = (await compose($)).find(one => one.id === READD)?.text
+  expect(second).toBe(first)
+  expect(new TextEncoder().encode(String(second))).toEqual(new TextEncoder().encode(String(first)))
+  expect(faults(world)).toEqual([])
+})
+
+test('a summary that holds the items drops the section again, and the receipts with it', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  const written = { summary: 'This session is being continued. The team uses pnpm, not npm, and chose option B, the queue-based design.' }
+  world.transcript = [...MESSAGES]
+  on('session.compact', () => ({ messages: [{ role: 'user', text: written.summary, toolUses: [] }], tokensBefore: 150000, tokensAfter: 30000 }) as never)
+  composing(on)
+  await lossyThenReadd($, world)
+  expect(Object.keys(watch.latest.receipts)).toHaveLength(2)
+
+  written.summary = 'This session is being continued. Never use port 8765 for the dev server. Do not read any code yet; wait for the other session to finish.'
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  expect(watch.latest.readded).toEqual([])
+  expect(watch.latest.receipts).toEqual({})
+  expect((await compose($)).map(one => one.id)).toEqual(['intro'])
+  expect(faults(world)).toEqual([])
+})
+
+test('the page press fills readded with what the check marked missing, bumps the count the sensor records, and a second press adds nothing', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'add-back' } as never)
+  expect(watch.latest.readded).toHaveLength(2)
+  expect(Object.values(watch.latest.receipts)).toEqual([
+    { at: expect.any(Number), replies: 0, referenced: null },
+    { at: expect.any(Number), replies: 0, referenced: null },
+  ])
+  const receipts = watch.latest.receipts
+  await mounted.press({ key: 'add-back' } as never)
+  expect(watch.latest.readded).toHaveLength(2)
+  expect(watch.latest.receipts).toEqual(receipts)
+  await mounted.unmount()
+
+  await reply($, world, SECOND)
+  expect(sensor(world).filter(one => one.event === 'compaction')[0]).toMatchObject({ kind: 'manual', missing: 2, added: 2 })
+  expect(faults(world)).toEqual([])
+})
+
+test('readdMissing puts back what was missing or partly there, once each, and leaves the rest as it was', () => {
+  const lost = item('a', 'instruction', 'Never use port 8765')
+  const half = item('b', 'decision', 'Use the queue design')
+  const kept = item('c', 'instruction', 'Use pnpm')
+  const file = item('d', 'file', 'src/api/limiter.ts')
+  const safe = item('e', 'instruction', 'Always safe', true)
+  const marks: Record<string, GlassMark> = { a: 'missing', b: 'partly', c: 'found', d: 'missing', e: 'safe' }
+  const review = checked(marks, [lost, half, kept, file, safe])
+
+  const once = readdMissing(review, 1000)
+  expect(once.readded.map(one => one.id)).toEqual(['a', 'b'])
+  expect(once.receipts).toEqual({ a: { at: 1000, replies: 0, referenced: null }, b: { at: 1000, replies: 0, referenced: null } })
+  expect({ ...once, readded: review.readded, receipts: review.receipts }).toEqual(review)
+
+  // A second call, later, skips what is already there and keeps its receipt.
+  const twice = readdMissing(once, 2000)
+  expect(twice).toBe(once)
+  const more = readdMissing({ ...checked({ ...marks, c: 'missing' }, [lost, half, kept, file, safe]), readded: once.readded, receipts: once.receipts }, 3000)
+  expect(more.readded.map(one => one.id)).toEqual(['a', 'b', 'c'])
+  expect(more.receipts.a).toEqual({ at: 1000, replies: 0, referenced: null })
+  expect(more.receipts.c).toEqual({ at: 3000, replies: 0, referenced: null })
+
+  // Nothing checked yet: nothing to add.
+  expect(readdMissing(emptyReview(), 1)).toEqual(emptyReview())
+})
+
+test('a summary that holds a put-back item drops its receipt and keeps the others', () => {
+  const a = item('a', 'instruction', 'Never use port 8765')
+  const b = item('b', 'instruction', 'Do not read any code')
+  const review = readdMissing(checked({ a: 'missing', b: 'missing' }, [a, b]), 5)
+  const reviewed = { ts: 9, trigger: 'manual' as const, summary: '', items: [a, b], marks: { a: 'found', b: 'missing' } as Record<string, GlassMark>, judged: false, earlier: [] }
+  const next = withSummary(sound(review), reviewed, { ts: 9, trigger: 'manual', before: null, after: null, kept: 1, missing: 1 })
+  expect(next.readded.map(one => one.id)).toEqual(['b'])
+  expect(Object.keys(next.receipts)).toEqual(['b'])
 })

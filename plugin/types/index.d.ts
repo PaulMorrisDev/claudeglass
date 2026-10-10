@@ -264,6 +264,12 @@ export type GlassMark = 'found' | 'partly' | 'missing' | 'safe'
 /** What made a reviewed summary: the user's /compact, Claude Code at its threshold, or a plugin (a summary made ahead, `precompute`, is never reviewed). */
 export type GlassReviewTrigger = 'auto' | 'manual' | 'plugin'
 
+/**
+ * What followed a put-back item (compaction review): when it was put back (ms), the main replies seen since, and
+ * whether one of them referenced it (null until a reply does, or enough replies have passed without).
+ */
+export type GlassReceipt = { at: number; replies: number; referenced: boolean | null }
+
 /** The check of the last summary against the keep list. */
 export type GlassReviewed = {
   ts: number
@@ -322,6 +328,8 @@ export type GlassReview = {
   list: GlassKeepItem[]
   /** Items the user put back after a summary lost them: kept in the list and sent to the summariser until a summary holds them. */
   readded: GlassKeepItem[]
+  /** The receipt of each put-back item, by its id: what the replies since said of it. */
+  receipts: Record<string, GlassReceipt>
   after: GlassReviewed | null
   history: GlassReviewRow[]
   ui: GlassReviewUi

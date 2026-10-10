@@ -205,6 +205,7 @@ COPY: dict[str, str] = {
     "compaction.add.many": "Add these back",
     "compaction.quick": "Quick check (est.): it looks for paths, numbers and key words in the summary.",
     "compaction.drafted": "A draft is in the prompt box. Edit it and send it when you want. Nothing was sent.",
+    "compaction.readded.note": "Claude is told these again with its next reply.",
     "compaction.draft.failed": "The prompt box could not take the draft.",
     "compaction.addback": "Before compaction we agreed: {items}.",
     "compaction.keep": "/compact Keep: {items}",

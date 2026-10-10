@@ -1,6 +1,6 @@
-import type { GlassKeepItem, GlassMark, GlassPin, GlassReview, GlassReviewed, GlassReviewRow, GlassReviewTrigger, GlassSnap } from '../types'
+import type { GlassKeepItem, GlassMark, GlassPin, GlassReceipt, GlassReview, GlassReviewed, GlassReviewRow, GlassReviewTrigger, GlassSnap } from '../types'
 import { COPY } from './generated/copy.js'
-import { checkCoverage, compactKeep, KEEP_MAX } from './lib/coverage.js'
+import { checkCoverage, compactKeep, isSaid, KEEP_MAX } from './lib/coverage.js'
 import type { HoldState } from './lib/coverage.js'
 import { buildKeepList, exactTokens, itemId, pinText, splitSuggested, squash, trimText } from './lib/keeplist.js'
 import { fill } from './lib/text.js'
@@ -78,6 +78,7 @@ export function emptyReview(): GlassReview {
     suggest: 0,
     list: [],
     readded: [],
+    receipts: {},
     after: null,
     history: [],
     ui: { view: 'before', toggled: [], summary: false, list: false, earlier: false, busy: false, note: null },
@@ -87,8 +88,10 @@ export function emptyReview(): GlassReview {
 /** A review state from the host, whatever it holds (an older shape, or nothing). */
 export function sound(review: GlassReview | null | undefined): GlassReview {
   if (review === null || review === undefined || !Array.isArray(review.list)) return emptyReview()
-  // A state kept from before items could be put back has no `readded`.
-  return Array.isArray(review.readded) ? review : { ...review, readded: [] }
+  // A state kept from before items could be put back has no `readded` or `receipts`.
+  const readded = Array.isArray(review.readded) ? review.readded : []
+  const receipts = review.receipts !== null && typeof review.receipts === 'object' ? review.receipts : {}
+  return readded === review.readded && receipts === review.receipts ? review : { ...review, readded, receipts }
 }
 
 /** Whether a message is the summary Claude Code puts first, not something the user typed. */
@@ -200,6 +203,8 @@ export function reviewCompaction(args: {
 /** The review after a summary: badge fields, the check, and a row in the history. */
 export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: GlassReviewRow): GlassReview {
   const history = [...review.history, row]
+  // An item the summary now holds is no longer sent to the summariser as put back, and its receipt goes with it.
+  const readded = review.readded.filter(item => !['found', 'safe'].includes(reviewed.marks[item.id] ?? ''))
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY)
   return {
     ...review,
@@ -208,12 +213,27 @@ export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: G
     seen: row.missing === 0,
     held: false,
     list: reviewed.items,
-    // An item the summary now holds is no longer sent to the summariser as put back.
-    readded: review.readded.filter(item => !['found', 'safe'].includes(reviewed.marks[item.id] ?? '')),
+    readded,
+    receipts: Object.fromEntries(readded.map(item => [item.id, review.receipts[item.id]]).filter((one): one is [string, GlassReceipt] => one[1] !== undefined)),
     after: reviewed,
     history,
     ui: { ...review.ui, view: 'after', toggled: [], summary: false, list: false, earlier: false, busy: false, note: null },
   }
+}
+
+/**
+ * The review with the things the user said that the last check marked missing or partly put back: added to `readded`
+ * once each, with a fresh receipt. An item already put back keeps the receipt it has; everything else is as it was.
+ */
+export function readdMissing(review: GlassReview, now: number): GlassReview {
+  const after = review.after
+  if (after === null) return review
+  const held = new Set(review.readded.map(item => item.id))
+  const added = after.items.filter(item => isSaid(item) && !item.safe && ['missing', 'partly'].includes(after.marks[item.id] ?? '') && !held.has(item.id))
+  if (added.length === 0) return review
+  const receipts = { ...review.receipts }
+  for (const item of added) receipts[item.id] = { at: now, replies: 0, referenced: null }
+  return { ...review, readded: [...review.readded, ...added], receipts }
 }
 
 /** What the Detailed view adds to the boundary line: the context before and after, and what the summary cost when that is known (an amount in the user's billing words). */

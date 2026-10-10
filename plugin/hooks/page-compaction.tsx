@@ -4,7 +4,7 @@ import type { GlassKeepItem, GlassMark, GlassReviewed, GlassReviewUi, GlassSetti
 import { isTicked, keepCandidates, memory, splitKeep, SUGGESTED_SHOWN, tickedItems } from './compaction-memory'
 import { amount, formatTokens, localTime } from './fmt'
 import { COPY } from './generated/copy.js'
-import { addBackNote, compactKeep, judgePrompt, KEEP_MAX, MARK_SYMBOL, missingSaid, parseJudge, saidTotal, tally } from './lib/coverage.js'
+import { compactKeep, judgePrompt, KEEP_MAX, MARK_SYMBOL, missingSaid, parseJudge, saidTotal, tally } from './lib/coverage.js'
 import { priceUsage } from './lib/pricing.js'
 import { fill, joinParts } from './lib/text.js'
 import { addPage } from './pane'
@@ -115,7 +115,7 @@ function render(context: PageContext): RenderElement {
             hotkey="b"
             autoFocus
             label={missing.length === 1 ? COPY['compaction.add.one'] : COPY['compaction.add.many']}
-            onPress={() => void draft(addBackNote(missing, COPY['compaction.addback'], LABELS), 'compaction.drafted', missing.length)}
+            onPress={() => void kit.readd().then(() => say(COPY['compaction.readded.note']))}
           />
         </Box>,
       )

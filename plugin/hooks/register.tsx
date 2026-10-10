@@ -15,6 +15,8 @@ import { register as pane } from './pane'
 import { register as compactionPage } from './page-compaction'
 import { register as instructionsPage } from './page-instructions'
 import { register as pins } from './pins'
+import { register as readd } from './readd'
+import { register as receipt } from './receipt'
 import { register as rebuildLog } from './rebuild-log'
 import { register as spinner } from './spinner'
 import { register as hint } from './hint'
@@ -43,6 +45,8 @@ export const register: Register = (on, options) => {
   agentsPage(on, options)
   compaction(on, options)
   pins(on, options)
+  readd(on, options)
+  receipt(on, options)
   compactionPage(on, options)
   instructionsPage(on, options)
   tighten(on, options)
