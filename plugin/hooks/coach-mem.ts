@@ -1,7 +1,6 @@
 import type { GlassRestState, GlassSettings, GlassSnap } from '../types'
 import { HOW, PATTERNS, THRESHOLDS, TIPS } from './generated/coaching.js'
 import { COPY } from './generated/copy.js'
-import type { Io } from './io'
 import {
   BACKGROUND_FORGET_S,
   backgroundLaunched,
@@ -18,18 +17,13 @@ import {
   endsOnQuestion,
   freshHint,
   isChangeRequest,
-  isFeedbackPrompt,
   isGo,
   isNotification,
-  latestReminder,
   launchedInBackground,
-  marksNewPiece,
   mergeRest,
   pasteHint,
   pickHint,
   pollHint,
-  ratedSince,
-  ratingDue,
   startingContext,
 } from './lib/coach.js'
 import type { Background, Draft, Exchange, Found, LastReply, Patterns, RawPatterns, Thresholds } from './lib/coach.js'
@@ -37,7 +31,7 @@ import { mayShow, recordShown } from './lib/rest.js'
 import { fill } from './lib/text.js'
 import { formatTokens } from './lib/units.js'
 import { noteShown, seconds } from './sensor'
-import { coachingApplies, configDir, projectInScope } from './settings'
+import { coachingApplies } from './settings'
 import type { View } from './view'
 
 // What the coaching that runs before a message is sent keeps in module memory
@@ -46,7 +40,7 @@ import type { View } from './view'
 // the background work still out, and the hint now on screen. Only lengths,
 // counts and yes-or-no answers are kept: the words of a message are looked at
 // where they arrive and dropped. coach.ts feeds this from the events; hint.ts
-// and notes.ts ask it what to say. The decisions are lib/coach.js.
+// and the draft hooks ask it what to say. The decisions are lib/coach.js.
 
 const MAX_EXCHANGES = 12
 const patterns: Patterns = compilePatterns(PATTERNS as unknown as RawPatterns)
@@ -75,8 +69,6 @@ type Mem = {
   background: Background
   /** Characters of the session's first message, for what a fresh start would carry. */
   firstPromptChars: number | null
-  /** When the piece of work the rating reminder counts began, in seconds; null when not known (a rating of the session then counts). */
-  pieceAt: number | null
   /** The plan the last ExitPlanMode call was refused (a go-ahead typed next approves it). */
   rejectedPlan: PlanTip | null
   /** The permission mode the message being submitted was sent under (classic.UserPromptSubmit carries it); null until known. */
@@ -99,7 +91,6 @@ function fresh(): Mem {
     asked: false,
     background: emptyBackground(),
     firstPromptChars: null,
-    pieceAt: null,
     rejectedPlan: null,
     mode: null,
     clearStatus: null,
@@ -124,13 +115,6 @@ export function thresholdsOf(settings: GlassSettings): Thresholds {
 function learn(settings: GlassSettings, model: string | null): void {
   mem.th = thresholdsOf(settings)
   mem.cpt = charsPerToken(settings.charsPerToken, model)
-}
-
-function pieceOf(snap: GlassSnap): GlassSnap['piece'] {
-  // A snapshot saved before the piece was kept has none.
-  const held = snap.piece as GlassSnap['piece'] | undefined
-  if (held === undefined) snap.piece = { tokens: 0, noted: false, surveying: false }
-  return snap.piece
 }
 
 // -- the draft ---------------------------------------------------------------
@@ -162,8 +146,7 @@ export function isTypedOrigin(kind: string): boolean {
 
 /**
  * A message went in. A typed one (the composer, or the phone) joins the run of
- * messages drip_feed counts; a /cg-feedback run starts the rating reminder's
- * count over; a background task's notification ends the wait for that work.
+ * messages drip_feed counts; a background task's notification ends the wait for that work.
  */
 export function submitted(snap: GlassSnap, settings: GlassSettings, input: { text: string; origin: string; queued: boolean }, now: number): void {
   learn(settings, snap.model)
@@ -178,15 +161,8 @@ export function submitted(snap: GlassSnap, settings: GlassSettings, input: { tex
   if (!isTypedOrigin(input.origin)) return
   const trimmed = text.trim()
   if (trimmed === '') return
-  if (isFeedbackPrompt(text, patterns.feedbackSkill)) {
-    snap.piece = { tokens: 0, noted: false, surveying: true }
-    mem.pieceAt = null
-    return
-  }
   if (SLASH_COMMAND.test(trimmed.slice(0, 80))) return
-  pieceOf(snap).surveying = false
   mem.rejectedPlan = null
-  if (mem.pieceAt === null) mem.pieceAt = seconds(now)
   if (mem.firstPromptChars === null && snap.replies === 0) mem.firstPromptChars = text.length
   if (input.queued) return
   const prev = mem.exchanges[mem.exchanges.length - 1]
@@ -240,9 +216,8 @@ function hasBackground(snap: GlassSnap, nowS: number): boolean {
 // -- the end of a reply ------------------------------------------------------
 
 /**
- * A reply of the main session ended: what it said (a question to you, a new
- * piece of work) and what it used, for the next message's hint and the rating
- * reminder. The plan_fresh line on the status bar has had its reply.
+ * A reply of the main session ended: whether it ended on a question to you, for the
+ * next message's hint. The plan_fresh line on the status bar has had its reply.
  */
 export function turnEnded(snap: GlassSnap, settings: GlassSettings, end: { answer?: string; reason?: string }): void {
   learn(settings, snap.model)
@@ -250,14 +225,6 @@ export function turnEnded(snap: GlassSnap, settings: GlassSettings, end: { answe
   if (last !== undefined && (end.reason === undefined || end.reason === 'answer')) last.answered = true
   const answer = end.answer ?? ''
   mem.asked = answer !== '' && endsOnQuestion(answer, patterns)
-  const piece = pieceOf(snap)
-  const used = snap.reqs.slice(snap.reqs.length - snap.turnReqs).reduce((sum, one) => sum + one.input + one.cacheRead + one.cacheWrite + one.output, 0)
-  if (answer !== '' && marksNewPiece(answer)) {
-    snap.piece = { tokens: used, noted: false, surveying: false }
-    mem.pieceAt = mem.submitAt === null ? null : mem.submitAt / 1000
-  } else if (!piece.surveying) {
-    piece.tokens += used
-  }
   clearPlanStatus()
 }
 
@@ -431,59 +398,4 @@ export function leftPlanMode(): boolean {
 export function goAheadPlan(text: string, origin: string): PlanTip | null {
   const plan = mem.rejectedPlan
   return plan !== null && isTypedOrigin(origin) && isGo(text, patterns) ? plan : null
-}
-
-// -- rating_reminder ---------------------------------------------------------
-
-export type NoteCandidate = { kind: string; stake: number; text: string; shown?: () => Promise<void> }
-
-const COACH_FILE = 'mod/coach.json'
-
-async function remindedAt(io: Io, dir: string): Promise<number | null> {
-  try {
-    const text = await io.readFile(`${dir}/${COACH_FILE}`)
-    const raw: unknown = typeof text === 'string' && text !== '' ? JSON.parse(text) : null
-    const value = raw !== null && typeof raw === 'object' ? (raw as { reminded_at?: unknown }).reminded_at : null
-    return typeof value === 'number' && Number.isFinite(value) ? value : null
-  } catch {
-    return null
-  }
-}
-
-/**
- * The rating reminder as a turn-end note, when this piece of work is big enough
- * and no reminder has gone out in the last days (the hook's, from the settings
- * file, or the mod's own), the session wasn't rated on the dashboard since the
- * piece began, and the user opted in to it (`feedback_reminder`) for this project.
- * Coaching notes being off doesn't hold it back (the capture hook's reminder goes
- * by the opt-in and the project filter alone). The time of the last one is the
- * only thing kept, in <config_dir>/mod/coach.json.
- */
-export async function ratingCandidate(io: Io, snap: GlassSnap, settings: GlassSettings, now: number): Promise<NoteCandidate | null> {
-  if (!settings.coaching.feedbackReminder || !projectInScope(settings)) return null
-  const th = thresholdsOf(settings)
-  const piece = pieceOf(snap)
-  const nowS = seconds(now)
-  if (ratingDue(piece.tokens, settings.typicalPiece, null, piece.noted, nowS, th) === null) return null
-  // A rating of this session on the dashboard since the piece began is the rating the reminder asks for.
-  const rated = snap.sessionId === null ? null : (settings.coaching.rated[snap.sessionId] ?? null)
-  if (ratedSince(rated, mem.pieceAt)) return null
-  const dir = await configDir(io)
-  // The later of the hook's last reminder (from the settings file) and the mod's own.
-  const reminded = latestReminder(settings.coaching.remindedAt, await remindedAt(io, dir))
-  const found = ratingDue(piece.tokens, settings.typicalPiece, reminded, piece.noted, nowS, th)
-  if (found === null) return null
-  return {
-    kind: found.kind,
-    stake: found.stake,
-    text: fill(COPY['note.rating'], { tokens: formatTokens(found.fields.tokens ?? piece.tokens) }),
-    shown: async () => {
-      piece.noted = true
-      try {
-        await io.writeFile(`${dir}/${COACH_FILE}`, JSON.stringify({ schema: 1, reminded_at: nowS }))
-      } catch {
-        // The piece is marked, so it isn't told again this session; the days' rest starts at the next one.
-      }
-    },
-  }
 }

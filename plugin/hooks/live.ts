@@ -25,7 +25,6 @@ export function emptySnap(): GlassSnap {
     calBase: null,
     parallel: false,
     reqs: [],
-    startedAt: null,
     toolsUsed: [],
     firstCr: null,
     startupFirst: null,
@@ -38,7 +37,6 @@ export function emptySnap(): GlassSnap {
     pendingCompaction: false,
     toolKept: 0,
     heaviest: [],
-    switches: 0,
     mix: { read: 0, write: 0, input: 0, output: 0 },
     rest: { hints: {} },
     lastNoteReply: null,
@@ -47,13 +45,11 @@ export function emptySnap(): GlassSnap {
     turnId: null,
     turnUsd: 0,
     turnExact: false,
-    turn: emptyTurn(),
     events: [],
     pending: [],
     eventsDirty: false,
     lastBeat: 0,
     agents: [],
-    piece: { tokens: 0, noted: false, surveying: false },
   }
 }
 
@@ -63,10 +59,6 @@ export function emptySnap(): GlassSnap {
  */
 export function soundSnap(snap: GlassSnap | null | undefined): GlassSnap {
   return fillMissing(snap, emptySnap())
-}
-
-export function emptyTurn(): GlassSnap['turn'] {
-  return { rebuilds: [], big: null, switched: false, compactedCold: null, compacted: false, switchUsd: 0 }
 }
 
 let work: GlassSnap | null = null

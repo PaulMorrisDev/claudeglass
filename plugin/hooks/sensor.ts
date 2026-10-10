@@ -14,6 +14,8 @@ const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/
 const CLEAR_FACTOR = 1.3
 /** How many replies after a note decide what the user did about it. */
 const OUTCOME_REPLIES = 2
+/** At most one turn-end note per this many replies. */
+export const NOTE_EVERY = 5
 
 const SURFACES = ['desktop', 'terminal', 'vscode', 'mobile']
 

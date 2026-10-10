@@ -162,9 +162,6 @@ export const MOVED = [
   "cold_return",
   "drip_feed",
   "plan_fresh",
-  "rating_reminder",
-  "report_reread",
-  "split_run",
   "status_poll"
 ];
 
@@ -206,7 +203,8 @@ export const SENSOR_EVENTS = [
   "note",
   "rebuild",
   "cold_send",
-  "compaction"
+  "compaction",
+  "tweak"
 ];
 
 export const SENSOR_VOCAB = {
@@ -281,6 +279,14 @@ export const SENSOR_VOCAB = {
     "outcome": [
       "expected",
       "unexpected"
+    ]
+  },
+  "tweak": {
+    "kind": [
+      "summarise",
+      "readd",
+      "check",
+      "hold"
     ]
   }
 };

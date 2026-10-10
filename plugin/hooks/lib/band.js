@@ -1,114 +1,120 @@
 /* claudeglass mod: lib/band.js
  *
- * How the band above the prompt gets narrower. It has up to three pieces: the
- * context, the spend, and one that appears only when it matters (the "extra"). Each
- * has a full form and a short one. When they don't fit, the forms change in a fixed
- * order, so what the user must act on is the last thing to go:
+ * The band above the prompt is one health line and one Button. This is its pure
+ * part: which of four states the session is in, and the words of the line at the
+ * width there is. Nothing here reads a clock, the disk or the engine; the words
+ * come in as templates (the strings in generated/copy.js) and the widths are in
+ * cells, which the caller measures.
  *
- *   1. the spend goes short
- *   2. the context goes short
- *   3. the spend goes, while the extra is urgent (the cache is cold or ending, the
- *      5-hour limit will run out before it resets, or a summary may have dropped
- *      something)
- *   4. the extra goes short
- *   5. the extra goes: when it is not urgent the spend comes back, short, if it fits
- *   6. the spend goes (the only step left after 5 when the extra is urgent: an urgent
- *      extra never goes before the spend does, so the spend stays gone)
- *
- * The context is always kept. The desktop's bar shows only when every piece fits at
- * full length. Nothing here reads a clock, the disk or the engine; the widths are in
- * cells and the caller measures them.
+ *   fine    plenty of room or filling: the Glass Button
+ *   tight   close to the summarising point: Summarise (or review first)
+ *   review  the last summary lost something the user has not looked at and not yet put back: Re-add
+ *   kept    the last summary lost nothing and no reply has ended since: Glass
+ */
+
+import { fill, joinParts } from "./text.js";
+
+/**
+ * @typedef {"fine"|"tight"|"review"|"kept"} Health
  */
 
 /**
- * @typedef {"context"|"spend"|"extra"} Role
+ * @typedef {Object} HealthFacts
+ * @property {string|null} reading     The context state (plenty, filling, soon, next); null before the first reading.
+ * @property {boolean} summarised      A summary has been checked this session.
+ * @property {number} missing          Items the last summary lost (missing or only partly kept).
+ * @property {number} pending          Of those, the items not yet put back: what Re-add would add.
+ * @property {boolean} seen            The user has looked at that summary.
+ * @property {number} total            Items the user said that the last summary was checked against.
+ * @property {number} replies          Main replies this session so far.
+ * @property {number|null} repliesAt   The reply count when that summary was made; null before one.
  */
 
 /**
- * @typedef {Object} Piece
- * @property {Role} role
- * @property {string} key
- * @property {number} full         Cells at full length.
- * @property {number|null} short   Cells of the short form; null when it has none.
- * @property {boolean} [urgent]    For the extra: it is something to act on, so the spend gives way first.
+ * The state the band is in; null before the first reading (the band then draws nothing new).
+ * @param {HealthFacts} facts
+ * @returns {Health|null}
  */
+export function healthOf(facts) {
+  if (facts.reading === null) return null;
+  if (facts.summarised && facts.missing > 0 && facts.pending > 0 && !facts.seen) return "review";
+  if (facts.reading === "soon" || facts.reading === "next") return "tight";
+  // Kept shows until the next reply ends (the count of replies moves on), then it is Fine again.
+  if (facts.summarised && facts.missing === 0 && facts.total > 0 && facts.repliesAt !== null && facts.replies === facts.repliesAt) {
+    return "kept";
+  }
+  return "fine";
+}
+
+/** Cells a Button takes beyond its label (the brackets and their padding). */
+export var BUTTON_PADDING = 4;
+/** Cells the dot takes, and the gap between the dot, the state word and the line. */
+export var LEAD_CELLS = 1;
+export var WORD_GAP = 2;
 
 /**
- * @typedef {"full"|"short"|"gone"} Form
+ * Cells a Button with this label takes.
+ * @param {string} label
+ * @returns {number}
  */
-
-/**
- * @typedef {Object} Shape
- * @property {Object<string, Form>} forms  By piece key.
- * @property {boolean} bar                 The bar fits too.
- */
-
-// Cells a separator takes between two pieces (a gap, the rule, a gap).
-export var SEPARATOR_CELLS = 3;
-
-/**
- * The forms each piece takes in the order of steps above, one plan per step.
- * @param {boolean} urgent
- * @returns {{ context: Form, spend: Form, extra: Form }[]}
- */
-function plans(urgent) {
-  /** @type {{ context: Form, spend: Form, extra: Form }[]} */
-  var list = [
-    { context: "full", spend: "full", extra: "full" },
-    { context: "full", spend: "short", extra: "full" },
-    { context: "short", spend: "short", extra: "full" },
-  ];
-  if (urgent) list.push({ context: "short", spend: "gone", extra: "full" });
-  list.push({ context: "short", spend: urgent ? "gone" : "short", extra: "short" });
-  // An urgent extra is what the spend gave way to: the spend does not come back when it goes.
-  if (!urgent) list.push({ context: "short", spend: "short", extra: "gone" });
-  list.push({ context: "short", spend: "gone", extra: "gone" });
-  return list;
+export function buttonCells(label) {
+  return label.length + BUTTON_PADDING;
 }
 
 /**
- * The forms the pieces take to fit `room` cells, and whether the bar fits.
- * When nothing fits the last plan stands: the context alone, short.
- * @param {Piece[]} pieces    In the order they are drawn; at most one of each role.
- * @param {number} room       Cells for the pieces and their separators.
- * @param {number} [barCells] Cells the bar takes; 0 or left out when there is no bar.
- * @returns {Shape}
+ * @typedef {Object} HealthWords
+ * @property {string} full         "{pct}% full"
+ * @property {string} replies      "about {replies} replies before a summary"
+ * @property {string} repliesOne   "about 1 reply before a summary"
+ * @property {string} point        "Claude summarises at {tokens}"
+ * @property {string} lost         "Summary lost {missing} of {total} items"
+ * @property {string} kept         "Summary kept all {total} items"
+ * @property {string} keptOne      "Summary kept the 1 item"
  */
-export function narrow(pieces, room, barCells) {
-  /** @type {Piece|undefined} */
-  var extra;
-  for (var i = 0; i < pieces.length; i++) {
-    var one = /** @type {Piece} */ (pieces[i]);
-    if (one.role === "extra") extra = one;
-  }
-  var list = plans(extra !== undefined && extra.urgent === true);
 
-  /**
-   * @param {{ context: Form, spend: Form, extra: Form }} plan
-   * @returns {{ forms: Object<string, Form>, width: number }}
-   */
-  function measure(plan) {
-    /** @type {Object<string, Form>} */
-    var forms = {};
-    var width = 0;
-    var shown = 0;
-    for (var j = 0; j < pieces.length; j++) {
-      var piece = /** @type {Piece} */ (pieces[j]);
-      var form = plan[piece.role];
-      forms[piece.key] = form;
-      if (form === "gone") continue;
-      width += form === "short" && piece.short !== null ? piece.short : piece.full;
-      shown += 1;
-    }
-    return { forms: forms, width: width + SEPARATOR_CELLS * Math.max(0, shown - 1) };
-  }
+/**
+ * @typedef {Object} HealthFigures
+ * @property {string} pct          The share of the window used, written ("34").
+ * @property {number|null} replies Replies before the summary; null when not known yet.
+ * @property {string} point        The summarising point, written ("160k").
+ * @property {number} missing
+ * @property {number} total
+ */
 
-  var bars = typeof barCells === "number" && barCells > 0 ? barCells : 0;
-  for (var k = 0; k < list.length; k++) {
-    var found = measure(/** @type {{ context: Form, spend: Form, extra: Form }} */ (list[k]));
-    if (found.width <= room || k === list.length - 1) {
-      return { forms: found.forms, bar: bars > 0 && k === 0 && found.width + bars <= room };
-    }
+/**
+ * The forms of the line, longest first. The last is empty: the state word and the Button alone.
+ * @param {Health} state
+ * @param {HealthFigures} figures
+ * @param {HealthWords} words
+ * @returns {string[]}
+ */
+export function healthForms(state, figures, words) {
+  if (state === "review") return [fill(words.lost, { missing: figures.missing, total: figures.total }), ""];
+  if (state === "kept") return [figures.total === 1 ? words.keptOne : fill(words.kept, { total: figures.total }), ""];
+  var full = fill(words.full, { pct: figures.pct });
+  var left = figures.replies;
+  var runway =
+    left === null || left < 1
+      ? fill(words.point, { tokens: figures.point })
+      : left === 1
+        ? words.repliesOne
+        : fill(words.replies, { replies: left });
+  return [joinParts([full, runway]), full, ""];
+}
+
+/**
+ * The line that fits `room` cells: the longest form that does; the state word and the Button alone ("") when none does.
+ * @param {Health} state
+ * @param {HealthFigures} figures
+ * @param {HealthWords} words
+ * @param {number} room
+ * @returns {string}
+ */
+export function healthLine(state, figures, words, room) {
+  var forms = healthForms(state, figures, words);
+  for (var i = 0; i < forms.length; i++) {
+    var form = /** @type {string} */ (forms[i]);
+    if (form.length <= room) return form;
   }
-  return { forms: {}, bar: false };
+  return "";
 }

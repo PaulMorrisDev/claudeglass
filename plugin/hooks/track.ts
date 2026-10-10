@@ -8,7 +8,7 @@ import { drainSensor } from './compaction-memory'
 import { drainShown, endCoach, resetCoach } from './coach-mem'
 import { beat, keepBeating, leave } from './heartbeat'
 import type { Io } from './io'
-import { emptySnap, emptyTurn, flags, flushNow, forget, live, restart, touch } from './live'
+import { emptySnap, flags, flushNow, forget, live, restart, touch } from './live'
 import { cacheState } from './lib/cache.js'
 import { readContext, toolGrowth, toolWhat } from './lib/context.js'
 import { priceUsage, ratesFor } from './lib/pricing.js'
@@ -22,7 +22,6 @@ import { coldMin } from './view'
 const snapAtom = atom({ plugin: 'claudeglass', key: 'snap' } as const, emptySnap())
 const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null)
 const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
-const pageAtom = atom({ plugin: 'claudeglass', key: 'page' } as const, 'now')
 
 // Follows the main session: Claude Code's own figures at each measurement, one
 // record per model request, one per reply, and each conversation summary. All
@@ -37,11 +36,9 @@ const MAX_HEAVIEST = 5
 const MAX_TOOLS_USED = 200
 /** A wait this long after a request that hit the usage limit counts as the limit's pause. */
 const LIMIT_PAUSE_MS = 60 * 1000
-/** A tool result this big is worth a note, for the tools whose output Claude isn't already coached on. */
-export const BIG_RESULT_TOKENS = 8000
 const NOTE_TOOLS = ['Bash', 'Grep', 'Glob']
 
-/** Which tool a note about a big result names, or null when the tool isn't one it covers. */
+/** Whether a tool is one whose result is named as the heaviest of a reply: the ones whose output Claude isn't already coached on. */
 export function noteTool(name: string): boolean {
   return NOTE_TOOLS.includes(name) || name.startsWith('mcp__')
 }
@@ -292,8 +289,6 @@ function beginReply(snap: GlassSnap, settings: GlassSettings, now: number, turnI
   snap.turnStartCost = snap.cost === null ? (fresh && snap.replies === 0 ? 0 : null) : lastEnd === null ? snap.cost : Math.max(snap.cost, lastEnd)
   snap.turnUsd = 0
   snap.turnExact = false
-  // A summary made between replies (a /compact) is still waiting for its note.
-  snap.turn = { ...emptyTurn(), compacted: snap.turn.compacted, compactedCold: snap.turn.compactedCold }
   snap.turnReqs = 0
 }
 
@@ -325,8 +320,6 @@ async function recordRequest(
   if (first) {
     snap.firstCr = cacheRead
     snap.startupFirst = ctx
-    // Only a session seen from its first request has a start: a resumed one may have spent in earlier 5-hour windows.
-    snap.startedAt = snap.turnAt ?? now
   }
   for (const name of tools) {
     if (!snap.toolsUsed.includes(name) && snap.toolsUsed.length < MAX_TOOLS_USED) snap.toolsUsed.push(name)
@@ -336,18 +329,7 @@ async function recordRequest(
   const ttl = settings.ttl
   const rebuild = detectRebuild(prev, request, settings.rebuild, ttl, snap.firstCr)
   if (rebuild !== null) {
-    const extra = priceUsage(rates, { cache_creation_input_tokens: rebuild.tokens }, ttl) - priceUsage(rates, { cache_read_input_tokens: rebuild.tokens }, ttl)
-    snap.turn.rebuilds.push({ cause: rebuild.cause, tokens: rebuild.tokens, usd: Math.max(0, extra), expected: rebuild.expected })
     addEvent(snap, { ts: seconds(now), event: 'rebuild', kind: rebuild.cause, outcome: rebuild.expected ? 'expected' : 'unexpected' })
-  }
-
-  if (prev !== null && prev.model !== '' && model !== '' && prev.model !== model) {
-    snap.switches += 1
-    snap.turn.switched = true
-    if (rates !== null) {
-      const write = ttl >= 3600 ? rates.cache_write_1h : rates.cache_write_5m
-      snap.turn.switchUsd = (ctx / 1000000) * Math.max(0, write - rates.cache_read)
-    }
   }
 
   if (growth > 0 && prev !== null) {
@@ -359,9 +341,6 @@ async function recordRequest(
       snap.heaviest.push(what === '' ? { name, tokens: growth } : { name, tokens: growth, what })
       snap.heaviest.sort((a, b) => b.tokens - a.tokens)
       snap.heaviest.splice(MAX_HEAVIEST)
-    }
-    if (noted !== undefined && growth >= BIG_RESULT_TOKENS && growth > (snap.turn.big?.tokens ?? 0)) {
-      snap.turn.big = { name: noted, tokens: growth }
     }
   }
 
@@ -381,17 +360,13 @@ async function recordRequest(
 }
 
 /** Records a conversation summary of the main session. */
-function recordCompaction(snap: GlassSnap, settings: GlassSettings, trigger: string, before: number | null, after: number | null, now: number): void {
-  const idle = snap.lastTs === null ? false : !cacheState(snap.lastTs, now, settings.ttl).isWarm
-  const size = before ?? snap.reading?.tokens ?? 0
-  const compaction: GlassCompaction = { ts: now, trigger, tokensBefore: before, tokensAfter: after, wasCold: idle && size >= coldMin(settings) }
+function recordCompaction(snap: GlassSnap, trigger: string, before: number | null, after: number | null, now: number): void {
+  const compaction: GlassCompaction = { ts: now, trigger, tokensBefore: before, tokensAfter: after }
   snap.compactions.push(compaction)
   if (snap.compactions.length > MAX_COMPACTIONS) snap.compactions.splice(0, snap.compactions.length - MAX_COMPACTIONS)
   snap.pendingCompaction = true
   snap.toolKept = 0
   snap.heaviest = []
-  snap.turn.compacted = true
-  if (compaction.wasCold) snap.turn.compactedCold = compaction
 }
 
 export const register: Register = on => {
@@ -403,8 +378,6 @@ export const register: Register = on => {
       await reloadSettings(io)
       const detailed = await $.store.get('detailed')
       await update($, detailedAtom, () => detailed === true)
-      const page = await $.store.get('page')
-      if (typeof page === 'string') await update($, pageAtom, () => page)
       const snap = await ensure($)
       if (snap.surface === null && isSurface(e.surface)) {
         snap.surface = e.surface
@@ -413,7 +386,7 @@ export const register: Register = on => {
       await beat(io, snap, true)
       keepBeating(io)
       await touch(io)
-      await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail | pin <text> | unpin <words> | tighten | guard | budget <amount>]', immediate: true })
+      await $.command.register({ name: 'glass', description: COPY['checkpoint.command'], argumentHint: '[startup | detail | pin <text> | unpin <words> | tighten | guard]', immediate: true })
     } catch (error) {
       $.ui.log(`claudeglass: session.start ${String(error)}`, { to: 'debug' })
     }
@@ -561,7 +534,6 @@ export const register: Register = on => {
             $.ui.log(`claudeglass: turn end ${String(error)}`, { to: 'debug' })
           }
         }
-        snap.turn = emptyTurn()
         await writeSensor(io, snap)
         await armCacheClock(io, snap, settings.ttl)
       }
@@ -581,7 +553,7 @@ export const register: Register = on => {
         const snap = await ensure($)
         const settings = await getSettings(io)
         const now = await $.clock.now()
-        recordCompaction(snap, settings, e.trigger, result.tokensBefore ?? null, result.tokensAfter ?? null, now)
+        recordCompaction(snap, e.trigger, result.tokensBefore ?? null, result.tokensAfter ?? null, now)
         // The band and the pane match /context straight away, not at the next measurement.
         try {
           await refreshReading($, snap, { tokensAfter: result.tokensAfter ?? null })

@@ -4,28 +4,20 @@ import type { Register } from 'claude-code'
 import type { GlassPin } from '../types'
 import { emptyReview, isSummaryText, MAX_PINS, memory, newPin, sound } from './compaction-memory'
 import { COPY } from './generated/copy.js'
-import { buildKeepList, squash } from './lib/keeplist.js'
+import { squash } from './lib/keeplist.js'
+import { pinnable } from './page-checkpoint'
 import { OPEN_ARGS } from './pane'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
 const pinsAtom = atom({ plugin: 'claudeglass', key: 'pins' } as const, [] as GlassPin[])
 const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, emptyReview())
-const pageAtom = atom({ plugin: 'claudeglass', key: 'page' } as const, 'now')
 
 // Two buttons in the transcript's own rows, each on at most one row so a key is
 // never used twice: [p] pin on the newest prompt that holds an instruction or a
 // decision, and [v] review under the summary row while the summary may have
 // dropped something. Pinning is also /glass pin <text> (command.ts) and a press
 // on an item in the Compaction page.
-
-/** The instructions and decisions in a prompt, as one line to pin, or null when it holds none. */
-function pinnable(text: string): string | null {
-  const found = buildKeepList([{ role: 'user', text }], {})
-    .filter(item => item.kind === 'instruction' || item.kind === 'decision')
-    .map(item => item.text.replace(/[.!]+$/, ''))
-  return found.length === 0 ? null : found.join('; ')
-}
 
 export const register: Register = on => {
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
@@ -55,8 +47,6 @@ export const register: Register = on => {
           }
         : async () => {
             await update($, reviewAtom, was => ({ ...sound(was), seen: true, ui: { ...sound(was).ui, view: 'after' as const, note: null } }))
-            await update($, pageAtom, () => 'compaction')
-            await $.store.set('page', 'compaction')
             await $.ui.open(OPEN_ARGS)
           }
     return (

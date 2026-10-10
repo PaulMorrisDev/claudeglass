@@ -571,28 +571,16 @@ test('the guard asks about a new topic over a big context, even with the cache w
   expect(notes(world)).toEqual([])
 })
 
-test('the Settings view turns the guard on in Detailed; the Now page and Simple have no toggle', async ($, on) => {
+test('the pane has no toggle for the guard: /glass guard turns it on', async ($, on) => {
   const world = prepare(on)
   const state = rig(on, world)
   await started($, world, state)
   const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as never })
-  expect(await mounted.find({ type: 'Button', key: 'settings' })).toBeUndefined()
-  expect(await mounted.find({ type: 'Button', key: 'opt:guard' })).toBeUndefined()
-
   await $.command.run({ command: 'glass', args: 'detail' } as never)
-  // Detailed has a quiet Settings button; the Now page itself holds no toggle.
-  expect(await mounted.find({ type: 'Button', key: 'guard-toggle' })).toBeUndefined()
-  expect(await mounted.find({ type: 'Button', key: 'opt:guard' })).toBeUndefined()
-  await mounted.press({ key: 'settings' })
-  const toggle = await mounted.find({ type: 'Button', key: 'opt:guard' })
-  expect(toggle?.props.hotkey).toBeUndefined()
-  expect(toggle?.props.dimColor).toBe(true)
-  expect(String(toggle?.props.label)).toBe('Ask before a costly send: Off')
-
-  await mounted.press({ key: 'opt:guard' })
-  expect(String((await mounted.find({ type: 'Button', key: 'opt:guard' }))?.props.label)).toBe('Ask before a costly send: On')
+  for (const key of ['settings', 'opt:guard', 'guard-toggle']) expect(await mounted.find({ type: 'Button', key })).toBeUndefined()
   await mounted.unmount()
 
+  expect((await $.command.run({ command: 'glass', args: 'guard on' } as never)).text).toMatch(/on/i)
   await gone($, world)
   state.answer = 'Cancel'
   expect((await send($, state, NO_PATH)).drop).toBeDefined()

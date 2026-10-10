@@ -1,5 +1,5 @@
-import { expect, mock } from 'claude-code/testing'
-import type { Engine, Mounted } from 'claude-code/testing'
+import { mock } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { RATES } from '../hooks/generated/rates.js'
@@ -120,9 +120,9 @@ export function usageFor(tokens: number, usd: number, over: { point?: number; wi
   }
 }
 
-export function prepare(on: On, options: { settings?: string | null; now?: number; session?: string } = {}): World {
+export function prepare(on: On, options: { settings?: string | null; now?: number; session?: string; store?: Record<string, unknown> } = {}): World {
   const clock = mock.clock(on, { now: options.now ?? T0 })
-  mock.store(on)
+  mock.store(on, options.store)
   mock.env(on, { CLAUDE_CONFIG_DIR: '/cfg' })
   const files = new Map<string, string>()
   if (options.settings !== null) files.set(`${CONFIG}/claudeglass/mod/settings.json`, options.settings ?? settingsFile())
@@ -264,33 +264,4 @@ export function elements(node: unknown): Exclude<Node, string>[] {
   if (node === null || typeof node !== 'object') return []
   const one = node as Exclude<Node, string>
   return [one, ...(one.children ?? []).flatMap(elements)]
-}
-
-/** The Glass pane's pages, as the page bar labels them. */
-export const PAGES: Record<string, string> = { now: 'Now', agents: 'Agents', compaction: 'Compaction', instructions: 'Startup' }
-
-/**
- * Shows page `id` of a mounted Glass pane the way the person does: the page's tab is a Button unless it is
- * the page shown (the choice persists between mounts), so it is pressed when it is there. Afterwards the page
- * bar draws page `id` as bold, underlined text labelled `label`, and every other page as a tab Button.
- */
-export async function showPage(mounted: Pick<Mounted, 'find' | 'press' | 'drawn'>, id: string, label: string): Promise<void> {
-  expect(PAGES[id]).toBe(label)
-  const tab = await mounted.find({ type: 'Button', key: `page:${id}` })
-  if (tab !== undefined) {
-    expect(tab.props.label).toBe(label)
-    await mounted.press({ key: `page:${id}` })
-  }
-  const tree = await mounted.drawn()
-  const drawn = elements(tree)
-  // The page shown is the one bold, underlined text of the bar (a Text carries no key in the tree).
-  const current = drawn.filter(one => one.type === 'Text' && one.props?.bold === true && one.props?.underline === true)
-  expect(current.map(textOf)).toEqual([label])
-  expect(drawn.filter(one => one.type === 'Button' && one.props?.key === `page:${id}`)).toHaveLength(0)
-  for (const [other, name] of Object.entries(PAGES)) {
-    if (other === id) continue
-    const button = drawn.filter(one => one.type === 'Button' && one.props?.key === `page:${other}`)
-    expect(button).toHaveLength(1)
-    expect(textOf(button[0])).toBe(name)
-  }
 }

@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, prepare, reply, showPage, SITE, START, textOf } from './support'
+import { elements, faults, prepare, reply, SITE, START, textOf } from './support'
 import type { World } from './support'
 
 const PANE = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
@@ -76,9 +76,12 @@ async function loadStartup($: Engine, over: { github?: number; files?: File[] } 
 }
 
 async function pane($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface, component: 'Pane', requestId: 'glass', props: PANE as never })
-  await showPage(mounted, 'instructions', 'Startup')
-  return mounted
+  return $.ui.mount({ plugin: 'claudeglass', surface, component: 'Pane', requestId: 'glass-startup', props: PANE as never })
+}
+
+/** Turns the Detailed view on, as /glass detail does. */
+async function detailed($: Engine): Promise<void> {
+  await $.command.run({ command: 'glass', args: 'detail' } as never)
 }
 
 function lines(tree: unknown): string[] {
@@ -160,26 +163,32 @@ for (const surface of ['terminal', 'desktop'] as const) test(`Simple: the startu
   // "(est.)" is said once.
   expect(shown.filter(line => line.includes('(est.)'))).toHaveLength(1)
 
-  // The only Buttons are the page bar and the pane's own quiet controls: rows are text, and nothing here has a key of its own.
+  // The only Button is the pane's quiet "What these mean": rows are text, and nothing here has a key of its own.
+  expect(buttons(tree).map(button => String(button.props?.key))).toEqual(['help'])
   for (const button of buttons(tree)) {
-    const key = String(button.props?.key ?? '')
-    if (key.startsWith('page:')) expect(button.props?.hotkey).toMatch(/^[nask]$/)
-    else expect(button.props?.hotkey).toBeUndefined()
+    expect(button.props?.hotkey).toBeUndefined()
     expect(button.props?.variant).toBeUndefined()
   }
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 
-test('the Startup tab has the key s and keeps the id instructions', async ($, on) => {
+test('Startup is its own pane, glass-startup: it holds no tab bar and no hotkey, and Checkpoint is not drawn in it', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  const tab = await mounted.find({ type: 'Button', key: 'page:instructions' })
-  expect(tab?.props.label).toBe('Startup')
-  expect(tab?.props.hotkey).toBe('s')
+  await loadStartup($)
+  const mounted = await pane($)
+  const tree = await mounted.drawn()
+  expect(buttons(tree).some(one => one.props?.hotkey !== undefined || String(one.props?.key).startsWith('page:'))).toBe(false)
+  expect(lines(tree)).not.toContain('Keep through the next summary')
+  expect(lines(tree)).not.toContain('Open Startup')
   await mounted.unmount()
+
+  // The pane named glass is Checkpoint, and it shows no startup rows.
+  const checkpoint = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
+  expect(lines(await checkpoint.drawn())).not.toContain('Built-in tools (3)')
+  await checkpoint.unmount()
   expect(faults(world)).toEqual([])
 })
 
@@ -235,7 +244,7 @@ test('a server is named as /mcp lists it, and one with only an id is a connector
   await world.clock.advance(1000)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   // Largest first, each by its name, never its id.
   // Four are listed: github, the connector, playwright, and docs behind tool search. Each server's tools follow it, by their short names.
@@ -296,7 +305,7 @@ for (const surface of ['terminal', 'desktop'] as const) test(`Detailed lists eac
   await $.skill.prompt({ skill: 'commit', text: text(2000) } as never)
 
   const mounted = await pane($, surface)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
 
   // Servers largest first, the one that waits behind tool search last and without a size.
@@ -332,7 +341,7 @@ test('a path-scoped file is in the third group and does not move the startup tot
   expect(run(shown, 'Added as you work', 5)).toEqual(['Added as you work', '2k', '/clear and /compact empty these.', 'Files loaded as Claude reached them', '2k'])
   // The file itself waits for Detailed, marked as loading later.
   expect(shown.join('\n')).not.toMatch(/src\/CLAUDE\.md/)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   shown = lines(await mounted.drawn())
   expect(run(shown, 'Files loaded as Claude reached them', 3)).toEqual(['Files loaded as Claude reached them', '2k', 'src/CLAUDE.md (loads later)'])
   await mounted.unmount()
@@ -345,20 +354,17 @@ test("Detailed has no dashboard link of its own: the footer's goes to the CLAUDE
   await $.session.start(START)
   await loadStartup($)
 
+  await detailed($)
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
   const tree = await mounted.drawn()
   const links = elements(tree).filter(one => one.type === 'Link')
   expect(links).toHaveLength(1)
   expect(links[0]?.props?.href).toBe('http://localhost:8792/#/agents/context')
   expect(buttons(tree).some(one => String(one.props?.key) === 'dashboard-copy')).toBe(false)
-  expect(lines(tree).some(line => /CLAUDE\.md files in the dashboard|Copy the CLAUDE\.md files link/.test(line))).toBe(false)
-  await mounted.press({ key: 'link' })
-  expect(world.copied).toContain('http://127.0.0.1:8792/#/agents/context')
 
-  // Rows are text: the Buttons are the page bar and the pane's footer, and the page bar alone has keys.
+  // Rows are text: the only Button is the footer's, and it has no key.
   const keys = buttons(tree).filter(one => one.props?.hotkey !== undefined).map(one => String(one.props?.key))
-  expect(keys.every(key => key.startsWith('page:'))).toBe(true)
+  expect(keys).toEqual([])
   expect(buttons(tree).some(one => /^(item|row|explain)/.test(String(one.props?.key)))).toBe(false)
   expect(buttons(tree).some(one => one.props?.variant === 'primary')).toBe(false)
   await mounted.unmount()
@@ -374,7 +380,7 @@ test('a long name keeps its figure on one line: the name is cut in a Box that ma
   await $.tool.describe({ tool: `mcp__${long}__go`, description: text(2000), provider: { plugin: `mcp:${long}`, tier: 'user' } } as never)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const tree = await mounted.drawn()
   const row = elements(tree).find(one => one.type === 'Box' && String(one.props?.key).startsWith('item:mcp:') && textOf(one).includes(long))
   expect(row).toBeDefined()
@@ -395,7 +401,7 @@ test('the built-in tools list the ten largest, then one dim row with the rest co
   for (let n = 1; n <= 12; n += 1) await $.tool.describe({ tool: `Tool${n}`, description: text(400 * n), provider: ENGINE } as never)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const tree = await mounted.drawn()
   const shown = lines(tree)
   const at = shown.indexOf('Built-in tools (15)')
@@ -420,7 +426,7 @@ test('tools behind tool search are one dim line, cut to the row width with an el
   for (let n = 1; n <= 8; n += 1) await $.tool.describe({ tool: `AVeryLongDeferredToolNameThatGoesOnAndOn${n}`, description: text(400), isDeferred: true, provider: ENGINE } as never)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   const line = shown.find(text => /^9 more load only when asked for: /.test(text))
   expect(line).toBeDefined()
@@ -443,7 +449,7 @@ test('the tool search line names as many whole tools as the row holds and ends w
   for (const [at, letter] of ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].entries()) await $.tool.describe({ tool: `Deferred${letter}`, description: text(9000 - at * 100), isDeferred: true, provider: ENGINE } as never)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const waiting = lines(await mounted.drawn()).find(line => /^9 more load only when asked for: /.test(line))
   // A fifth name would run past the line's width, so four names and the ellipsis.
   expect(waiting).toBe('9 more load only when asked for: DeferredA, DeferredB, DeferredC, DeferredD, …')
@@ -461,7 +467,7 @@ test('the servers line fits whole names too', async ($, on) => {
   }
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const waiting = lines(await mounted.drawn()).find(line => /^\d+ more servers? load/.test(line))
   expect(waiting).toBeDefined()
   expect(String(waiting).length).toBeLessThanOrEqual(82)
@@ -492,7 +498,7 @@ test("on the terminal the servers the app brings stay in You control, named and 
   await loadWithBrowser($)
 
   const terminal = await pane($, 'terminal')
-  await terminal.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await terminal.drawn())
   expect(shown).toContain('MCP servers (3)')
   expect(shown).toContain('Claude Browser')
@@ -512,7 +518,7 @@ test("in the Desktop app the servers it brings count as Claude Code's own: liste
   await loadWithBrowser($)
 
   const desktop = await pane($, 'desktop')
-  await desktop.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await desktop.drawn())
   expect(shown).toContain('MCP servers (2)')
   // Listed under Claude Code's own by name and size, and not advised against.
@@ -540,7 +546,7 @@ test('a server /mcp names by its wire name reads as words, in the own rows and t
   world.figures(1000, 0)
 
   const mounted = await pane($, 'desktop')
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   expect(shown.filter(line => line.includes('Claude_Browser'))).toEqual([])
   expect(shown.indexOf('Claude Browser')).toBeGreaterThan(shown.indexOf("Claude Code's own"))
@@ -557,7 +563,7 @@ test("with no server from the app, Claude Code's own has no rows under it on the
   await $.skill.prompt({ skill: 'commit', text: text(2000) } as never)
 
   const desktop = await pane($, 'desktop')
-  await desktop.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await desktop.drawn())
   const own = shown.indexOf("Claude Code's own")
   expect(shown.filter(line => line === 'Instructions and system prompt')).toEqual([])
@@ -694,7 +700,7 @@ test('agent types that received CLAUDE.md are listed in the detailed view', asyn
   const mounted = await pane($)
   // Simple stays short.
   expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Received it/)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   expect(shown).toContain('Agents and CLAUDE.md')
   expect(shown).toContain('Received it: general-purpose')
@@ -734,7 +740,7 @@ test("with Claude Code's own count the total is its figure, and each row is its 
 
   // Detailed: the groups add up to the total, so there is no second figure to explain.
   mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   shown = lines(await mounted.drawn())
   expect(shown.some(line => /^Claude Code counts/.test(line))).toBe(false)
   expect(run(shown, 'CLAUDE.md and memory', 8)).toEqual(['CLAUDE.md and memory', '9k', '.claude/CLAUDE.md', '1.2k', 'work/CLAUDE.md', '7.2k', 'rules/style.md', '600'])
@@ -751,7 +757,7 @@ test("when none of Claude Code's rows fits what loaded, the estimate stands besi
   await reply($, world, FIRST)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   expect(shown).toContain('Claude Code counts 18k of startup context on the Now page. This list adds up to about 28k.')
   expect(shown).toContain('The list estimates from text at a fixed rate. It leaves out the input schemas of tools, which are most of their size.')
@@ -776,7 +782,7 @@ test("a count too small for the rows it left out gives way to the estimate, so t
   const total = Number(/about ([\d.]+)k/.exec(lead(shown)[0] ?? '')?.[1]) * 1000
   const groups = figure(run(shown, 'You control', 2)[1]) + figure(run(shown, "Claude Code's own", 2)[1])
   expect(Math.abs(total - groups)).toBeLessThanOrEqual(1000)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   shown = lines(await mounted.drawn())
   expect(shown.some(line => line.startsWith('Claude Code counts 3k of startup context on the Now page.'))).toBe(true)
   await mounted.unmount()
@@ -789,7 +795,7 @@ test('before Claude Code has counted anything the page shows the estimate alone'
   await $.session.start(START)
   await loadStartup($)
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   expect(lead(shown)[0]).toBe('Every request starts with about 28k tokens of setup (est.).')
   expect(shown.some(line => /^Claude Code counts/.test(line))).toBe(false)
@@ -805,7 +811,7 @@ test("the instructions your servers gave Claude at the start are part of the MCP
   await $.prompt.attachment({ type: 'mcp_instructions_delta', text: text(8000), origin: { kind: 'engine' } } as never)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   // github 2k + the servers' instructions 2k, the built-in tools 5k; Claude Code's own stays the system prompt (3k + 10).
   expect(run(shown, 'You control', 4)).toEqual(['You control', '11.5k', 'MCP servers (2)', '4k'])
@@ -829,7 +835,7 @@ test('Detailed lists each built-in tool under its row, largest first, those behi
   expect(run(lines(tree), 'Built-in tools (3)', 2)).toEqual(['Built-in tools (3)', '5k'])
   expect(lines(tree).some(line => /Bash|NotebookEdit|permissions\.deny/.test(line))).toBe(false)
 
-  await mounted.press({ key: 'more' })
+  await detailed($)
   tree = await mounted.drawn()
   const shown = lines(tree)
   // Bash is 12000 characters and Read 8000, so they share the row's 5k as 3k and 2k; NotebookEdit waits behind tool search and costs nothing, so it is one dim line.
@@ -865,7 +871,7 @@ test("with Claude Code's count each built-in tool is its share of the row, and t
   await reply($, world, FIRST)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const shown = lines(await mounted.drawn())
   expect(run(shown, 'Built-in tools (3)', 6)).toEqual(['Built-in tools (3)', '701', 'Bash', '421', 'Read', '280'])
   await mounted.unmount()
@@ -892,7 +898,7 @@ test("a count with no row for the built-in tools does not cover them: the estima
   expect(lead(shown)[0]).toMatch(/^Every request starts with about [\d.]+k tokens of setup \(est\.\)\.$/)
   expect(run(shown, 'Built-in tools (3)', 2)).toEqual(['Built-in tools (3)', '5k'])
   expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '8.5k'])
-  await mounted.press({ key: 'more' })
+  await detailed($)
   shown = lines(await mounted.drawn())
   expect(shown.some(line => /^Claude Code counts 17\.5k of startup context on the Now page\./.test(line))).toBe(true)
   await mounted.unmount()
@@ -943,7 +949,7 @@ test("Detailed lists an MCP server's tools under it by the sizes Claude Code giv
   const mounted = await pane($)
   // Simple: servers only.
   expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/create issue|and 1 more/)
-  await mounted.press({ key: 'more' })
+  await detailed($)
   const tree = await mounted.drawn()
   const shown = lines(tree)
   expect(run(shown, 'MCP servers (2)', 16)).toEqual([

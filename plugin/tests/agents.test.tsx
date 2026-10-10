@@ -2,12 +2,11 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, notes, prepare, reply, settingsFile, showPage, SITE, START, textOf } from './support'
+import type { GlassAgent, GlassSnap } from '../types'
+import { faults, notes, prepare, reply, settingsFile, SITE, START } from './support'
 import type { Step, World } from './support'
 
-const PANE = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
 const BAND = { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 160, ...SITE }
-const RESULT = { tool_use_id: 'tu1', tool: 'Agent', isErrored: false, ...SITE }
 
 // One reply that leaves the main context at 120k of a 160k summarising point, $0.50 spent.
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
@@ -34,6 +33,11 @@ function bottoms(on: On): { listing: Listing } {
   })
   on('session.compact', (_$, e) => ({ trigger: e.trigger }) as never)
   on('agent.list', () => ({ value: state.listing }) as never)
+  latest = null
+  on('state.set', async (_$, e, next) => {
+    if (e.plugin === 'claudeglass' && e.key === 'snap') latest = e.value as GlassSnap
+    return next(e)
+  })
   return state
 }
 
@@ -78,29 +82,17 @@ async function foreground($: Engine, world: World, one: Spawn = {}): Promise<str
   return id
 }
 
-async function pane($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface, component: 'Pane', requestId: 'glass', props: PANE as never })
-  await showPage(mounted, 'agents', 'Agents')
-  return mounted
+/** The snapshot as last written (bottoms() watches it). */
+let latest: GlassSnap | null = null
+
+/** The agent runs the snapshot holds: what agents.ts followed. The pane no longer lists them; the dashboard does. */
+function runs(): GlassAgent[] {
+  return latest?.agents ?? []
 }
 
-function lines(tree: unknown): string[] {
-  return elements(tree)
-    .filter(one => one.type === 'Text' || one.type === 'Button' || one.type === 'Link')
-    .map(textOf)
-    .filter(text => text !== '')
-}
-/** What the Agent call's result row draws for agent `id`: its line, then any note under it. */
-async function rowLines($: Engine, id: string, status = 'completed'): Promise<string[]> {
-  const props = { ...RESULT, output: { agentId: id, status } }
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'ToolResult', requestId: 'tu1', props: props as never })
-  const out = lines(await mounted.drawn())
-  await mounted.unmount()
-  return out
-}
-
-function noted(shown: string[]): string[] {
-  return shown.filter(text => /^Glass · /.test(text))
+/** The coaching notes kept on run `id`, as the words they were given in. */
+function noted(id: string): string[] {
+  return (runs().find(one => one.id === id)?.notes ?? []).map(note => note.text)
 }
 
 test('a run is followed from its spawn to its end: requests, tools, calls, cost and the Agent call', async ($, on) => {
@@ -108,96 +100,20 @@ test('a run is followed from its spawn to its end: requests, tools, calls, cost 
   bottoms(on)
   await $.session.start(START)
   await reply($, world, FIRST)
-  await foreground($, world)
+  const id = await foreground($, world)
 
-  const mounted = await pane($)
-  await mounted.press({ key: 'more' })
-  const shown = lines(await mounted.drawn())
-  expect(shown).toContain('✓ Find callers')
-  expect(shown.some(text => /^Explore · [\d.]+k in · [\d.]+k? out · 3 calls · \d+% re-read from the cache$/.test(text))).toBe(true)
-  expect(shown).toContain('Grep ×1 · Read ×1')
-  expect(shown.some(text => /done/.test(text))).toBe(true)
-  await mounted.unmount()
+  const [run, ...rest] = runs()
+  expect(rest).toEqual([])
+  expect(run).toMatchObject({ id, type: 'Explore', desc: 'Find callers', model: 'claude-haiku-4-5', status: 'done', background: false, requests: 2, calls: 3, tools: { Grep: 1, Read: 1 } })
+  expect(run?.usd).toBeGreaterThan(0)
+  expect(run?.endedAt).not.toBeNull()
+  // The task prompt is never kept, in the snapshot or on disk.
+  expect(JSON.stringify(run)).not.toMatch(/parseConfig/)
+  expect([...world.files.values()].join('\n')).not.toMatch(/parseConfig/)
   expect(faults(world)).toEqual([])
 })
 
-test('the Agents page first screen: a sentence and a row for the run', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  await foreground($, world)
-
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const mounted = await pane($, surface)
-    const shown = lines(await mounted.drawn())
-    expect(shown.some(text => /^No agents working · agents are \d+% of this session's cost$/.test(text))).toBe(true)
-    // A row is named by the task it was given, not by its agent type.
-    expect(shown).toContain('✓ Find callers')
-    expect(shown).not.toContain('✓ Explore')
-    expect(shown).toContain('haiku')
-    expect(shown.some(text => /done/.test(text))).toBe(true)
-    expect(shown.some(text => /^\$0\.\d+$/.test(text))).toBe(true)
-    // Simple shows no token figures and no main session row.
-    expect(shown.some(text => /in · .* out/.test(text))).toBe(false)
-    expect(shown).not.toContain('Main session')
-    // The row is text: no Details button, no panel.
-    expect(elements(await mounted.drawn()).filter(one => one.type === 'Button' && String(one.props?.key).startsWith('agent:'))).toEqual([])
-    expect(shown).not.toContain('Details')
-    // The only hotkeys on the page are the page bar's.
-    for (const button of elements(await mounted.drawn()).filter(one => one.type === 'Button' && one.props?.hotkey !== undefined)) expect(String(button.props?.key)).toMatch(/^page:/)
-    await mounted.unmount()
-  }
-  expect(faults(world)).toEqual([])
-})
-
-const BILLINGS = [
-  { mode: 'subscription', share_per_usd: null, period_label: 'weekly', basis: 'list' },
-  { mode: 'unknown', share_per_usd: null, period_label: 'weekly', basis: 'list' },
-]
-
-for (const billing of BILLINGS) {
-  test(`on ${billing.mode} billing an amount like "0.12 USD" is not boxed, so the row does not wrap`, async ($, on) => {
-    const world = prepare(on, { settings: settingsFile({ billing }) })
-    bottoms(on)
-    await $.session.start(START)
-    await reply($, world, FIRST)
-    await foreground($, world)
-
-    for (const surface of ['terminal', 'desktop'] as const) {
-      const mounted = await pane($, surface)
-      const tree = await mounted.drawn()
-      const amount = lines(tree).find(text => / USD$/.test(text) || /^\$\d/.test(text))
-      expect(amount).toBeDefined()
-      // The fixed-width cells are the name, the model and the activity; the amount is a Text of its own after them, with no width.
-      const boxed = elements(tree).filter(one => one.type === 'Box' && one.props?.width !== undefined)
-      expect(boxed.length).toBeGreaterThanOrEqual(3)
-      expect(boxed.some(one => textOf(one).includes(String(amount)))).toBe(false)
-      expect(elements(tree).some(one => one.type === 'Text' && textOf(one) === amount)).toBe(true)
-      await mounted.unmount()
-    }
-    expect(faults(world)).toEqual([])
-  })
-}
-
-test('Detailed adds the tokens, calls and cache share of each run, and the main session', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  await foreground($, world)
-
-  const mounted = await pane($)
-  await mounted.press({ key: 'more' })
-  const shown = lines(await mounted.drawn())
-  expect(shown.some(text => /^Explore · [\d.]+k in · [\d.]+k? out · 3 calls · \d+% re-read from the cache$/.test(text))).toBe(true)
-  expect(shown).toContain('Main session')
-  expect(shown).toContain('1 reply')
-  await mounted.unmount()
-  expect(faults(world)).toEqual([])
-})
-
-test('a running run is listed first and counted in the headline, with what it is doing', async ($, on) => {
+test('a running run is followed with what it is doing, and ends when its turn does', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -206,66 +122,26 @@ test('a running run is listed first and counted in the headline, with what it is
   const second = await spawn($, world, { type: 'general-purpose', desc: 'Check docs' })
   await work($, world, second, { ...HAIKU, tools: ['WebSearch'] }, 0)
 
-  const mounted = await pane($)
-  const shown = lines(await mounted.drawn())
-  expect(shown.some(text => /^1 agent working · agents are \d+% of this session's cost$/.test(text))).toBe(true)
-  expect(shown.some(text => /reading the web/.test(text))).toBe(true)
-  const names = elements(await mounted.drawn())
-    .filter(one => one.type === 'Box' && String(one.props?.key).startsWith('row:agent-'))
-    .map(one => one.props?.key)
-  expect(names).toEqual([`row:${second}`, `row:${first}`])
-  expect(shown).toContain('● Check docs')
-  await mounted.unmount()
+  const running = runs().find(one => one.id === second)
+  expect(running).toMatchObject({ status: 'running', desc: 'Check docs', activity: 'fetching' })
+  expect(runs().find(one => one.id === first)?.status).toBe('done')
+  await end($, world, second)
+  expect(runs().find(one => one.id === second)?.status).toBe('done')
   expect(faults(world)).toEqual([])
 })
 
-test('Detailed names each run by its task with a dim tools line; no row has a button, the task prompt is never kept, and the footer link goes to the subagent runs', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  await foreground($, world)
-
-  const mounted = await pane($)
-  await mounted.press({ key: 'more' })
-  const tree = await mounted.drawn()
-  const shown = lines(tree)
-  expect(shown).toContain('Grep ×1 · Read ×1')
-  const toolsLine = elements(tree).find(one => one.type === 'Text' && textOf(one) === 'Grep ×1 · Read ×1')
-  expect(toolsLine?.props.dimColor).toBe(true)
-  // Nothing of the task prompt is drawn or written.
-  expect(shown).not.toContain('Find every caller of parseConfig.')
-  expect([...world.files.values()].join('\n')).not.toMatch(/parseConfig/)
-  expect(elements(tree).filter(one => one.type === 'Button' && String(one.props?.key).startsWith('agent:'))).toEqual([])
-  // The page repeats no dashboard link of its own: the footer's is the subagent runs.
-  expect(elements(tree).filter(one => one.type === 'Link')).toHaveLength(1)
-  expect(elements(tree).filter(one => one.type === 'Button' && String(one.props?.key).startsWith('dashboard'))).toEqual([])
-  const link = elements(tree).find(one => one.type === 'Link')
-  expect(String(link?.props.href)).toBe('http://localhost:8792/#/agents/subagents?t=habits.habits_agent_runs')
-  await mounted.press({ key: 'link' })
-  expect(world.copied).toContain('http://127.0.0.1:8792/#/agents/subagents?t=habits.habits_agent_runs')
-  await mounted.unmount()
-  expect(faults(world)).toEqual([])
-})
-
-test('a run with no description is named by its type, and only a named task gets the type in the figures line', async ($, on) => {
+test('a run with no description is kept with its type alone', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
   await reply($, world, FIRST)
   await foreground($, world, { desc: '' })
 
-  const mounted = await pane($)
-  await mounted.press({ key: 'more' })
-  const shown = lines(await mounted.drawn())
-  expect(shown).toContain('✓ Explore')
-  expect(shown.some(text => /^[\d.]+k in · /.test(text))).toBe(true)
-  expect(shown.some(text => /^Explore · /.test(text))).toBe(false)
-  await mounted.unmount()
+  expect(runs()[0]).toMatchObject({ type: 'Explore', desc: '' })
   expect(faults(world)).toEqual([])
 })
 
-test('the tools line lists the five most called, merges MCP tools into one and ends with an ellipsis when more were used', async ($, on) => {
+test('every tool a run called is counted, MCP tools by their own names', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -274,89 +150,25 @@ test('the tools line lists the five most called, merges MCP tools into one and e
   const used = ['Bash', 'Bash', 'Bash', 'Read', 'Read', 'Edit', 'Grep', 'Glob', 'mcp__a__one', 'mcp__b__two', 'Write']
   for (const [index, name] of used.entries()) await work($, world, id, { ...HAIKU, tools: [name] }, index)
 
-  const mounted = await pane($)
-  await mounted.press({ key: 'more' })
-  const line = lines(await mounted.drawn()).find(text => /^Bash ×3/.test(text))
-  expect(line).toBe('Bash ×3 · Read ×2 · MCP tool ×2 · Edit ×1 · Grep ×1 · …')
-  await mounted.unmount()
+  const [run] = runs()
+  expect(run?.tools).toEqual({ Bash: 3, Read: 2, Edit: 1, Grep: 1, Glob: 1, mcp__a__one: 1, mcp__b__two: 1, Write: 1 })
+  expect(run?.calls).toBe(used.length)
   expect(faults(world)).toEqual([])
 })
 
-test('with no agent the page says none has run', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  const mounted = await pane($)
-  expect(lines(await mounted.drawn()).some(text => /^No agents have run in this session yet\./.test(text))).toBe(true)
-  await mounted.unmount()
-  expect(faults(world)).toEqual([])
-})
-
-test('the band says how many agents work, only while one does and nothing more urgent is showing', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-
-  const texts = async () => {
-    const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'AbovePrompt', props: BAND as never })
-    const out = elements(await mounted.drawn())
-      .filter(one => one.type === 'Text')
-      .map(textOf)
-      .filter(text => text !== '│' && text !== '')
-    await mounted.unmount()
-    return out
-  }
-
-  expect(await texts()).toHaveLength(2)
-  const one = await spawn($, world, { background: true })
-  await work($, world, one, HAIKU, 0)
-  expect((await texts())[2]).toBe('1 agent working')
-  const two = await spawn($, world, { background: true, type: 'Plan' })
-  await work($, world, two, HAIKU, 0)
-  expect((await texts())[2]).toBe('2 agents working')
-  await end($, world, one)
-  expect((await texts())[2]).toBe('1 agent working')
-  await end($, world, two)
-  expect(await texts()).toHaveLength(2)
-  expect(faults(world)).toEqual([])
-})
-
-test('the Agent call has its row under it: name, model and cost; Detailed adds tokens', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  const id = await foreground($, world)
-
-  expect((await rowLines($, id)).some(text => /^Explore · haiku · \$0\.\d+$/.test(text))).toBe(true)
-
-  // A call that is not an Agent call has no row.
-  const other = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'ToolResult', requestId: 'tu2', props: { ...RESULT, tool: 'Read', tool_use_id: 'tu2', output: { agentId: id } } as never })
-  expect(lines(await other.drawn())).toEqual([])
-  await other.unmount()
-
-  const mounted = await pane($)
-  await mounted.press({ key: 'more' })
-  await mounted.unmount()
-  expect((await rowLines($, id)).some(text => /^Explore · haiku · [\d.]+k in · [\d.]+k? out · \$0\.\d+$/.test(text))).toBe(true)
-  expect(faults(world)).toEqual([])
-})
-
-test('report_reread: a background agent started over a big context is told on its row, once', async ($, on) => {
+test('report_reread: a background agent started over a big context is told, once', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
   await reply($, world, BIG)
   const first = await spawn($, world, { background: true })
-  const shown = await rowLines($, first, 'async_launched')
-  expect(noted(shown)).toHaveLength(1)
-  expect(noted(shown)[0]).toMatch(/^Glass · This session holds about 160k tokens, and the reply to each report/)
+  const shown = noted(first)
+  expect(shown).toHaveLength(1)
+  expect(shown[0]).toMatch(/^This session holds about 160k tokens, and the reply to each report/)
 
   // The rest rule holds the same note back for half an hour.
   const second = await spawn($, world, { background: true, type: 'Plan' })
-  expect(noted(await rowLines($, second, 'async_launched'))).toEqual([])
+  expect(noted(second)).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
@@ -366,7 +178,7 @@ test('report_reread is not told when the agent is muted in the settings', async 
   await $.session.start(START)
   await reply($, world, BIG)
   const id = await spawn($, world, { background: true })
-  expect(noted(await rowLines($, id, 'async_launched'))).toEqual([])
+  expect(noted(id)).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
@@ -376,7 +188,7 @@ test('report_reread is not told for a foreground agent', async ($, on) => {
   await $.session.start(START)
   await reply($, world, BIG)
   const id = await spawn($, world, { background: false })
-  expect(noted(await rowLines($, id))).toEqual([])
+  expect(noted(id)).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
@@ -386,11 +198,11 @@ test('report_reread stays quiet while the context is below the threshold', async
   await $.session.start(START)
   await reply($, world, FIRST)
   const id = await spawn($, world, { background: true })
-  expect(noted(await rowLines($, id, 'async_launched'))).toEqual([])
+  expect(noted(id)).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
-test('split_run: a foreground run that began from a long brief is told on its row', async ($, on) => {
+test('split_run: a foreground run that began from a long brief is told', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -398,9 +210,9 @@ test('split_run: a foreground run that began from a long brief is told on its ro
   const long = `${'Study this in depth. '.repeat(400)}\nEnd.`
   const id = await foreground($, world, { prompt: long })
 
-  const shown = noted(await rowLines($, id))
+  const shown = noted(id)
   expect(shown).toHaveLength(1)
-  expect(shown[0]).toMatch(/^Glass · In this session .*6,000 characters/)
+  expect(shown[0]).toMatch(/^In this session .*6,000 characters/)
   expect(faults(world)).toEqual([])
 })
 
@@ -410,9 +222,9 @@ test('split_run: a short brief earns nothing, and a skipped agent type earns not
   await $.session.start(START)
   await reply($, world, FIRST)
   const short = await foreground($, world)
-  expect(noted(await rowLines($, short))).toEqual([])
+  expect(noted(short)).toEqual([])
   const skipped = await foreground($, world, { type: 'statusline-setup', prompt: 'x'.repeat(9000) })
-  expect(noted(await rowLines($, skipped))).toEqual([])
+  expect(noted(skipped)).toEqual([])
   expect(notes(world)).toEqual([])
   expect(faults(world)).toEqual([])
 })
@@ -433,7 +245,7 @@ test('split_run: a background run that ended too big is told at the end of a lat
   expect(faults(world)).toEqual([])
 })
 
-test('an agent that ends in an error shows as stopped, and the engine list ends a run whose end was not seen', async ($, on) => {
+test('an agent that ends in an error is kept as failed, and the engine list ends a run whose end was not seen', async ($, on) => {
   const world = prepare(on)
   const state = bottoms(on)
   await $.session.start(START)
@@ -444,16 +256,14 @@ test('an agent that ends in an error shows as stopped, and the engine list ends 
   const lost = await spawn($, world, { type: 'Plan' })
   await work($, world, lost, HAIKU, 0)
 
-  const mounted = await pane($)
-  let shown = lines(await mounted.drawn())
-  expect(shown.some(text => /stopped with an error/.test(text))).toBe(true)
-  expect(shown.some(text => /^1 agent working/.test(text))).toBe(true)
+  let all = runs()
+  expect(all.find(one => one.id === failed)?.status).toBe('failed')
+  expect(all.find(one => one.id === lost)?.status).toBe('running')
 
   state.listing = [{ id: lost, status: 'completed' }]
   await world.clock.advance(11000)
-  shown = lines(await mounted.drawn())
-  expect(shown.some(text => /^No agents working/.test(text))).toBe(true)
-  await mounted.unmount()
+  all = runs()
+  expect(all.find(one => one.id === lost)?.status).toBe('done')
   expect(faults(world)).toEqual([])
 })
 
@@ -483,24 +293,6 @@ test('many agents at once draw at most four times a second', async ($, on) => {
   const drawn = (world.draws.AbovePrompt ?? 0) - before
   expect(drawn).toBeGreaterThanOrEqual(1)
   expect(drawn).toBeLessThanOrEqual(4 * 2)
-  await mounted.unmount()
-  expect(faults(world)).toEqual([])
-})
-
-test('the first screen shows six agents and says how many more there are; Detailed lists them all', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  for (let i = 0; i < 8; i += 1) await spawn($, world, { desc: `Task ${i}`, background: true })
-
-  const mounted = await pane($)
-  const rows = async () => elements(await mounted.drawn()).filter(one => one.type === 'Box' && String(one.props?.key).startsWith('row:agent-'))
-  expect(await rows()).toHaveLength(6)
-  expect(lines(await mounted.drawn())).toContain('and 2 more')
-  await mounted.press({ key: 'more' })
-  expect(await rows()).toHaveLength(8)
-  expect(lines(await mounted.drawn()).some(text => /^and \d+ more$/.test(text))).toBe(false)
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })

@@ -97,7 +97,7 @@ export const KEEP_MAX = 1500;
 export const JUDGE_SUMMARY_MAX = 12000;
 
 /** The mark glyphs the review draws. */
-export const MARK_SYMBOL = { found: "✓", partly: "~", missing: "✗", safe: "ⓘ" };
+export const MARK_SYMBOL = { found: "✓", partly: "◐", missing: "✗", safe: "ⓘ" };
 
 const NEGATION_IN_ITEM = /\b(never|don'?t|do not|dont|not|no|avoid|without|shouldn'?t|should not|mustn'?t|must not|can'?t|cannot|stop)\b/i;
 const NEGATION_IN_SUMMARY =

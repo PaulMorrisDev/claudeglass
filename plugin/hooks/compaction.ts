@@ -178,7 +178,9 @@ export const register: Register = on => {
         before: result.tokensBefore ?? null,
         after: result.tokensAfter ?? null,
       })
-      await update($, reviewAtom, (was): GlassReview => withSummary(sound(was), done.reviewed, done.row))
+      // The count of replies so far is kept with the summary: the band says Kept until the next reply ends.
+      const replies = soundSnap(await read($, snapAtom)).replies
+      await update($, reviewAtom, (was): GlassReview => withSummary(sound(was), done.reviewed, done.row, replies))
       // The Detailed view says how the context changed and what the summary cost, when Claude Code reported its usage.
       let detail: BoundaryDetail | null = null
       if ((await read($, detailedAtom)) === true) {

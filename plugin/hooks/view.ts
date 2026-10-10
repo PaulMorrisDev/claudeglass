@@ -4,7 +4,7 @@ import type { CacheState } from './lib/cache.js'
 import { runway } from './lib/context.js'
 import { ratesFor, sendCost } from './lib/pricing.js'
 import type { ModelRates } from './lib/pricing.js'
-import { fallbackSettings, soundSettings } from './settings'
+import { soundSettings } from './settings'
 import { soundSnap } from './live'
 
 // What the surfaces draw from: the snapshot and the settings, with the few
@@ -117,9 +117,4 @@ export function buildView(snap: GlassSnap, settings: GlassSettings, detailed: bo
  */
 export function drawView(snap: GlassSnap, settings: GlassSettings | null, detailed: boolean, now: number, working: boolean): View {
   return buildView(soundSnap(snap), soundSettings(settings), detailed, now, working)
-}
-
-/** True when there is nothing to show yet: no figures from Claude Code. */
-export function hasNothing(view: View): boolean {
-  return view.snap.reading === null && view.snap.cost === null
 }

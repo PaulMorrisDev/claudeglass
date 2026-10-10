@@ -3,7 +3,7 @@ import { COPY } from './generated/copy.js'
 import { formatClock } from './lib/cache.js'
 import { fill } from './lib/text.js'
 import { formatAmount, formatTokens } from './lib/units.js'
-import { limitShare, sessionShare } from './limit'
+import { limitShare } from './limit'
 
 // Amounts and times in the words the user's billing mode calls for. API
 // billing reads in dollars ("$0.38"), a subscription as a share of its limit,
@@ -30,11 +30,6 @@ export function amount(usd: number, settings: GlassSettings): string {
   return fill(COPY['amount.list'], { dollars })
 }
 
-/** The same, without its leading "about ", for a sentence that writes "about" itself. */
-export function amountAfterAbout(usd: number, settings: GlassSettings): string {
-  return amount(usd, settings).replace(/^about /, '')
-}
-
 /** A share of the 5-hour limit in percent: two decimals below 1%, so a small amount doesn't read "0.0%"; one above. */
 function shareText(share: number): string {
   return share < 1 ? `${share.toFixed(2)}%` : `${share.toFixed(1)}%`
@@ -48,20 +43,6 @@ function shareText(share: number): string {
 export function amountOf(usd: number, snap: GlassSnap, settings: GlassSettings): string {
   if (settings.billing.mode === 'subscription') {
     const share = limitShare(snap, usd)
-    if (share !== null) return fill(COPY['amount.share.limit'], { share: shareText(share) })
-  }
-  return amount(usd, settings)
-}
-
-/**
- * An amount for the whole session. As `amountOf`, except the 5-hour share is used only when the session
- * began inside the window now running and the share is 100% or less (limit.ts `sessionShare`): a session
- * that spans several windows is not priced at one window's rate. Otherwise `amount`: the weekly share,
- * else the list price.
- */
-export function sessionAmount(usd: number, snap: GlassSnap, settings: GlassSettings): string {
-  if (settings.billing.mode === 'subscription') {
-    const share = sessionShare(snap, usd)
     if (share !== null) return fill(COPY['amount.share.limit'], { share: shareText(share) })
   }
   return amount(usd, settings)

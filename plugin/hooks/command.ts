@@ -1,15 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { GlassBudget, GlassPin } from '../types'
-import { runBudget } from './budget'
-import { MAX_PINS, newPin, pinsMatching } from './compaction-memory'
+import type { GlassPin, GlassReview } from '../types'
+import { emptyReview, MAX_PINS, newPin, pinsMatching, sound } from './compaction-memory'
 import { rememberedDraft } from './draft'
 import { COPY } from './generated/copy.js'
-import { emptySnap, soundSnap } from './live'
-import { fallbackSettings } from './settings'
 import { fill } from './lib/text.js'
-import { OPEN_ARGS } from './pane'
+import { OPEN_ARGS, STARTUP_OPEN_ARGS } from './pane'
 import { runTighten, TIGHTEN_OPEN } from './tighten'
 import type { TightenKit } from './tighten'
 
@@ -18,11 +15,9 @@ import type { TightenKit } from './tighten'
 const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
 const explainAtom = atom({ plugin: 'claudeglass', key: 'explain' } as const, null)
 const pinsAtom = atom({ plugin: 'claudeglass', key: 'pins' } as const, [] as GlassPin[])
-const snapAtom = atom({ plugin: 'claudeglass', key: 'snap' } as const, emptySnap())
-const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null)
-const budgetAtom = atom({ plugin: 'claudeglass', key: 'budget' } as const, null as GlassBudget | null)
+const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, emptyReview())
 
-// /glass opens the pane; /glass detail turns the Detailed view on or off;
+// /glass opens the Checkpoint pane and /glass startup the Startup pane; /glass detail turns the Detailed view on or off;
 // /glass pin <text> adds a pin to the compaction review's keep list and
 // /glass unpin <words> (or "all") removes the pins that hold those words. The
 // command is declared in track.ts at session.start. It is immediate, so it
@@ -91,18 +86,9 @@ export const register: Register = on => {
         await $.store.set('guard', enabled)
         return { text: enabled ? COPY['guard.on'] : COPY['guard.off'] }
       }
-      if (args === 'budget' || args.startsWith('budget ')) {
-        const text = await runBudget(args.slice(6), {
-          get: () => read($, budgetAtom),
-          set: async budget => {
-            await update($, budgetAtom, () => budget)
-          },
-          snap: async () => soundSnap(await read($, snapAtom)),
-          settings: async () => (await read($, settingsAtom)) ?? fallbackSettings(),
-        })
-        return { text }
-      }
-      const opened = await $.ui.open(OPEN_ARGS)
+      // Opening the Checkpoint pane is looking at the last summary, so the band leaves Review.
+      if (args !== 'startup') await update($, reviewAtom, (was): GlassReview => ({ ...sound(was), seen: true }))
+      const opened = await $.ui.open(args === 'startup' ? STARTUP_OPEN_ARGS : OPEN_ARGS)
       return { text: opened.isPlaced ? COPY['pane.opened'] : COPY['pane.failed'] }
     } catch (error) {
       $.ui.log(`claudeglass: command ${String(error)}`, { to: 'debug' })

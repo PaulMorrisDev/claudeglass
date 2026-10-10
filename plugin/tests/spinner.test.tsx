@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { elements, faults, measured, prepare, reply, settingsFile, START, textOf } from './support'
+import { spendText, watchState } from './figures'
+import { faults, measured, prepare, reply, settingsFile, START } from './support'
 
 const SPINNER = { word: 'Thinking', message: null, suffix: '(3s)', mode: 'responding' } as const
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
@@ -88,6 +89,7 @@ test('the spinner shows the reply cost as each request is priced, before Claude 
 
 test('a reply that ends before Claude Code reports its cost is settled by the cost that follows', async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
 
@@ -96,12 +98,7 @@ test('a reply that ends before Claude Code reports its cost is settled by the co
   await $.turn.complete({ turnId: 'turn-live', reason: 'answer', answer: 'done', isAborted: false, durationMs: 1000 })
   await world.clock.advance(300)
 
-  const change = async () => {
-    const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 200, scroll: undefined, view: undefined } as never })
-    const spend = elements(await mounted.drawn()).filter(one => one.type === 'Text').map(textOf).find(text => text.includes('this session'))
-    await mounted.unmount()
-    return spend
-  }
+  const change = async () => spendText(seen, world)
   expect(await change()).toBe('$0.50 this session (+$0.04)')
 
   world.figures(121200, 0.62)

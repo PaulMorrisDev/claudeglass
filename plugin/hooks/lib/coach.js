@@ -596,30 +596,6 @@ export function freshHint(ctx, start, planChars, compacted, cpt, th) {
   return { kind: "plan_fresh", stake: kept, fields: { kept: kept } };
 }
 
-// -- rating_reminder ---------------------------------------------------------
-
-var SECONDS_PER_DAY = 86400;
-
-/**
- * The rating reminder when this piece of work has used at least
- * rating_min_tokens and rating_typical_factor times your typical piece, no
- * reminder went out in the last rating_rest_days days, and the piece
- * wasn't reminded already (capture_hook._reminder_due).
- * @param {number} tokens        What the piece has used.
- * @param {number} typical       Your typical piece, 0 when unknown.
- * @param {number|null} remindedAt  When a reminder last went out, seconds.
- * @param {boolean} notedBefore  This piece was reminded already.
- * @param {number} nowS
- * @param {Thresholds} th
- * @returns {Found|null}
- */
-export function ratingDue(tokens, typical, remindedAt, notedBefore, nowS, th) {
-  if (tokens < Math.max(th.rating_min_tokens, th.rating_typical_factor * (typical || 0))) return null;
-  if (typeof remindedAt === "number" && nowS - remindedAt < th.rating_rest_days * SECONDS_PER_DAY) return null;
-  if (notedBefore) return null;
-  return { kind: "rating_reminder", stake: tokens, fields: { tokens: tokens } };
-}
-
 // -- background work ---------------------------------------------------------
 
 /**

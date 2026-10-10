@@ -62,9 +62,8 @@ export function fallbackSettings(): GlassSettings {
     once: [],
     usual: { sessionCostUsd: null, endContextTokens: null },
     charsPerToken: { text: {}, family: '' },
-    typicalPiece: 0,
     // Without the file the mod can't know the user opted in, so it coaches no one.
-    coaching: { enabled: false, projects: [], excludeProjects: [], feedbackReminder: false, planFresh: true, remindedAt: null, rated: {} },
+    coaching: { enabled: false, projects: [], excludeProjects: [], planFresh: true },
     dashboardUrl: null,
   }
 }
@@ -111,16 +110,12 @@ export function parseSettings(text: string, now: number): GlassSettings | null {
     once: words(coaching?.once),
     usual: { sessionCostUsd: finite(usual?.session_cost_usd), endContextTokens: finite(usual?.end_context_tokens) },
     charsPerToken: { text: numbers(calibration?.text), family: typeof calibration?.default_family === 'string' ? calibration.default_family : '' },
-    typicalPiece: finite(coaching?.typical_piece_tokens) ?? 0,
     // Off unless the file says it is on: a file from before the key was written coaches no one until it is written again.
     coaching: {
       enabled: coaching?.enabled === true,
       projects: words(coaching?.projects),
       excludeProjects: words(coaching?.exclude_projects),
-      feedbackReminder: coaching?.feedback_reminder === true,
       planFresh: coaching?.plan_fresh !== false,
-      remindedAt: finite(coaching?.reminded_at),
-      rated: numbers(coaching?.rated),
     },
     dashboardUrl: url,
   }

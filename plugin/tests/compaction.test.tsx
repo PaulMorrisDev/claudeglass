@@ -2,13 +2,12 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { emptyReview, readdMissing, sound, withSummary } from '../hooks/compaction-memory'
+import { emptyReview, lostCount, lostItems, readdMissing, sound, withSummary } from '../hooks/compaction-memory'
 import type { GlassKeepItem, GlassMark, GlassReview } from '../types'
 import { elements, faults, prepare, reply, SESSION, SITE, START, textOf, usageFor } from './support'
 import type { World } from './support'
 
 const PANE = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
-const BAND = { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 200, ...SITE }
 const SENSOR = `/cfg/claudeglass/mod/sensor/${SESSION}.json`
 
 // One reply that leaves the context at 120k of a 160k summarising point, $0.50 spent.
@@ -59,10 +58,6 @@ async function started($: Dollar, world: World): Promise<void> {
   await reply($, world, FIRST)
 }
 
-async function band($: Dollar, surface: 'terminal' | 'desktop' = 'terminal') {
-  return $.ui.mount({ plugin: 'claudeglass', surface, component: 'AbovePrompt', props: BAND as never })
-}
-
 async function pane($: Dollar, surface: 'terminal' | 'desktop' = 'terminal') {
   return $.ui.mount({ plugin: 'claudeglass', surface, component: 'Pane', requestId: 'glass', props: PANE as never })
 }
@@ -75,33 +70,18 @@ function lines(tree: unknown): string[] {
     .filter(text => text !== '')
 }
 
-/** The lines of the page itself, from its lead sentence on (the page bar's words come before it). */
-function fromLead(tree: unknown): string[] {
-  const shown = lines(tree)
-  const at = shown.findIndex(line => line.startsWith('Claude summarised'))
-  return at < 0 ? shown : shown.slice(at)
+/** The Buttons of a drawn page, as the hotkeys, variants and looks they carry. */
+function buttons(tree: unknown) {
+  return elements(tree)
+    .filter(one => one.type === 'Button')
+    .map(one => ({ key: String(one.props?.key), label: String(one.props?.label), hotkey: one.props?.hotkey as string | undefined, variant: one.props?.variant as string | undefined, dim: one.props?.dimColor === true }))
 }
 
-/** Whether the page bar draws the page as the current one: bold Text with its name, not a Button. */
-function showsPage(tree: unknown, name: string): boolean {
-  return elements(tree).some(one => one.type === 'Text' && one.props?.bold === true && textOf(one) === name)
-}
-
-/** Turns the hold on the way a person does: the Detailed view of the Compaction page. */
+/** Presses the footer's hold switch the way a person does, so the next automatic summary is held for review. */
 async function turnOn($: Dollar, key: 'hold'): Promise<void> {
-  await $.command.run({ command: 'glass', args: 'detail' } as never)
   const mounted = await pane($)
-  // The page showing is drawn as bold text; any other page has its tab on the bar, and that is what gets pressed.
-  if (!showsPage(await mounted.drawn(), 'Compaction')) {
-    expect(await mounted.find({ type: 'Button', key: 'page:compaction' })).toBeDefined()
-    await mounted.press({ key: 'page:compaction' } as never)
-  }
-  expect(showsPage(await mounted.drawn(), 'Compaction')).toBe(true)
-  // The options are on the pane's Settings view, not on this page.
-  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Hold auto-compact/)
-  await mounted.press({ key: 'settings' } as never)
-  await mounted.press({ key: `opt:${key}` } as never)
-  expect(lines(await mounted.drawn()).join('\n')).toMatch(/Hold auto-compact for review: On/)
+  await mounted.press({ key } as never)
+  expect(lines(await mounted.drawn())).toContain('Hold auto-summaries for review: on')
   await mounted.unmount()
 }
 
@@ -115,37 +95,26 @@ function sensor(world: World): Event[] {
   return (JSON.parse(String(world.files.get(SENSOR))) as { events: Event[] }).events
 }
 
-/** Presses the band's review button, which opens the Compaction page, then draws the pane. */
-async function reviewPane($: Dollar, world: World, surface: 'terminal' | 'desktop' = 'terminal') {
-  const mounted = await band($, surface)
-  const button = await mounted.find({ type: 'Button', key: 'review' })
-  expect(button?.props.hotkey).toBe('r')
-  await mounted.press({ key: 'review' } as never)
-  await mounted.unmount()
-  expect(world.opened.at(-1)).toMatchObject({ id: 'glass' })
+/** The Checkpoint pane after a summary: the same pane, mounted fresh. */
+async function reviewPane($: Dollar, _world: World, surface: 'terminal' | 'desktop' = 'terminal') {
   return pane($, surface)
 }
 
-test('a summary of the main session: a boundary line, a badge, the counts in state, and a sensor event with counts only', async ($, on) => {
+test('a summary of the main session: a boundary line, the counts in state, and a sensor event with counts only', async ($, on) => {
   const world = prepare(on)
+  const watch = watchReview(on)
   bottoms(on, world)
   await started($, world)
 
-  // Before a summary there is no badge (the offer to review beforehand is tested below).
-  let mounted = await band($)
-  expect(await mounted.find({ type: 'Button', key: 'review' })).toBeUndefined()
-  await mounted.unmount()
+  // Before a summary there is nothing to review.
+  expect(watch.latest.after).toBeNull()
+  expect(watch.latest.history).toEqual([])
 
   await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)
-  const done = boundary(world)
-  expect(done).toEqual(['● Glass · Claude summarised the conversation. 2 things you said may be missing. Press Review above the prompt to check.'])
-
-  mounted = await band($)
-  const texts = elements(await mounted.drawn()).filter(one => one.type === 'Text').map(textOf)
-  expect(texts).toContain('2 things may be missing from the summary')
-  const review = await mounted.find({ type: 'Button', key: 'review' })
-  expect(review?.props.label).toBe('Review')
-  await mounted.unmount()
+  expect(boundary(world)).toHaveLength(1)
+  expect(boundary(world)[0]).toMatch(/^● Glass · Claude summarised the conversation\. 2 things you said may be missing\./)
+  expect(watch.latest).toMatchObject({ missing: 2, seen: false })
+  expect(watch.latest.history).toHaveLength(1)
 
   // The counts reach the sensor with the next reply: kept, missing, added; no words.
   await reply($, world, SECOND)
@@ -158,26 +127,22 @@ test('a summary of the main session: a boundary line, a badge, the counts in sta
 
 test('a subagent summary is left alone', async ($, on) => {
   const world = prepare(on)
+  const watch = watchReview(on)
   bottoms(on, world)
   await started($, world)
   await $.session.compact({ trigger: 'auto', agentId: 'agent-7', messages: MESSAGES } as never)
   expect(boundary(world)).toEqual([])
-  const mounted = await band($)
-  expect(await mounted.find({ type: 'Button', key: 'review' })).toBeUndefined()
+  expect(watch.latest.after).toBeNull()
+  expect(watch.latest.history).toEqual([])
+  const mounted = await pane($)
+  expect(lines(await mounted.drawn())).not.toContain('Last summary')
   await mounted.unmount()
   await reply($, world, SECOND)
   expect(sensor(world).filter(one => one.event === 'compaction')).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
-/** The Buttons of a drawn page, as the hotkeys and variants they carry. */
-function buttons(tree: unknown) {
-  return elements(tree)
-    .filter(one => one.type === 'Button')
-    .map(one => ({ key: String(one.props?.key), label: String(one.props?.label), hotkey: one.props?.hotkey as string | undefined, variant: one.props?.variant as string | undefined }))
-}
-
-test('the review page opens on what may be missing and one note that puts it back; nothing is sent', async ($, on) => {
+test('Last summary says what the summary kept and lost, one row per lost item, and one press puts them back; nothing is sent', async ($, on) => {
   const world = prepare(on)
   const watch = watchReview(on)
   const seen = bottoms(on, world)
@@ -185,32 +150,42 @@ test('the review page opens on what may be missing and one note that puts it bac
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
 
   const mounted = await reviewPane($, world)
-  const shown = fromLead(await mounted.drawn())
-  const text = shown.join('\n')
-  // One bold sentence first, then what may be missing as plain rows with no kind label.
-  expect(shown[0]).toMatch(/^Claude summarised the conversation( at \d{1,2}:\d\d [ap]m)?\.$/)
-  expect(shown[1]).toBe('2 things you asked for may be missing:')
-  expect(shown).toContainEqual(expect.stringMatching(/^• Never use port 8765/))
-  expect(shown).toContainEqual(expect.stringMatching(/^• Don't read any code yet/))
-  // Only what may be missing: the kept items are not listed on the first screen.
-  expect(text).not.toMatch(/pnpm/)
-  expect(text).not.toMatch(/option B/)
-  expect(text).not.toMatch(/What you asked/)
+  const tree = await mounted.drawn()
+  const shown = lines(tree)
+  expect(shown).toContainEqual(expect.stringMatching(/^Last summary · \d{1,2}:\d\d [ap]m · you asked$/))
+  // The counts sit at the heading's right edge, and say nothing of re-adding until something is re-added.
+  expect(shown).toContain('kept 2 · lost 2')
+  // One row per lost item, with the lost mark; the kept ones are not listed here.
+  expect(shown).toContainEqual(expect.stringMatching(/^✗ Never use port 8765/))
+  expect(shown).toContainEqual(expect.stringMatching(/^✗ Don't read any code yet/))
+  expect(shown.filter(text => /^✗ [^ ]/.test(text))).toHaveLength(2)
+  expect(shown.join('\n')).not.toMatch(/✗ .*(pnpm|option B)/)
+  expect(shown.some(text => /re-added/.test(text))).toBe(false)
 
-  // Rows are text. The only hotkeys are the page bar's and the one main action, which is the one primary Button.
-  const all = buttons(await mounted.drawn())
-  const primary = all.filter(one => one.variant === 'primary')
-  expect(primary).toEqual([{ key: 'add-back', label: 'Add these back', hotkey: 'b', variant: 'primary' }])
-  expect(all.filter(one => one.hotkey !== undefined && one.key !== 'add-back').every(one => one.key.startsWith('page:'))).toBe(true)
-  expect(all.filter(one => one.key.startsWith('add:') || one.key === 'add-all')).toEqual([])
+  // The Buttons: Re-add is primary with its own key, Check with a model is secondary, and there is no earlier summary to show.
+  const all = buttons(tree)
+  expect(all.find(one => one.key === 'readd')).toEqual({ key: 'readd', label: 'Re-add 2 items', hotkey: 'r', variant: 'primary', dim: false })
+  expect(all.find(one => one.key === 'check')).toEqual({ key: 'check', label: 'Check with a model', hotkey: undefined, variant: 'secondary', dim: false })
+  expect(all.some(one => one.key === 'earlier')).toBe(false)
+  expect(all.filter(one => one.hotkey !== undefined).map(one => one.key).sort()).toEqual(['readd', 'summarise'])
   const desktop = await pane($, 'desktop')
-  expect(fromLead(await desktop.drawn())).toEqual(shown)
+  expect(lines(await desktop.drawn())).toEqual(shown)
   await desktop.unmount()
 
-  // One press puts everything missing back through the system prompt: nothing goes to the prompt box, nothing is sent.
-  await mounted.press({ key: 'add-back' } as never)
+  // One press puts everything lost back through the system prompt: nothing goes to the prompt box, nothing is sent.
+  await mounted.press({ key: 'readd' } as never)
   expect(watch.latest.readded.map(one => one.text)).toEqual([expect.stringMatching(/8765/), expect.stringMatching(/read any code/)])
-  expect(lines(await mounted.drawn())).toContain('Claude is told these again with its next reply.')
+  const done = lines(await mounted.drawn())
+  expect(done).toContain('Claude is told these again with its next reply.')
+  expect(done).toContain('kept 2 · lost 2 · re-added 2')
+  // Each re-added row says where its receipt stands, in words.
+  expect(done.filter(text => text === 're-added, not yet seen')).toHaveLength(2)
+  // Done: the Button gives way to when it was done, so there is nothing left to press twice.
+  expect(buttons(await mounted.drawn()).some(one => one.key === 'readd')).toBe(false)
+  expect(done.filter(text => /^Re-added \d{1,2}:\d\d [ap]m$/.test(text))).toHaveLength(1)
+  const receipts = watch.latest.receipts
+  await expect(mounted.press({ key: 'readd' } as never)).rejects.toThrow()
+  expect(watch.latest.receipts).toEqual(receipts)
   expect(seen.filled).toEqual([])
   expect(seen.submitted).toEqual([])
   await mounted.unmount()
@@ -221,7 +196,29 @@ test('the review page opens on what may be missing and one note that puts it bac
   expect(faults(world)).toEqual([])
 })
 
-test('the second line says everything is in the summary, or that nothing needed keeping; one missing item reads in the singular; more than four are counted', async ($, on) => {
+test('a re-added row names its receipt: referenced once a reply says it, not referenced after ten replies that do not', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'readd' } as never)
+  const words = async () => lines(await mounted.drawn()).filter(text => text.startsWith('re-added, '))
+  expect(await words()).toEqual(['re-added, not yet seen', 're-added, not yet seen'])
+
+  // The next reply names the port; the other item waits.
+  const step = { cacheRead: 120000, cacheWrite: 1000, output: 200 }
+  await reply($, world, { usd: 0.05, steps: [{ ...step, answer: 'I will not use port 8765 for the dev server.' }] })
+  expect(await words()).toEqual(['re-added, referenced ✓', 're-added, not yet seen'])
+
+  // Nine more replies that do not say the other: the tenth reply settles it as not referenced.
+  for (let count = 0; count < 9; count++) await reply($, world, { usd: 0.05, steps: [{ ...step, answer: 'Formatted the file.' }] })
+  expect(await words()).toEqual(['re-added, referenced ✓', 're-added, not referenced'])
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('the Last summary says everything is kept, or that nothing needed keeping; one lost item reads in the singular; more than five are counted', async ($, on) => {
   const world = prepare(on)
   const watch = watchReview(on)
   const written = { summary: '' }
@@ -230,187 +227,344 @@ test('the second line says everything is in the summary, or that nothing needed 
   on('session.compact', () => ({ messages: [{ role: 'user', text: written.summary, toolUses: [] }], tokensBefore: 150000, tokensAfter: 30000 }) as never)
   await started($, world)
 
-  // The summary carries both constraints, so nothing is missing.
+  // The summary carries both constraints, so nothing is lost: no Re-add, and the line says so.
   written.summary = `This session is being continued. The team uses pnpm, not npm, and chose option B, the queue-based design. Never use port 8765. Do not read any code yet, wait for the other session to finish.`
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
   let mounted = await pane($)
-  await mounted.press({ key: 'page:compaction' } as never)
-  let shown = fromLead(await mounted.drawn())
-  expect(shown[1]).toBe('Everything you asked Claude to keep is in the summary.')
-  expect(await mounted.find({ type: 'Button', key: 'add-back' })).toBeUndefined()
+  let shown = lines(await mounted.drawn())
+  expect(shown).toContain('The summary kept everything you asked for.')
+  expect(shown).toContain('kept 4 · lost 0')
+  expect(shown.some(text => /^✗ [^ ]/.test(text))).toBe(false)
+  expect(buttons(await mounted.drawn()).some(one => one.key === 'readd')).toBe(false)
   await mounted.unmount()
 
   // Nothing the user said is worth keeping.
   written.summary = 'This session is being continued. Work went on.'
   await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Thanks, that looks right.', toolUses: [] }] } as never)
   mounted = await pane($)
-  shown = fromLead(await mounted.drawn())
-  expect(shown[1]).toBe('Nothing you said needed keeping.')
-  expect(await mounted.find({ type: 'Button', key: 'add-back' })).toBeUndefined()
+  shown = lines(await mounted.drawn())
+  expect(shown).toContain('The summary kept everything you asked for.')
+  expect(buttons(await mounted.drawn()).some(one => one.key === 'readd')).toBe(false)
   await mounted.unmount()
 
-  // One missing item: singular line, "Add it back".
+  // One lost item: "Re-add 1 item".
   await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Never use port 8765 for the dev server.', toolUses: [] }] } as never)
   mounted = await pane($)
-  shown = fromLead(await mounted.drawn())
-  expect(shown[1]).toBe('1 thing you asked for may be missing:')
-  expect(buttons(await mounted.drawn()).find(one => one.key === 'add-back')?.label).toBe('Add it back')
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'readd')?.label).toBe('Re-add 1 item')
   await mounted.unmount()
 
-  // Six missing: four rows, then a count.
-  const six = Array.from({ length: 6 }, (_, n) => ({ role: 'user', text: `Never touch module${n}x.`, toolUses: [] }))
-  await $.session.compact({ trigger: 'manual', messages: six } as never)
+  // Seven lost: five rows, then a count, and Re-add puts back all seven.
+  const seven = Array.from({ length: 7 }, (_, n) => ({ role: 'user', text: `Never touch module${n}x.`, toolUses: [] }))
+  await $.session.compact({ trigger: 'manual', messages: seven } as never)
   mounted = await pane($)
-  shown = fromLead(await mounted.drawn())
-  expect(shown[1]).toBe('6 things you asked for may be missing:')
-  expect(shown.filter(line => line.startsWith('• '))).toHaveLength(4)
+  shown = lines(await mounted.drawn())
+  expect(shown.filter(text => /^✗ [^ ]/.test(text))).toHaveLength(5)
   expect(shown).toContain('and 2 more')
-  await mounted.press({ key: 'add-back' } as never)
-  expect(watch.latest.readded.map(one => one.text).sort()).toEqual(six.map((_, n) => `Never touch module${n}x.`))
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'readd')?.label).toBe('Re-add 7 items')
+  await mounted.press({ key: 'readd' } as never)
+  expect(watch.latest.readded.map(one => one.text).sort()).toEqual(seven.map((_, n) => `Never touch module${n}x.`))
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 
-test('the summary, the full list with marks, the earlier messages and the history sit behind a press', async ($, on) => {
+/** The tokens a fake model reports. */
+const USAGE = { input_tokens: 800, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+/** What sits under $.model.complete: it answers every item of the check with `word`, or fails, after the gate opens. */
+function judging(on: On, how: { word: 'yes' | 'partly' | 'no'; fail: boolean; gate: Promise<void> | null }): { prompts: string[] } {
+  const seen: { prompts: string[] } = { prompts: [] }
+  on('model.complete', async (_$, e) => {
+    seen.prompts.push(String(e.prompt))
+    if (how.gate !== null) await how.gate
+    if (how.fail) return { value: { isAnswered: false, reason: 'api-error', usage: USAGE } } as never
+    const items = String(e.prompt).split('ITEMS\n')[1]?.split('\n') ?? []
+    return { value: { isAnswered: true, text: items.map((_, n) => `${n + 1}: ${how.word}`).join('\n'), usage: USAGE } } as never
+  })
+  return seen
+}
+
+test('Check with a model asks Haiku once, updates the marks and says what it used; busy while it runs, done afterwards', async ($, on) => {
   const world = prepare(on)
-  const seen = bottoms(on, world)
+  const watch = watchReview(on)
+  let open: () => void = () => {}
+  const how = { word: 'yes' as const, fail: false, gate: new Promise<void>(resolve => (open = resolve)) }
+  const asked = judging(on, how)
+  bottoms(on, world)
   await started($, world)
-  await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
   const mounted = await reviewPane($, world)
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'check')).toMatchObject({ label: 'Check with a model', dim: false })
 
-  await mounted.press({ key: 'summary' } as never)
-  const md = await mounted.find({ type: 'Markdown' })
-  expect(String(md?.props.text)).toMatch(/option B/)
+  // While the model answers the button is dim and says so, and a second press does nothing.
+  const pressed = mounted.press({ key: 'check' } as never)
+  await world.clock.advance(10)
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'check')).toMatchObject({ label: 'Checking…', dim: true })
+  await mounted.press({ key: 'check' } as never).catch(() => undefined)
+  open()
+  await pressed
+  expect(asked.prompts).toHaveLength(1)
+  expect(asked.prompts[0]).toMatch(/Never use port 8765/)
 
-  // Opening the list closes the summary: one view at a time.
-  await mounted.press({ key: 'list' } as never)
-  expect(await mounted.find({ type: 'Markdown' })).toBeUndefined()
-  const text = lines(await mounted.drawn()).join('\n')
-  expect(text).toMatch(/Quick check \(est\.\)/)
-  // The mark's word comes first on one line, so it can never wrap into a column of its own.
-  expect(text).toMatch(/^✗ not in the summary · Never use port 8765/m)
-  expect(text).toMatch(/^✓ in the summary · Use pnpm, not npm/m)
-  // Files Claude edited are not listed one by one; they are one dim line.
-  expect(text).not.toMatch(/limiter\.ts/)
-  expect(text).toMatch(/Recent files, the plan and CLAUDE\.md are kept anyway \(1\)\./)
-  // Rows are text: nothing to press here, no pin buttons, and the quiet toggle now offers to hide the list.
-  const open = buttons(await mounted.drawn())
-  expect(open.filter(one => one.key.startsWith('pin:') || one.key.startsWith('item:'))).toEqual([])
-  expect(open.find(one => one.key === 'list')?.label).toBe('Hide the list')
-
-  await mounted.press({ key: 'earlier' } as never)
-  // ... and opening the earlier messages closes the list.
-  const afterEarlier = buttons(await mounted.drawn())
-  expect(afterEarlier.find(one => one.key === 'list')?.label).toBe('Everything checked')
-  expect(afterEarlier.find(one => one.key === 'earlier')?.label).toBe('Hide earlier messages')
-  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/✗ not in the summary/)
-  const earlier = buttons(await mounted.drawn()).filter(one => one.key.startsWith('earlier:'))
-  expect(earlier.length).toBe(2)
-  expect(earlier.every(one => one.label === 'Use this' && one.hotkey === undefined)).toBe(true)
-  expect(lines(await mounted.drawn())).toContainEqual(expect.stringMatching(/^Let's go with option B/))
-  await mounted.press({ key: String(earlier[0]?.key) } as never)
-  expect(seen.filled.at(-1)).toMatch(/^Let's go with option B/)
-
-  // Simple: no history, options or dashboard.
-  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Hold auto-compact/)
+  // Every item now counts as found: nothing is lost, the note says what the model used, the button is spent.
+  const shown = lines(await mounted.drawn())
+  expect(shown).toContain('The model checked 5 items: 5 found, 0 partly, 0 missing.')
+  expect(shown).toContain('The summary kept everything you asked for.')
+  expect(shown.some(text => /^✗ [^ ]/.test(text))).toBe(false)
+  expect(buttons(await mounted.drawn()).some(one => one.key === 'readd')).toBe(false)
+  // The Button gives way to what the check used.
+  expect(buttons(await mounted.drawn()).some(one => one.key === 'check')).toBe(false)
+  expect(shown).toContain('Checked · about 1k tokens')
+  expect(watch.latest).toMatchObject({ missing: 0 })
+  expect(watch.latest.after?.judged).toBe(true)
+  expect(watch.latest.ui).toMatchObject({ action: null, busy: false })
   await mounted.unmount()
-
-  // Detailed adds the history. The options and the dashboard link are not on the page: the footer has the link and Settings the options.
-  await $.command.run({ command: 'glass', args: 'detail' } as never)
-  const detailed = await pane($)
-  const more = lines(await detailed.drawn()).join('\n')
-  expect(more).toMatch(/you ran \/compact|on its own/)
-  expect(more).toMatch(/150k to 30k/)
-  expect(more).not.toMatch(/Hold auto-compact/)
-  expect(more).toMatch(/Choose what to keep next time/)
-  const links = elements(await detailed.drawn()).filter(one => one.type === 'Link')
-  expect(links).toHaveLength(1)
-  expect(String(links[0]?.props.href)).toBe('http://localhost:8792/#/spend/usage?t=compactions.compactions_summary')
-  expect(buttons(await detailed.drawn()).some(one => one.key === 'dashboard-copy')).toBe(false)
-  await detailed.press({ key: 'link' } as never)
-  expect(world.copied.at(-1)).toBe('http://127.0.0.1:8792/#/spend/usage?t=compactions.compactions_summary')
-  // Nothing on this page but the page bar and the one main action has a hotkey, and no two are alike.
-  const drawn = buttons(await detailed.drawn())
-  const keys = drawn.filter(one => one.hotkey !== undefined)
-  expect(keys.filter(one => !one.key.startsWith('page:')).map(one => one.key)).toEqual(['add-back'])
-  expect(new Set(keys.map(one => one.hotkey)).size).toBe(keys.length)
-  expect(drawn.filter(one => one.variant === 'primary')).toHaveLength(1)
-  await detailed.unmount()
   expect(faults(world)).toEqual([])
 })
 
-test('the Detailed view offers the Haiku check as a quiet button with its size line', async ($, on) => {
+test('Check with a model that cannot answer leaves the quick check standing and the button ready again', async ($, on) => {
   const world = prepare(on)
+  const watch = watchReview(on)
+  judging(on, { word: 'no', fail: true, gate: null })
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'check' } as never)
+  const shown = lines(await mounted.drawn())
+  expect(shown).toContain('The model could not check, so the quick check stands.')
+  expect(shown).toContainEqual(expect.stringMatching(/^✗ Never use port 8765/))
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'check')).toMatchObject({ label: 'Check with a model', dim: false })
+  expect(watch.latest.after?.judged).toBe(false)
+  expect(watch.latest.ui).toMatchObject({ action: null, busy: false })
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('earlier summaries sit behind a dim Button that shows one row each and hides again', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
   bottoms(on, world)
   await started($, world)
   await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)
-  await $.command.run({ command: 'glass', args: 'detail' } as never)
+  await world.clock.advance(60000)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  await $.session.compact({ trigger: 'plugin', messages: MESSAGES } as never)
+  expect(watch.latest.history).toHaveLength(3)
+
   const mounted = await reviewPane($, world)
-  const check = buttons(await mounted.drawn()).find(one => one.key === 'haiku-check')
-  expect(check?.label).toBe('Check with Haiku')
-  expect(check?.hotkey).toBeUndefined()
-  expect(check?.variant).toBeUndefined()
-  expect(lines(await mounted.drawn()).join('\n')).toMatch(/Sends the summary and your list to Haiku, about \d+ tokens\./)
+  // The newest summary is the section above; the two before it are the earlier ones.
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'earlier')).toMatchObject({ label: 'Show 2 earlier summaries', dim: true, hotkey: undefined })
+  expect(lines(await mounted.drawn()).some(text => /kept \d+ · lost \d+$/.test(text) && text.includes('automatic'))).toBe(false)
+
+  await mounted.press({ key: 'earlier' } as never)
+  const shown = lines(await mounted.drawn())
+  expect(shown).toContainEqual(expect.stringMatching(/^\d{1,2}:\d\d [ap]m · you asked · kept 2 · lost 2$/))
+  expect(shown).toContainEqual(expect.stringMatching(/^\d{1,2}:\d\d [ap]m · automatic · kept 2 · lost 2$/))
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'earlier')?.label).toBe('Hide earlier summaries')
+
+  await mounted.press({ key: 'earlier' } as never)
+  expect(lines(await mounted.drawn()).some(text => /automatic · kept/.test(text))).toBe(false)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('the heading names the trigger: pressed here for a summary the pane started', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'plugin', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  expect(lines(await mounted.drawn())).toContainEqual(expect.stringMatching(/^Last summary · \d{1,2}:\d\d [ap]m · pressed here$/))
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('the keep list: ticks with a kind label each, five rows and the rest behind Show n more, the count follows the ticks', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  world.transcript = [
+    ...MESSAGES,
+    { role: 'user', text: 'Always run the tests before you commit.', toolUses: [] },
+    { role: 'user', text: 'Never edit the generated files by hand.', toolUses: [] },
+    { role: 'user', text: 'Prefer small commits over one big one.', toolUses: [] },
+  ]
+  await $.session.start(START)
+  await reply($, world, FIRST)
+  const mounted = await pane($)
+  const ticks = async () => buttons(await mounted.drawn()).filter(one => one.key.startsWith('tick:'))
+  const first = await ticks()
+  expect(first).toHaveLength(5)
+  expect(first.every(one => one.label.startsWith('[x] ') && one.hotkey === undefined && one.variant === undefined)).toBe(true)
+  const more = buttons(await mounted.drawn()).find(one => one.key === 'more')
+  expect(more).toMatchObject({ dim: true, hotkey: undefined })
+  expect(more?.label).toMatch(/^Show \d+ more$/)
+  expect(lines(await mounted.drawn())).toContain('5 items')
+
+  // Past the first five the items start unticked.
+  await mounted.press({ key: 'more' } as never)
+  const all = await ticks()
+  expect(all.length).toBeGreaterThan(5)
+  expect(all.slice(5).every(one => one.label.startsWith('[ ] ') && one.dim)).toBe(true)
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'more')?.label).toBe('Show fewer')
+  await mounted.press({ key: 'more' } as never)
+  expect(await ticks()).toHaveLength(5)
+
+  // Unticking changes the count the heading and the Summarise Button give.
+  await mounted.press({ key: String(first[0]?.key) } as never)
+  expect(lines(await mounted.drawn())).toContain('4 items')
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'summarise')?.label).toBe('Summarise now, keeping 4 items')
+  expect((await ticks())[0]?.label.startsWith('[ ] ')).toBe(true)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('Summarise now starts a summary from the pane, and a summary is told the ticked items only', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  const seen = bottoms(on, world)
+  await started($, world)
+  const mounted = await pane($)
+  expect(lines(await mounted.drawn())).not.toContain('Last summary')
+
+  // The press reaches the engine once, and leaves the Button as it was. (The test engine fills in no trigger or messages for
+  // a call with none, as Claude Code does; the summaries below are called whole.)
+  await mounted.press({ key: 'summarise' } as never)
+  expect(seen.compacts).toHaveLength(1)
+  expect(watch.latest.ui).toMatchObject({ action: null })
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'summarise')).toMatchObject({ label: 'Summarise now, keeping 4 items', dim: false })
+
+  // The ticked items are what the summary is told; unticking one takes it out.
+  await $.session.compact({ trigger: 'plugin', messages: MESSAGES } as never)
+  expect(seen.compacts.at(-1)?.instructions).toMatch(/^Keep: .*8765/)
+  const tick = elements(await mounted.drawn()).find(one => one.type === 'Button' && String(one.props?.label).includes('Never use port 8765'))
+  await mounted.press({ key: String(tick?.props?.key) } as never)
+  await $.session.compact({ trigger: 'plugin', messages: MESSAGES } as never)
+  expect(seen.compacts.at(-1)?.instructions).toMatch(/^Keep: /)
+  expect(seen.compacts.at(-1)?.instructions).not.toMatch(/8765/)
+  expect(seen.compacts.at(-1)?.instructions).toMatch(/pnpm/)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('Summarise now is dim and says Summarising while the summary runs', async ($, on) => {
+  const world = prepare(on)
+  let open: () => void = () => {}
+  const gate = new Promise<void>(resolve => (open = resolve))
+  world.transcript = [...MESSAGES]
+  on('session.compact', async () => {
+    await gate
+    return { messages: [SUMMARY_MESSAGE], tokensBefore: 150000, tokensAfter: 30000 } as never
+  })
+  await started($, world)
+  const mounted = await pane($)
+  const pressed = mounted.press({ key: 'summarise' } as never)
+  await world.clock.advance(10)
+  const busy = buttons(await mounted.drawn()).find(one => one.key === 'summarise')
+  expect(busy).toMatchObject({ label: 'Summarising…', dim: true, variant: 'primary' })
+  expect(lines(await mounted.drawn())).toContain('A summary is running.')
+  open()
+  await pressed
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'summarise')).toMatchObject({ label: 'Summarise now, keeping 4 items', dim: false })
+  expect(lines(await mounted.drawn())).not.toContain('A summary is running.')
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('Summarise now while a reply runs is dim and says to wait; a press that Claude Code refuses says so and clears the busy mark', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  world.transcript = [...MESSAGES]
+  const mode = { throws: false, skip: null as string | null }
+  let compactCalls = 0
+  on('session.compact', () => {
+    compactCalls += 1
+    if (mode.throws) throw new Error('a turn is running')
+    if (mode.skip !== null) return { skip: mode.skip } as never
+    return { messages: [SUMMARY_MESSAGE], tokensBefore: 150000, tokensAfter: 30000 } as never
+  })
+  await started($, world)
+  const mounted = await pane($)
+
+  // A press that Claude Code refuses says why, under the Button, once.
+  mode.throws = true
+  await mounted.press({ key: 'summarise' } as never)
+  expect(watch.latest.ui).toMatchObject({ action: null, note: 'A reply is running. Summarise when it ends.', noteFor: 'summarise' })
+  expect(lines(await mounted.drawn()).filter(text => text === 'A reply is running. Summarise when it ends.')).toHaveLength(1)
+
+  // A summary a hook holds says why, with the words the hook gave; the next press clears the earlier note.
+  mode.throws = false
+  mode.skip = 'held for review'
+  await mounted.press({ key: 'summarise' } as never)
+  expect(watch.latest.ui).toMatchObject({ action: null, note: 'The summary was held: held for review', noteFor: 'summarise' })
+  expect(lines(await mounted.drawn())).toContain('The summary was held: held for review')
+  expect(lines(await mounted.drawn())).not.toContain('A reply is running. Summarise when it ends.')
+  expect(watch.latest.after).toBeNull()
+  mode.skip = null
+
+  // A reply running (its first request has begun, and it has not ended): the Button is dim with the reason, and a press does nothing.
+  const compacts = compactCalls
+  await $.turn.start({ text: 'go', turnId: 'turn-open' })
+  world.next = { usage: { cacheRead: 120000, cacheWrite: 1000, output: 200 }, tools: [] }
+  const stream = $.turn.step({ turnId: 'turn-open', index: 0, model: 'claude-sonnet-4-6', messageCount: 3 })
+  for await (const chunk of stream) void chunk
+  await stream.result
+  await world.clock.advance(300)
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'summarise')).toMatchObject({ dim: true, label: 'Summarise now, keeping 4 items' })
+  // The reason shows once: the Button's note line, not a second line from a press.
+  expect(lines(await mounted.drawn()).filter(text => text === 'A reply is running. Summarise when it ends.')).toHaveLength(1)
+  await mounted.press({ key: 'summarise' } as never)
+  expect(compactCalls).toBe(compacts)
+  // The press did not touch the note (it still says the earlier hold), and the reply line is not doubled.
+  expect(watch.latest.ui.note).toBe('The summary was held: held for review')
+  expect(lines(await mounted.drawn()).filter(text => text === 'A reply is running. Summarise when it ends.')).toHaveLength(1)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('Pin the last thing I said pins the newest instruction or decision, once; a pinned row has a quiet Unpin', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  bottoms(on, world)
+  await started($, world)
+  const mounted = await pane($)
+  const pin = buttons(await mounted.drawn()).find(one => one.key === 'pin-last')
+  expect(pin).toMatchObject({ label: 'Pin the last thing I said', dim: true, hotkey: undefined })
+
+  await mounted.press({ key: 'pin-last' } as never)
+  const shown = lines(await mounted.drawn())
+  expect(shown).toContain('Pinned. It stays on your keep list until /clear.')
+  // Pins come first in the list, with their label, and the Button is gone: it is pinned already.
+  const rows = buttons(await mounted.drawn()).filter(one => one.key.startsWith('tick:'))
+  expect(rows[0]?.label).toMatch(/^\[x\] (Let's go with option B|Use pnpm)/)
+  expect(shown).toContain('pinned')
+  expect(buttons(await mounted.drawn()).some(one => one.key === 'pin-last')).toBe(false)
+  expect(watch.latest.list.length).toBeGreaterThan(0)
+
+  const unpin = buttons(await mounted.drawn()).filter(one => one.label === 'Unpin')
+  expect(unpin).toHaveLength(1)
+  expect(unpin[0]).toMatchObject({ dim: true, hotkey: undefined })
+  await mounted.press({ key: String(unpin[0]?.key) } as never)
+  expect(buttons(await mounted.drawn()).some(one => one.label === 'Unpin')).toBe(false)
+  expect(lines(await mounted.drawn())).not.toContain('pinned')
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 
 test('files in a scratch place are not kept; a project inside one is, because the session folder is known', async ($, on) => {
   const world = prepare(on)
+  const watch = watchReview(on)
   bottoms(on, world)
   const edit = (path: string) => ({ role: 'assistant', text: '', toolUses: [{ tool_use_id: path, tool: 'Edit', input: { file_path: path }, text: 'ok' }] })
   await $.session.start({ ...START, cwd: '/tmp/proj' })
   await reply($, world, FIRST)
   const messages = [...MESSAGES, edit('/tmp/proj/src/a.ts'), edit('/tmp/other/b.ts'), edit('/home/me/.claude/plans/plan.md')]
   await $.session.compact({ trigger: 'manual', messages } as never)
-  const mounted = await reviewPane($, world)
-  await mounted.press({ key: 'list' } as never)
   // Of the three new edits and the one in MESSAGES, the project's file and src/api/limiter.ts are recent and kept anyway.
-  expect(lines(await mounted.drawn()).join('\n')).toMatch(/kept anyway \(2\)\./)
-  await mounted.unmount()
-  expect(faults(world)).toEqual([])
-})
-
-test('before a summary: ticks, then a /compact Keep command in the prompt box, at most 1,500 characters', async ($, on) => {
-  const world = prepare(on)
-  const seen = bottoms(on, world)
-  await started($, world)
-  await reply($, world, { gap: 10000, steps: [{ cacheRead: 120000, cacheWrite: 31000, output: 200 }], usd: 0.2 })
-  // 150k of a 160k point: soon. The band offers the review.
-  let mounted = await band($)
-  const offer = await mounted.find({ type: 'Button', key: 'review-before' })
-  expect(offer?.props.label).toBe('Review before compacting')
-  expect(offer?.props.hotkey).toBe('r')
-  await mounted.press({ key: 'review-before' } as never)
-  await mounted.unmount()
-
-  mounted = await pane($)
-  const text = lines(await mounted.drawn()).join('\n')
-  expect(text).toMatch(/Claude will summarise this conversation soon\. Tick what it must keep\./)
-  expect(text).toMatch(/\[x\] Never use port 8765/)
-  expect(text).toMatch(/\[x\] Let's go with option B/)
-  // The ticks are real controls but carry no hotkey and no kind label; the one main action has `c`.
-  const drawn = buttons(await mounted.drawn())
-  const ticks = drawn.filter(one => one.key.startsWith('tick:'))
-  expect(ticks.length).toBeGreaterThanOrEqual(4)
-  expect(ticks.length).toBeLessThanOrEqual(5)
-  expect(ticks.every(one => one.hotkey === undefined)).toBe(true)
-  expect(text).not.toMatch(/What you asked|Decisions/)
-  expect(drawn.find(one => one.key === 'use')).toEqual({ key: 'use', label: 'Fill in /compact', hotkey: 'c', variant: 'primary' })
-  expect(drawn.filter(one => one.variant === 'primary')).toHaveLength(1)
-  await mounted.press({ key: 'use' } as never)
-  const command = seen.filled.at(-1) ?? ''
-  expect(command.startsWith('/compact Keep: ')).toBe(true)
-  expect(command).toMatch(/Never use port 8765/)
-  expect(command.length).toBeLessThanOrEqual(1500)
-
-  // Unticking an item takes it out of the command.
-  const tick = elements(await mounted.drawn()).find(one => one.type === 'Button' && String(one.props?.label).includes('Never use port 8765'))
-  await mounted.press({ key: String(tick?.props?.key) } as never)
-  await mounted.press({ key: 'use' } as never)
-  expect(seen.filled.at(-1)).not.toMatch(/8765/)
-  expect(seen.submitted).toEqual([])
-  await mounted.unmount()
+  const safe = (watch.latest.after?.items ?? []).filter(one => one.safe).map(one => one.text)
+  expect(safe).toHaveLength(2)
+  expect(safe.join('\n')).toMatch(/src\/a\.ts/)
+  expect(safe.join('\n')).toMatch(/limiter\.ts/)
+  expect(safe.join('\n')).not.toMatch(/other\/b\.ts|plan\.md/)
   expect(faults(world)).toEqual([])
 })
 
@@ -423,7 +577,6 @@ test('/glass pin adds a pin that comes first in the list and survives a summary;
   await reply($, world, SECOND)
 
   let mounted = await pane($)
-  await mounted.press({ key: 'page:compaction' } as never)
   const before = lines(await mounted.drawn())
   expect(before.findIndex(text => text.includes('rotate the staging key'))).toBeGreaterThan(-1)
   expect(before.findIndex(text => text.includes('rotate the staging key'))).toBeLessThan(before.findIndex(text => text.includes('Never use port 8765')))
@@ -432,7 +585,10 @@ test('/glass pin adds a pin that comes first in the list and survives a summary;
   // The summary drops it; the page says so.
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
   mounted = await pane($)
-  expect(lines(await mounted.drawn()).join('\n')).toMatch(/3 things you asked for may be missing:/)
+  const lost = lines(await mounted.drawn())
+  expect(lost).toContain('kept 2 · lost 3')
+  expect(lost.filter(text => /^✗ [^ ]/.test(text))).toHaveLength(3)
+  expect(lost.join('\n')).toMatch(/✗ rotate the staging key/)
   await mounted.unmount()
 
   await $.session.end({ sessionId: SESSION, reason: 'clear' } as never)
@@ -443,7 +599,7 @@ test('/glass pin adds a pin that comes first in the list and survives a summary;
   expect(faults(world)).toEqual([])
 })
 
-test('/glass unpin removes the pins that hold those words, or all of them; the before view has a quiet Unpin on a pinned row', async ($, on) => {
+test('/glass unpin removes the pins that hold those words, or all of them; a pinned row has a quiet Unpin', async ($, on) => {
   const world = prepare(on)
   bottoms(on, world)
   await started($, world)
@@ -458,8 +614,7 @@ test('/glass unpin removes the pins that hold those words, or all of them; the b
   await reply($, world, SECOND)
 
   // The press on a pinned row's Unpin takes that pin away; it is a quiet Button without a hotkey.
-  let mounted = await pane($)
-  await mounted.press({ key: 'page:compaction' } as never)
+  const mounted = await pane($)
   let page = await mounted.drawn()
   expect(lines(page).join('\n')).not.toMatch(/staging key/)
   const unpins = buttons(page).filter(one => one.label === 'Unpin')
@@ -578,23 +733,23 @@ test('a prompt row can carry [p] pin, and the summary row [v] review', async ($,
   expect(faults(world)).toEqual([])
 })
 
-test('straight after a summary the band reads the context as Claude Code reports it then, not as it was', async ($, on) => {
+test('straight after a summary the pane reads the context as Claude Code reports it then, not as it was', async ($, on) => {
   const world = prepare(on)
   bottoms(on, world)
   await started($, world)
 
-  let mounted = await band($)
-  expect(elements(await mounted.drawn()).map(textOf).join(' ')).toMatch(/60% full/)
+  let mounted = await pane($)
+  expect(lines(await mounted.drawn())).toContainEqual(expect.stringMatching(/^Context 60% full/))
   await mounted.unmount()
 
   // The summary leaves 30k in the context; no measurement has come yet.
   world.figures(30000, 0.5)
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
   await world.clock.advance(300)
-  mounted = await band($)
-  const text = elements(await mounted.drawn()).map(textOf).join(' ')
+  mounted = await pane($)
+  const text = lines(await mounted.drawn()).join(' ')
   await mounted.unmount()
-  expect(text).toMatch(/15% full/)
+  expect(text).toMatch(/Context 15% full/)
   expect(text).not.toMatch(/60% full/)
   expect(faults(world)).toEqual([])
 })
@@ -660,9 +815,6 @@ test('a summary a plugin starts is reviewed like a manual one', async ($, on) =>
   await started($, world)
   await $.session.compact({ trigger: 'plugin', messages: MESSAGES } as never)
   expect(boundary(world)).toHaveLength(1)
-  const mounted = await band($)
-  expect(await mounted.find({ type: 'Button', key: 'review' })).toBeDefined()
-  await mounted.unmount()
   await reply($, world, SECOND)
   const found = sensor(world).filter(one => one.event === 'compaction')
   expect(found).toHaveLength(1)
@@ -684,8 +836,8 @@ test('a summary made ahead is told the keep list and nothing else happens: no hi
   expect(world.logs.slice(before)).toEqual([])
   expect(watch.latest.history).toEqual([])
   expect(watch.latest.after).toBeNull()
-  const mounted = await band($)
-  expect(await mounted.find({ type: 'Button', key: 'review' })).toBeUndefined()
+  const mounted = await pane($)
+  expect(lines(await mounted.drawn())).not.toContain('Last summary')
   await mounted.unmount()
   await reply($, world, SECOND)
   expect(sensor(world).filter(one => one.event === 'compaction')).toEqual([])
@@ -710,7 +862,7 @@ test('items put back are kept in the list and told to the summariser until a sum
   const lost = (watch.latest.after?.items ?? []).filter(one => /8765|read any code/.test(one.text))
   expect(lost).toHaveLength(2)
   const mounted = await reviewPane($, world)
-  await mounted.press({ key: 'add-back' } as never)
+  await mounted.press({ key: 'readd' } as never)
   await mounted.unmount()
   expect(watch.latest.readded.map(one => one.id)).toEqual(lost.map(one => one.id))
 
@@ -754,7 +906,7 @@ test('a review state from before items could be put back still draws', async ($,
   expect(faults(world)).toEqual([])
 })
 
-test('a /compact drafted from the page already carries the list, so the summary is not told it twice', async ($, on) => {
+test('a /compact that already carries the keep list is not told it twice', async ($, on) => {
   const world = prepare(on)
   const seen = bottoms(on, world)
   await started($, world)
@@ -784,7 +936,7 @@ async function lossyThenReadd($: Dollar, world: World): Promise<void> {
   await started($, world)
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
   const mounted = await reviewPane($, world)
-  await mounted.press({ key: 'add-back' } as never)
+  await mounted.press({ key: 'readd' } as never)
   await mounted.unmount()
 }
 
@@ -862,14 +1014,15 @@ test('the page press fills readded with what the check marked missing, bumps the
   await started($, world)
   await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
   const mounted = await reviewPane($, world)
-  await mounted.press({ key: 'add-back' } as never)
+  await mounted.press({ key: 'readd' } as never)
   expect(watch.latest.readded).toHaveLength(2)
   expect(Object.values(watch.latest.receipts)).toEqual([
     { at: expect.any(Number), replies: 0, referenced: null },
     { at: expect.any(Number), replies: 0, referenced: null },
   ])
   const receipts = watch.latest.receipts
-  await mounted.press({ key: 'add-back' } as never)
+  // The Button is gone once everything is back; a press that still arrives adds nothing.
+  await mounted.press({ key: 'readd' } as never).catch(() => undefined)
   expect(watch.latest.readded).toHaveLength(2)
   expect(watch.latest.receipts).toEqual(receipts)
   await mounted.unmount()
@@ -913,4 +1066,62 @@ test('a summary that holds a put-back item drops its receipt and keeps the other
   const next = withSummary(sound(review), reviewed, { ts: 9, trigger: 'manual', before: null, after: null, kept: 1, missing: 1 })
   expect(next.readded.map(one => one.id)).toEqual(['b'])
   expect(Object.keys(next.receipts)).toEqual(['b'])
+})
+
+test('a summary counts as lost what the user said that it dropped or kept in part; what is already put back is not offered again', () => {
+  const a = item('a', 'instruction', 'Never use port 8765')
+  const b = item('b', 'decision', 'Use the queue design')
+  const c = item('c', 'instruction', 'Use pnpm')
+  const file = item('d', 'file', 'src/api/limiter.ts')
+  const marks: Record<string, GlassMark> = { a: 'missing', b: 'partly', c: 'found', d: 'missing' }
+  const reviewed = { ts: 9, trigger: 'manual' as const, summary: '', items: [a, b, c, file], marks, judged: false, earlier: [] }
+  const next = withSummary(emptyReview(), reviewed, { ts: 9, trigger: 'manual', before: null, after: null, kept: 2, missing: 2 }, 7)
+  // The band, the toast and the sensor read this one number: partly counts, a file does not.
+  expect(next.missing).toBe(2)
+  expect(next.seen).toBe(false)
+  // The band keeps Kept while the count of replies is still this one.
+  expect(next.repliesAt).toBe(7)
+  expect(lostItems(next).map(one => one.id)).toEqual(['a', 'b'])
+  expect(lostCount(next)).toBe(2)
+
+  // Put back, nothing is left to offer, though the summary still lost them.
+  const back = readdMissing(next, 1)
+  expect(lostCount(back)).toBe(0)
+  expect(back.missing).toBe(2)
+  expect(lostCount(emptyReview())).toBe(0)
+})
+
+test('while Re-add is offered Summarise steps back to secondary; a note sits under the section whose press set it; the ticks are plain and fit their row', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.command.run({ command: 'glass', args: 'pin rotate the staging key before friday and the other long thing nobody should have to read in full' } as never)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+
+  const tree = await mounted.drawn()
+  expect(buttons(tree).find(one => one.key === 'summarise')).toMatchObject({ variant: 'secondary' })
+  expect(buttons(tree).find(one => one.key === 'readd')).toMatchObject({ variant: 'primary' })
+  // Plain ticks: no `[ ... ]` frame around the `[x]`, and every row fits the row width, the pin's with its Unpin.
+  const ticks = elements(tree).filter(one => one.type === 'Button' && String(one.props?.key).startsWith('tick:'))
+  expect(ticks.length).toBeGreaterThan(0)
+  for (const one of ticks) expect(one.props?.plain).toBe(true)
+  const pinned = ticks.find(one => /staging key/.test(String(one.props?.label)))
+  expect(pinned).toBeDefined()
+  expect(String(pinned?.props?.label).length + 2 + 'pinned'.length + 2 + 'Unpin'.length + 4).toBeLessThanOrEqual(56)
+  for (const one of ticks) expect(String(one.props?.label).length + 2 + 'instruction'.length).toBeLessThanOrEqual(56)
+
+  // The pin's note sits under the Keep list, before the Last summary; Re-add's sits under the Last summary.
+  await mounted.press({ key: 'readd' } as never)
+  expect(watch.latest.ui).toMatchObject({ note: 'Claude is told these again with its next reply.', noteFor: 'readd' })
+  const shown = lines(await mounted.drawn())
+  expect(shown.indexOf('Claude is told these again with its next reply.')).toBeGreaterThan(shown.findIndex(text => text.startsWith('Last summary')))
+  // The next press clears it.
+
+  await mounted.press({ key: String(ticks[0]?.props?.key) } as never)
+  expect(watch.latest.ui).toMatchObject({ note: null, noteFor: null })
+  expect(lines(await mounted.drawn())).not.toContain('Claude is told these again with its next reply.')
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
 })

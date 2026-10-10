@@ -2,7 +2,9 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, prepare, reply, SESSION, settingsFile, showPage, SITE, START, T0, textOf } from './support'
+import { coldText, spendText, watchState } from './figures'
+import type { Watched } from './figures'
+import { elements, faults, prepare, reply, SESSION, settingsFile, SITE, START, T0, textOf } from './support'
 import type { Step, World } from './support'
 
 // The third round of review fixes: the 5-hour share while another session runs, a long reply that a subagent's
@@ -35,7 +37,7 @@ async function segments(mounted: Mounted): Promise<string[]> {
   return elements(await mounted.drawn())
     .filter(one => one.type === 'Text')
     .map(textOf)
-    .filter(text => text !== '│' && text !== '')
+    .filter(text => text !== '')
 }
 
 /** The 5-hour limit at `pct` percent used, with the window ending at `resetsAt`. */
@@ -76,22 +78,23 @@ async function complete($: Engine, world: World, turnId: string): Promise<void> 
 
 // -- A1 ------------------------------------------------------------------------------------------------------------
 
-/** Two replies in one window, the limit moving 10% to 15% for a dollar and a half, then a cold cache: the band's third segment. */
-async function coldSegment($: Engine, world: World, resetsAt: string): Promise<string | undefined> {
+/** Two replies in one window, the limit moving 10% to 15% for a dollar and a half, then a cold cache: the cache segment the band no longer draws. */
+async function coldSegment($: Engine, world: World, seen: Watched, resetsAt: string): Promise<string | undefined> {
   limit(world, 10, resetsAt)
   await $.session.start(START)
   await reply($, world, FIRST)
   limit(world, 15, resetsAt)
   await reply($, world, { steps: [{ cacheRead: 120000, cacheWrite: 1000, output: 200 }], usd: 0.5 })
   await world.clock.advance(400 * 1000)
-  return (await band($))[2]
+  return coldText(seen, world)
 }
 
 test('A1: with another session\'s heartbeat fresh, the 5-hour limit is not split into this session\'s share', async ($, on) => {
   const world = prepare(on, { settings: SUBSCRIPTION })
+  const seen = watchState(on)
   const resetsAt = new Date(T0 + 4 * 60 * MINUTE).toISOString()
   present(world, 'session-other', NOW_S - 30)
-  const cold = await coldSegment($, world, resetsAt)
+  const cold = await coldSegment($, world, seen, resetsAt)
   expect(cold).toMatch(/^cache expired \(est\.\)/)
   expect(cold).not.toMatch(SHARE)
   expect(faults(world)).toEqual([])
@@ -99,16 +102,18 @@ test('A1: with another session\'s heartbeat fresh, the 5-hour limit is not split
 
 test('A1: a heartbeat seen more than ten minutes ago, or the session\'s own, leaves the share as it was', async ($, on) => {
   const world = prepare(on, { settings: SUBSCRIPTION })
+  const seen = watchState(on)
   const resetsAt = new Date(T0 + 4 * 60 * MINUTE).toISOString()
   present(world, 'session-other', NOW_S - 700)
   present(world, 'session-ended', 0)
-  const cold = await coldSegment($, world, resetsAt)
+  const cold = await coldSegment($, world, seen, resetsAt)
   expect(cold).toMatch(/^cache expired \(est\.\): the next send costs about \d+\.\d+% of your 5-hour limit$/)
   expect(faults(world)).toEqual([])
 })
 
 test('A1: a fall in the 5-hour percent starts the share over, though the reset time is the same', async ($, on) => {
   const world = prepare(on, { settings: SUBSCRIPTION })
+  const seen = watchState(on)
   const resetsAt = new Date(T0 + 4 * 60 * MINUTE).toISOString()
   limit(world, 50, resetsAt)
   await $.session.start(START)
@@ -120,7 +125,7 @@ test('A1: a fall in the 5-hour percent starts the share over, though the reset t
   await reply($, world, { steps: [{ cacheRead: 121000, cacheWrite: 1000, output: 200 }], usd: 0.5 })
   await world.clock.advance(400 * 1000)
   // 5 points for $0.50 is 10% a dollar, so a cold send of about $0.45 is about 4.5%. Kept from the 50% it would have no share.
-  expect((await band($))[2]).toMatch(/^cache expired \(est\.\): the next send costs about 4\.\d% of your 5-hour limit$/)
+  expect(coldText(seen, world)).toMatch(/^cache expired \(est\.\): the next send costs about 4\.\d% of your 5-hour limit$/)
   expect(faults(world)).toEqual([])
 })
 
@@ -141,6 +146,7 @@ test('A1: the heartbeat folder is looked at once a minute, not at every measurem
 
 test('A2: a subagent\'s turn twenty minutes into a long reply doesn\'t begin a new reply: no cold send, and the reply\'s cost stays whole', async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
 
@@ -154,7 +160,7 @@ test('A2: a subagent\'s turn twenty minutes into a long reply doesn\'t begin a n
   await measure($, world, 0.5 + 2 * PRICED_USD)
   await complete($, world, 'long')
 
-  expect((await band($))[1]).toBe('$1.17 this session (+$0.67)')
+  expect(spendText(seen, world)).toBe('$1.17 this session (+$0.67)')
   const sensor = JSON.parse(String(world.files.get(`/cfg/claudeglass/mod/sensor/${SESSION}.json`))) as { events: { event: string }[] }
   expect(sensor.events.filter(one => one.event === 'cold_send')).toEqual([])
   expect(faults(world)).toEqual([])
@@ -164,6 +170,7 @@ test('A2: a subagent\'s turn twenty minutes into a long reply doesn\'t begin a n
 
 test('A3: a measurement of the last reply that arrives after the next reply began is not counted in the next', async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
 
@@ -178,26 +185,28 @@ test('A3: a measurement of the last reply that arrives after the next reply bega
   await measure($, world, 0.5 + 2 * PRICED_USD)
   await complete($, world, 'three')
 
-  expect((await band($))[1]).toBe('$1.17 this session (+$0.34)')
+  expect(spendText(seen, world)).toBe('$1.17 this session (+$0.34)')
   expect(faults(world)).toEqual([])
 })
 
 test('A3: a measurement that arrives before the next reply begins settles the reply it belongs to', async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
   await reply($, world, { steps: [PRICED], usd: PRICED_USD })
-  expect((await band($))[1]).toBe('$0.84 this session (+$0.34)')
+  expect(spendText(seen, world)).toBe('$0.84 this session (+$0.34)')
   await reply($, world, { steps: [PRICED], usd: PRICED_USD })
-  expect((await band($))[1]).toBe('$1.17 this session (+$0.34)')
+  expect(spendText(seen, world)).toBe('$1.17 this session (+$0.34)')
   expect(faults(world)).toEqual([])
 })
 
 test('A3: the first reply of a session, and the first after a /clear, are settled from nothing', async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
-  expect((await band($))[1]).toBe('$0.50 this session (+$0.50)')
+  expect(spendText(seen, world)).toBe('$0.50 this session (+$0.50)')
 
   await $.session.end({ sessionId: SESSION, reason: 'clear' } as never)
   world.session = 'session-two'
@@ -208,7 +217,7 @@ test('A3: the first reply of a session, and the first after a /clear, are settle
   await mainStep($, world, 'again', 0, PRICED, undefined, 1)
   await measure($, world, 0.4)
   await complete($, world, 'again')
-  expect((await band($))[1]).toBe('$0.40 this session (+$0.40)')
+  expect(spendText(seen, world)).toBe('$0.40 this session (+$0.40)')
   expect(faults(world)).toEqual([])
 })
 
@@ -218,26 +227,29 @@ function summarising(on: On): void {
   on('session.compact', () => ({ messages: [{ role: 'user', text: 'Summary of the conversation.', toolUses: [] }], tokensBefore: 150000, tokensAfter: 30000 }) as never)
 }
 
-test('A4: right after /compact the band takes the context from the new breakdown, not from the last request\'s size', async ($, on) => {
+test("A4: right after /compact the band takes the context from the new breakdown, not from the last request's size", async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   summarising(on)
   await $.session.start(START)
   await reply($, world, FIRST)
-  expect((await band($))[0]).toMatch(/60% full/)
+  expect((await band($))[2]).toMatch(/^60% full/)
 
   // Claude Code's breakdown is the new context; its `context.tokens` is still the last request's.
   world.figures(30000, 0.5)
   world.stale = 120000
   await $.session.compact({ trigger: 'manual', messages: SAID } as never)
   await world.clock.advance(300)
-  const texts = await band($)
   // The state word follows the tokens, the percent follows the breakdown: they agree.
-  expect(texts[0]).toBe('○ 15% full · Claude summarises at 160k')
+  expect(seen.snap?.reading).toMatchObject({ state: 'plenty', tokens: 30000, point: 160000 })
+  expect(Math.round(seen.snap?.reading?.pct ?? 0)).toBe(15)
+  expect((await band($))[1]).not.toBe('Tight  ')
   expect(faults(world)).toEqual([])
 })
 
-test('A4: with no breakdown yet, the summary\'s own tokensAfter is the context', async ($, on) => {
+test("A4: with no breakdown yet, the summary's own tokensAfter is the context", async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   summarising(on)
   await $.session.start(START)
   await reply($, world, FIRST)
@@ -246,8 +258,8 @@ test('A4: with no breakdown yet, the summary\'s own tokensAfter is the context',
   world.breakdown = false
   await $.session.compact({ trigger: 'manual', messages: SAID } as never)
   await world.clock.advance(300)
-  const texts = await band($)
-  expect(texts[0]).toBe('○ 15% full · Claude summarises at 200k')
+  expect(seen.snap?.reading).toMatchObject({ state: 'plenty', tokens: 30000, point: 200000 })
+  expect(Math.round(seen.snap?.reading?.pct ?? 0)).toBe(15)
   expect(faults(world)).toEqual([])
 })
 
@@ -325,20 +337,27 @@ test('A7: one reply or none left before Claude summarises is on the status line;
 
 // -- A8 ------------------------------------------------------------------------------------------------------------
 
-test('A8: no two hotkeys on the Compaction page are the same, and the Haiku check has its own', async ($, on) => {
+test('A8: no two hotkeys on the Checkpoint pane are the same, whatever state it is in', async ($, on) => {
   const world = prepare(on)
   summarising(on)
   await $.session.start(START)
   await reply($, world, FIRST)
   await $.command.run({ command: 'glass', args: 'detail' } as never)
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  await showPage(mounted, 'compaction', 'Compaction')
-  const keys = elements(await mounted.drawn())
-    .filter(one => one.type === 'Button' && typeof one.props?.hotkey === 'string')
-    .map(one => String(one.props?.hotkey))
-  // The pane's own page tabs and the band's keys share the screen; the page's buttons add theirs.
-  expect(new Set(keys).size).toBe(keys.length)
-  await mounted.unmount()
+  const keys = async () => {
+    const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
+    const found = elements(await mounted.drawn())
+      .filter(one => one.type === 'Button' && typeof one.props?.hotkey === 'string')
+      .map(one => String(one.props?.hotkey))
+    await mounted.unmount()
+    return found
+  }
+  // Before a summary: Summarise alone. After one that lost things: Re-add as well, and Check with a model has no key.
+  const before = await keys()
+  expect(before).toEqual(['s'])
+  await $.session.compact({ trigger: 'manual', messages: SAID } as never)
+  const after = await keys()
+  expect(after.sort()).toEqual(['r', 's'])
+  expect(new Set(after).size).toBe(after.length)
   expect(faults(world)).toEqual([])
 })
 
@@ -419,55 +438,55 @@ async function workflowAgent($: Engine, world: World): Promise<string> {
   return String((answer as { agentId?: string }).agentId)
 }
 
-async function headline($: Engine): Promise<string> {
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  await showPage(mounted, 'agents', 'Agents')
-  const text = elements(await mounted.drawn()).filter(one => one.type === 'Text').map(textOf).join('\n')
-  await mounted.unmount()
-  return text
+/** How many runs the snapshot holds as running. */
+function running(seen: Watched): number {
+  return seen.snap?.agents.filter(one => one.status === 'running').length ?? 0
 }
 
 test('C1: a workflow\'s agent the engine\'s list never shows is not finished at every poll; its own end finishes it', async ($, on) => {
   const world = prepare(on)
   agentRig(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
   const id = await workflowAgent($, world)
   await mainStep($, world, `turn-${id}`, 0, { ...PRICED, model: 'claude-haiku-4-5' }, id)
 
   await world.clock.advance(45_000)
-  expect(await headline($)).toMatch(/1 agent working/)
+  expect(running(seen)).toBe(1)
 
   await $.turn.complete({ turnId: `turn-${id}`, reason: 'answer', answer: 'done', isAborted: false, durationMs: 1000, agentId: id } as never)
-  expect(await headline($)).toMatch(/No agents working/)
+  expect(running(seen)).toBe(0)
   expect(faults(world)).toEqual([])
 })
 
 test('C1: the Workflow call returning in the foreground finishes the run\'s agents', async ($, on) => {
   const world = prepare(on)
   agentRig(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
   const id = await workflowAgent($, world)
   await mainStep($, world, `turn-${id}`, 0, { ...PRICED, model: 'claude-haiku-4-5' }, id)
   await world.clock.advance(45_000)
-  expect(await headline($)).toMatch(/1 agent working/)
+  expect(running(seen)).toBe(1)
 
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'wf-call' } as never)
-  expect(await headline($)).toMatch(/No agents working/)
+  expect(running(seen)).toBe(0)
   expect(faults(world)).toEqual([])
 })
 
 test('C1: a workflow\'s agent with no event for half an hour is finished, so the band stops counting it', async ($, on) => {
   const world = prepare(on)
   agentRig(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
   const id = await workflowAgent($, world)
   await mainStep($, world, `turn-${id}`, 0, { ...PRICED, model: 'claude-haiku-4-5' }, id)
   await world.clock.advance(20 * MINUTE)
-  expect(await headline($)).toMatch(/1 agent working/)
+  expect(running(seen)).toBe(1)
   await world.clock.advance(15 * MINUTE)
-  expect(await headline($)).toMatch(/No agents working/)
+  expect(running(seen)).toBe(0)
   expect(faults(world)).toEqual([])
 })

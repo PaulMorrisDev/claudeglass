@@ -5,9 +5,8 @@ import { VERSION } from '../hooks/generated/version.js'
 import { emptySnap } from '../hooks/live'
 import { addEvent, MAX_EVENTS, sensorFile } from '../hooks/sensor'
 import { faults, prepare, reply, SESSION, START, T0 } from './support'
-import type { Step, World } from './support'
+import type { World } from './support'
 
-const MINUTE = 60 * 1000
 const PRESENT = `/cfg/claudeglass/mod/present/${SESSION}.json`
 const SENSOR = `/cfg/claudeglass/mod/sensor/${SESSION}.json`
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
@@ -24,12 +23,6 @@ function json(world: World, path: string): { [key: string]: unknown } {
 
 function events(world: World): Event[] {
   return json(world, SENSOR).events as Event[]
-}
-
-/** One reply of two requests: Claude asks for a Bash call at `ctx`, and the result grows the context by `grew`. */
-function bashReply(ctx: number, grew: number, first: boolean): Step[] {
-  const ask: Step = first ? { input: 500, cacheRead: 0, cacheWrite: ctx - 500, output: 300, tools: ['Bash'] } : { input: 500, cacheRead: ctx - 500, cacheWrite: 0, output: 300, tools: ['Bash'] }
-  return [ask, { input: 500, cacheRead: ctx - 500, cacheWrite: grew + 500, output: 300 }]
 }
 
 async function hint($: Dollar): Promise<void> {
@@ -120,23 +113,6 @@ test('the sensor file holds closed words and times only, in the shape the Python
     }
   }
   expect(JSON.stringify(file)).not.toMatch(/\/work|\$|answer|done/)
-  expect(faults(world)).toEqual([])
-})
-
-test('a note the mod showed is settled by what followed it', async ($, on) => {
-  const world = prepare(on)
-  await $.session.start(START)
-  for (let i = 0; i < 4; i += 1) {
-    await reply($, world, { gap: i === 0 ? 0 : 40 * MINUTE, steps: bashReply(20000 + i * 40000, 40000, i === 0), usd: 0.2 })
-  }
-  const settled = events(world).filter(one => one.event === 'note')
-  expect(settled.length).toBeGreaterThanOrEqual(1)
-  const vocab = SENSOR_VOCAB.note
-  for (const one of settled) {
-    expect(vocab.kind).toContain(one.kind)
-    expect(vocab.surface).toContain(one.surface)
-    expect(vocab.outcome).toContain(one.outcome)
-  }
   expect(faults(world)).toEqual([])
 })
 

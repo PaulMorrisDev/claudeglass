@@ -3,12 +3,11 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { SENSOR_VOCAB } from '../hooks/generated/coaching.js'
-import { faults, notes, prepare, reply, SESSION, settingsFile, START, T0 } from './support'
+import { faults, prepare, reply, SESSION, settingsFile, START } from './support'
 import type { World } from './support'
 
 const MINUTE = 60 * 1000
 const SENSOR = `/cfg/claudeglass/mod/sensor/${SESSION}.json`
-const COACH = '/cfg/claudeglass/mod/coach.json'
 
 // One reply that leaves the main context at 120k, and one that only reads it again.
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
@@ -463,87 +462,6 @@ test('a second plan inside the rest gives no second tip', async ($, on) => {
   await tool($, 'ExitPlanMode')
   await tool($, 'ExitPlanMode')
   expect(state.statuses.filter(one => one !== undefined)).toHaveLength(1)
-})
-
-// -- rating_reminder ----------------------------------------------------------------------
-
-const BIG_REPLY = { steps: [{ cacheRead: 240_000, cacheWrite: 10_000, output: 0 }], usd: 0.5 }
-
-function ratingNotes(world: World): string[] {
-  return notes(world).filter(line => /isn't rated/.test(line))
-}
-
-async function work($: Engine, world: World, replies: number): Promise<void> {
-  for (let i = 0; i < replies; i += 1) await reply($, world, { gap: MINUTE, ...BIG_REPLY })
-}
-
-test('a piece of work past a million tokens earns the rating reminder, once, and the time is kept', async ($, on) => {
-  const world = prepare(on)
-  world.shape = { window: 5_000_000, point: 4_000_000 }
-  const state = rig(on)
-  await $.session.start(START)
-  await send($, state, 'build the thing')
-  await work($, world, 3)
-  expect(ratingNotes(world)).toEqual([])
-
-  await work($, world, 1)
-  expect(ratingNotes(world)).toHaveLength(1)
-  expect(ratingNotes(world)[0]).toMatch(/^● Glass · This piece of work has used about 1(\.\d)?M tokens and isn't rated\. Finished\? Run \/cg-feedback: a few ticks make your savings tips fit how you work\.$/)
-  const kept = JSON.parse(String(world.files.get(COACH))) as { schema: number; reminded_at: number }
-  expect(kept.schema).toBe(1)
-  expect(kept.reminded_at).toBeGreaterThan(1_700_000_000)
-
-  await work($, world, 8)
-  expect(ratingNotes(world)).toHaveLength(1)
-  const shown = sensorNotes(world, 'rating_reminder')
-  expect(shown).toHaveLength(1)
-  expect(SENSOR_VOCAB.note.surface).toContain(shown[0]?.surface)
-  expect(faults(world)).toEqual([])
-})
-
-test('the reminder waits for your typical piece, and for the days of rest', async ($, on) => {
-  const typical = prepare(on, { settings: settingsFile({ coaching: { typical_piece_tokens: 600_000 } }) })
-  typical.shape = { window: 5_000_000, point: 4_000_000 }
-  const state = rig(on)
-  await $.session.start(START)
-  await send($, state, 'build the thing')
-  await work($, typical, 4)
-  expect(ratingNotes(typical)).toEqual([])
-  await work($, typical, 1)
-  expect(ratingNotes(typical)).toHaveLength(1)
-})
-
-test('a reminder that went out in the last days holds the next one back', async ($, on) => {
-  const world = prepare(on)
-  world.shape = { window: 5_000_000, point: 4_000_000 }
-  const state = rig(on)
-  world.files.set(COACH, JSON.stringify({ schema: 1, reminded_at: Math.floor(T0 / 1000) - 3600 }))
-  await $.session.start(START)
-  await send($, state, 'build the thing')
-  await work($, world, 6)
-  expect(ratingNotes(world)).toEqual([])
-})
-
-test('a /cg-feedback run starts the count over', async ($, on) => {
-  const world = prepare(on)
-  world.shape = { window: 5_000_000, point: 4_000_000 }
-  const state = rig(on)
-  await $.session.start(START)
-  await send($, state, 'build the thing')
-  await work($, world, 3)
-  await send($, state, '/cg-feedback 4')
-  await work($, world, 3)
-  expect(ratingNotes(world)).toEqual([])
-})
-
-test('the rating reminder can be muted', async ($, on) => {
-  const world = prepare(on, { settings: settingsFile({ coaching: { muted: ['rating_reminder'] } }) })
-  world.shape = { window: 5_000_000, point: 4_000_000 }
-  const state = rig(on)
-  await $.session.start(START)
-  await send($, state, 'build the thing')
-  await work($, world, 6)
-  expect(ratingNotes(world)).toEqual([])
 })
 
 // -- speed --------------------------------------------------------------------------------

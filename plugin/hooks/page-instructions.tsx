@@ -9,12 +9,10 @@ import { adviceFor, agentTypesOf, bestAdvice, entriesOf, fitToCategories, server
 import type { Entry, StartupGroups, StartupItem, StartupRow } from './lib/instructions.js'
 import { fill } from './lib/text.js'
 import { formatTokens } from './lib/units.js'
-import { addPage } from './pane'
 import type { PageContext } from './pane'
 import { figureRow, heading } from './rows'
 
-// The Startup page (the page id is still `instructions`, so a stored choice keeps
-// working): what is in every request before the person types, and what they can do
+// The Startup pane's page (pane id glass-startup): what is in every request before the person types, and what they can do
 // about it. It opens with that total in one sentence and, when one thing is big
 // enough to fix, one line of advice. Then three groups: what the person controls
 // (MCP servers, built-in tools, CLAUDE.md and memory, the skills list, plugin tools),
@@ -172,7 +170,7 @@ function ownRows(table: PageContext['table'], own: StartupGroups['builtin']): Re
   ]
 }
 
-async function render(context: PageContext): Promise<RenderElement> {
+export async function render(context: PageContext): Promise<RenderElement> {
   const { table, view } = context
   const { Box, Text } = table
   const entries = entriesOf(ledger.items)
@@ -268,5 +266,4 @@ async function render(context: PageContext): Promise<RenderElement> {
 
 export const register: Register = (on, options) => {
   watch(on, options)
-  addPage({ id: 'instructions', hotkey: 's', labelKey: 'pane.instructions', render, dashboard: view => contextLink(view.settings) })
 }

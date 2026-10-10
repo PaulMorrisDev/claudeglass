@@ -73,6 +73,7 @@ export function emptyReview(): GlassReview {
   return {
     ts: null,
     missing: 0,
+    repliesAt: null,
     seen: true,
     held: false,
     suggest: 0,
@@ -81,7 +82,7 @@ export function emptyReview(): GlassReview {
     receipts: {},
     after: null,
     history: [],
-    ui: { view: 'before', toggled: [], summary: false, list: false, earlier: false, busy: false, note: null },
+    ui: { view: 'before', toggled: [], summary: false, list: false, earlier: false, busy: false, action: null, note: null, noteFor: null },
   }
 }
 
@@ -196,12 +197,14 @@ export function reviewCompaction(args: {
     judged: false,
     earlier: earlierPrompts(args.messages),
   }
-  const row: GlassReviewRow = { ts: args.now, trigger: args.trigger, before: args.before, after: args.after, kept: coverage.kept, missing: coverage.missing }
-  return { reviewed, row, counts: { kept: coverage.kept, missing: coverage.missing, added: 0 } }
+  // "Missing" is what the user would have to put back: the things they said that were dropped or kept only in part.
+  const missing = lostSaid(reviewed).length
+  const row: GlassReviewRow = { ts: args.now, trigger: args.trigger, before: args.before, after: args.after, kept: coverage.kept, missing }
+  return { reviewed, row, counts: { kept: coverage.kept, missing, added: 0 } }
 }
 
 /** The review after a summary: badge fields, the check, and a row in the history. */
-export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: GlassReviewRow): GlassReview {
+export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: GlassReviewRow, replies: number | null = null): GlassReview {
   const history = [...review.history, row]
   // An item the summary now holds is no longer sent to the summariser as put back, and its receipt goes with it.
   const readded = review.readded.filter(item => !['found', 'safe'].includes(reviewed.marks[item.id] ?? ''))
@@ -209,7 +212,8 @@ export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: G
   return {
     ...review,
     ts: reviewed.ts,
-    missing: row.missing,
+    missing: lostSaid(reviewed).length,
+    repliesAt: replies,
     seen: row.missing === 0,
     held: false,
     list: reviewed.items,
@@ -217,8 +221,28 @@ export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: G
     receipts: Object.fromEntries(readded.map(item => [item.id, review.receipts[item.id]]).filter((one): one is [string, GlassReceipt] => one[1] !== undefined)),
     after: reviewed,
     history,
-    ui: { ...review.ui, view: 'after', toggled: [], summary: false, list: false, earlier: false, busy: false, note: null },
+    ui: { ...review.ui, view: 'after', toggled: [], summary: false, list: false, earlier: false, busy: false, action: null, note: null, noteFor: null },
   }
+}
+
+/**
+ * The things the user said that a check marked missing or only partly kept: what a summary lost. This is the one
+ * meaning of "lost" the band, the toast, the sensor and the pane share.
+ */
+export function lostSaid(reviewed: GlassReviewed): GlassKeepItem[] {
+  return reviewed.items.filter(item => isSaid(item) && !item.safe && ['missing', 'partly'].includes(reviewed.marks[item.id] ?? ''))
+}
+
+/** The lost items not yet put back: what Re-add would add now. */
+export function lostItems(review: GlassReview): GlassKeepItem[] {
+  if (review.after === null) return []
+  const back = new Set(review.readded.map(item => item.id))
+  return lostSaid(review.after).filter(item => !back.has(item.id))
+}
+
+/** How many items Re-add would add now. */
+export function lostCount(review: GlassReview): number {
+  return lostItems(review).length
 }
 
 /**
@@ -226,10 +250,7 @@ export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: G
  * once each, with a fresh receipt. An item already put back keeps the receipt it has; everything else is as it was.
  */
 export function readdMissing(review: GlassReview, now: number): GlassReview {
-  const after = review.after
-  if (after === null) return review
-  const held = new Set(review.readded.map(item => item.id))
-  const added = after.items.filter(item => isSaid(item) && !item.safe && ['missing', 'partly'].includes(after.marks[item.id] ?? '') && !held.has(item.id))
+  const added = lostItems(review)
   if (added.length === 0) return review
   const receipts = { ...review.receipts }
   for (const item of added) receipts[item.id] = { at: now, replies: 0, referenced: null }

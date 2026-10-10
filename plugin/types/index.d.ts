@@ -34,8 +34,6 @@ export type GlassSettings = {
   usual: { sessionCostUsd: number | null; endContextTokens: number | null }
   /** Characters per token of text, by model family (the calibration), and the family a session on an unknown model counts as. */
   charsPerToken: { text: Record<string, number>; family: string }
-  /** The tokens in the user's typical piece of work (the rating reminder compares with it); 0 when not known. */
-  typicalPiece: number
   /**
    * Whether coaching is on for this user, and what the capture hook uses to decide it (the file's `coaching` block).
    * `enabled` is false unless `coaching_notes` is in `[capture] coaching`, and in the fallback.
@@ -45,14 +43,8 @@ export type GlassSettings = {
     /** The slug patterns of `[capture] projects` (a leading `!` leaves a project out) and `exclude_projects`, as the user wrote them. */
     projects: string[]
     excludeProjects: string[]
-    /** `feedback_reminder` is opted in under `[capture] feedback`. */
-    feedbackReminder: boolean
     /** False when `coaching.json` has `plan_fresh: false`. */
     planFresh: boolean
-    /** When the capture hook last gave the rating reminder, in seconds; null for never. */
-    remindedAt: number | null
-    /** Sessions rated on the dashboard lately: session id to when, in seconds. */
-    rated: Record<string, number>
   }
   dashboardUrl: string | null
 }
@@ -81,7 +73,6 @@ export type GlassCompaction = {
   trigger: string
   tokensBefore: number | null
   tokensAfter: number | null
-  wasCold: boolean
 }
 
 /** A tool result's size, with a few words on what the call did when it can say (`toolWhat`). Live state only. */
@@ -129,13 +120,6 @@ export type GlassAgent = {
   workflow?: { runId: string; call: string }
   /** When an event of its own last arrived (ms); a workflow's row with none for a long while is finished (agents.ts). */
   seenAt?: number
-}
-
-export type GlassRebuild = {
-  cause: 'limit' | 'compaction' | 'expiry' | 'prefix' | 'unknown'
-  tokens: number
-  usd: number
-  expected: boolean
 }
 
 export type GlassSensorEvent =
@@ -187,8 +171,6 @@ export type GlassSnap = {
    */
   parallel: boolean
   reqs: GlassRequest[]
-  /** When the session's first reply began (ms); null until a request has been seen. */
-  startedAt: number | null
   /** The names of the tools the main session has called, once each. */
   toolsUsed: string[]
   firstCr: number | null
@@ -203,7 +185,6 @@ export type GlassSnap = {
   pendingCompaction: boolean
   toolKept: number
   heaviest: GlassItem[]
-  switches: number
   mix: { read: number; write: number; input: number; output: number }
   rest: GlassRestState
   lastNoteReply: number | null
@@ -217,14 +198,6 @@ export type GlassSnap = {
   turnUsd: number
   /** False while `turnUsd` rests on the prices alone, with no measurement from Claude Code since the last request. */
   turnExact: boolean
-  turn: {
-    rebuilds: GlassRebuild[]
-    big: GlassItem | null
-    switched: boolean
-    compactedCold: GlassCompaction | null
-    compacted: boolean
-    switchUsd: number
-  }
   events: GlassSensorEvent[]
   pending: GlassPendingNote[]
   /** True when events changed since the sensor file was last written. */
@@ -233,15 +206,7 @@ export type GlassSnap = {
   lastBeat: number
   /** The agents that ran in this session, oldest first. */
   agents: GlassAgent[]
-  /** The piece of work the rating reminder counts: tokens the replies since it began have used, and whether it was reminded or is a /cg-feedback run's own. */
-  piece: { tokens: number; noted: boolean; surveying: boolean }
 }
-
-/**
- * The session budget (`/glass budget`): money on API billing (list-price dollars), a share of the 5-hour limit on a
- * subscription. Set by the person; cleared by `/glass budget off`.
- */
-export type GlassBudget = { kind: 'usd' | 'pct'; value: number }
 
 /** A thing the user pinned to the keep list (compaction review). The text is theirs and lives in $.state only. */
 export type GlassPin = { id: string; text: string }
@@ -280,6 +245,8 @@ export type GlassReviewed = {
   marks: Record<string, GlassMark>
   /** True once Haiku's check replaced the quick check's marks. */
   judged: boolean
+  /** The tokens that check used (input and output); absent before one. */
+  judgedTokens?: number
   /** Prompts from before the summary, newest first. */
   earlier: { id: string; text: string }[]
 }
@@ -308,16 +275,22 @@ export type GlassReviewUi = {
   earlier: boolean
   /** The Haiku check is running. */
   busy: boolean
-  /** One line under the headline: what the last press did. */
+  /** The press being carried out, while its Button shows it is busy; null when none. */
+  action?: 'summarise' | 'readd' | 'check' | null
+  /** One line under the section whose press set it (`noteFor`): what that press did. */
   note: string | null
+  /** The section the note is drawn under; null when there is no note. */
+  noteFor?: 'summarise' | 'readd' | 'check' | 'pin' | null
 }
 
 /** The compaction review: counts the band needs, and what the page draws from. */
 export type GlassReview = {
   /** When the last reviewed summary was made, in ms; null before one. */
   ts: number | null
-  /** Items the summary may have dropped. */
+  /** Items the user said that the summary dropped or kept only in part (the ones the page offers to put back). */
   missing: number
+  /** The count of main replies when the last summary was made; the band shows Kept while it is still the count. Null before one. */
+  repliesAt?: number | null
   /** True once the user has opened the review for that summary. */
   seen: boolean
   /** True while an automatic summary is being held for review. */
@@ -341,17 +314,11 @@ declare module 'claude-code' {
       snap: GlassSnap
       settings: GlassSettings | null
       detailed: boolean
-      page: string
       /** The glossary entry the pane is explaining, if any. */
       explain: string | null
-      help: boolean
-      /** Which copy button was pressed a moment ago (its key), so only that one says it copied; null when none. */
-      copied: string | null
       /** The keep list's pins (compaction review). */
       pins: GlassPin[]
       review: GlassReview
-      /** The session budget, or null when none is set. */
-      budget: GlassBudget | null
     }
   }
 }

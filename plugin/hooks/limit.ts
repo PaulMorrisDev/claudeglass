@@ -31,27 +31,3 @@ export function limitShare(snap: GlassSnap, usd: number): number | null {
   const rate = pctPerUsd(snap)
   return rate === null || !Number.isFinite(usd) || usd < 0 ? null : usd * rate
 }
-
-const FIVE_HOURS_MS = 5 * 60 * 60 * 1000
-
-/**
- * True when the session's first reply came inside the 5-hour window now running (the window ends at the limit's
- * reset and began five hours before). False when that can't be told: the reset time is unknown, or the session
- * was not seen from its start (a resumed one), so some of its spend may belong to an earlier window.
- */
-export function startedInWindow(snap: GlassSnap): boolean {
-  const limit = snap.fiveHour
-  if (limit === null || limit.resetsAt === null || snap.startedAt === null) return false
-  const resetsAt = Date.parse(limit.resetsAt)
-  return Number.isFinite(resetsAt) && snap.startedAt >= resetsAt - FIVE_HOURS_MS
-}
-
-/**
- * Percent of the 5-hour limit the whole session's spend `usd` is worth, or null when that would mislead: the
- * session began before this window (its spend is spread over more than one, so one window's rate does not
- * price it), or the share comes out over 100.
- */
-export function sessionShare(snap: GlassSnap, usd: number): number | null {
-  const share = limitShare(snap, usd)
-  return share !== null && share <= 100 && startedInWindow(snap) ? share : null
-}

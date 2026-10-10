@@ -2,7 +2,9 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, prepare, reply, SESSION, settingsFile, showPage, SITE, START, T0, textOf } from './support'
+import { coldText, spendText, watchState } from './figures'
+import type { Watched } from './figures'
+import { faults, prepare, reply, SESSION, settingsFile, START, T0 } from './support'
 import type { Step, World } from './support'
 
 // The fourth round of review fixes: the 5-hour share while another session is idle or has gone quiet, the cost of the
@@ -11,8 +13,6 @@ import type { Step, World } from './support'
 
 const MINUTE = 60 * 1000
 const NOW_S = Math.floor(T0 / 1000)
-const PANE = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
-const PROPS = { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 200, ...SITE }
 const SUBSCRIPTION = settingsFile({ billing: { mode: 'subscription', share_per_usd: null, period_label: 'weekly usage limit', basis: 'list' } })
 
 // One reply that leaves the context at 120k of a 160k summarising point, $0.50 spent.
@@ -23,40 +23,11 @@ const PRICED_USD = 0.336
 const CONTEXT = PRICED.cacheRead + PRICED.cacheWrite + PRICED.output
 const SHARE = /\d+\.\d% of your 5-hour limit/
 
-async function band($: Engine): Promise<string[]> {
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'AbovePrompt', props: PROPS as never })
-  const texts = elements(await mounted.drawn())
-    .filter(one => one.type === 'Text')
-    .map(textOf)
-    .filter(text => text !== '│' && text !== '')
-  await mounted.unmount()
-  return texts
-}
-
-/** An agent for the Agents page to list: that page, in Detailed, is where the main session's reply count shows. */
-async function anAgent($: Engine, world: World): Promise<void> {
-  await $.command.run({ command: 'glass', args: 'detail' } as never)
-  await $.agent.spawn({
-    tool_use_id: 'call',
-    prompt: 'Study the module and report.',
-    description: 'Study',
-    subagentType: 'general-purpose',
-    model: 'claude-haiku-4-5',
-    parentModel: 'claude-opus-4-6',
-    background: false,
-    fork: false,
-  } as never)
+/** How many replies the snapshot counts for the main session. */
+async function repliesCounted(seen: Watched, world: World): Promise<number | undefined> {
+  // The snapshot reaches $.state at most four times a second.
   await world.clock.advance(300)
-}
-
-/** How many replies the Agents page counts for the main session. */
-async function repliesCounted($: Engine, world: World): Promise<string> {
-  await world.clock.advance(300)
-  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  await showPage(mounted, 'agents', 'Agents')
-  const text = elements(await mounted.drawn()).filter(one => one.type === 'Text').map(textOf).join(' ')
-  await mounted.unmount()
-  return /(\d+ repl(?:y|ies))/.exec(text)?.[1] ?? ''
+  return seen.snap?.replies
 }
 
 function limit(world: World, pct: number, resetsAt: string): void {
@@ -88,32 +59,34 @@ async function complete($: Engine, world: World, turnId: string, reason = 'answe
 
 // -- D1 ------------------------------------------------------------------------------------------------------------
 
-/** Two replies in one window, the limit moving 10% to 15% for a dollar and a half, then a cold cache: the band's third segment. */
-async function coldSegment($: Engine, world: World, resetsAt: string): Promise<string | undefined> {
+/** Two replies in one window, the limit moving 10% to 15% for a dollar and a half, then a cold cache: the cache segment the band no longer draws. */
+async function coldSegment($: Engine, world: World, seen: Watched, resetsAt: string): Promise<string | undefined> {
   limit(world, 10, resetsAt)
   await $.session.start(START)
   await reply($, world, FIRST)
   limit(world, 15, resetsAt)
   await reply($, world, { steps: [{ cacheRead: 120000, cacheWrite: 1000, output: 200 }], usd: 0.5 })
   await world.clock.advance(400 * 1000)
-  return (await band($))[2]
+  return coldText(seen, world)
 }
 
 test('D1: another session that is open but idle (its last request long ago) leaves the 5-hour share as it was', async ($, on) => {
   const world = prepare(on, { settings: SUBSCRIPTION })
+  const seen = watchState(on)
   const resetsAt = new Date(T0 + 4 * 60 * MINUTE).toISOString()
   // Its heartbeat is fresh (the process is open), but it last sent a request an hour ago.
   present(world, 'session-other', NOW_S - 30, NOW_S - 3600)
-  const cold = await coldSegment($, world, resetsAt)
+  const cold = await coldSegment($, world, seen, resetsAt)
   expect(cold).toMatch(/^cache expired \(est\.\): the next send costs about \d+\.\d+% of your 5-hour limit$/)
   expect(faults(world)).toEqual([])
 })
 
 test('D1: another session whose last request was within ten minutes splits the limit: no share', async ($, on) => {
   const world = prepare(on, { settings: SUBSCRIPTION })
+  const seen = watchState(on)
   const resetsAt = new Date(T0 + 4 * 60 * MINUTE).toISOString()
   present(world, 'session-other', NOW_S - 30, NOW_S - 120)
-  const cold = await coldSegment($, world, resetsAt)
+  const cold = await coldSegment($, world, seen, resetsAt)
   expect(cold).toMatch(/^cache expired \(est\.\)/)
   expect(cold).not.toMatch(SHARE)
   expect(faults(world)).toEqual([])
@@ -121,6 +94,7 @@ test('D1: another session whose last request was within ten minutes splits the l
 
 test('D1: when the other session goes quiet the share starts over, so its points do not count as this session\'s', async ($, on) => {
   const world = prepare(on, { settings: SUBSCRIPTION })
+  const seen = watchState(on)
   const resetsAt = new Date(T0 + 4 * 60 * MINUTE).toISOString()
   present(world, 'session-other', NOW_S, NOW_S)
   limit(world, 10, resetsAt)
@@ -138,7 +112,7 @@ test('D1: when the other session goes quiet the share starts over, so its points
   await reply($, world, { steps: [{ cacheRead: 121000, cacheWrite: 1000, output: 200 }], usd: 0.5 })
   await world.clock.advance(400 * 1000)
   // 2 points for $0.50 is about 4% a dollar. Kept from the first base it would be 32 points for $1.00, eight times that.
-  const share = /about (\d+\.\d)% of your 5-hour limit/.exec((await band($))[2] ?? '')
+  const share = /about (\d+\.\d)% of your 5-hour limit/.exec((coldText(seen, world)) ?? '')
   expect(share).not.toBeNull()
   expect(Number(share?.[1])).toBeLessThan(4)
   expect(faults(world)).toEqual([])
@@ -148,19 +122,20 @@ test('D1: when the other session goes quiet the share starts over, so its points
 
 test('D2: the first reply after a resume is its own estimate, not the whole session\'s cost; the next is exact', async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   await $.session.start(START)
   // A resumed conversation: the first request already holds earlier messages, and Claude Code's ledger holds the earlier cost.
   await $.turn.start({ text: 'go on', turnId: 'resumed' })
   await mainStep($, world, 'resumed', 0, PRICED, 9)
   await measure($, world, 42)
   await complete($, world, 'resumed')
-  expect((await band($))[1]).toBe('$42.0 this session (+$0.34)')
+  expect(spendText(seen, world)).toBe('$42.0 this session (+$0.34)')
 
   await $.turn.start({ text: 'again', turnId: 'again' })
   await mainStep($, world, 'again', 0, PRICED)
   await measure($, world, 42.5)
   await complete($, world, 'again')
-  expect((await band($))[1]).toBe('$42.5 this session (+$0.50)')
+  expect(spendText(seen, world)).toBe('$42.5 this session (+$0.50)')
   expect(faults(world)).toEqual([])
 })
 
@@ -168,11 +143,10 @@ test('D2: the first reply after a resume is its own estimate, not the whole sess
 
 test('D3: a turn that made no request (Esc first, or a hook that answered) is not counted as another reply', async ($, on) => {
   const world = prepare(on)
-  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'claude-haiku-4-5', agentId: 'agent-1' }) as never)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
-  await anAgent($, world)
-  expect(await repliesCounted($, world)).toBe('1 reply')
+  expect(await repliesCounted(seen, world)).toBe(1)
 
   // Esc before the first request.
   await $.turn.start({ text: 'oops', turnId: 'esc' })
@@ -181,12 +155,12 @@ test('D3: a turn that made no request (Esc first, or a hook that answered) is no
   await $.turn.start({ text: 'hooked', turnId: 'hooked' })
   await complete($, world, 'hooked')
 
-  expect(await repliesCounted($, world)).toBe('1 reply')
-  expect((await band($))[1]).toBe('$0.50 this session (+$0.50)')
+  expect(await repliesCounted(seen, world)).toBe(1)
+  expect(spendText(seen, world)).toBe('$0.50 this session (+$0.50)')
 
   // The next real reply is the second.
   await reply($, world, { steps: [PRICED], usd: PRICED_USD })
-  expect(await repliesCounted($, world)).toBe('2 replies')
+  expect(await repliesCounted(seen, world)).toBe(2)
   expect(faults(world)).toEqual([])
 })
 
@@ -194,6 +168,7 @@ test('D3: a turn that made no request (Esc first, or a hook that answered) is no
 
 test('D4: a measure part way through a reply does not leave the next reply short when the last figure comes late', async ($, on) => {
   const world = prepare(on)
+  const seen = watchState(on)
   await $.session.start(START)
   await reply($, world, FIRST)
 
@@ -209,7 +184,7 @@ test('D4: a measure part way through a reply does not leave the next reply short
   await mainStep($, world, 'three', 0, PRICED)
   await measure($, world, 0.5 + 0.3 + 2 * PRICED_USD)
   await complete($, world, 'three')
-  expect((await band($))[1]).toBe('$1.47 this session (+$0.34)')
+  expect(spendText(seen, world)).toBe('$1.47 this session (+$0.34)')
   expect(faults(world)).toEqual([])
 })
 
