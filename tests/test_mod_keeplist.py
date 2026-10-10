@@ -1,9 +1,9 @@
 """The compaction review's pure logic (``plugin/hooks/lib/keeplist.js`` and
-``coverage.js``) behaves as its Node tests say.
+``coverage.js``, and ``receipt.js`` which settles the receipt of a re-add) behaves as its Node tests say.
 
 The mod runs inside Claude Code and keeps its logic in plain ES modules so
 Node can import the same files. These run the Node tests
-(``tests/js/keeplist.test.mjs``, ``tests/js/coverage.test.mjs``; the planted
+(``tests/js/keeplist.test.mjs``, ``tests/js/coverage.test.mjs``, ``tests/js/receipt.test.mjs``; the planted
 conversation they share is ``tests/js/planted.mjs``) from pytest, the way
 ``test_mod_vectors.py`` runs the shared vectors. They skip when Node is
 missing. ``test_mod_vectors.py`` already holds every lib module to the
@@ -29,7 +29,7 @@ def _node() -> str:
     return node
 
 
-@pytest.mark.parametrize("name", ["keeplist.test.mjs", "coverage.test.mjs"])
+@pytest.mark.parametrize("name", ["keeplist.test.mjs", "coverage.test.mjs", "receipt.test.mjs"])
 def test_node_tests_pass(name: str) -> None:
     done = subprocess.run(
         [_node(), "--test", str(JS / name)],
@@ -39,7 +39,7 @@ def test_node_tests_pass(name: str) -> None:
 
 
 def test_the_libs_import_only_each_other() -> None:
-    for name in ("keeplist.js", "coverage.js"):
+    for name in ("keeplist.js", "coverage.js", "receipt.js"):
         text = (ROOT / "plugin" / "hooks" / "lib" / name).read_text(encoding="utf-8")
         for line in text.splitlines():
             # A JSDoc type may name a sibling (`{import("./keeplist.js").KeepItem}`); code may not load anything at run time.

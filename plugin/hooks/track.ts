@@ -54,9 +54,44 @@ export type TurnEnd = {
   /** The reply's text and why it ended; for a turn end only. Looked at, never kept. */
   answer?: string
   reason?: string
+  /** What the reply said at each step and the inputs of the tools it called; for a turn end only. Looked at, never kept. */
+  texts?: string[]
 }
 
 type Listener = (end: TurnEnd) => Promise<void>
+
+/** The most texts, and the most characters in all, held for one reply. */
+const MAX_TEXTS = 64
+const MAX_TEXT_CHARS = 200000
+
+/** What the main reply now running has said and called, in memory only, until its turn ends (the reply a later one replaces is dropped). */
+let said: { turnId: string; texts: string[]; chars: number } = { turnId: '', texts: [], chars: 0 }
+
+/** Holds one text of the reply `turnId`, as much of it as the limits leave room for. */
+function hold(turnId: string, text: string): void {
+  if (said.turnId !== turnId) said = { turnId, texts: [], chars: 0 }
+  const room = MAX_TEXT_CHARS - said.chars
+  if (text === '' || said.texts.length >= MAX_TEXTS || room <= 0) return
+  const kept = text.length > room ? text.slice(0, room) : text
+  said.texts.push(kept)
+  said.chars += kept.length
+}
+
+/** The strings in a tool's input, however deep, one per line: what the call named, without JSON's escapes in the way. */
+function leaves(value: unknown, out: string[] = [], depth = 0): string[] {
+  if (typeof value === 'string') out.push(value)
+  else if (Array.isArray(value)) {
+    if (depth < 8) for (const one of value) leaves(one, out, depth + 1)
+  } else if (value !== null && typeof value === 'object' && depth < 8) for (const one of Object.values(value)) leaves(one, out, depth + 1)
+  return out
+}
+
+/** The texts held for the reply `turnId`; they are emptied from memory. */
+function release(turnId: string): string[] {
+  const texts = said.turnId === turnId ? said.texts : []
+  said = { turnId: '', texts: [], chars: 0 }
+  return texts
+}
 
 const listeners: Listener[] = []
 
@@ -410,6 +445,7 @@ export const register: Register = on => {
       await leave(io, e.sessionId)
       stopCacheClock()
       if (e.reason === 'clear') {
+        release('')
         // The coaching's memory and the agents' prompts are the cleared conversation's.
         resetCoach()
         for (const forget of clearListeners) forget()
@@ -470,6 +506,15 @@ export const register: Register = on => {
       }
     }
     const result = yield* next(e)
+    // What the step said and the tools it called, for the end of the reply (a subagent's steps are never held).
+    if (e.agentId === undefined) {
+      try {
+        if (typeof result.answer === 'string') hold(e.turnId, result.answer)
+        for (const use of result.toolUses) hold(e.turnId, leaves(use.input).join('\n'))
+      } catch (error) {
+        $.ui.log(`claudeglass: turn.step texts ${String(error)}`, { to: 'debug' })
+      }
+    }
     if (e.agentId === undefined && result.usage !== null) {
       const io = kit($)
       try {
@@ -488,6 +533,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     const io = kit($)
+    const texts = release(e.turnId)
     try {
       const snap = await ensure($)
       const settings = await getSettings(io)
@@ -510,7 +556,7 @@ export const register: Register = on => {
         settleAfterReply(snap, last.ctx)
         for (const listener of listeners) {
           try {
-            await listener({ io, snap, settings, now, answer: e.answer, reason: e.reason })
+            await listener({ io, snap, settings, now, answer: e.answer, reason: e.reason, texts })
           } catch (error) {
             $.ui.log(`claudeglass: turn end ${String(error)}`, { to: 'debug' })
           }

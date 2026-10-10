@@ -24,6 +24,8 @@ export type Step = {
   tools?: string[]
   /** What each named tool was called with (an empty input when left out). */
   inputs?: Record<string, Record<string, unknown>>
+  /** What the model says in this step (nothing when left out). */
+  answer?: string
 }
 
 /** One MCP tool of Claude Code's breakdown: its tokens and whether it is in the prompt are 100 and true when a test leaves them out. */
@@ -186,7 +188,7 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
     return {
       turnId: e.turnId,
       index: e.index,
-      answer: '',
+      answer: usage.answer ?? '',
       toolUses: tools.map(name => ({ id: name, name, input: usage.inputs?.[name] ?? {} })),
       stopReason: 'end_turn',
       usage: { model: usage.model ?? 'claude-sonnet-4-6', input_tokens: usage.input ?? 0, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead, cache_creation_input_tokens: usage.cacheWrite },
