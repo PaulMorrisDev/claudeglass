@@ -173,10 +173,13 @@ def test_corpus_from_store_window_filters_like_discovery(tmp_path: Path):
     old_path = project_dir / "sess-old.jsonl"
     new_path = project_dir / "sess-new.jsonl"
     write_jsonl(old_path, [turn_line(timestamp="2020-01-01T00:00:00.000Z")])
-    write_jsonl(new_path, [turn_line(timestamp="2026-09-18T00:00:00.000Z")])
-
     import os
     import time
+    from datetime import datetime, timedelta, timezone
+
+    # A day ago, so it stays inside the 30-day window whatever today is.
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    write_jsonl(new_path, [turn_line(timestamp=recent)])
 
     old_mtime = time.time() - 10 * 365 * 24 * 3600
     os.utime(old_path, (old_mtime, old_mtime))

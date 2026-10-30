@@ -41,6 +41,12 @@ def store() -> Store:
     return s
 
 
+#: A retention window that drops the 2000-01-01 sessions the prune tests
+#: add but keeps ``_seed``'s 2026-09-18 session for years. A 30-day window
+#: stopped keeping it once the seed date was a month in the past.
+_RETENTION_KEEPS_SEED = 3650
+
+
 def _seed(store: Store) -> None:
     snapshot_id = store.upsert_snapshot(
         project_slug="proj-a",
@@ -924,7 +930,7 @@ def test_retention_prune_removes_old_sessions(store: Store) -> None:
         first_ts="2000-01-01T00:00:00Z",
         last_ts="2000-01-01T01:00:00Z",
     )
-    removed = store.retention_prune(retention_days=30)
+    removed = store.retention_prune(retention_days=_RETENTION_KEEPS_SEED)
     assert removed == 1
     assert store.session("session-old") is None
     assert store.session("session-a") is not None
@@ -952,7 +958,7 @@ def test_sessions_listing_has_no_transcripts_key(store: Store) -> None:
 
 def test_daily_usage_aggregates_across_transcripts(store: Store) -> None:
     _seed(store)
-    rows = store.daily_usage(days=30)
+    rows = store.daily_usage(days=None)
     assert len(rows) == 1
     row = rows[0]
     assert row["day"] == "2026-09-18"
@@ -972,18 +978,19 @@ def test_daily_usage_accepts_since_until_like_summary(store: Store) -> None:
 
 def test_daily_usage_split_agent_separates_main_from_subagents(store: Store) -> None:
     _seed(store)  # one top-level transcript (10 turns), one subagent (5 turns)
-    rows = {(r["agent"], r["model"]): r for r in store.daily_usage(split="agent")}
+    # days=None: the seed is a fixed past date, outside any rolling window.
+    rows = {(r["agent"], r["model"]): r for r in store.daily_usage(split="agent", days=None)}
     assert set(rows) == {("main", "claude-sonnet-5"), ("subagent", "claude-sonnet-5")}
     assert rows[("main", "claude-sonnet-5")]["turns"] == 10
     assert rows[("subagent", "claude-sonnet-5")]["turns"] == 5
     # split="model" (and the default) keep the original, unsplit shape.
-    assert store.daily_usage(split="model") == store.daily_usage()
-    assert "agent" not in store.daily_usage()[0]
+    assert store.daily_usage(split="model", days=None) == store.daily_usage(days=None)
+    assert "agent" not in store.daily_usage(days=None)[0]
 
 
 def test_cache_read_tokens_by_model(store: Store) -> None:
     _seed(store)  # top-level cache_read_tokens=2000, subagent=400, same model
-    assert store.cache_read_tokens_by_model() == {"claude-sonnet-5": 2400}
+    assert store.cache_read_tokens_by_model(days=None) == {"claude-sonnet-5": 2400}
     assert store.cache_read_tokens_by_model(since="2026-09-19T00:00:00Z") == {}
 
 
@@ -1752,7 +1759,7 @@ def test_retention_prune_removes_an_old_sessions_plan_builds(store: Store) -> No
     )
     store.set_feedback("session-old", builds=[{"build": 1, "plan": "gap", "handoff": "no"}])
     store.set_tip_feedback("recommendation", "model.default", "wrong")
-    assert store.retention_prune(retention_days=30) == 1
+    assert store.retention_prune(retention_days=_RETENTION_KEEPS_SEED) == 1
     assert store._connection().execute("SELECT COUNT(*) FROM session_plan_feedback").fetchone()[0] == 0
     # A card answer is not tied to one session, so the prune leaves it.
     assert store.tip_feedback_count() == 1
@@ -1934,7 +1941,7 @@ def test_retention_prune_removes_old_ratings(store: Store) -> None:
         first_ts="2000-01-01T00:00:00Z", last_ts="2000-01-01T01:00:00Z",
     )
     store.set_feedback("session-old", outcome="missed", worth="no")
-    assert store.retention_prune(retention_days=30) == 1
+    assert store.retention_prune(retention_days=_RETENTION_KEEPS_SEED) == 1
     assert store.all_feedback() == {}
 
 
@@ -2737,7 +2744,7 @@ def test_retention_prune_takes_a_removed_sessions_mod_events_with_it(store: Stor
     )
     store.replace_mod_events("session-old", [_note("2026-09-21T10:00:00Z")])
     store.replace_mod_events("session-a", [_note("2026-09-21T10:00:00Z")])
-    assert store.retention_prune(retention_days=30) == 1
+    assert store.retention_prune(retention_days=_RETENTION_KEEPS_SEED) == 1
     assert {e["session_id"] for e in store.read_mod_events()} == {"session-a"}
 
 

@@ -200,7 +200,7 @@ def test_twelve_hour_session_spans_three_five_hour_blocks(tmp_path):
     # across three.
     #
     # The UTC timestamps below are built from fixed LOCAL wall-clock
-    # times (via this machine's current UTC offset) rather than a named
+    # times (via this machine's UTC offset on that date) rather than a named
     # zone passed through Config -- this test suite's own convention
     # elsewhere (see _tzdata_has in test_classify.py) is that a resolvable
     # IANA zone isn't guaranteed on every machine (e.g. bare Windows
@@ -208,8 +208,10 @@ def test_twelve_hour_session_spans_three_five_hour_blocks(tmp_path):
     # to the machine's own local zone regardless.
     from datetime import datetime, timedelta, timezone
 
-    offset = datetime.now().astimezone().utcoffset() or timedelta(0)
     local_base = datetime(2026, 9, 18, 0, 30)  # 00:30 local
+    # The offset on that date, not today's: a test run after the clocks
+    # change would otherwise put every turn an hour off.
+    offset = local_base.astimezone().utcoffset() or timedelta(0)
     local_times = [local_base + timedelta(hours=h) for h in range(13)]  # 00:30 .. 12:30 local
     timestamps = [(lt - offset).replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z") for lt in local_times]
 

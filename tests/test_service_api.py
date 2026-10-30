@@ -1051,14 +1051,15 @@ def test_daily_usage_split_agent_separates_main_from_subagents(server):
             }
         ],
     )
-    resp, body = server.get_json("/api/daily-usage?split=agent")
+    # window=all: the rows are dated 2026-09-18, outside a rolling window.
+    resp, body = server.get_json("/api/daily-usage?split=agent&window=all")
     assert resp.status == 200
     by_agent = {row["agent"]: row for row in body["data"]}
     assert set(by_agent) == {"main", "subagent"}
     assert by_agent["main"]["turns"] == 3
     assert by_agent["subagent"]["turns"] == 1
     assert_privacy(body)
-    resp, body = server.get_json("/api/daily-usage?split=model")
+    resp, body = server.get_json("/api/daily-usage?split=model&window=all")
     assert resp.status == 200
     assert "agent" not in body["data"][0]
 
