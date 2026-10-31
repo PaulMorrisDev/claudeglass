@@ -136,12 +136,17 @@ def _command_pattern() -> re.Pattern[str]:
     "claudeglass serve --purge: will delete"), which names the
     command that is talking rather than one to run. Nor the module in
     ``python -m claudeglass ...``, which has the same name: a command
-    already in that form stays as it is."""
+    already in that form stays as it is. Nor the mod's name in a Claude
+    Code plugin command ("/plugin install claudeglass --marketplace ...")."""
     from .cli import SUBCOMMANDS  # the CLI imports the service; import late
 
     words = "|".join(re.escape(word) for word in sorted(SUBCOMMANDS, key=len, reverse=True))
+    plugin_verbs = "".join(
+        f"(?<!plugin {verb} )" for verb in ("install", "uninstall", "update", "enable", "disable")
+    )
     return re.compile(
         r"(?<![\w./\\-])(?<!-m )"
+        + plugin_verbs
         + re.escape(SHORT)
         + r"(?= (?:(?:" + words + r")(?![\w-])|--?[a-z]))"
         + r"(?! (?:\S+ )?\S*:(?:\s|$))"

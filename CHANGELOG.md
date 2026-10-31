@@ -111,6 +111,9 @@ Capture and dashboard:
   200 with zeros.
 - **A threshold written as text in config.toml names the key and asks for a
   number** instead of crashing a report.
+- **`update --finish` prints the mod's install line as Claude Code needs
+  it.** It printed `/plugin install python -m claudeglass ...`, taking the
+  mod's name for this command.
 
 The mod:
 

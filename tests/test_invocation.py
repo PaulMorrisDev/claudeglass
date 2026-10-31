@@ -182,6 +182,12 @@ PREFIX = r'& "C:\Program Files\Python314\python.exe" -m claudeglass'
         ("claudeglass capture:\n", "claudeglass capture:\n"),
         # A colon further on is part of the command.
         ("claudeglass apply --revert 2026-09-25T10:00:00", f"{PREFIX} apply --revert 2026-09-25T10:00:00"),
+        # The mod's name in a Claude Code plugin command is not this command.
+        (
+            "/plugin install claudeglass --marketplace PaulMorrisDev/claudeglass",
+            "/plugin install claudeglass --marketplace PaulMorrisDev/claudeglass",
+        ),
+        ("claude plugin uninstall claudeglass --scope user", "claude plugin uninstall claudeglass --scope user"),
     ],
 )
 def test_rewrite_swaps_only_commands(text, expected):
