@@ -34,6 +34,7 @@ COPY: dict[str, str] = {
     # -- The band above the prompt ------------------------------------------
     "band.full": "{pct}% full",
     "band.point": "Claude summarises at {tokens}",
+    "band.auto.off": "Claude won't summarise by itself",
     "band.open": "Glass",
     # -- The health line (band) and the Checkpoint pane -----------------------
     "health.fine": "Fine",

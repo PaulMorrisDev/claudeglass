@@ -7,6 +7,9 @@ import { configDir } from './settings'
 // times only (no text, paths or amounts). One file per session, rewritten whole
 // at each turn's end when it changed. The Python side reads it
 // (src/claudeglass/mod_sensor.py) and drops anything outside its vocabulary.
+// The events live in the snapshot, which belongs to one Claude Code process; a session
+// resumed, or one whose app was restarted, comes back in a new process with none, so the
+// first write of a process adds to the file an earlier one left (mergeEarlier).
 
 export const MAX_EVENTS = 500
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/
@@ -87,14 +90,60 @@ export function sensorFile(snap: GlassSnap): string | null {
   return JSON.stringify({ schema: 1, session_id: snap.sessionId, version: VERSION, events: newestEvents(snap.events) })
 }
 
-/** Rewrites the session's sensor file when its events changed. A failed write is tried again at the next turn. */
+/** An event as an earlier process wrote it, or null when it is not one this version could have written. */
+function earlierEvent(value: unknown): GlassSensorEvent | null {
+  if (value === null || typeof value !== 'object') return null
+  const one = value as { ts?: unknown; event?: unknown }
+  if (typeof one.ts !== 'number' || !Number.isInteger(one.ts) || typeof one.event !== 'string') return null
+  return value as GlassSensorEvent
+}
+
+/**
+ * Adds the events an earlier process left in the session's sensor file to the snapshot, once per process. A resume, an app
+ * restart or a reopened session starts a new process whose snapshot has no events, and writing it whole would replace the
+ * file's history (the Desktop often ends a process without a session.end, so the file is all there is). Only events
+ * older than this process's own are taken, so a file this process wrote itself before a reload adds nothing twice. A
+ * file that is missing, unreadable, of another schema or another session's is left out of it.
+ */
+async function mergeEarlier(io: Io, snap: GlassSnap, path: string): Promise<void> {
+  snap.sensorMerged = true
+  let text: string | null = null
+  try {
+    text = await io.readFile(path)
+  } catch {
+    // The engine rejects a read of a file that isn't there, which is a session's first write.
+  }
+  if (text === null || text === '') return
+  let file: unknown
+  try {
+    file = JSON.parse(text)
+  } catch {
+    return
+  }
+  const raw = file as { schema?: unknown; session_id?: unknown; events?: unknown } | null
+  if (raw === null || typeof raw !== 'object' || raw.schema !== 1 || raw.session_id !== snap.sessionId || !Array.isArray(raw.events)) return
+  const first = snap.events.reduce((least, one) => Math.min(least, one.ts), Number.POSITIVE_INFINITY)
+  const older: GlassSensorEvent[] = []
+  for (const value of raw.events) {
+    const one = earlierEvent(value)
+    if (one !== null && one.ts < first) older.push(one)
+  }
+  if (older.length > 0) snap.events = newestEvents([...older, ...snap.events])
+}
+
+/**
+ * Rewrites the session's sensor file when its events changed, after adding to them what an earlier process left (the
+ * first write of a process). A failed write is tried again at the next turn.
+ */
 export async function writeSensor(io: Io, snap: GlassSnap): Promise<void> {
-  if (!snap.eventsDirty) return
-  const text = sensorFile(snap)
-  if (text === null) return
+  if (!snap.eventsDirty || sensorFile(snap) === null) return
   try {
     const dir = await configDir(io)
-    await io.writeFile(`${dir}/mod/sensor/${snap.sessionId}.json`, text)
+    const path = `${dir}/mod/sensor/${snap.sessionId}.json`
+    if (!snap.sensorMerged) await mergeEarlier(io, snap, path)
+    const text = sensorFile(snap)
+    if (text === null) return
+    await io.writeFile(path, text)
     snap.eventsDirty = false
   } catch {
     // Left dirty: the next turn's end writes it again.

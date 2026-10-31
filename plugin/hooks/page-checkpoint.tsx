@@ -102,14 +102,17 @@ export function render(context: PageContext): RenderElement {
   // Header: how full the context is, and the one way to summarise now.
   const reading = view.snap.reading
   // With no count of replies yet the band's own words say where Claude summarises.
+  // With auto-compact off there is no point and no runway, and the line says Claude won't summarise by itself.
   const replies =
     reading === null
       ? ''
-      : view.replies === null || view.replies < 1
-        ? fill(COPY['band.point'], { tokens: formatTokens(reading.point) })
-        : view.replies === 1
-          ? COPY['health.replies.one']
-          : fill(COPY['health.replies'], { replies: view.replies })
+      : reading.point === null
+        ? COPY['band.auto.off']
+        : view.replies === null || view.replies < 1
+          ? fill(COPY['band.point'], { tokens: formatTokens(reading.point) })
+          : view.replies === 1
+            ? COPY['health.replies.one']
+            : fill(COPY['health.replies'], { replies: view.replies })
   const where = reading === null ? '' : joinParts([fill(COPY['checkpoint.context'], { pct: percent(reading.pct) }), replies])
   const summarising = action === 'summarise'
   const summariseLabel = summarising ? COPY['health.busy'] : chosen.length === 0 ? COPY['checkpoint.summarise.none'] : chosen.length === 1 ? COPY['checkpoint.summarise.one'] : fill(COPY['checkpoint.summarise'], { count: chosen.length })

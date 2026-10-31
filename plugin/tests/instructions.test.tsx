@@ -2,7 +2,8 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, prepare, reply, SITE, START, textOf } from './support'
+import { watchState } from './figures'
+import { elements, faults, prepare, reply, SESSION, SITE, START, textOf } from './support'
 import type { World } from './support'
 
 const PANE = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
@@ -1078,3 +1079,119 @@ test('a new session starts the list over, and nothing about it is written to dis
   expect(faults(world)).toEqual([])
 })
 
+
+// -- Claude Code's count of the startup --------------------------------------------------------------------------------
+
+/** What the summary breakdown estimates for this startup: the built-in tools at 12k, where Claude Code counts 7k. */
+const ESTIMATED = [
+  { name: 'System prompt', tokens: 4000 },
+  { name: 'Memory files', tokens: 9000 },
+  { name: 'System tools', tokens: 12000 },
+  { name: 'MCP tools', tokens: 15000 },
+  { name: 'Skills', tokens: 2000 },
+]
+const COUNTED = ESTIMATED.map(row => (row.name === 'System tools' ? { ...row, tokens: 7000 } : row))
+
+/** How many times a full breakdown (the count) was asked for. */
+function counts(world: World): number {
+  return world.asked.filter(one => one === 'full').length
+}
+
+test("Claude Code's count of the startup is asked for once, after the first reply, and stands in for the summary's estimates", async ($, on) => {
+  const world = prepare(on)
+  const seen = watchState(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  world.shape = { startupRows: ESTIMATED }
+  world.counted = { startupRows: COUNTED }
+
+  // Before the first reply nothing is counted: the pane has the summary's figures, and the estimates in them.
+  expect(counts(world)).toBe(0)
+
+  await reply($, world, FIRST)
+  await world.clock.advance(1)
+  expect(counts(world)).toBe(1)
+  // The startup rows as counted are kept; the conversation is what is left of the context (120k) after them.
+  expect(seen.snap?.startupCounted).toEqual(COUNTED)
+  expect(seen.snap?.reading?.parts).toMatchObject({ startup: 37000, conversation: 83000 })
+  expect(seen.snap?.reading?.tokens).toBe(120000)
+
+  // The pane's total is Claude Code's counted one (37k), not the summary's estimate (42k).
+  const mounted = await pane($)
+  expect(lead(lines(await mounted.drawn()))[0]).toBe('Every request starts with 37k tokens of setup.')
+  await mounted.unmount()
+
+  // The later readings keep the counted rows and never ask for the count again.
+  await reply($, world, SECOND)
+  await reply($, world, SECOND)
+  await world.clock.advance(1)
+  expect(counts(world)).toBe(1)
+  expect(seen.snap?.reading?.parts?.startup).toBe(37000)
+  expect(world.asked.filter(one => one === 'summary').length).toBeGreaterThan(2)
+  expect(faults(world)).toEqual([])
+})
+
+test("a category the count does not name keeps the summary's figure", async ($, on) => {
+  const world = prepare(on)
+  const seen = watchState(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  world.shape = { startupRows: ESTIMATED }
+  // The count names only the tools: a server that connected after it keeps the summary's figure.
+  world.counted = { startupRows: COUNTED.filter(row => row.name === 'System tools') }
+  await reply($, world, FIRST)
+  await world.clock.advance(1)
+
+  expect(seen.snap?.startupCounted).toEqual([{ name: 'System tools', tokens: 7000 }])
+  expect(seen.snap?.reading?.parts).toMatchObject({ startup: 37000, conversation: 83000 })
+  expect(faults(world)).toEqual([])
+})
+
+test("a count Claude Code can't make leaves the summary's figures and is not asked for again", async ($, on) => {
+  const world = prepare(on)
+  const seen = watchState(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  world.shape = { startupRows: ESTIMATED }
+  world.countFails = true
+
+  await reply($, world, FIRST)
+  await world.clock.advance(1)
+  await reply($, world, SECOND)
+  await reply($, world, SECOND)
+  await world.clock.advance(1)
+
+  expect(counts(world)).toBe(1)
+  expect(seen.snap?.startupCounted).toEqual([])
+  // The estimates stand: 42k of startup in the 120k context.
+  expect(seen.snap?.reading?.parts).toMatchObject({ startup: 42000 })
+  // One line for the debug log, from the one try.
+  expect(faults(world)).toEqual([expect.stringContaining('startup count')])
+})
+
+test('a /clear starts a new conversation, which is counted again at its first reply', async ($, on) => {
+  const world = prepare(on)
+  const seen = watchState(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  world.shape = { startupRows: ESTIMATED }
+  world.counted = { startupRows: COUNTED }
+  await reply($, world, FIRST)
+  await world.clock.advance(1)
+  expect(counts(world)).toBe(1)
+
+  await $.session.end({ sessionId: SESSION, reason: 'clear' } as never)
+  world.session = 'session-two'
+  await $.session.start(START)
+  expect(seen.snap?.startupCounted ?? null).toBeNull()
+  world.usd = 0
+  await reply($, world, FIRST)
+  await world.clock.advance(1)
+  expect(counts(world)).toBe(2)
+  expect(seen.snap?.startupCounted).toEqual(COUNTED)
+  expect(faults(world)).toEqual([])
+})

@@ -112,10 +112,11 @@ answer when you start it in a long session. It reads no size from their
 results and never says a large result is large. It is also registered
 for SubagentStop, where it prints nothing: it only notes that an agent
 run ended too big for one task, so the main session's next hook can say
-so. A call takes
-about 44 milliseconds on the author's Windows machine, python's own
-start being about 12, and returns before anything else when a result is
-under the size a note could apply to. A `settings.json` written before
+so. How long a call takes depends on the machine, and Python's own start
+is part of it. Setup > Capture and `claudeglass capture status` show the
+measured figure from your own sessions, which Claude Code times (about 124
+milliseconds a run on the author's Windows machine). The hook returns
+before anything else when a result is under the size a note could apply to. A `settings.json` written before
 the shell and MCP tools, or `Grep` and `Glob`, were dropped keeps
 starting it after them until `claudeglass update --finish` or
 `capture connect` rewrites the entry; it returns at once. The wait and

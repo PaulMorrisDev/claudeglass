@@ -5,10 +5,12 @@
  * mod ($.session.usage({ breakdown: "summary" }).context) and agrees with
  * /context: the percentage shown is /context's own, and the compaction
  * point is the user's (autoCompactWindow and friends), not the model's
- * raw window. No Python twin; the rules are in the plan (sections 1-3).
+ * raw window. Claude Code only estimates some categories in a summary (the
+ * built-in tools come out about 1.7 times their counted size), so the
+ * startup part can be put right with the rows of one counted breakdown
+ * (countedRows, withCounted). No Python twin; the rules are in the plan
+ * (sections 1-3).
  */
-
-import { commandLabel } from "./command.js";
 
 /**
  * @typedef {Object} ContextCategory
@@ -26,6 +28,7 @@ import { commandLabel } from "./command.js";
  * @property {number} [autoCompactThreshold] Where Claude summarises, when it says.
  * @property {number} [percentage]           /context's own percent full, of `maxTokens`.
  * @property {string} [autocompactSource]
+ * @property {boolean} [isAutoCompactEnabled]  False when Claude Code will not summarise by itself (it then sends no threshold).
  */
 
 /**
@@ -52,9 +55,9 @@ import { commandLabel } from "./command.js";
  * @typedef {Object} ContextReading
  * @property {number} pct      Percent full, as /context shows it.
  * @property {number} tokens   Tokens in the context now.
- * @property {number} point    Tokens at which Claude summarises.
+ * @property {number|null} point    Tokens at which Claude summarises; null when auto-compact is off (no automatic summary).
  * @property {number} window   The model's window.
- * @property {ContextState} state  plenty under 50% of `point`, filling to 75%, soon to 90%, next above.
+ * @property {ContextState} state  plenty under 50% of `point`, filling to 75%, soon to 90%, next above. With no `point`, the same shares of the window.
  * @property {ContextParts} parts  Null parts when there is no breakdown.
  */
 
@@ -75,8 +78,11 @@ function same(name, wanted) {
   return typeof name === "string" && name.trim().toLowerCase() === wanted;
 }
 
+/** The tokens Claude Code keeps free of the window for the summary itself (its "Autocompact buffer" category). */
+var AUTOCOMPACT_BUFFER = 33000;
+
 /**
- * Where the context sits against the point Claude summarises at.
+ * Where the context sits against the point Claude summarises at (or, with auto-compact off, against the window).
  * @param {number} tokens
  * @param {number} point
  * @returns {ContextState}
@@ -94,9 +100,13 @@ function stateOf(tokens, point) {
  * The reading the band and the pane show. `pct` is `breakdown.percentage`
  * when present (so it matches /context), else tokens over `maxTokens`, else
  * over the window. `point` is `autoCompactThreshold` when present, else
- * `maxTokens` less the buffer category, else the window. Without a
- * breakdown (or without categories) everything falls back to `tokens`
- * and `window` and `parts` are null.
+ * `maxTokens` less the buffer category, else `maxTokens` less the 33k
+ * Claude Code keeps (its default buffer), and null when the breakdown says
+ * auto-compact is off: Claude Code then sends no threshold, and a buffer of
+ * a few thousand tokens against a window of a million would otherwise read
+ * as a summary point 3k short of the end. Without a breakdown (or without
+ * categories) everything falls back to `tokens` and `window` and `parts`
+ * are null.
  * @param {ContextUsage|null|undefined} context
  * @returns {ContextReading}
  */
@@ -142,9 +152,12 @@ export function readContext(context) {
   else if (b && finite(b.percentage) && maxTokens !== null) tokens = (b.percentage / 100) * maxTokens;
   else tokens = 0;
 
+  /** @type {number|null} */
   var point;
-  if (b && finite(b.autoCompactThreshold) && b.autoCompactThreshold > 0) point = b.autoCompactThreshold;
+  if (b && b.isAutoCompactEnabled === false) point = null;
+  else if (b && finite(b.autoCompactThreshold) && b.autoCompactThreshold > 0) point = b.autoCompactThreshold;
   else if (maxTokens !== null && sawBuffer && maxTokens - buffer > 0) point = maxTokens - buffer;
+  else if (maxTokens !== null && maxTokens - AUTOCOMPACT_BUFFER > 0) point = maxTokens - AUTOCOMPACT_BUFFER;
   else point = windowTokens;
 
   var pct;
@@ -159,7 +172,7 @@ export function readContext(context) {
     tokens: tokens,
     point: point,
     window: windowTokens,
-    state: stateOf(tokens, point),
+    state: stateOf(tokens, point === null ? (maxTokens !== null ? maxTokens : windowTokens) : point),
     parts: {
       startup: categories.length ? startup : null,
       conversation: categories.length ? conversation : null,
@@ -177,7 +190,7 @@ var RUNWAY_STEPS = 5;
  * the latest (up to five) steps that grew; a drop is a compaction or a
  * /clear and is left out. Null with fewer than two growing steps.
  * @param {number[]} history
- * @param {number} point  Tokens at which Claude summarises.
+ * @param {number|null} point  Tokens at which Claude summarises; null (auto-compact is off) gives no count.
  * @returns {number|null}
  */
 export function runway(history, point) {
@@ -208,43 +221,76 @@ export function toolGrowth(prevCtx, prevOutput, ctx) {
   return Math.max(0, ctx - prevCtx - prevOutput);
 }
 
-/** The longest a command is kept as "what" a tool call did, and a description (the row cuts it to fit). */
-var WHAT_COMMAND = 40;
-var WHAT_DESCRIPTION = 80;
-/** The longest a search pattern is kept. */
-var WHAT_PATTERN = 30;
+/**
+ * The startup rows of a breakdown as Claude Code counted them. A summary breakdown estimates some categories from
+ * characters (the built-in tools come out about 1.7 times their counted size, and the memory files, agents and system
+ * prompt differ by a few hundred tokens), while a full one counts each with the token-count request; the totals agree
+ * because Claude Code reconciles the Messages row to the total. These are the used categories that are not Messages
+ * and not deferred, as name and tokens: what loads before the first message. Empty when there is no breakdown.
+ * @param {ContextUsage|null|undefined} context  The `context` of a full breakdown.
+ * @returns {{ name: string, tokens: number }[]}
+ */
+export function countedRows(context) {
+  var b = context && context.breakdown;
+  var categories = b && Array.isArray(b.categories) ? b.categories : [];
+  /** @type {{ name: string, tokens: number }[]} */
+  var rows = [];
+  for (var i = 0; i < categories.length; i++) {
+    var category = categories[i];
+    if (!category || !finite(category.tokens) || typeof category.name !== "string") continue;
+    if (category.kind !== "used" || category.isDeferred || same(category.name, "messages")) continue;
+    rows.push({ name: category.name, tokens: category.tokens });
+  }
+  return rows;
+}
 
 /**
- * A few words on what a tool call did, so the heaviest results can say more than a tool's name: a shell
- * call's description, else its command (without leading variable assignments and `cd` hops, first 40 characters); a file's
- * base name for Read, Edit, Write and NotebookEdit; the pattern of Grep and Glob (30 characters); the host
- * of a WebFetch. Anything else, or an input that has none of these, gives "". Kept in live state only.
- * @param {string} name   The tool's name.
- * @param {unknown} input The arguments the model gave it.
- * @returns {string}
+ * A summary breakdown's categories with the counted rows put in place of its estimates, matched by name. The Messages
+ * row takes up the difference, so the used total, the free space and the percentage stay Claude Code's own. A category the
+ * counted rows do not name keeps its estimate. The list comes back as it was when there is nothing to put in place, or
+ * no Messages row to take up the difference (a context before its first message).
+ * @template {{ name: string, tokens: number, kind?: string, isDeferred?: boolean }} C
+ * @param {readonly C[]} categories
+ * @param {readonly { name: string, tokens: number }[]|null|undefined} counted  From countedRows.
+ * @returns {C[]}
  */
-export function toolWhat(name, input) {
-  if (input === null || typeof input !== "object") return "";
-  var args = /** @type {Object<string, unknown>} */ (input);
-  /** @param {unknown} value */
-  var text = function (value) {
-    return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
-  };
-  if (name === "Bash" || name === "PowerShell") {
-    return commandLabel(args, WHAT_COMMAND, WHAT_DESCRIPTION);
+export function countedCategories(categories, counted) {
+  var list = Array.isArray(categories) ? categories.slice() : [];
+  if (!Array.isArray(counted) || counted.length === 0) return list;
+  var messages = -1;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && same(list[i].name, "messages") && list[i].kind === "used") messages = i;
   }
-  if (name === "Read" || name === "Edit" || name === "Write" || name === "NotebookEdit") {
-    var path = text(args.file_path) || text(args.notebook_path);
-    var parts = path.split(/[\\/]/).filter(function (part) {
-      return part !== "";
-    });
-    return parts.length === 0 ? "" : /** @type {string} */ (parts[parts.length - 1]);
+  if (messages < 0) return list;
+  /** @type {Object<string, number>} */
+  var counts = {};
+  for (var j = 0; j < counted.length; j++) {
+    if (counted[j] && finite(counted[j].tokens)) counts[String(counted[j].name).trim().toLowerCase()] = counted[j].tokens;
   }
-  if (name === "Grep" || name === "Glob") return text(args.pattern).slice(0, WHAT_PATTERN).trim();
-  if (name === "WebFetch") {
-    var url = text(args.url);
-    var host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/?#@]*@)?([^/?#:]+)/i.exec(url);
-    return host === null ? "" : /** @type {string} */ (host[1]);
-  }
-  return "";
+  var moved = 0;
+  var out = list.map(function (category) {
+    if (!category || category.kind !== "used" || category.isDeferred || !finite(category.tokens)) return category;
+    var name = typeof category.name === "string" ? category.name.trim().toLowerCase() : "";
+    if (name === "messages" || !Object.prototype.hasOwnProperty.call(counts, name)) return category;
+    moved += category.tokens - /** @type {number} */ (counts[name]);
+    return Object.assign({}, category, { tokens: counts[name] });
+  });
+  var row = /** @type {C} */ (out[messages]);
+  out[messages] = Object.assign({}, row, { tokens: Math.max(0, row.tokens + moved) });
+  return out;
+}
+
+/**
+ * A summary `context` with its breakdown's startup rows counted (countedCategories). The context's own tokens and
+ * percent are untouched; only the split of the used tokens between the startup and the conversation moves, so
+ * readContext's `parts` match what /context counts. The same context when there is nothing to put right.
+ * @template {ContextUsage} T
+ * @param {T} context
+ * @param {readonly { name: string, tokens: number }[]|null|undefined} counted
+ * @returns {T}
+ */
+export function withCounted(context, counted) {
+  var b = context && context.breakdown;
+  if (!b || !Array.isArray(b.categories) || !Array.isArray(counted) || counted.length === 0) return context;
+  return Object.assign({}, context, { breakdown: Object.assign({}, b, { categories: countedCategories(b.categories, counted) }) });
 }

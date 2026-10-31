@@ -4,6 +4,7 @@ import type { Elements, EngineInterface, PaneOpenArgs, Register, RenderElement, 
 import type { GlassPin, GlassReview } from '../types'
 import { emptyReview, endSummarise, memory, noteReadd, noteSummarise, noteTweak, readdMissing, sound, tickedItems } from './compaction-memory'
 import { COPY, GLOSSARY } from './generated/copy.js'
+import { countedCategories } from './lib/context.js'
 import { fill } from './lib/text.js'
 import { emptySnap } from './live'
 import { dashboardAddress, render as checkpoint } from './page-checkpoint'
@@ -57,7 +58,10 @@ export type PageKit = {
   setOption: (key: string, enabled: boolean) => Promise<void>
   /** Asks a model a question: its answer and the tokens it used, or why it could not. */
   ask: (model: string, prompt: string, maxTokens: number) => Promise<{ text: string; input: number; output: number } | { reason: string }>
-  /** The rows of Claude Code's own context breakdown (what /context lists) as of now; empty when it can't say. */
+  /**
+   * The rows of Claude Code's own context breakdown (what /context lists) as of now, the startup rows as counted once a
+   * session when that has been done; empty when it can't say.
+   */
   categories: () => Promise<{ name: string; tokens: number; kind: string; isDeferred: boolean }[]>
   /**
    * Each MCP server's name as /mcp lists it, keyed by the server part of its tools' names
@@ -94,7 +98,11 @@ async function toggleHelp($: EngineInterface, id: string): Promise<void> {
   await update($, explainAtom, () => (open ? null : id))
 }
 
-/** Claude Code's own breakdown of the context (the summary: local and free); undefined when it can't give one. */
+/**
+ * Claude Code's own breakdown of the context (the summary: local and free); undefined when it can't give one. The summary
+ * estimates some rows (the built-in tools most), so the rows counted once a session (track.ts countStartup) are put in
+ * place of those estimates where the pane reads the categories.
+ */
 async function breakdownOf($: EngineInterface) {
   try {
     return (await $.session.usage({ breakdown: 'summary' })).context.breakdown
@@ -180,7 +188,8 @@ function buildKit($: EngineInterface): PageKit {
     },
     categories: async () => {
       const breakdown = await summary()
-      return (breakdown?.categories ?? []).map(one => ({ name: one.name, tokens: one.tokens, kind: one.kind, isDeferred: one.isDeferred }))
+      const counted = (await read($, snapAtom)).startupCounted
+      return countedCategories(breakdown?.categories ?? [], counted).map(one => ({ name: one.name, tokens: one.tokens, kind: one.kind, isDeferred: one.isDeferred }))
     },
     mcpNames: async () => {
       const names: Record<string, string> = {}

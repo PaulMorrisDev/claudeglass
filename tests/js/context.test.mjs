@@ -14,7 +14,7 @@ const staticDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
 const load = (name) => import(pathToFileURL(join(lib, name)).href);
 
-const { readContext, runway, toolGrowth, toolWhat } = await load("context.js");
+const { countedCategories, countedRows, readContext, runway, toolGrowth, withCounted } = await load("context.js");
 const { fill, joinParts } = await load("text.js");
 const { formatTokens, formatAmount, formatAmountCell, amountText, moneySymbol } = await load("units.js");
 const { noteAllowed, mayShow, stamp } = await load("rest.js");
@@ -305,23 +305,130 @@ test("pricing resolves a settings-file rate card", () => {
   assert.equal(priceUsage(null, { input_tokens: 5 }, 300), 0);
 });
 
-test("toolWhat is a few words on what a call did, and nothing for a tool it does not know", () => {
-  // A shell call: its description, else the command without leading assignments, cut at 40 characters.
-  assert.equal(toolWhat("Bash", { description: "Run the plugin tests", command: "npm test" }), "Run the plugin tests");
-  assert.equal(toolWhat("Bash", { command: "T=/c/x CC=\"a b\" npm test" }), "npm test");
-  assert.equal(toolWhat("PowerShell", { command: "Get-ChildItem -Recurse -Force C:\\Users\\someone\\a-very-long-path" }).length, 40);
-  assert.equal(toolWhat("Bash", { description: "d".repeat(100) }).length, 80);
-  // A file tool: the file's base name, from either kind of path.
-  assert.equal(toolWhat("Read", { file_path: "/work/src/instructions.js" }), "instructions.js");
-  assert.equal(toolWhat("Edit", { file_path: "C:\\Dev\\app\\a.ts" }), "a.ts");
-  assert.equal(toolWhat("NotebookEdit", { notebook_path: "/w/n.ipynb" }), "n.ipynb");
-  // A search: the pattern, cut at 30.
-  assert.equal(toolWhat("Grep", { pattern: "needle" }), "needle");
-  assert.equal(toolWhat("Glob", { pattern: "g".repeat(50) }).length, 30);
-  // A fetch: the host.
-  assert.equal(toolWhat("WebFetch", { url: "https://example.com/a/b?c=d" }), "example.com");
-  // Anything else, or an input that is not an object: nothing.
-  assert.equal(toolWhat("Agent", { description: "x" }), "");
-  assert.equal(toolWhat("Bash", null), "");
-  assert.equal(toolWhat("Read", {}), "");
+// What Claude Code gave for a resumed session (7b1258aa), asked twice: the summary breakdown estimates the built-in
+// tools at 29,675 tokens where the counted one finds 17,692, and the Messages row takes up the difference. The total,
+// the percentage and the threshold are the same in both.
+function probeContext(kind) {
+  const summary = kind === "summary";
+  return {
+    tokens: 143004,
+    window: 1000000,
+    percent: 14,
+    breakdown: {
+      maxTokens: 400000,
+      rawMaxTokens: 400000,
+      percentage: 36,
+      autoCompactThreshold: 367000,
+      isAutoCompactEnabled: true,
+      categories: [
+        { name: "System prompt", tokens: summary ? 10985 : 10413, kind: "used" },
+        { name: "System tools", tokens: summary ? 29675 : 17692, kind: "used" },
+        { name: "System tools (deferred)", tokens: summary ? 32048 : 20104, kind: "used", isDeferred: true },
+        { name: "Custom agents", tokens: summary ? 1513 : 1603, kind: "used" },
+        { name: "Memory files", tokens: summary ? 1506 : 1651, kind: "used" },
+        { name: "Skills", tokens: 9942, kind: "used" },
+        { name: "Messages", tokens: summary ? 89383 : 101703, kind: "used" },
+        { name: "Autocompact buffer", tokens: 33000, kind: "buffer" },
+        { name: "Free space", tokens: 223996, kind: "free" },
+      ],
+    },
+  };
+}
+
+test("countedRows are the used categories that load before the first message, and nothing else", () => {
+  assert.deepEqual(countedRows(probeContext("full")), [
+    { name: "System prompt", tokens: 10413 },
+    { name: "System tools", tokens: 17692 },
+    { name: "Custom agents", tokens: 1603 },
+    { name: "Memory files", tokens: 1651 },
+    { name: "Skills", tokens: 9942 },
+  ]);
+  for (const input of [undefined, null, {}, { breakdown: {} }, { breakdown: { categories: [] } }]) assert.deepEqual(countedRows(input), []);
+});
+
+test("a summary reading with the counted startup rows has the counted startup and conversation, and the same total", () => {
+  const summary = probeContext("summary");
+  const full = probeContext("full");
+  // As the summary has it, the startup part is 12k high and the conversation 12k low.
+  assert.deepEqual(readContext(summary).parts, { startup: 53621, conversation: 89383, free: 223996 });
+  assert.deepEqual(readContext(full).parts, { startup: 41301, conversation: 101703, free: 223996 });
+
+  const put = readContext(withCounted(summary, countedRows(full)));
+  // The counted split, to the token, and the figures that were right in both stay as they were.
+  assert.deepEqual(put.parts, readContext(full).parts);
+  const was = readContext(summary);
+  assert.equal(put.tokens, was.tokens);
+  assert.equal(put.pct, was.pct);
+  assert.equal(put.point, was.point);
+  assert.equal(put.state, was.state);
+  // Without the context's own tokens (right after a summary) the used total is the same, so the figures agree there too.
+  assert.equal(readContext({ ...withCounted(summary, countedRows(full)), tokens: undefined }).tokens, 143004);
+});
+
+test("a category the counted rows do not name keeps its estimate, and the input is left as it was", () => {
+  const summary = probeContext("summary");
+  summary.breakdown.categories.splice(6, 0, { name: "MCP tools", tokens: 4000, kind: "used" });
+  summary.breakdown.categories.find((one) => one.name === "Messages").tokens = 85383;
+  const before = JSON.stringify(summary);
+  const put = withCounted(summary, countedRows(probeContext("full")));
+  assert.equal(put.breakdown.categories.find((one) => one.name === "MCP tools").tokens, 4000);
+  assert.equal(put.breakdown.categories.find((one) => one.name === "Messages").tokens, 97703);
+  assert.equal(readContext(put).parts.startup, 45301);
+  assert.equal(JSON.stringify(summary), before);
+});
+
+test("nothing is put in place when nothing was counted, or when there is no Messages row to take up the difference", () => {
+  const summary = probeContext("summary");
+  for (const counted of [undefined, null, []]) assert.equal(withCounted(summary, counted), summary);
+  assert.equal(withCounted({ tokens: 5 }, countedRows(probeContext("full"))).breakdown, undefined);
+  // A fresh session has no Messages row yet: the estimates stand rather than the total moving.
+  const fresh = probeContext("summary");
+  fresh.breakdown.categories = fresh.breakdown.categories.filter((one) => one.name !== "Messages");
+  assert.deepEqual(countedCategories(fresh.breakdown.categories, countedRows(probeContext("full"))), fresh.breakdown.categories);
+  // The Messages row never goes below nothing (here the count finds more at the start than the estimate did).
+  const small = probeContext("full");
+  small.breakdown.categories.find((one) => one.name === "Messages").tokens = 100;
+  assert.equal(countedCategories(small.breakdown.categories, countedRows(probeContext("summary"))).find((one) => one.name === "Messages").tokens, 0);
+});
+
+test("with auto-compact off Claude Code names no threshold, and there is no summary point", () => {
+  // What Claude Code sent for a 1M window with auto-compact off: no threshold, and a buffer of 3,000.
+  const off = {
+    tokens: 250000,
+    window: 1000000,
+    breakdown: {
+      maxTokens: 1000000,
+      rawMaxTokens: 1000000,
+      percentage: 25,
+      isAutoCompactEnabled: false,
+      categories: [
+        { name: "System prompt", tokens: 10000, kind: "used" },
+        { name: "Messages", tokens: 240000, kind: "used" },
+        { name: "Compact buffer", tokens: 3000, kind: "buffer" },
+        { name: "Free space", tokens: 747000, kind: "free" },
+      ],
+    },
+  };
+  const reading = readContext(off);
+  assert.equal(reading.point, null);
+  assert.equal(reading.pct, 25);
+  assert.equal(reading.state, "plenty");
+  // The state follows the window instead: 80% of it is soon.
+  assert.equal(readContext({ ...off, tokens: 800000 }).state, "soon");
+  assert.equal(readContext({ ...off, tokens: 950000 }).state, "next");
+  // No point, no runway.
+  assert.equal(runway([100000, 200000, 300000], reading.point), null);
+  // The same breakdown with auto-compact on is the old reading: the threshold, or the window less the buffer.
+  const on = { ...off, breakdown: { ...off.breakdown, isAutoCompactEnabled: true } };
+  assert.equal(readContext(on).point, 997000);
+  assert.equal(readContext({ ...on, breakdown: { ...on.breakdown, autoCompactThreshold: 900000 } }).point, 900000);
+});
+
+test("with neither a threshold nor a buffer the point is the window less the 33k Claude Code keeps", () => {
+  const context = probeContext("full");
+  context.breakdown.categories = context.breakdown.categories.filter((one) => one.kind !== "buffer");
+  delete context.breakdown.autoCompactThreshold;
+  assert.equal(readContext(context).point, 367000);
+  // A window too small to hold the buffer is its own point.
+  assert.equal(readContext({ tokens: 10, window: 20000, breakdown: { maxTokens: 20000, categories: [] } }).point, 20000);
 });

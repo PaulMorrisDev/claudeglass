@@ -103,7 +103,11 @@ sentence, and one button on the right. The button changes with the state.
 The word and the dot give the state, so colour is never the only signal.
 "% full" matches `/context`. The summary point is the one Claude Code uses,
 including your `autoCompactWindow` setting. Before Claude has a count of
-replies, the line says "Claude summarises at 160k" instead.
+replies, the line says "Claude summarises at 160k" instead. If you have turned
+auto-compact off in Claude Code, no summary will happen on its own, so there
+is no point and no count of replies. The line is "% full" followed by "Claude
+won't summarise by itself", and Tight means the window itself is 75% full. The
+Checkpoint pane's header says the same.
 
 Pressing Summarise starts the summary Claude Code would start with
 `/compact`, with the keep list as its instructions. It does nothing while a
@@ -368,6 +372,15 @@ a note on the pane says they are estimates. Before Claude Code has counted,
 the sizes come from text alone and leave out the input schemas of tools,
 which are most of a tool's size, so the lead says "(est.)".
 
+Claude Code answers a quick request for the context with estimates, and the
+built-in tools come out well above their count (12k too high in one session,
+with the conversation as far too low). So once a session, after Claude's
+first reply, the mod asks Claude Code for the full count, the one `/context`
+makes, and keeps the startup rows from it. The pane's total and the split
+between setup and conversation use those rows from then on; the quick
+readings after each reply still give everything else. Until that first reply
+has finished, and if Claude Code can't count, the quick estimates stand.
+
 ## How a summary is handled
 
 A conversation summary (compaction) replaces the conversation with a short
@@ -518,7 +531,6 @@ or `claudeglass` under `CLAUDE_CONFIG_DIR`.
 | `mod/settings.json` | ClaudeGlass: `update --finish`, then the dashboard's service after a report, and again at once when you rate a session or change the capture settings | Your billing mode, rate card, cache lifetime and characters per token. Also the coaching thresholds, your `muted` and `once` lists, whether coaching is on, "your usual", and where the dashboard answers. The mod only reads it. |
 | `mod/present/<session id>.json` | The mod | A heartbeat: the session id, the last time seen and the time of the session's last request. It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
 | `mod/sensor/<session id>.json` | The mod | What the mod showed and what you did next, as closed words and counts. |
-| `mod/coach.json` | The mod | The time of the last rating reminder, and nothing else. |
 
 ### The sensor
 
@@ -533,6 +545,17 @@ events are:
 | `compaction` | A summary: how it ran (automatic, you asked or pressed here) and how many items it kept, lost and had re-added. It also records whether the summariser was told the keep list, and how many re-added items later replies referenced. |
 | `tweak` | A button you pressed: Summarise now, Re-add, Check with a model or the hold. It carries a count before and, once known, a count after: items kept, lost or checked, or summaries held. |
 
+A new Claude Code process for the same session adds to the file rather than
+replacing it; history written before this version may be partial. This
+happens when you resume a session, or restart or update the app, and the old
+process may have ended without a word. The first time the new process writes
+the file, it adds the events already in it that are older than its own.
+
+The `present` event is written once Claude Code names the surface. The
+Desktop app, VS Code and the mobile app start a session before the client
+attaches, so the mod asks again, once a reply, until a surface is named. A
+session with no surface at all, such as a headless run, never writes it.
+
 The sensor and heartbeat files never hold a prompt, a message, a summary or
 a path. The dashboard's watcher drops any event whose word is outside a fixed
 list. The words you type, the summary text, the keep list and the replies
@@ -541,7 +564,10 @@ to disk.
 
 The mod makes no network calls. It calls a model in exactly two cases, and
 only when you press the button: `/glass tighten` and Check with a model.
-Both go through Claude Code, to Haiku.
+Both go through Claude Code, to Haiku. Once a session, after Claude's first
+reply, it also asks Claude Code to count what loads before your first
+message. Claude Code does that with the token-count request that `/context`
+makes. It is not a model reply, and the mod sends nothing itself.
 
 ## With and without the mod
 
@@ -639,7 +665,9 @@ generated copy in step with it, and the house style in
 - **A receipt shows a match, not understanding.** A reply that names an item
   settles it as referenced, whether or not Claude acted on it.
 - **Startup sizes are rough.** Row sizes are shares of Claude Code's count,
-  or, before it has counted, text alone without tool schemas.
+  or, before it has counted, text alone without tool schemas. Until a
+  session's first reply has finished, Claude Code's count is its quick
+  estimate, which puts the built-in tools high.
 - **A hold is only as good as the headroom.** On a 200,000 window it never
   holds.
 - **Pane titles show only with two panes open.** That is why the Checkpoint pane has an Open Startup button.

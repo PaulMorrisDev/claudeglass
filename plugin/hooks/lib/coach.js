@@ -2,7 +2,7 @@
  *
  * The coaching the capture hook gives after a message is sent
  * (src/claudeglass/hooks/capture_hook.py: _cold_hint, _poll_hint,
- * _drip_hint, _paste_hint, _fresh_hint, _reminder_due), decided here from
+ * _drip_hint, _paste_hint, _fresh_hint), decided here from
  * what the mod sees instead: the draft before it is sent, the replies so
  * far, the background work still running. The same thresholds, the same
  * order of hints and the same text patterns (generated/coaching.js
@@ -747,32 +747,4 @@ export function projectApplies(cwd, projects, excluded, name) {
   }
   if (includes.length === 0) return true;
   return includes.some(function (pattern) { return slugMatches(pattern, slug); });
-}
-
-/**
- * The later of the times a rating reminder last went out, in seconds: the
- * hook's (from the settings file) and the mod's own (mod/coach.json).
- * @param {number|null|undefined} hook
- * @param {number|null|undefined} mod
- * @returns {number|null}
- */
-export function latestReminder(hook, mod) {
-  var a = typeof hook === "number" && isFinite(hook) ? hook : null;
-  var b = typeof mod === "number" && isFinite(mod) ? mod : null;
-  if (a === null) return b;
-  if (b === null) return a;
-  return Math.max(a, b);
-}
-
-/**
- * Whether the session was rated on the dashboard since this piece of work
- * began (capture_hook._reminder_due): a rating counts when the piece's start
- * is not known, or the rating came at or after it.
- * @param {number|null|undefined} ratedAt  Seconds, null for never rated.
- * @param {number|null|undefined} pieceAt  When the piece began, seconds; null when unknown.
- * @returns {boolean}
- */
-export function ratedSince(ratedAt, pieceAt) {
-  if (typeof ratedAt !== "number" || !isFinite(ratedAt)) return false;
-  return typeof pieceAt !== "number" || ratedAt >= pieceAt;
 }

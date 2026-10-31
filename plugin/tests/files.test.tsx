@@ -4,7 +4,7 @@ import { SENSOR_VOCAB } from '../hooks/generated/coaching.js'
 import { VERSION } from '../hooks/generated/version.js'
 import { emptySnap } from '../hooks/live'
 import { addEvent, MAX_EVENTS, sensorFile } from '../hooks/sensor'
-import { faults, prepare, reply, SESSION, START, T0 } from './support'
+import { faults, prepare, reply, SDK_START, SESSION, START, T0 } from './support'
 import type { World } from './support'
 
 const PRESENT = `/cfg/claudeglass/mod/present/${SESSION}.json`
@@ -149,4 +149,154 @@ test('the sensor file keeps the newest events by time, oldest first, whatever or
   addEvent(few, { ts: 100, event: 'note', kind: 'runway', surface: 'log', outcome: 'sent' })
   const written = JSON.parse(String(sensorFile(few))) as { events: Event[] }
   expect(written.events.map(one => one.ts)).toEqual([100, 300])
+})
+
+// -- The surface arrives after the session starts ----------------------------------------------------------------------
+
+const NOW = Math.floor(T0 / 1000)
+
+test('a session that starts with no surface learns it when the client attaches, and says it is present once', async ($, on) => {
+  const world = prepare(on)
+  world.surfaces = []
+  await $.session.start(SDK_START)
+  // Nothing to say yet: no surface, and no file.
+  expect(world.files.has(SENSOR)).toBe(false)
+
+  // The Desktop client attaches after the session has started, before the first reply.
+  world.surfaces = ['desktop']
+  await reply($, world, FIRST)
+  await reply($, world, { ...COLD, gap: 400 * 1000 })
+  expect(events(world).filter(one => one.event === 'present')).toEqual([{ ts: NOW, event: 'present', surface: 'desktop' }])
+  expect(faults(world)).toEqual([])
+})
+
+test('a headless session, whose surfaces stay empty, never says it is present, and is asked once a reply', async ($, on) => {
+  const world = prepare(on)
+  world.surfaces = []
+  await $.session.start(SDK_START)
+  const atStart = world.surfaceCalls
+
+  await reply($, world, FIRST)
+  await reply($, world, { ...COLD, gap: 400 * 1000 })
+  await reply($, world, { ...COLD, gap: 400 * 1000 })
+  expect(events(world).some(one => one.event === 'present')).toBe(false)
+  // Once before each of the three replies, not at every hook of them.
+  expect(world.surfaceCalls - atStart).toBe(3)
+  expect(faults(world)).toEqual([])
+})
+
+test('a surface the session starts with is announced at the start and asked for no more', async ($, on) => {
+  const world = prepare(on)
+  await $.session.start(START)
+  const atStart = world.surfaceCalls
+  await reply($, world, FIRST)
+  await reply($, world, { ...COLD, gap: 400 * 1000 })
+  expect(events(world).filter(one => one.event === 'present')).toEqual([{ ts: NOW, event: 'present', surface: 'terminal' }])
+  expect(world.surfaceCalls).toBe(atStart)
+})
+
+// -- A new process for the same session --------------------------------------------------------------------------------
+
+/** The sensor file an earlier process of the session left. */
+function seeded(world: World, events: object[], over: Record<string, unknown> = {}): void {
+  world.files.set(SENSOR, JSON.stringify({ schema: 1, session_id: SESSION, version: '0.0.1', events, ...over }))
+}
+
+const EARLIER = [
+  { ts: NOW - 7200, event: 'present', surface: 'desktop' },
+  { ts: NOW - 3600, event: 'compaction', kind: 'auto', kept: 3, missing: 1, added: 0, instructed: 1 },
+  { ts: NOW - 3000, event: 'tweak', kind: 'readd', before: 1, after: 1 },
+]
+
+test('a new process for the same session adds to its sensor file instead of replacing it', async ($, on) => {
+  const world = prepare(on)
+  seeded(world, EARLIER)
+  await $.session.start(START)
+  await reply($, world, FIRST)
+  await reply($, world, { ...COLD, gap: 400 * 1000 })
+
+  const seen = events(world)
+  // What the earlier process wrote, then this one's: its own present and the cold send, all in time order.
+  expect(seen.slice(0, 3)).toEqual(EARLIER)
+  expect(seen[3]).toEqual({ ts: NOW, event: 'present', surface: 'terminal' })
+  expect(seen.some(one => one.event === 'cold_send')).toBe(true)
+  expect(seen.map(one => one.ts)).toEqual([...seen.map(one => one.ts)].sort((a, b) => a - b))
+  // The file keeps the shape the Python side reads.
+  expect(Object.keys(json(world, SENSOR)).sort()).toEqual(['events', 'schema', 'session_id', 'version'])
+  expect(json(world, SENSOR).version).toBe(VERSION)
+  expect(faults(world)).toEqual([])
+})
+
+test('a process that starts and ends with no reply keeps the earlier events and adds its present', async ($, on) => {
+  const world = prepare(on)
+  seeded(world, EARLIER)
+  await $.session.start(START)
+  await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
+  expect(events(world)).toEqual([...EARLIER, { ts: NOW, event: 'present', surface: 'terminal' }])
+  expect(faults(world)).toEqual([])
+})
+
+test('later writes of a process keep what it holds and do not read the file again', async ($, on) => {
+  const world = prepare(on)
+  seeded(world, EARLIER)
+  await $.session.start(START)
+  await reply($, world, FIRST)
+  expect(events(world).slice(0, 3)).toEqual(EARLIER)
+
+  // Something else rewrites the file. The process writes its own history whole at its next change.
+  seeded(world, [{ ts: NOW - 10, event: 'present', surface: 'mobile' }])
+  await reply($, world, { ...COLD, gap: 400 * 1000 })
+  const seen = events(world)
+  expect(seen.slice(0, 3)).toEqual(EARLIER)
+  expect(seen.some(one => one.surface === 'mobile')).toBe(false)
+})
+
+test('events the file holds from this very process (a reload) are not added twice', async ($, on) => {
+  const world = prepare(on)
+  // The file already has the present this process is about to announce, at the same second.
+  seeded(world, [{ ts: NOW - 60, event: 'cold_send', outcome: 'warned' }, { ts: NOW, event: 'present', surface: 'terminal' }])
+  await $.session.start(START)
+  await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
+  expect(events(world)).toEqual([{ ts: NOW - 60, event: 'cold_send', outcome: 'warned' }, { ts: NOW, event: 'present', surface: 'terminal' }])
+})
+
+test('the file keeps the newest events when the earlier ones and this process hold more than the limit', async ($, on) => {
+  const world = prepare(on)
+  const old = Array.from({ length: MAX_EVENTS }, (_, i) => ({ ts: NOW - 5000 + i, event: 'cold_send', outcome: 'warned' }))
+  seeded(world, old)
+  await $.session.start(START)
+  await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
+  const seen = events(world)
+  expect(seen).toHaveLength(MAX_EVENTS)
+  // The oldest row is the one dropped, and the file starts at the oldest it keeps.
+  expect(seen[0]).toEqual(old[1])
+  expect(seen[seen.length - 1]).toEqual({ ts: NOW, event: 'present', surface: 'terminal' })
+})
+
+const NOT_USABLE: [string, string][] = [
+  ['text that is not JSON', 'not json'],
+  ['nothing at all', ''],
+  ['another schema', JSON.stringify({ schema: 2, session_id: SESSION, events: EARLIER })],
+  ['another session', JSON.stringify({ schema: 1, session_id: 'session-two', events: EARLIER })],
+  ['no list of events', JSON.stringify({ schema: 1, session_id: SESSION, events: 'x' })],
+  ['a JSON value that is not a file', '42'],
+]
+
+for (const [what, text] of NOT_USABLE) {
+  test(`a sensor file that is ${what} is left out, and the new events are written`, async ($, on) => {
+    const world = prepare(on)
+    world.files.set(SENSOR, text)
+    await $.session.start(START)
+    await reply($, world, FIRST)
+    expect(events(world)).toEqual([{ ts: NOW, event: 'present', surface: 'terminal' }])
+    expect(faults(world)).toEqual([])
+  })
+}
+
+test('events in the file that are not events are dropped, the rest are kept', async ($, on) => {
+  const world = prepare(on)
+  seeded(world, [null, 7, 'x', { ts: 'soon', event: 'present' }, { ts: NOW - 5.5, event: 'present' }, { event: 'present' }, EARLIER[1]])
+  await $.session.start(START)
+  await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
+  expect(events(world)).toEqual([EARLIER[1], { ts: NOW, event: 'present', surface: 'terminal' }])
 })

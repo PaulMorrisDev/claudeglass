@@ -756,6 +756,21 @@ test('straight after a summary the pane reads the context as Claude Code reports
   expect(faults(world)).toEqual([])
 })
 
+test("with auto-compact off the pane's header says how full the context is and that Claude will not summarise", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  // A million-token window, no threshold, and the few thousand tokens of buffer Claude Code still names.
+  world.shape = { window: 1000000, buffer: 3000, autoCompact: false }
+  await started($, world)
+
+  const mounted = await pane($)
+  const header = lines(await mounted.drawn())[0]
+  await mounted.unmount()
+  expect(header).toMatch(/^Context \d+% full · Claude won't summarise by itself/)
+  expect(header).not.toMatch(/summarises at|replies/)
+  expect(faults(world)).toEqual([])
+})
+
 /** What the test sees of the review state: the last value written. */
 type Watch = { readonly latest: GlassReview }
 

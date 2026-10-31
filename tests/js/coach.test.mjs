@@ -5,7 +5,7 @@
 //
 // tests/test_mod_coach.py runs this file with COACH_VECTORS set to a JSON
 // file of cases built by calling the capture hook's own functions
-// (_is_status, _drip_count, _cold_hint, _fresh_hint, _reminder_due, ...),
+// (_is_status, _drip_count, _cold_hint, _fresh_hint, ...),
 // so the decisions are held to the Python they port.
 
 import test from "node:test";
@@ -47,8 +47,6 @@ const {
   freshHint,
   projectApplies,
   projectSlug,
-  latestReminder,
-  ratedSince,
   emptyBackground,
   backgroundLaunched,
   backgroundNotified,
@@ -454,17 +452,6 @@ test("the slug is the folder with every other character as a dash, cut at 200", 
   assert.equal(projectSlug("/x", "given"), "given");
   const long = projectSlug("/" + "a".repeat(300));
   assert.equal(long.length, 200 + 1 + 8);
-});
-
-test("the later reminder wins, and a rating counts when it is not before the piece began", () => {
-  assert.equal(latestReminder(100, 200), 200);
-  assert.equal(latestReminder(300, 200), 300);
-  assert.equal(latestReminder(null, 200), 200);
-  assert.equal(latestReminder(null, null), null);
-  assert.equal(ratedSince(null, 10), false);
-  assert.equal(ratedSince(50, 10), true);
-  assert.equal(ratedSince(5, 10), false);
-  assert.equal(ratedSince(5, null), true);
 });
 
 test("the decisions match the Python they port, case by case", { skip: process.env.COACH_VECTORS ? false : "COACH_VECTORS isn't set (test_mod_coach.py sets it)" }, () => {

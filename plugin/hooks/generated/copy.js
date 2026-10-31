@@ -5,6 +5,7 @@ export const COPY = {
   "amount.list": "{dollars} list-price equivalent",
   "amount.share": "about {share} of your weekly limit",
   "amount.share.limit": "about {share} of your 5-hour limit",
+  "band.auto.off": "Claude won't summarise by itself",
   "band.full": "{pct}% full",
   "band.open": "Glass",
   "band.point": "Claude summarises at {tokens}",

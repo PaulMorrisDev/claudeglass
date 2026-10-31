@@ -10,7 +10,7 @@ import { beat, keepBeating, leave } from './heartbeat'
 import type { Io } from './io'
 import { emptySnap, flags, flushNow, forget, live, restart, touch } from './live'
 import { cacheState } from './lib/cache.js'
-import { readContext, toolGrowth, toolWhat } from './lib/context.js'
+import { countedRows, readContext, toolGrowth, withCounted } from './lib/context.js'
 import { priceUsage, ratesFor } from './lib/pricing.js'
 import { detectRebuild } from './lib/rebuild.js'
 import { addEvent, announcePresent, isSurface, seconds, settleAfterReply, settleAtEnd, writeSensor } from './sensor'
@@ -29,19 +29,11 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 
 const MAX_REQUESTS = 200
 const MAX_REPLIES = 100
-const MAX_REPLY_COSTS = 40
 const MAX_COMPACTIONS = 20
-const MAX_HEAVIEST = 5
 /** The most tool names kept as called this session (a session calls a few dozen at most). */
 const MAX_TOOLS_USED = 200
 /** A wait this long after a request that hit the usage limit counts as the limit's pause. */
 const LIMIT_PAUSE_MS = 60 * 1000
-const NOTE_TOOLS = ['Bash', 'Grep', 'Glob']
-
-/** Whether a tool is one whose result is named as the heaviest of a reply: the ones whose output Claude isn't already coached on. */
-export function noteTool(name: string): boolean {
-  return NOTE_TOOLS.includes(name) || name.startsWith('mcp__')
-}
 
 export type TurnEnd = {
   io: Io
@@ -177,6 +169,21 @@ async function firstSurface($: EngineInterface): Promise<string | null> {
 }
 
 /**
+ * A session that was claimed with no surface known is asked again, at most once per reply. Claude Code starts the
+ * sessions the Desktop app, VS Code and the mobile app drive with no surface, and the client attaches a moment later,
+ * so the one question at the claim often finds none. Once a surface is named, `present` is announced as it would have
+ * been at the start. A headless session, whose surfaces stay empty, is asked once a reply and never announces it.
+ */
+async function lateSurface($: EngineInterface, snap: GlassSnap): Promise<void> {
+  if (snap.surface !== null || snap.surfaceAskedAt === snap.replies) return
+  snap.surfaceAskedAt = snap.replies
+  const surface = await firstSurface($)
+  if (surface === null) return
+  snap.surface = surface
+  announcePresent(snap, await $.clock.now())
+}
+
+/**
  * The snapshot of the session now running. A new session id (a /clear raises
  * no session.start) starts it over and says the mod is present again.
  */
@@ -184,7 +191,10 @@ export async function ensure($: EngineInterface): Promise<GlassSnap> {
   const io = kit($)
   const snap = await live(io)
   const id = await $.session.id()
-  if (snap.sessionId === id) return snap
+  if (snap.sessionId === id) {
+    await lateSurface($, snap)
+    return snap
+  }
   const surface = snap.surface ?? (await firstSurface($))
   // A snapshot no session has claimed yet (the first event of a session, or after a /clear) is claimed where it stands,
   // so what another hook has put on it since (a message counted) isn't lost to a second start.
@@ -203,17 +213,62 @@ function count(value: unknown): number {
  * The context as Claude Code reports it now (what /context shows). Right after a summary `context.tokens` is still the
  * last request's size while the breakdown is the new context, so then the tokens come from the breakdown's used total
  * (what its percentage is of), else from the summary's own `tokensAfter`: the state, the runway and the figures agree.
+ * Each reading asks for the summary breakdown (local and free), which estimates the built-in tools well over their count;
+ * the startup rows counted once a session (`countStartup`) are put in place of those estimates, so the startup and the
+ * conversation parts match what /context counts.
  */
 async function refreshReading($: EngineInterface, snap: GlassSnap, summary?: { tokensAfter: number | null }): Promise<void> {
   const usage = await $.session.usage({ breakdown: 'summary' })
+  const context = withCounted(usage.context, snap.startupCounted)
   if (summary === undefined) {
-    if (typeof usage.context.tokens === 'number') snap.reading = readContext(usage.context)
+    if (typeof context.tokens === 'number') snap.reading = readContext(context)
     return
   }
-  const fresh = readContext({ ...usage.context, tokens: undefined })
+  const fresh = readContext({ ...context, tokens: undefined })
   if (fresh.tokens > 0) snap.reading = fresh
-  else if (summary.tokensAfter !== null && summary.tokensAfter > 0) snap.reading = readContext({ ...usage.context, tokens: summary.tokensAfter })
-  else if (typeof usage.context.tokens === 'number') snap.reading = readContext(usage.context)
+  else if (summary.tokensAfter !== null && summary.tokensAfter > 0) snap.reading = readContext({ ...context, tokens: summary.tokensAfter })
+  else if (typeof context.tokens === 'number') snap.reading = readContext(context)
+}
+
+/** The session whose startup is being counted, while the count is on its way (it is not asked for twice). */
+let counting: string | null = null
+
+/**
+ * Claude Code's own count of what loads before the first message, asked for once a session. A summary breakdown (every
+ * reading's) estimates some categories from characters, the built-in tools at about 1.7 times their count: the startup
+ * part reads about 12k high and the conversation as much low. A full one counts each tool and file with the token-count
+ * request, one for each, as /context does, which takes a moment, so it is asked for once, off to the side of the hook, and
+ * after the session's first reply, when its MCP servers have connected. Its startup rows are kept on the snapshot
+ * (`startupCounted`) and put in place of the estimates in every summary reading after it (`refreshReading`) and in the
+ * Startup pane (pane.tsx). A count that fails leaves an empty list, so it isn't tried again.
+ */
+function countStartup($: EngineInterface, io: Io, snap: GlassSnap): void {
+  const id = snap.sessionId
+  if (id === null || snap.startupCounted !== null || counting === id) return
+  counting = id
+  io.after(0, () => {
+    void (async () => {
+      let rows: { name: string; tokens: number }[] = []
+      try {
+        rows = countedRows((await $.session.usage({ breakdown: 'full' })).context)
+      } catch (error) {
+        $.ui.log(`claudeglass: startup count ${String(error)}`, { to: 'debug' })
+      }
+      try {
+        const now = await live(io)
+        // A /clear or a new session in the meantime is another conversation: its first reply asks for its own.
+        if (now.sessionId === id) {
+          now.startupCounted = rows
+          if (rows.length > 0) await refreshReading($, now)
+          await touch(io)
+        }
+      } catch (error) {
+        $.ui.log(`claudeglass: startup count ${String(error)}`, { to: 'debug' })
+      } finally {
+        counting = null
+      }
+    })()
+  })
 }
 
 /**
@@ -236,10 +291,9 @@ function settleCost(snap: GlassSnap): void {
     snap.turnUsd = spent
     snap.turnExact = true
   } else if (!snap.turnExact) {
+    // The reply has ended: this is what it cost, and `turnUsd` keeps it until the next reply begins.
     snap.turnExact = true
-    snap.lastReplyUsd = spent
-    const last = snap.replyCosts[snap.replyCosts.length - 1]
-    if (last !== undefined) last.usd = spent
+    snap.turnUsd = spent
   }
 }
 
@@ -260,10 +314,6 @@ async function measure($: EngineInterface, snap: GlassSnap, cost: number | undef
     }
   }
   snap.limitHit = limits.some(one => one.percentUsed >= 100)
-}
-
-function toolLabel(name: string): string {
-  return name
 }
 
 /**
@@ -307,8 +357,6 @@ async function recordRequest(
   const cacheWrite = count(usage.cache_creation_input_tokens)
   const ctx = input + cacheRead + cacheWrite
   const tools = uses.map(use => use.name)
-  // A few words on what each call did, for the heaviest items: kept in this live snapshot only, never written to disk.
-  const whats = uses.map(use => toolWhat(use.name, use.input))
   const prev = snap.reqs[snap.reqs.length - 1] ?? null
   const model = usage.model || step.model
   const first = step.index === 0 && step.messageCount <= 1 && snap.reqs.length === 0 && snap.replies === 0
@@ -316,7 +364,7 @@ async function recordRequest(
   const afterLimitWait = snap.limitHit && prev !== null && now - prev.ts >= LIMIT_PAUSE_MS
   const growth = prev !== null && step.index > 0 && !afterCompaction ? toolGrowth(prev.ctx, prev.output, ctx) : 0
 
-  const request: GlassRequest = { ts: now, ctx, input, output, cacheRead, cacheWrite, model, tools, whats, afterCompaction, afterLimitWait, first, growth }
+  const request: GlassRequest = { ts: now, ctx, input, output, cacheRead, cacheWrite, model, tools, afterCompaction, afterLimitWait, first, growth }
   if (first) {
     snap.firstCr = cacheRead
     snap.startupFirst = ctx
@@ -332,24 +380,10 @@ async function recordRequest(
     addEvent(snap, { ts: seconds(now), event: 'rebuild', kind: rebuild.cause, outcome: rebuild.expected ? 'expected' : 'unexpected' })
   }
 
-  if (growth > 0 && prev !== null) {
-    snap.toolKept += growth
-    const noted = prev.tools.find(noteTool)
-    const name = toolLabel(noted ?? prev.tools[0] ?? '')
-    if (name !== '') {
-      const what = prev.whats?.[prev.tools.indexOf(name)] ?? ''
-      snap.heaviest.push(what === '' ? { name, tokens: growth } : { name, tokens: growth, what })
-      snap.heaviest.sort((a, b) => b.tokens - a.tokens)
-      snap.heaviest.splice(MAX_HEAVIEST)
-    }
-  }
+  if (growth > 0 && prev !== null) snap.toolKept += growth
 
   snap.turnUsd += priceUsage(rates, usage, ttl)
   snap.turnExact = false
-  snap.mix.read += priceUsage(rates, { cache_read_input_tokens: cacheRead }, ttl)
-  snap.mix.write += priceUsage(rates, { cache_creation_input_tokens: cacheWrite }, ttl)
-  snap.mix.input += priceUsage(rates, { input_tokens: input }, ttl)
-  snap.mix.output += priceUsage(rates, { output_tokens: output }, ttl)
 
   snap.reqs.push(request)
   if (snap.reqs.length > MAX_REQUESTS) snap.reqs.splice(0, snap.reqs.length - MAX_REQUESTS)
@@ -366,7 +400,6 @@ function recordCompaction(snap: GlassSnap, trigger: string, before: number | nul
   if (snap.compactions.length > MAX_COMPACTIONS) snap.compactions.splice(0, snap.compactions.length - MAX_COMPACTIONS)
   snap.pendingCompaction = true
   snap.toolKept = 0
-  snap.heaviest = []
 }
 
 export const register: Register = on => {
@@ -374,6 +407,7 @@ export const register: Register = on => {
     const io = kit($)
     try {
       forget()
+      counting = null
       resetCoach()
       await reloadSettings(io)
       const detailed = await $.store.get('detailed')
@@ -521,11 +555,8 @@ export const register: Register = on => {
         snap.replies += 1
         snap.history.push(last.ctx)
         if (snap.history.length > MAX_REPLIES) snap.history.splice(0, snap.history.length - MAX_REPLIES)
-        const known = snap.cost !== null && snap.turnStartCost !== null ? Math.max(0, snap.cost - snap.turnStartCost) : null
-        const spent = snap.turnUsd > 0 ? snap.turnUsd : known
-        snap.lastReplyUsd = spent
-        snap.replyCosts.push({ usd: spent ?? 0, ctx: last.ctx })
-        if (snap.replyCosts.length > MAX_REPLY_COSTS) snap.replyCosts.splice(0, snap.replyCosts.length - MAX_REPLY_COSTS)
+        // A reply the rates could not price (a model with no rate) is what Claude Code's cost moved by.
+        if (!(snap.turnUsd > 0) && snap.cost !== null && snap.turnStartCost !== null) snap.turnUsd = Math.max(0, snap.cost - snap.turnStartCost)
         settleAfterReply(snap, last.ctx)
         for (const listener of listeners) {
           try {
@@ -536,6 +567,7 @@ export const register: Register = on => {
         }
         await writeSensor(io, snap)
         await armCacheClock(io, snap, settings.ttl)
+        countStartup($, io, snap)
       }
       await touch(io)
     } catch (error) {

@@ -67,6 +67,7 @@ export function buttonCells(label) {
  * @property {string} replies      "about {replies} replies before a summary"
  * @property {string} repliesOne   "about 1 reply before a summary"
  * @property {string} point        "Claude summarises at {tokens}"
+ * @property {string} autoOff       "Claude won't summarise by itself", for a context with no summarising point
  * @property {string} lost         "Summary lost {missing} of {total} items"
  * @property {string} kept         "Summary kept all {total} items"
  * @property {string} keptOne      "Summary kept the 1 item"
@@ -76,7 +77,7 @@ export function buttonCells(label) {
  * @typedef {Object} HealthFigures
  * @property {string} pct          The share of the window used, written ("34").
  * @property {number|null} replies Replies before the summary; null when not known yet.
- * @property {string} point        The summarising point, written ("160k").
+ * @property {string|null} point  The summarising point, written ("160k"); null when auto-compact is off, so the line has no runway and says so.
  * @property {number} missing
  * @property {number} total
  */
@@ -93,6 +94,7 @@ export function healthForms(state, figures, words) {
   if (state === "kept") return [figures.total === 1 ? words.keptOne : fill(words.kept, { total: figures.total }), ""];
   var full = fill(words.full, { pct: figures.pct });
   var left = figures.replies;
+  if (figures.point === null) return [joinParts([full, words.autoOff]), full, ""];
   var runway =
     left === null || left < 1
       ? fill(words.point, { tokens: figures.point })

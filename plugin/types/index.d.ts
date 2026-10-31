@@ -59,8 +59,6 @@ export type GlassRequest = {
   cacheWrite: number
   model: string
   tools: string[]
-  /** A few words on what each tool call did (`toolWhat`), in step with `tools`; "" for a tool that has none. Live state only. */
-  whats?: string[]
   afterCompaction: boolean
   afterLimitWait: boolean
   first: boolean
@@ -74,9 +72,6 @@ export type GlassCompaction = {
   tokensBefore: number | null
   tokensAfter: number | null
 }
-
-/** A tool result's size, with a few words on what the call did when it can say (`toolWhat`). Live state only. */
-export type GlassItem = { name: string; tokens: number; what?: string }
 
 /** One agent run of this session. The task prompt is never kept here (agents.ts holds it in memory). */
 export type GlassAgent = {
@@ -155,7 +150,8 @@ export type GlassPendingNote = {
 export type GlassContextReading = {
   pct: number
   tokens: number
-  point: number
+  /** Where Claude Code summarises, in tokens; null when auto-compact is off (no automatic summary will happen). */
+  point: number | null
   window: number
   state: 'plenty' | 'filling' | 'soon' | 'next'
   parts: { startup: number | null; conversation: number | null; free: number | null }
@@ -169,10 +165,14 @@ export type GlassSnap = {
   sessionId: string | null
   /** The surface the session runs on (terminal, desktop, ...); null until known. */
   surface: string | null
+  /**
+   * The count of replies when the surface was last asked for with none known (ensure() in track.ts asks again at most once
+   * per reply: a Desktop session starts with no surface and the client attaches later); null before it was asked that way.
+   */
+  surfaceAskedAt: number | null
   reading: GlassContextReading | null
   cost: number | null
   turnStartCost: number | null
-  lastReplyUsd: number | null
   fiveHour: { pct: number; resetsAt: string | null } | null
   /** True once the 5-hour limit has been reached. */
   limitHit: boolean
@@ -188,17 +188,20 @@ export type GlassSnap = {
   toolsUsed: string[]
   firstCr: number | null
   startupFirst: number | null
+  /**
+   * What loads before the first message, as Claude Code counted it (a `full` breakdown, asked for once a session, after its
+   * first reply): the name and tokens of each used category but Messages. It stands in for the estimates the per-reply
+   * `summary` breakdown gives (lib/context.js `withCounted`). Null until counted; empty when Claude Code could not count.
+   */
+  startupCounted: { name: string; tokens: number }[] | null
   model: string | null
   /** Context after each reply, oldest first. */
   history: number[]
   replies: number
-  replyCosts: { usd: number; ctx: number }[]
   lastTs: number | null
   compactions: GlassCompaction[]
   pendingCompaction: boolean
   toolKept: number
-  heaviest: GlassItem[]
-  mix: { read: number; write: number; input: number; output: number }
   rest: GlassRestState
   lastNoteReply: number | null
   /** Requests in the reply being worked on. */
@@ -207,7 +210,10 @@ export type GlassSnap = {
   turnAt: number | null
   /** The id of the main reply last begun (the `turnId` its first request carried): a request with another id begins the next reply, a subagent's never does. */
   turnId: string | null
-  /** What the reply being worked on has cost so far, in USD: each request priced from its usage, replaced by Claude Code's own figure at each measurement. */
+  /**
+   * What the reply being worked on has cost so far, in USD: each request priced from its usage, replaced by Claude Code's own
+   * figure at each measurement. Between replies it is what the reply that ended cost (until the next one begins).
+   */
   turnUsd: number
   /** False while `turnUsd` rests on the prices alone, with no measurement from Claude Code since the last request. */
   turnExact: boolean
@@ -215,6 +221,8 @@ export type GlassSnap = {
   pending: GlassPendingNote[]
   /** True when events changed since the sensor file was last written. */
   eventsDirty: boolean
+  /** True once this process has read the session's sensor file left by an earlier process and added its events to `events` (sensor.ts writeSensor). */
+  sensorMerged: boolean
   /** When the heartbeat was last written, in ms. */
   lastBeat: number
   /** The agents that ran in this session, oldest first. */

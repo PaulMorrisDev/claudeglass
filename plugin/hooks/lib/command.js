@@ -1,8 +1,8 @@
 /* claudeglass mod: lib/command.js
  *
- * What to call a shell command in a list: the keep list's failed command and the
- * heaviest items on the Now page say the same words for the same call. Pure text
- * work; nothing here reads a clock, the disk or the engine.
+ * What to call a shell command in a list: the keep list's failed command says
+ * what the command was, without its set-up. Pure text work; nothing here reads
+ * a clock, the disk or the engine.
  */
 
 /** A leading `VAR=value` step: an unquoted value stops at a space, `;` or `&`, so `T=/c/x&&npm test` keeps `npm test`. */

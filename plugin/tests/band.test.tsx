@@ -398,6 +398,36 @@ test('with no summarising point in the figures, the point is the window less the
   expect(faults(world)).toEqual([])
 })
 
+test('with neither a threshold nor a buffer in the figures, the point is the window less the 33k Claude Code keeps', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  world.shape = { window: 400000, point: null }
+  await started($, world, TIGHT)
+
+  const mounted = await band($)
+  expect((await texts(mounted))[2]).toBe('30% full · Claude summarises at 367k')
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('with auto-compact off the band says how full the context is, and that Claude will not summarise by itself', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  // A million-token window, no threshold, and the few thousand tokens of buffer Claude Code still names.
+  world.shape = { window: 1000000, buffer: 3000, autoCompact: false }
+  await started($, world, TIGHT)
+  await reply($, world, LATER)
+  await reply($, world, LATER)
+
+  const mounted = await band($)
+  const shown = await texts(mounted)
+  expect(shown.slice(0, 2)).toEqual(['●', 'Fine   '])
+  expect(shown[2]).toBe("12% full · Claude won't summarise by itself")
+  expect(shown.join(' ')).not.toMatch(/summarises at|replies/)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
 test('the busy label shows only while a summary runs; a second press before it ends starts none', async ($, on) => {
   const world = prepare(on)
   const watch = watchReview(on)

@@ -1,5 +1,5 @@
 // Tests for the readable-command helper (plugin/hooks/lib/command.js), which the keep list's failed
-// command and the Now page's heaviest items share.
+// command uses.
 //
 //   node --test tests/js/command.test.mjs
 
@@ -10,7 +10,6 @@ import { dirname, join } from "node:path";
 
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
 const { commandLabel, bareCommand } = await import(pathToFileURL(join(lib, "command.js")).href);
-const { toolWhat } = await import(pathToFileURL(join(lib, "context.js")).href);
 const { buildKeepList } = await import(pathToFileURL(join(lib, "keeplist.js")).href);
 
 test("the set-up a command starts with is dropped: assignments, quoted ones, and cd hops", () => {
@@ -39,9 +38,9 @@ test("the description wins, and the limits are the caller's", () => {
   assert.equal(commandLabel({ command: 5 }), "");
 });
 
-test("the heaviest items and the keep list say the same words for the same call", () => {
+test("the keep list names a failed command by its label", () => {
   const input = { command: "cd /c/Dev/app && T=/c/x&&npm test" };
-  assert.equal(toolWhat("Bash", input), "npm test");
+  assert.equal(commandLabel(input), "npm test");
   const messages = [{ role: "assistant", text: "", toolUses: [{ tool: "Bash", input, isError: true, text: "Exit code 2" }] }];
   const error = buildKeepList(messages).find((item) => item.kind === "error");
   assert.equal(error.text, "npm test failed: Exit code 2");

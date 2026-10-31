@@ -17,7 +17,8 @@ export type Parts = {
   conversation: number
   output: number
   free: number
-  point: number
+  /** Where Claude Code summarises; null when auto-compact is off. */
+  point: number | null
   tokens: number
 }
 
@@ -65,7 +66,8 @@ export function partsOf(snap: GlassSnap): Parts | null {
     startup,
     conversation: conversation - output,
     output,
-    free: Math.max(0, reading.point - tokens),
+    // With auto-compact off the room left is what the window holds.
+    free: Math.max(0, (reading.point ?? reading.window) - tokens),
     point: reading.point,
     tokens,
   }

@@ -33,7 +33,7 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 
 // The coaching that used to come after a message is sent, given before it. This
 // file feeds coach-mem.ts from the events; hint.ts shows what it chooses for the
-// draft, notes.ts the rating reminder, and the status line the plan tip.
+// draft, and the status line the plan tip. (The rating reminder is the capture hook's again; the mod no longer gives it.)
 //
 //   session.start  the project the session runs in (coaching covers the projects the user's config leaves in)
 //   prompt.edit    the draft's shape (length, and the words while it is short)

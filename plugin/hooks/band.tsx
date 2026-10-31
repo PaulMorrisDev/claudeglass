@@ -155,12 +155,13 @@ export const register: Register = on => {
     const room = e.props.bodyColumns - buttonCells(action.label) - BUTTON_GAP - LEAD_CELLS - WORD_CELLS - 2 * WORD_GAP
     const line = healthLine(
       state,
-      { pct: percent(reading.pct), replies: view.replies, point: formatTokens(reading.point), missing: review.missing, total },
+      { pct: percent(reading.pct), replies: view.replies, point: reading.point === null ? null : formatTokens(reading.point), missing: review.missing, total },
       {
         full: COPY['band.full'],
         replies: COPY['health.replies'],
         repliesOne: COPY['health.replies.one'],
         point: COPY['band.point'],
+        autoOff: COPY['band.auto.off'],
         lost: COPY['health.lost'],
         kept: COPY['health.kept.all'],
         keptOne: COPY['health.kept.one'],

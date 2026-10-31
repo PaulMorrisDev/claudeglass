@@ -15,6 +15,7 @@ const WORDS = {
   replies: "about {replies} replies before a summary",
   repliesOne: "about 1 reply before a summary",
   point: "Claude summarises at {tokens}",
+  autoOff: "Claude won't summarise by itself",
   lost: "Summary lost {missing} of {total} items",
   kept: "Summary kept all {total} items",
   keptOne: "Summary kept the 1 item",
@@ -73,6 +74,18 @@ test("with no count of replies the line gives the summarising point instead", ()
   const figures = { pct: "71", replies: null, point: "160k", missing: 0, total: 0 };
   assert.equal(healthForms("tight", figures, WORDS)[0], "71% full · Claude summarises at 160k");
   assert.equal(healthForms("tight", { ...figures, replies: 0 }, WORDS)[0], "71% full · Claude summarises at 160k");
+});
+
+test("with auto-compact off there is no point and no runway, so the line says how full the context is and that Claude will not summarise", () => {
+  const figures = { pct: "71", replies: 4, point: null, missing: 0, total: 0 };
+  const longest = "71% full · Claude won't summarise by itself";
+  assert.deepEqual(healthForms("fine", figures, WORDS), [longest, "71% full", ""]);
+  assert.deepEqual(healthForms("tight", { ...figures, replies: null }, WORDS), [longest, "71% full", ""]);
+  assert.equal(healthLine("tight", figures, WORDS, 60), longest);
+  // A narrow band drops the second part, as it drops a runway.
+  assert.equal(healthLine("tight", figures, WORDS, 40), "71% full");
+  // Review and Kept still say what the summary did.
+  assert.deepEqual(healthForms("review", { ...figures, missing: 3, total: 9 }, WORDS), ["Summary lost 3 of 9 items", ""]);
 });
 
 test("Review and Kept say what the summary did with the items", () => {

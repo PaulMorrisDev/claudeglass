@@ -53,7 +53,7 @@ export type World = {
   /** What session.messages reports: the transcript so far (a test fills it). */
   transcript: unknown[]
   /** The window and summarising point session.usage reports (a 200k window and a 160k point when left out). */
-  shape: { window?: number; point?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: McpToolRow[] }
+  shape: { window?: number; point?: number | null; buffer?: number; autoCompact?: boolean; startupRows?: { name: string; tokens: number }[]; mcpTools?: McpToolRow[] }
   /** The project root session.root reports. */
   root: string
   /** The session id session.id reports (a test changes it, as a /clear does). */
@@ -66,6 +66,17 @@ export type World = {
   breakdown: boolean
   /** The surfaces session.surfaces reports; the session's own surface is the first (terminal when a test leaves it out). */
   surfaces: string[]
+  /** How many times session.surfaces was asked. */
+  surfaceCalls: number
+  /** The breakdown each session.usage call asked for, in order (undefined for a call that asked for none). */
+  asked: (string | undefined)[]
+  /**
+   * What Claude Code counts where the summary estimates: when set, a `full` session.usage reports `shape` with these over it
+   * (the estimate stands in a `summary` one). Null: a `full` breakdown is the same as a summary one.
+   */
+  counted: World['shape'] | null
+  /** True: a `full` session.usage is refused, as an engine without the counting would. */
+  countFails: boolean
 }
 
 /** The coaching block of a settings file written for a user who turned coaching and the rating reminder on. */
@@ -89,10 +100,12 @@ export function settingsFile(over: Record<string, unknown> = {}): string {
  * Claude Code's context figures for `tokens` in use. The breakdown names the summarising point
  * (`autoCompactThreshold`) unless `over.buffer` is given: then it names an "Autocompact buffer" category
  * instead and the point is the window less that, as on a machine whose Claude Code leaves the threshold out.
+ * With `over.point` null it names neither a threshold nor a buffer, and `over.autoCompact` false says auto-compact is
+ * off (Claude Code then sends no threshold).
  */
-export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: McpToolRow[] } = {}) {
+export function usageFor(tokens: number, usd: number, over: { point?: number | null; window?: number; startup?: number; buffer?: number; autoCompact?: boolean; startupRows?: { name: string; tokens: number }[]; mcpTools?: McpToolRow[] } = {}) {
   const window = over.window ?? WINDOW
-  const point = over.point ?? POINT
+  const point = over.point === undefined ? POINT : over.point
   // The startup part is one "System prompt" row, or the rows a test names (Memory files, System tools, ...) when it gives them.
   const rows = over.startupRows ?? [{ name: 'System prompt', tokens: Math.min(over.startup ?? 18000, tokens) }]
   const startup = rows.reduce((sum, row) => sum + row.tokens, 0)
@@ -105,7 +118,8 @@ export function usageFor(tokens: number, usd: number, over: { point?: number; wi
       breakdown: {
         maxTokens: window,
         percentage: (tokens / window) * 100,
-        ...(over.buffer === undefined ? { autoCompactThreshold: point } : {}),
+        ...(over.autoCompact === undefined ? {} : { isAutoCompactEnabled: over.autoCompact }),
+        ...(over.buffer === undefined && point !== null && over.autoCompact !== false ? { autoCompactThreshold: point } : {}),
         ...(over.mcpTools === undefined ? {} : { mcpTools: over.mcpTools.map(tool => ({ tokens: 100, isLoaded: true, ...tool })) }),
         categories: [
           ...rows.map(row => ({ kind: 'used', name: row.name, tokens: row.tokens })),
@@ -126,18 +140,26 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   mock.env(on, { CLAUDE_CONFIG_DIR: '/cfg' })
   const files = new Map<string, string>()
   if (options.settings !== null) files.set(`${CONFIG}/claudeglass/mod/settings.json`, options.settings ?? settingsFile())
-  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project', session: options.session ?? SESSION, listed: 0, stale: null, breakdown: true, surfaces: ['terminal'] }
+  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project', session: options.session ?? SESSION, listed: 0, stale: null, breakdown: true, surfaces: ['terminal'], surfaceCalls: 0, asked: [], counted: null, countFails: false }
   let current = usageFor(0, 0)
+  let counted = usageFor(0, 0)
   world.figures = (tokens, usd) => {
     current = usageFor(tokens, usd, world.shape)
+    counted = usageFor(tokens, usd, { ...world.shape, ...world.counted })
   }
   on('session.id', () => ({ value: world.session }) as never)
-  on('session.surfaces', () => ({ value: world.surfaces }) as never)
+  on('session.surfaces', () => {
+    world.surfaceCalls += 1
+    return { value: world.surfaces } as never
+  })
   on('session.messages', () => ({ value: world.transcript }) as never)
-  on('session.usage', () => {
-    const context = { ...current.context, ...(world.stale === null ? {} : { tokens: world.stale }) }
+  on('session.usage', (_$, e) => {
+    world.asked.push(e?.breakdown)
+    if (e?.breakdown === 'full' && world.countFails) throw new Error('no full breakdown here')
+    const figures = e?.breakdown === 'full' && world.counted !== null ? counted : current
+    const context = { ...figures.context, ...(world.stale === null ? {} : { tokens: world.stale }) }
     if (!world.breakdown) delete (context as { breakdown?: unknown }).breakdown
-    return { value: { ...current, context } } as never
+    return { value: { ...figures, context } } as never
   })
   on('session.root', () => ({ value: world.root }) as never)
   // The engine makes a path absolute (C:\cfg\... on Windows); the files are kept by the path as the mod wrote it.
@@ -198,6 +220,9 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
 }
 
 export const START = { cwd: '/work', surface: 'terminal', isInteractive: true } as const
+
+/** How Claude Code starts a session the Desktop app, VS Code or the mobile app drives: no surface yet, and not interactive. */
+export const SDK_START = { cwd: '/work', surface: null, isInteractive: false } as const
 
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 

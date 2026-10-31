@@ -47,7 +47,8 @@ function viewOf(seen: Watched, world: World): View {
 export function spendText(seen: Watched, world: World): string | undefined {
   const { snap, settings } = viewOf(seen, world)
   if (snap.cost === null) return undefined
-  const change = snap.lastReplyUsd
+  // Between replies `turnUsd` is what the reply that ended cost.
+  const change = snap.turnAt === null ? snap.turnUsd : null
   const added = isVisibleChange(change) ? ` ${fill(CHANGE, { amount: shortAmount(change, settings) })}` : ''
   return `${fill(COST, { amount: amount(snap.cost, settings) })}${added}`
 }
