@@ -3,6 +3,7 @@
 export const BUILT_IN = [
   "Claude_Browser",
   "Claude_Preview",
+  "claude-in-chrome",
   "computer-use",
   "mcp-registry",
   "scheduled-tasks",

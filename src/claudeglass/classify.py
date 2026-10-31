@@ -812,7 +812,9 @@ def extract_features(
         for event in result.events:
             if event.kind == EventKind.QUEUE_OPERATION:
                 queue_ops += 1
-            elif event.kind == EventKind.COMPACT_BOUNDARY:
+            elif event.kind == EventKind.COMPACT_BOUNDARY and not event.detail.get("inherited"):
+                # A continued session's inherited boundary is the session it
+                # came from's compaction, which that session already counts.
                 compactions += 1
             elif event.kind == EventKind.TASK_NOTIFICATION:
                 task_notifications += 1

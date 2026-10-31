@@ -103,8 +103,8 @@ SETTING_TEXT: dict[str, tuple[str, str, str]] = {
         "",
     ),
     "mcpServers": (
-        "The MCP servers this agent can use. Servers left out are not loaded for it.",
-        "The agent can't call tools from servers you leave out.",
+        "MCP servers added for this agent, by name or defined inline. It still gets every server your session has.",
+        "Nothing is taken away: the list only adds servers.",
         "",
     ),
     "tools": (
@@ -300,7 +300,7 @@ LEVER_LABELS = {
     "tools": "Tools it may use",
     "disallowedTools": "Tools it may not use",
     "skills": "Skills loaded at start",
-    "mcpServers": "MCP servers it may use",
+    "mcpServers": "MCP servers added for it",
     "includeCoAuthoredBy": "Co-authored-by line on commits (deprecated)",
     "env.DISABLE_PROMPT_CACHING": "Prompt caching (env override, all models)",
     "env.DISABLE_PROMPT_CACHING_SONNET": "Prompt caching (env override, Sonnet)",

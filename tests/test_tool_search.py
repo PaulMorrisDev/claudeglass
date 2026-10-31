@@ -33,7 +33,7 @@ from claudeglass.pricing import load_pricing, price_turn
 from claudeglass.snapshots import Snapshot, snapshot_project_key, snapshot_project_keys
 from claudeglass.units import Units
 
-from helpers import attachment_line, system_line, tool_use_block, turn_line, write_jsonl
+from helpers import attachment_line, ignorable_line, system_line, tool_use_block, turn_line, write_jsonl
 
 PRICING = load_pricing()
 SONNET = PRICING.resolve_model("claude-sonnet-5").rates
@@ -148,9 +148,9 @@ def _result(*turns: Turn, definitions: dict[str, int] | None = None) -> Transcri
     return TranscriptResult(turns=list(turns), tool_definition_chars=definitions or {})
 
 
-def test_deferred_tools_are_sized_by_their_own_server_or_every_server():
+def test_deferred_tools_are_sized_by_their_own_server_or_a_typical_mcp_tool():
     # github's loaded definitions average 400 tokens; jira has none of its
-    # own, so it takes the average of every loaded definition (400 too).
+    # own, and only two MCP tools were loaded, so it takes the typical 550.
     definitions = {"mcp__github__a": 1200, "mcp__github__b": 2000}
     stats = tool_search.compute_tool_search(
         [_result(_turn(1, {"github": 10, "jira": 5}), definitions=definitions)], PRICING
@@ -158,10 +158,182 @@ def test_deferred_tools_are_sized_by_their_own_server_or_every_server():
 
     github, jira = stats.servers["github"], stats.servers["jira"]
     assert github.definition_tokens == pytest.approx(400) and github.own_sizes and github.measured == 2
-    assert jira.definition_tokens == pytest.approx(400) and not jira.own_sizes and jira.measured == 0
-    assert stats.kept_tokens == pytest.approx(15 * 400)
+    assert jira.definition_tokens == 550.0 and not jira.own_sizes and jira.measured == 0
+    assert (github.sized_from, jira.sized_from) == ("its own tools", "typical MCP tool")
+    assert stats.kept_tokens == pytest.approx(10 * 400 + 5 * 550)
     assert github.saving_usd == pytest.approx(10 * 400 * SONNET.cache_read / 1e6)
     assert stats.most_deferred == 15 and stats.most_deferred_mcp == 15
+
+
+def test_the_typical_mcp_tool_is_the_mean_claude_code_counted_and_needs_no_calibration():
+    found = Calibration(tool={"claude-sonnet-5": 2.0}, default_family="claude-sonnet-5")
+    result = _upfront_result({"jira": 1}, loaded={"mcp__github__a": 1200})
+    jira = tool_search.compute_tool_search([result], PRICING, calibration=found).servers["jira"]
+    assert tool_search.DEFAULT_MCP_TOOL_TOKENS == 550.0 and tool_search.MIN_MCP_SAMPLE == 10
+    assert jira.definition_tokens == 550.0 and jira.sized_from == "typical MCP tool"
+
+
+def _upfront_result(deferred: dict[str, int], *, loaded=None, upfront=None, requested=()) -> TranscriptResult:
+    return TranscriptResult(
+        turns=[_turn(1, deferred)], tool_definition_chars=loaded or {}, upfront_tool_chars=upfront or {},
+        upfront_request_tools=list(requested),
+    )
+
+
+def test_a_server_with_no_loaded_tool_is_sized_from_its_own_tools_sent_in_full_not_claude_codes_own():
+    """Claude Code's own tools are far larger than an MCP tool's: one mixed
+    into the average put the saving about 28% too high."""
+    result = _upfront_result(
+        {"docs": 5, "other": 3, "built-in": 2},
+        loaded={"WebFetch": 4000},
+        upfront={"mcp__docs__a": 400, "mcp__docs__b": 600},
+    )
+
+    stats = tool_search.compute_tool_search([result], PRICING)
+
+    docs, other, built_in = stats.servers["docs"], stats.servers["other"], stats.servers["built-in"]
+    assert (docs.measured, docs.definition_tokens, docs.sized_from) == (2, 125.0, "its own tools")
+    assert docs.own_sizes
+    assert (other.measured, other.definition_tokens, other.sized_from) == (0, 550.0, "typical MCP tool")
+    assert not other.own_sizes
+    assert (built_in.definition_tokens, built_in.sized_from) == (1000.0, "its own tools")
+    # Every sample counts towards the window's figures, Claude Code's own too.
+    assert stats.definitions_measured == 3
+    assert stats.mean_definition_tokens == pytest.approx((400 + 600 + 4000) / 3 / 4)
+    assert stats.kept_tokens == pytest.approx(5 * 125 + 3 * 550 + 2 * 1000)
+
+
+def test_a_loaded_size_wins_over_the_size_it_was_sent_in_full_at():
+    result = _upfront_result(
+        {"docs": 1}, loaded={"mcp__docs__a": 800}, upfront={"mcp__docs__a": 400, "mcp__docs__b": 600}
+    )
+    docs = tool_search.compute_tool_search([result], PRICING).servers["docs"]
+    assert docs.measured == 2 and docs.definition_tokens == pytest.approx((800 + 600) / 2 / 4)
+
+
+def test_a_size_from_the_request_wins_over_a_larger_snapshot_size_of_the_same_tool_in_another_session():
+    """A window holds sessions from before Claude Code logged the request:
+    their snapshot sizes run about 1.5 times a request's, and the largest of
+    both would have mixed the two scales into one average."""
+    old = _upfront_result({"docs": 1}, upfront={"mcp__docs__a": 600, "mcp__other__b": 900})
+    new = _upfront_result({"docs": 1}, upfront={"mcp__docs__a": 400}, requested=["mcp__docs__a"])
+
+    sizes = tool_search._upfront_sizes([old, new])
+
+    # docs a: the request's 400, not the snapshot's 600; other b: only the
+    # snapshot has seen it, so its size stands.
+    assert sizes == {"mcp__docs__a": 400, "mcp__other__b": 900}
+
+
+def test_among_sizes_from_the_request_the_largest_wins_and_among_snapshot_sizes_too():
+    requests = [
+        _upfront_result({"docs": 1}, upfront={"mcp__docs__a": 380}, requested=["mcp__docs__a"]),
+        _upfront_result({"docs": 1}, upfront={"mcp__docs__a": 420}, requested=["mcp__docs__a"]),
+    ]
+    snapshots = [_upfront_result({"docs": 1}, upfront={"mcp__docs__b": size}) for size in (500, 700, 600)]
+
+    assert tool_search._upfront_sizes([*requests, *snapshots]) == {"mcp__docs__a": 420, "mcp__docs__b": 700}
+
+
+def test_a_cached_digest_from_before_the_field_existed_keeps_the_largest_size_as_before():
+    encoded = encode_result(TranscriptResult(upfront_tool_chars={"mcp__docs__a": 600}))
+    del encoded["upfront_request_tools"]
+    older = result_from_jsonable(encoded)
+
+    assert older.upfront_request_tools == []
+    assert tool_search._upfront_sizes([older, _upfront_result({"docs": 1}, upfront={"mcp__docs__a": 500})]) == {
+        "mcp__docs__a": 600
+    }
+
+
+def test_a_servers_own_mean_is_at_the_request_scale_across_sessions():
+    """A tool sent in full takes the snapshot's size only when no session
+    sized it from the request, so the server's mean stays on one scale."""
+    old = _upfront_result({"docs": 1}, upfront={"mcp__docs__a": 600, "mcp__docs__b": 600})
+    new = _upfront_result(
+        {"docs": 1, "other": 2}, upfront={"mcp__docs__a": 400, "mcp__docs__b": 400},
+        requested=["mcp__docs__a", "mcp__docs__b"],
+    )
+
+    stats = tool_search.compute_tool_search([old, new], PRICING)
+
+    assert stats.servers["docs"].definition_tokens == pytest.approx(100.0)
+    assert stats.servers["docs"].sized_from == "its own tools"
+
+
+def test_an_unmeasured_server_is_sized_at_the_typical_mcp_tool_not_another_servers_tools_sent_in_full():
+    """Tools sent in full are a server's small always-load tools (terminal
+    270 tokens against a real MCP tool's 550), so they don't stand for a
+    server with none measured."""
+    result = _upfront_result({"other": 3}, upfront={"mcp__docs__a": 400, "mcp__docs__b": 600})
+
+    other = tool_search.compute_tool_search([result], PRICING).servers["other"]
+
+    assert other.definition_tokens == 550.0 and other.sized_from == "typical MCP tool"
+    assert not other.own_sizes and other.measured == 0
+
+
+def test_ten_loaded_mcp_tools_on_other_servers_size_an_unmeasured_server():
+    loaded = {f"mcp__docs__t{i}": 1200 for i in range(9)} | {"mcp__docs__big": 3000}
+    result = _upfront_result(
+        {"docs": 1, "other": 3}, loaded=loaded, upfront={"mcp__small__a": 40, "mcp__small__b": 40}
+    )
+
+    other = tool_search.compute_tool_search([result], PRICING).servers["other"]
+
+    # Ten loaded tools (the sent-in-full ones don't count): (9 * 1200 + 3000) / 10 / 4.
+    assert other.definition_tokens == pytest.approx((9 * 1200 + 3000) / 10 / 4)
+    assert other.sized_from == "MCP tools loaded in this window" and not other.own_sizes
+
+
+def test_nine_loaded_mcp_tools_are_too_few_and_claude_codes_own_never_count():
+    loaded = {f"mcp__docs__t{i}": 1200 for i in range(9)} | {"WebFetch": 4000}
+    other = tool_search.compute_tool_search([_upfront_result({"other": 3}, loaded=loaded)], PRICING).servers["other"]
+    assert (other.definition_tokens, other.sized_from) == (550.0, "typical MCP tool")
+
+
+def test_a_servers_own_tools_sent_in_full_still_size_it_when_others_are_loaded():
+    loaded = {f"mcp__docs__t{i}": 1200 for i in range(10)}
+    result = _upfront_result(
+        {"small": 2, "other": 1}, loaded=loaded, upfront={"mcp__small__a": 400, "mcp__small__b": 600}
+    )
+
+    stats = tool_search.compute_tool_search([result], PRICING)
+
+    small = stats.servers["small"]
+    assert (small.measured, small.definition_tokens, small.sized_from) == (2, 125.0, "its own tools")
+    assert stats.servers["other"].sized_from == "MCP tools loaded in this window"
+
+
+def test_with_only_claude_codes_tools_measured_an_mcp_server_takes_the_typical_tool():
+    result = _upfront_result({"docs": 2, "built-in": 1}, loaded={"WebFetch": 4000, "Bash": 2000})
+    stats = tool_search.compute_tool_search([result], PRICING)
+    assert stats.servers["docs"].definition_tokens == 550.0
+    assert stats.servers["docs"].sized_from == "typical MCP tool"
+    assert stats.servers["built-in"].sized_from == "its own tools"
+
+
+def test_claude_codes_own_tools_with_none_measured_take_the_average_of_every_tool():
+    result = _upfront_result({"built-in": 2}, upfront={"mcp__docs__a": 400, "mcp__docs__b": 600})
+    row = tool_search.compute_tool_search([result], PRICING).servers["built-in"]
+    assert row.definition_tokens == pytest.approx(125) and row.sized_from == "all servers"
+
+
+def test_tools_sent_in_full_alone_are_enough_to_size_the_saving():
+    result = _upfront_result({"docs": 4}, upfront={"mcp__docs__a": 400})
+    stats = tool_search.compute_tool_search([result], PRICING)
+    assert stats.measurable and stats.kept_tokens == pytest.approx(4 * 100)
+    by_server = next(t for t in tool_search.build_section(stats).tables if t.name == "tool_search_by_server")
+    column = [c.key for c in by_server.columns].index("sized_from")
+    assert [row[column] for row in by_server.rows] == ["its own tools"]
+
+
+def test_nothing_is_sized_from_when_nothing_was_measured():
+    stats = tool_search.compute_tool_search([_upfront_result({"docs": 4})], PRICING)
+    assert not stats.measurable and stats.servers["docs"].sized_from == ""
+    by_server = next(t for t in tool_search.build_section(stats).tables if t.name == "tool_search_by_server")
+    column = [c.key for c in by_server.columns].index("sized_from")
+    assert [row[column] for row in by_server.rows] == [""]
 
 
 def test_definitions_and_name_lists_use_the_calibrated_characters_per_token():
@@ -359,6 +531,138 @@ def test_each_reply_keeps_what_each_mcp_server_sends_by_length_only(tmp_path: Pa
     assert result_from_jsonable(json.loads(json.dumps(encode_result(result)))) == result
 
 
+def test_each_mcp_tool_sent_in_full_keeps_its_own_size(tmp_path: Path):
+    a = {"name": "mcp__docs__a", "description": "Finds a page.", "schema": {"type": "object"}}
+    b = {"name": "mcp__docs__b", "description": "Reads a page. " * 10, "schema": {"type": "object", "x": 1}}
+    smaller_b = {"name": "mcp__docs__b", "description": "Reads.", "schema": {}}
+    lines = [
+        attachment_line("prompt_snapshot", tools=[a, b, {"name": "Bash", "description": "Runs.", "schema": {}}]),
+        turn_line(message_id="msg_1"),
+        attachment_line("prompt_snapshot", tools=[smaller_b]),
+        turn_line(message_id="msg_2"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="s"))
+
+    def chars(entry: dict) -> int:
+        return len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
+
+    # The name, description and schema as compact JSON; the largest sighting
+    # of a tool wins, and a built-in tool isn't an MCP tool.
+    assert result.upfront_tool_chars == {"mcp__docs__a": chars(a), "mcp__docs__b": chars(b)}
+    assert result.upfront_definition_chars_by_server == {"docs": chars(a) + chars(b)}
+    assert "Finds a page" not in repr(result.upfront_tool_chars)
+    # No request was logged, so none of those sizes is a request's.
+    assert result.upfront_request_tools == []
+
+
+def _request_chars(tool: dict) -> int:
+    """A definition as the request sent it: name, description and
+    ``input_schema``, the keys a ``deferred_tools_record`` is measured on."""
+    definition = {key: tool.get(key) for key in ("name", "description", "input_schema")}
+    return len(json.dumps(definition, ensure_ascii=False, separators=(",", ":")))
+
+
+def _snapshot_and_request(tmp_path: Path, snapshot_tools: list[dict], *shapes: list[dict], shape_first: bool = False):
+    """A transcript whose ``prompt_snapshot`` lists ``snapshot_tools`` (the
+    snapshot runs about 1.6 times the request) and which logged one
+    ``api-request-shape`` line per list in ``shapes``."""
+    shape_lines = [ignorable_line("api-request-shape", shape={"tools": tools}) for tools in shapes]
+    snapshot = attachment_line("prompt_snapshot", tools=snapshot_tools)
+    lines = [*shape_lines, snapshot, turn_line(message_id="msg_1")] if shape_first else [
+        snapshot, *shape_lines, turn_line(message_id="msg_1"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    return parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="s"))
+
+
+def test_an_mcp_tool_sent_in_full_is_sized_from_the_request_not_the_larger_snapshot(tmp_path: Path):
+    """Claude Code's snapshot entries run about 1.6 times the definitions it
+    sends, and a loaded definition is measured at the request's scale: mixing
+    the two put one server's average a quarter too high."""
+    sent_a = {"name": "mcp__docs__a", "description": "Finds a page.", "input_schema": {"type": "object"}}
+    sent_b = {"name": "mcp__docs__b", "description": "Reads a page.", "input_schema": {"type": "object"}}
+    snapshot_a = {"name": "mcp__docs__a", "description": "Finds a page. " * 20, "schema": {"type": "object"}}
+    snapshot_b = {"name": "mcp__docs__b", "description": "Reads a page. " * 20, "schema": {"type": "object"}}
+
+    result = _snapshot_and_request(tmp_path, [snapshot_a, snapshot_b], [sent_a, sent_b])
+
+    assert result.upfront_tool_chars == {"mcp__docs__a": _request_chars(sent_a), "mcp__docs__b": _request_chars(sent_b)}
+    assert result.upfront_definition_chars_by_server == {"docs": _request_chars(sent_a) + _request_chars(sent_b)}
+    assert result.upfront_request_tools == ["mcp__docs__a", "mcp__docs__b"]
+    snapshot_total = sum(len(json.dumps(t, ensure_ascii=False, separators=(",", ":"))) for t in (snapshot_a, snapshot_b))
+    assert snapshot_total > 1.5 * result.upfront_definition_chars_by_server["docs"]
+    # Sizes only: no description reaches the result.
+    assert "Finds a page" not in repr(result.upfront_tool_chars)
+    assert "Finds a page" not in repr(result.upfront_definition_chars_by_server)
+
+
+@pytest.mark.parametrize("shape_first", [True, False])
+def test_the_request_size_wins_whichever_line_comes_first(tmp_path: Path, shape_first: bool):
+    sent = {"name": "mcp__docs__a", "description": "Finds a page.", "input_schema": {"type": "object"}}
+    snapshot = {"name": "mcp__docs__a", "description": "Finds a page. " * 20, "schema": {"type": "object"}}
+
+    result = _snapshot_and_request(tmp_path, [snapshot], [sent], shape_first=shape_first)
+
+    assert result.upfront_tool_chars == {"mcp__docs__a": _request_chars(sent)}
+    assert result.upfront_definition_chars_by_server == {"docs": _request_chars(sent)}
+
+
+def test_a_tool_the_request_does_not_list_keeps_its_snapshot_size(tmp_path: Path):
+    sent = {"name": "mcp__docs__a", "description": "Finds a page.", "input_schema": {"type": "object"}}
+    snapshot_a = {"name": "mcp__docs__a", "description": "Finds a page. " * 20, "schema": {"type": "object"}}
+    snapshot_b = {"name": "mcp__docs__b", "description": "Reads a page.", "schema": {"type": "object"}}
+    snapshot_other = {"name": "mcp__other__c", "description": "Does a thing.", "schema": {"type": "object"}}
+
+    result = _snapshot_and_request(tmp_path, [snapshot_a, snapshot_b, snapshot_other], [sent])
+
+    def snapshot_chars(tool: dict) -> int:
+        return len(json.dumps({k: tool.get(k) for k in ("name", "description", "schema")}, separators=(",", ":")))
+
+    assert result.upfront_tool_chars == {
+        "mcp__docs__a": _request_chars(sent),
+        "mcp__docs__b": snapshot_chars(snapshot_b),
+        "mcp__other__c": snapshot_chars(snapshot_other),
+    }
+    # Only the tool the request listed is marked as sized from it.
+    assert result.upfront_request_tools == ["mcp__docs__a"]
+    # A server's total is its tools' sizes added up, wherever each came from;
+    # one the request never mentions keeps the snapshot's total.
+    assert result.upfront_definition_chars_by_server == {
+        "docs": _request_chars(sent) + snapshot_chars(snapshot_b),
+        "other": snapshot_chars(snapshot_other),
+    }
+
+
+def test_the_largest_request_size_of_a_tool_wins_and_a_deferred_entry_is_not_sent_in_full(tmp_path: Path):
+    small = {"name": "mcp__docs__a", "description": "Finds.", "input_schema": {"type": "object"}}
+    large = {"name": "mcp__docs__a", "description": "Finds a page. " * 10, "input_schema": {"type": "object"}}
+    deferred = {"name": "mcp__docs__b", "description": "Reads a page. " * 30, "input_schema": {}, "defer_loading": True}
+    built_in = {"name": "Bash", "description": "Runs.", "input_schema": {}}
+
+    result = _snapshot_and_request(
+        tmp_path, [], [small, deferred, built_in, "not a tool", {"name": "../../x"}], [large]
+    )
+
+    assert result.upfront_tool_chars == {"mcp__docs__a": _request_chars(large)}
+    assert result.upfront_definition_chars_by_server == {"docs": _request_chars(large)}
+    assert result.mcp_tool_suffixes_by_server == {"docs": ["a"]}
+
+
+def test_a_request_line_with_no_snapshot_still_sizes_the_mcp_tools_it_sent(tmp_path: Path):
+    sent = {"name": "mcp__docs__a", "description": "Finds a page.", "input_schema": {"type": "object"}}
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, [ignorable_line("api-request-shape", shape={"tools": [sent]}), turn_line(message_id="msg_1")])
+
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="s"))
+
+    assert result.upfront_tool_chars == {"mcp__docs__a": _request_chars(sent)}
+    assert result.upfront_definition_chars_by_server == {"docs": _request_chars(sent)}
+
+
 def test_a_connection_problem_clears_once_the_server_connects(tmp_path: Path):
     lines = [
         attachment_line(
@@ -518,12 +822,101 @@ def test_a_card_totalling_exactly_the_bar_is_shown():
 
 def test_one_server_reads_in_the_singular():
     (card,) = _cards(_unused("claude_ai_Notes"))
-    assert card.title == "Notes is an MCP server you never use"
+    assert card.title == "Notes is an MCP server you haven't used in 9 days"
     assert card.why == (
-        "Notes was offered in up to 10 main sessions and Claude never used it, "
-        "yet every reply carried its tool names, instructions or tools."
+        "Notes was offered in up to 10 main sessions over the last 9 days, and Claude didn't use it. "
+        "Every reply still carried its tool names, instructions or tools."
     )
     assert card.action.startswith("Notes: run /mcp and disable it ")
+
+
+def test_the_card_says_how_far_back_it_looked():
+    (card,) = _cards(_unused("claude_ai_Notes", first=13.0))
+    assert card.title == "Notes is an MCP server you haven't used in 13 days"
+    assert "over the last 13 days" in card.why
+    assert "looked back only 13 days" in card.action
+    # Before the line about when the saving starts.
+    assert card.action.index("looked back only") < card.action.index("The saving starts")
+
+
+def test_several_servers_say_the_least_that_any_of_them_was_looked_at():
+    (card,) = _cards(_unused("claude_ai_A", first=13.0) + _unused("claude_ai_B", first=9.0, chars=BIG * 2))
+    assert card.title == "2 MCP servers you haven't used in 9 days are loaded into your sessions"
+    assert "over the last 9 days" in card.why and "looked back only 9 days" in card.action
+
+
+def test_a_window_a_day_deep_reads_in_the_singular():
+    thresholds = tool_search.ToolSearchThresholds(unused_min_age_days=0.5)
+    (card,) = _cards(_unused("claude_ai_Notes", first=1.2), thresholds=thresholds)
+    assert card.title == "Notes is an MCP server you haven't used in 1 day"
+    assert "over the last 1 day," in card.why and "looked back only 1 day," in card.action
+
+
+def _carried(server: str, first: float, last: float) -> TranscriptResult:
+    """A session that started ``first`` days before the end and ended
+    ``last`` days before it, offering ``server`` throughout. The window took
+    it for its last reply and so brought its earlier turns too."""
+    return _session("carried", _reply(first, instructions={server: BIG}), _reply(last, instructions={server: BIG}))
+
+
+def test_a_session_that_started_before_the_window_does_not_stretch_the_look_back():
+    """Sessions that ended in the days before the window aren't in the
+    corpus, so a use in them can't be seen: 17 days is only how far one
+    long session reached back, and the card may claim only what every reply
+    was seen for."""
+    results = [*_unused("claude_ai_Notes", first=9.0), _carried("claude_ai_Notes", first=17.0, last=8.0)]
+
+    row = _rows(results)["claude_ai_Notes"]
+    (card,) = _cards(results)
+
+    assert row.first_seen_days == pytest.approx(9)
+    assert card.title == "Notes is an MCP server you haven't used in 9 days"
+    assert "over the last 9 days" in card.why
+    assert "looked back only 9 days" in card.action
+
+
+def test_a_server_seen_only_in_a_session_that_started_before_the_window_is_not_old_enough_to_flag():
+    """The age bar counts the days every reply was seen, not the days one
+    session spans: with five such days, ten sessions in them and one that
+    began ten days before the end, a server hasn't been offered for a week."""
+    results = [*_unused("claude_ai_Notes", first=5.0), _carried("claude_ai_Notes", first=10.0, last=4.0)]
+
+    row = _rows(results)["claude_ai_Notes"]
+
+    assert row.first_seen_days == pytest.approx(5)
+    assert row.status == tool_search.STATUS_UNUSED
+    assert _cards(results) == []
+
+
+def test_a_subagents_later_reply_makes_its_session_end_later():
+    """A session is in the window by its last reply across the main
+    transcript and its subagents: here the main transcript stopped twelve
+    days before the end but a subagent ran until two, so the session says
+    nothing about the days between."""
+    main = _session("long", _reply(12.0, instructions={"claude_ai_Notes": BIG}))
+    later = _session("long", _reply(2.0), kind="subagent")
+    results = [*_unused("claude_ai_Notes", first=9.0), main, later]
+
+    row = _rows(results)["claude_ai_Notes"]
+
+    assert row.first_seen_days == pytest.approx(9)
+
+
+def test_a_window_with_no_main_session_keeps_the_first_offer_as_it_was():
+    subagents = [
+        _session(f"sub-{i}", _reply(9.0 - i, instructions={"claude_ai_Notes": BIG}), kind="subagent")
+        for i in range(3)
+    ]
+
+    (row,) = tool_search.compute_tool_search(subagents, PRICING, all_projects=True).mcp_servers
+
+    # Measured from the last of its replies, seven days before END.
+    assert row.first_seen_days == pytest.approx(2)
+
+
+def test_the_thresholds_say_the_window_is_what_was_looked_at():
+    text = " ".join(tool_search.ToolSearchThresholds().describe())
+    assert "didn't use it in the window" in text and "never used" not in text
 
 
 def test_every_kind_from_its_own_evidence():
@@ -632,7 +1025,7 @@ def test_an_id_named_server_only_the_desktop_app_ever_named_is_a_desktop_connect
     assert row.aliases == ()
     (card,) = _cards(_unused(ID, entrypoint=DESKTOP))
     assert "+ > Connectors" in card.action and "claude.ai/customize/connectors" in card.action
-    assert card.title == "Connector 0a1b2c3d is an MCP server you never use"
+    assert card.title == "Connector 0a1b2c3d is an MCP server you haven't used in 9 days"
     assert card.subject == ID
 
 
@@ -682,6 +1075,17 @@ def test_a_server_the_desktop_app_brings_itself_is_shown_with_its_cost_and_never
     assert _cards(results) == []
     (card,) = _cards(_unused(server, entrypoint=DESKTOP) + _unused("claude_ai_A", entrypoint=DESKTOP))
     assert server not in card.subject and card.subject == "claude_ai_A"
+
+
+def test_claude_in_chrome_in_the_desktop_app_is_built_in():
+    rows = _rows(_unused("claude-in-chrome", entrypoint=DESKTOP))
+    row = rows["claude-in-chrome"]
+    assert row.kind == tool_search.KIND_DESKTOP_BUILTIN
+    assert row.status == tool_search.STATUS_BUILT_IN
+    assert "/chrome" in tool_search.server_fix({"kind": row.kind, "server": row.server})
+    assert _cards(_unused("claude-in-chrome", entrypoint=DESKTOP)) == []
+    # A terminal session's Chrome integration is not taken for the app's.
+    assert _rows(_unused("claude-in-chrome", entrypoint="cli"))["claude-in-chrome"].kind == tool_search.KIND_UNKNOWN
 
 
 def test_a_built_in_is_used_when_claude_used_it():
@@ -845,8 +1249,8 @@ def test_the_card_cites_real_cells_and_words_each_fix():
 def test_servers_that_share_a_fix_share_a_sentence():
     (card,) = _cards(_unused("claude_ai_A") + _unused("claude_ai_B", chars=BIG * 2))
     assert card.action.startswith("B and A: run /mcp and disable them")
-    assert card.why.startswith("B and A were offered in up to 10 main sessions and Claude never used them, "
-                               "yet every reply carried their ")
+    assert card.why.startswith("B and A were offered in up to 10 main sessions over the last 9 days, "
+                               "and Claude didn't use them. Every reply still carried their ")
     assert card.action.count("claude.ai/customize/connectors") == 1
 
 

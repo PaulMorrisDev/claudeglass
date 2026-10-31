@@ -94,10 +94,10 @@ from datetime import datetime, timedelta, timezone
 from . import capture as capture_mod
 from . import classify as classify_mod
 from . import pieces as pieces_mod
-from . import prompting, quality, recache
+from . import compaction, prompting, quality, recache
 from .calibration import model_family
 from .change_points import ChangePoint, affects_capture, applies_to
-from .model import EventKind, TranscriptResult, scheduled_main_session
+from .model import TranscriptResult, scheduled_main_session
 from .pricing import Pricing, price_turn
 from . import snapshots as snapshots_mod
 from .units import Units
@@ -268,7 +268,7 @@ def _transcript(result: TranscriptResult, pricing: Pricing) -> _Transcript:
         facts.capture_chars += turn.cap_note_chars + (turn.cap.chars if turn.cap is not None else 0)
         if turn.message_id in rebuilt:
             facts.rebuild_tokens += turn.cache_creation_tokens
-    facts.summaries = sum(1 for event in result.events if event.kind == EventKind.COMPACT_BOUNDARY)
+    facts.summaries = compaction.compactions_in(result)[0]
     return facts
 
 

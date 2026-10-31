@@ -85,12 +85,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import classify, discovery, recache
+from . import classify, compaction, discovery, recache
 from . import snapshots as snapshots_mod
 from .calibration import model_family
 from .config import Config
 from .corpus import Corpus, SessionBundle
-from .model import Column, EventKind, Section, Table, TranscriptResult, Turn
+from .model import Column, Section, Table, TranscriptResult, Turn
 from .pricing import Pricing, PricingCoverage, price_turn
 from .render.tables import format_cell
 from .snapshots import Snapshot
@@ -332,7 +332,7 @@ def _collect_session_metrics(
         # Fix cli.py's own _build_session_metrics precedent: top-level
         # transcript only, matching "did *this session's* own settings
         # take effect" rather than folding in subagent compactions too.
-        sm.compactions = sum(1 for e in bundle.top.events if e.kind == EventKind.COMPACT_BOUNDARY)
+        sm.compactions = compaction.compactions_in(bundle.top)[0]
 
         results.append(sm)
     return results

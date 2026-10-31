@@ -53,6 +53,30 @@ export function tableObjects(table) {
   });
 }
 
+// Whether a summary size is one the advice may offer: within the
+// summaries-per-session limit (compaction_sim_by_window's within_limit
+// column, true or "True"). A size beyond it summarises so often that the
+// compaction-window rule and the what-if both refuse it, so neither the
+// saving lever nor the chart's "cheapest" may name it. A table from before
+// the column existed offers every size.
+function withinLimit(row) {
+  var value = row.within_limit;
+  return !(value === false || value === "False" || value === "false");
+}
+
+// The cheapest of the summary sizes the advice may offer (those with
+// `allowed` set, see withinLimit), or null when none is. The chart names
+// this size, and only when it costs less than now.
+function cheapestAllowed(sizes) {
+  return sizes
+    .filter(function (d) {
+      return d.allowed;
+    })
+    .reduce(function (best, d) {
+      return !best || d.cost < best.cost ? d : best;
+    }, null);
+}
+
 function valueLabel(table, value) {
   var labels = (table && table.value_labels) || {};
   return labels[value] !== undefined ? labels[value] : value;
@@ -900,7 +924,7 @@ export function savingsLevers(tables) {
     });
   }
   var windows = tableObjects(tables.compaction_sim_by_window).filter(function (row) {
-    return row.window !== "none";
+    return row.window !== "none" && withinLimit(row);
   });
   if (windows.length) {
     var cheapest = windows.reduce(function (best, row) {
@@ -1118,6 +1142,7 @@ function line(ctx, data) {
         cost: num(row.cost),
         delta: num(row.delta_usd),
         perSession: num(row.compactions_per_session),
+        allowed: withinLimit(row),
       };
     })
     .filter(function (d) {
@@ -1129,10 +1154,8 @@ function line(ctx, data) {
   if (!now || sizes.length < MIN_POINTS) return { empty: opts.empty || "Too few summary sizes were tried in this window to compare them." };
 
   var nowCost = num(now.cost);
-  var cheapest = sizes.reduce(function (best, d) {
-    return d.cost < best.cost ? d : best;
-  }, sizes[0]);
-  var variant = cheapest.cost < nowCost ? null : "cheapest";
+  var cheapest = cheapestAllowed(sizes);
+  var variant = cheapest && cheapest.cost < nowCost ? null : "cheapest";
   // A size far costlier than the rest would flatten the others into a
   // line: it's drawn at the top edge, marked off the scale.
   var costs = sizes
@@ -1208,6 +1231,7 @@ function line(ctx, data) {
     else if (d.cost > nowCost) lines.push(moneyText(d.cost - nowCost) + " more than now");
     else lines.push("The same as now");
     lines.push(Number(d.perSession.toFixed(1)) + " summaries per session");
+    if (!d.allowed) lines.push("More summaries per session than the advice allows");
     if (d.offscale) lines.push("Off the top of the scale");
     d.tip = { value: moneyText(d.cost), label: "Summarised at " + thousands(d.tokens) + " tokens", lines: lines };
     d.open = opener(opts, "open", d.key);
@@ -1281,7 +1305,10 @@ function line(ctx, data) {
 
   return {
     variant: variant,
-    facts: { best: thousands(cheapest.tokens), saving: moneyText(nowCost - cheapest.cost) },
+    facts: {
+      best: cheapest ? thousands(cheapest.tokens) : "",
+      saving: cheapest ? moneyText(nowCost - cheapest.cost) : "",
+    },
     points: sizes.map(function (d) {
       return { x: ox + px(d), y: oy + py(d), tip: d.tip, open: d.open };
     }),

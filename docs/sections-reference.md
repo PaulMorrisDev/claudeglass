@@ -272,9 +272,13 @@ Definitions: [Concepts section 3](concepts.md#3-cache-rebuild-definitions-and-si
   usage-limit pause), `post-compaction` (the first reply after a
   conversation summary), `full-expiry` (the wait reached the cache
   lifetime, or the turn read only the start every session shares) and
-  `prefix-invalidated` (part of the session was read), classified in that
-  order: turns,
-  cache-creation tokens, avoidable cost, median ctx, median gap. Every
+  `prefix-invalidated` (part of the session was read, or the API itself
+  said the messages, system prompt, tools or model changed, however
+  short or long the wait was), classified in that order: turns,
+  cache-creation tokens, avoidable cost, median ctx, median gap, and
+  `api_cause`, the reasons the API gave
+  (`message.diagnostics.cache_miss_reason`, as `tools_changed 3,
+  messages_changed 1`; empty when Claude Code logged none). Every
   cause table below leaves `limit-expiry` turns out.
 - `recache_gap_buckets` — re-cache turns and their control-group share
   (all priced turns), bucketed by inter-turn gap (`<1m`, `1-5m`, `5-15m`,
@@ -302,10 +306,14 @@ Definitions: [Concepts section 3](concepts.md#3-cache-rebuild-definitions-and-si
 - `recache_by_agent_type` — priced turns, re-cache turns and share,
   cache-creation tokens, avoidable cost, per agent type (`"top-level"`
   for the main conversation).
-- `recache_huge_context` — turns at or above `huge_ctx` (default
-  200,000 tokens) and their share of total cache-read volume: a
-  context-hygiene metric, not a pricing surcharge (current-generation
-  models bill the full context window at standard rates).
+- `recache_huge_context` — turns whose context reached 80% of the
+  point where their session summarises, and their share of total
+  cache-read volume. That point is the session's window less 33,000
+  tokens: its auto-compact window, else the model's own context window.
+  A turn counts at `huge_ctx` (default 200,000 tokens) when neither is
+  known. A context-hygiene metric, not a pricing surcharge
+  (current-generation models bill the full context window at standard
+  rates).
 - `recache_by_group` — only with `report --group-by`: the
   `recache_summary` columns, one row per group.
 - `measured_miss_causes` — only when the usage-log CSV carries the
@@ -499,11 +507,22 @@ The `autoCompactWindow` sweep: full write-up and worked example in
 [`docs/compaction-sim.md`](compaction-sim.md).
 
 - `compaction_sim_by_window` — top-level sessions only, one row per
-  candidate window (100k/150k/200k/250k/300k/400k/500k/`none`):
-  simulated compactions per session, mean ctx, total cost, and delta vs.
-  the observed (`none`) cost in USD and percent — **negative delta means
-  cheaper**, the opposite sign convention to `ttl`'s own delta columns
-  (see the module docstring for why).
+  candidate window (100k/150k/200k/250k/300k/400k/500k/600k/700k/800k/
+  900k/967k/`none`; the windows above 500k are for the natively
+  1M-context models): simulated compactions per session, mean ctx, total
+  cost, and delta vs. the observed (`none`) cost in USD and percent —
+  **negative delta means cheaper**, the opposite sign convention to
+  `ttl`'s own delta columns (see the module docstring for why). A window
+  at or above the one a session ran under replays unchanged (a real
+  compaction is kept and the context never reaches the candidate's
+  trigger), so those rows equal `none`. The last column, `within_limit`,
+  says whether the window summarises no more often than
+  `max_compactions_per_session` (2): the compaction-window rule, the
+  what-if, the dashboard's savings lever and its summary-size chart offer
+  only a window within the limit. A window fires 33,000 tokens (Claude
+  Code's own buffer) below itself unless the corpus's real automatic
+  summaries under a known window say otherwise; precomputed ones do not
+  count toward that gap.
 - `compaction_sim_by_agent_type` — every agent type's (`"top-level"` and
   each subagent type) sessions, observed cost, best candidate window,
   its cost, the saving vs. observed (0 floor), the delta in percent, and
@@ -777,8 +796,14 @@ dominant cause and its lever.
   only; what its agents cost stays in the agent rows. There is no live
   receipt for it; the compaction check on Actions quotes the sessions and
   their share.
-- `compactions_trigger_mix` — trigger value (`auto`/`manual`/`unknown`)
-  counts and share.
+- `compactions_trigger_mix` — trigger value (`auto`/`auto (precomputed)`/
+  `manual`/`unknown`) counts and share. `auto (precomputed)` is an
+  automatic summary Claude Code (2.1.309 on) made in the background and
+  applied later (`compactMetadata.precomputed`): it is counted and priced
+  like any other summary, but it lands wherever the session happened to
+  be, so it says nothing about the size Claude Code summarises at and is
+  left out of the observed threshold, the compaction-window sweep's
+  trigger reserve and the auto-compact table's counts.
 - `compactions_per_session` — top 20 sessions by dropped tokens:
   session, compaction count, dropped tokens, post-compaction write cost.
 
@@ -1666,12 +1691,13 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   for the sessions the report covers.
 
   `prompting_effect` (`glass_effect.py`) — only when at least one session of
-  the report has a `present` event: the effect measurement, one row per
+  the report has an event of the mod (a `present`, `note`, `rebuild`,
+  `cold_send`, `compaction` or `tweak` event): the effect measurement, one row per
   figure with `with_glass` and `without_glass` (raw values; `row_kinds`
   gives each row's unit), `with_sessions` and `without_sessions` (the
   sessions that have the figure), `difference` and `verdict`. The groups
   are the sessions of the `prompting` section (a message of yours) with and
-  without a `present` event. The rows:
+  without any event of the mod. The rows:
 
   - `cost_per_reply` — the median over sessions of the session's cost (main
     session and agents, the report's per-session cost) over its replies
@@ -1704,7 +1730,10 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   always read the same) leaves zero, else "No measurable difference yet".
   The interval is 99% rather than 95% because five figures are read at once
   (Bonferroni). Non-interactive runs (`entrypoint` `sdk*` or `mcp`) never
-  write `present`, so they are left out of both groups. The table's notes
+  write `present`, so they are left out of both groups. A `claude -p` run
+  started inside a Desktop session inherits the desktop app's entrypoint
+  and cannot be told from the session itself, so it counts as a Desktop
+  session without ClaudeGlass; the table's notes say so. The table's notes
   say the groups may differ in other ways, so a gap is no proof the mod
   caused it, and that most sessions without the mod are from before it was
   added.
@@ -1716,7 +1745,10 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   `kept_with` and `kept_without`, the kept rate (kept over kept plus
   missing, pooled) of the `compaction` events with `instructed` 1 and 0; an
   event the mod left `instructed` off is in neither. The `readd` row has
-  `referenced`, the sum of the `compaction` events' `referenced` counts.
+  `referenced`, the sum of the `after` counts of the `readd` presses (the
+  re-added items later replies used, once the mod has settled the count;
+  blank when none has). A `compaction` event's own `referenced` is a
+  running count that every later summary repeats, so it is not summed.
   With no tweak and no instructed summary the table has no rows and the
   dashboard shows "No tweaks pressed yet."
 
@@ -1957,6 +1989,8 @@ subagent transcript's events before its first priced turn
 (`ContextBudgetStats.add_subagent`); sizes are characters divided by the
 characters per token measured on your own first calls (the
 `context_budget_calibration` table below; 4.0 until a model has ten). A
+dashboard view of one project uses the ratios measured on every project in
+its window. A CLI report measures its own sessions. A
 fork (its first turn reads most of the parent's context from cache, or its
 agent type is `fork`) is counted in `fork_spawns` and kept out of every
 average. No tables and one note when nothing was measured.
@@ -2093,11 +2127,15 @@ when the corpus has no top-level transcripts at all.
   characters per token), `skills_listing` (every `skill_listing`
   attachment's `size_chars` preceding the first turn), `memory_files` (the
   joined schema-2 snapshot's `content_layers` CLAUDE.md family + rules
-  bytes; `null` without a snapshot), `custom_agents` (the snapshot's agent
-  count out of the agent types the first calls' agent list named, times
-  that list's size; with no list in the first calls, the count times a
-  labelled 60-tokens-per-agent-listing constant; `null` without a
-  snapshot), `mcp_tools` (the MCP servers the project's sessions
+  bytes, plus the median auto memory (`MEMORY.md`) the project's first
+  calls carried, which Claude Code loads in every session; `null` without
+  a snapshot), `custom_agents` (labelled "Your own agents (est)": the
+  snapshot's agent count out of the agent types the first calls' agent list
+  named, times that list's size; with no list in the first calls, the count
+  times a labelled 60-tokens-per-agent-listing constant; `null` without a
+  snapshot. Agents from plugins are part of the agent roster but not
+  counted here, whereas Claude Code's own Custom agents category includes
+  them), `mcp_tools` (the MCP servers the project's sessions
   were offered, counted by what can be done about them, e.g. `"2 offered:
   1 you can turn off, 1 built into the desktop app"`, from the rows
   `tool_search` builds; with none offered, `"present, size unknown"` when
@@ -2107,19 +2145,33 @@ when the corpus has no top-level transcripts at all.
   `tool_search`; a built-in desktop server is counted but never
   removable) and `mcp_tools_tokens` beside them (the
   definitions, deferred-tool names and instructions the first call
-  carried, when it recorded them), `mcp_removable_tokens` (the same,
+  carried, when it recorded them; the definitions are at the size of the
+  request Claude Code logs, like the built-in tools'), `mcp_removable_tokens` (the same,
   leaving out the servers built into the desktop app),
   `controllable_est` (skills list +
   memory files + `mcp_removable_tokens`: the part a setting can change; most of P0 is
-  Claude Code's own tool JSON, which none can) and
-  `system_prompt_and_tools` — the residual: mean first call minus every
-  other known `(est)` bucket, floored at 0. The `all` row's
-  snapshot-derived buckets are always `null` (they can't be meaningfully
-  combined across different projects' own snapshots).
+  Claude Code's own tool JSON, which none can), `system_prompt_est`
+  ("System prompt (est)") and `builtin_tools_est` ("Built-in tools (est)")
+  — Claude Code's own system prompt and built-in tool definitions, sized
+  by `startup_sizes` from what the first call recorded (the mean over the
+  sessions that recorded each, with the tools at the size of the request
+  Claude Code logs; `null` when none did; no setting removes either) —
+  and `system_prompt_and_tools_est`, labelled "Everything else (est)" — the
+  residual: mean first call minus every other known `(est)` bucket,
+  including those two, floored at 0 (`null` when the buckets alone exceed
+  the first call). It holds Claude Code's deferred tool names and notes and
+  any bucket that couldn't be estimated. The residual keeps its key from
+  before the two columns were split out of it, because report JSON and CSV
+  consumers read it. The `all` row's snapshot-derived buckets are always
+  `null` (they can't be meaningfully combined across different projects'
+  own snapshots); its system prompt and built-in tools are not.
 - `context_budget_tools` — across every project, one row per built-in
-  tool and MCP server the main sessions started with, largest first, from
-  the tools snapshot Claude Code records (`startup_sizes`; older versions
-  record none): `tool` (the built-in's name, or an MCP server as
+  tool and MCP server the main sessions started with, largest first,
+  measured from the request Claude Code logs (the `api-request-shape`
+  line's tool definitions as sent), or from the snapshot it records on
+  older versions (`startup_sizes`; the snapshot's definitions measure
+  about 1.6 times the ones sent, so the request wins whenever the
+  transcript has one): `tool` (the built-in's name, or an MCP server as
   `tool_search.server_label` names it), `kind` (`Built-in`, `MCP
   server`, or `Desktop app` for a server the app brings: the tool search
   rows decide, else a listed name that a session in the app offered), the sessions
@@ -2138,19 +2190,31 @@ when the corpus has no top-level transcripts at all.
   A model needs ten such calls to get its own figure (the median of those
   calls); until then 4.0 stands in and the figure is left empty, and a
   model with neither figure has no row. Only those two numbers per model
-  are kept.
+  are kept. A dashboard view of one project shows the ratios measured on
+  every project in its window, and a CLI report measures its own sessions,
+  so the same project's table and token figures can differ between the two.
 - `context_budget_autocompact` — per project: the configured
   `autoCompactWindow` from the latest schema-2 snapshot's effective
-  settings (`null` if absent), the model's context window size (from a
-  statusline ground-truth row when one is available for the project,
-  else assumed as 1,000,000 for a `"[1m]"` model alias or 200,000
-  otherwise — `context_window_source` names which), the *observed*
-  effective autocompact threshold (median `compactMetadata.preTokens`
-  over this project's own `trigger == "auto"` compactions —
-  `compaction.effective_autocompact_threshold`), the implied buffer
-  (window minus threshold), how many auto compactions were observed, and
-  whether the observed threshold drifted more than 10% from the
-  configured window (`null` when either figure is unavailable).
+  settings (`null` if absent; a project with no snapshot of its own, such
+  as a worktree, takes the newest window any snapshot sets, since
+  user-level settings cover every project), the model's context window
+  size (from a statusline ground-truth row when one is available for the
+  project, else the rate card's window for the model setting —
+  `context_window_source` names which), the *observed* effective
+  autocompact threshold (median `compactMetadata.preTokens` over this
+  project's own `trigger == "auto"` compactions that were not precomputed
+  — `compaction.effective_autocompact_threshold`), the implied buffer,
+  how many automatic summaries that median is drawn from, and whether the
+  observed threshold drifted more than 10% from where the configured
+  window should summarise. Claude Code summarises a constant 33,000 tokens
+  below `autoCompactWindow` (400,000 fires at 367,000), so the implied
+  buffer is the configured window minus the observed threshold (about
+  33,000; the model's window minus the threshold only when no window is
+  configured), and the drift is measured against the window minus 33,000
+  (`null` when either figure is unavailable). Only summaries from sessions
+  that started under the configured window are compared with it: a
+  session that ran under an older setting is not evidence about the
+  current one.
 - `context_budget_statusline` — one real, non-estimated line per
   session (last reported used tokens, window size, used percentage),
   present only once at least one usage-log row carries `context_window`
@@ -2190,22 +2254,29 @@ deferred-tool list.
 
 - `tool_search_summary` — one row (`all replies`): replies requested
   with tools deferred, the most tools deferred in one reply and how many
-  of those were MCP tools, definitions measured and their average size
+  of those were MCP tools, definitions measured (loaded, or sent in full
+  at the start, as the request Claude Code logged shows, else a
+  `prompt_snapshot`) and their average size
   (tokens), tokens kept out of each reply, what keeping them out saved,
   the cost of the name list, replies that only called `ToolSearch` and
   their cost, and the net saving. The token and money figures are blank
-  when no definition was loaded in the window.
+  when no definition was loaded or sent in full in the window.
 - `tool_search_by_server` — one row per MCP server (`built-in` for
   Claude Code's own tools), largest saving first (top
   `tool_search_top_n`, default 20): the most of its tools deferred in one
   reply, its definitions measured, the size each deferred tool was
-  counted at, whether that size came from `its own tools` or `all
-  servers`, replies, tokens kept out of each reply and the saving.
+  counted at, whether that size came from `its own tools`, from the
+  `MCP tools loaded in this window` (a server with no tool of its own
+  measured, when at least ten MCP tools were loaded), from a `typical MCP
+  tool` (550 tokens, when fewer were) or from `all servers` (Claude
+  Code's own tools with none measured), replies, tokens kept out of each
+  reply and the saving.
 - `tool_search_servers` — one row per MCP server the window's
   transcripts or config snapshots name (never `built-in`), uncapped,
   ordered by status then cost: kind, status, main sessions and subagent
   runs that were offered it, uses, first and last offered (days before
-  the window's end), other names, up to three of its tools, its name in
+  the window's end; the first is no further back than every reply was
+  seen), other names, up to three of its tools, its name in
   your config and the projects that have it, and what keeping it cost
   (its share of the name list, its instructions, its tools sent in full,
   and their sum), at the front-of-prompt rate.
@@ -2337,7 +2408,10 @@ total was last written (`TranscriptMeta.cc_cost_as_of`; subagents
 included), from when the Claude Code process it counts started
 (`TranscriptMeta.cc_cost_since`: a resumed session's total leaves out
 the replies before the resume). A total of zero with no model in it is
-a blank record, not a cost, and is skipped.
+a blank record, not a cost, and is skipped. A Claude Code process that
+moves through several sessions (a fork or a continue) writes its running
+total into each one's log, so it is one row, not one per session: the
+largest total, against every one of those sessions' replies.
 
 - `cost_record_summary` — one `all` row: `sessions`, `cc_usd` (Claude
   Code's own), `local_usd` (ClaudeGlass, same span), `difference_pct`,
@@ -2349,9 +2423,16 @@ a blank record, not a cost, and is skipped.
   a request for a session title) and `estimated_usd` (the estimated
   compaction calls both sides count); `unexplained_pct` is what is left
   once the first two are taken out, and `worst_unexplained_pct` the
-  largest share in one session.
-- `cost_record_sessions` — the 20 newest records: `session_id`, `as_of`,
-  `cc_usd`, `local_usd`, `difference_pct`, `unexplained_pct`.
+  largest share in one session. `sessions` counts every session behind
+  the rows, not only the one whose log holds each total. Two shares of
+  the figures sit beside them, not taken out: `partial_usd`, the output
+  ClaudeGlass estimated for replies Claude Code logged only mid-stream
+  (it bills them in full), and `safeguards_usd`, the part of
+  `unlogged_usd` that is a response stopped by safeguards, which Claude
+  Code bills though the log keeps only a placeholder.
+- `cost_record_sessions` ("By session") — the 20 newest records, one per
+  Claude Code process: `session_id` (the record holding the largest total),
+  `as_of`, `cc_usd`, `local_usd`, `difference_pct`, `unexplained_pct`.
 
 Empty when no session in the window has a record (only some Claude Code
 versions write one). On three real Claude Code 2.1.283 sessions, $66 in
@@ -2407,6 +2488,14 @@ snapshot it is rated 5 with a note, rather than marked down.
 `agent_efficiency` is similarly a proxy (`agent_cost_variance_ratio`):
 the ratio of the costliest agent type's mean cost to the median across
 agent types.
+
+Context hygiene bands scale with the auto-compact window in force, or the
+model's own window when no setting is recorded: the bands are written for
+a 200,000-token window and multiplied by the window covering the most main
+session replies, each session's own as it started. A p90 of 316,000 tokens
+is level 4 against a 1,000,000 window but level 2 against the 400,000 one
+Claude Code actually summarises at. A `[thresholds.scorecard]
+context_p90_ctx` of your own is used as written.
 
 ## Recommendations (`recommend.py`)
 
@@ -2521,9 +2610,13 @@ none writes a file.
   (`spawn_unused_mcp_use_share_pct`) and that costs at least 5 USD over 30
   days (`spawn_unused_mcp_min_usd_30d`). Its amount counts each server's tool
   definitions and deferred names, a breakdown of the tools list card's
-  saving, so it is not added to it. Its `mcpServers` change is marked not
-  verified. ClaudeGlass does not record an agent's
-  `mcpServers`, so the card says to look in the file first.
+  saving, so it is not added to it. The card's change is a
+  `disallowedTools` entry, `mcp__<server>` per server, added to whatever
+  the file already lists, and is marked not verified. Claude Code's
+  subagent docs give `disallowedTools` as the way to withhold a server's
+  tools, whatever its kind; an `mcpServers` list only adds servers. A
+  server whose name holds `__` is left off the card, since `mcp__<prefix>`
+  would also withhold the servers that share its start.
 - A built-in agent type's `spawn-cost` card no longer says to shorten the
   task prompt: its start is Claude Code's own system prompt and tool
   definitions, which a tools list trims. `Explore`, `Plan` and
@@ -2555,13 +2648,19 @@ include `lines`, `unparsable_lines`, `truncated_final_line`,
 sanitised type or `other` since `PARSER_VERSION` 20), `oversized_lines`,
 `trailing_events`, `replayed_lines`, `copied_lines` (lines of another
 session whose own file holds them too, skipped since `PARSER_VERSION`
-26), `compaction_calls` / `compaction_calls_unsized` (compactions whose
+26; a fork that landed in another project folder, an agent file copied
+into a fork and a reply zeroed in a continued session count here too),
+`partial_output_turns` / `partial_output_est_tokens` (replies Claude Code
+logged only mid-stream, and the output tokens ClaudeGlass estimated for
+them beyond the count logged, since `PARSER_VERSION` 45),
+`compaction_calls` / `compaction_calls_unsized` (compactions whose
 summary request was estimated and priced, and those left out, since
 `PARSER_VERSION` 27), `timestamp_parse_failures`,
 `agent_settings`, `modes`, `attachment_catch_all`, `limit_hits`,
 `limit_resumes`, `agents_terminated`,
-`pre_split_turns` (pre-split `cache_creation` reads normalised at parse
-time — see the CHANGELOG), and `pricing_closest_match_turns` /
+`pre_split_turns` (pre-split cache_creation writes are priced at the
+5-minute rate; the TTL tables attribute them to the transcript's dominant
+lifetime), and `pricing_closest_match_turns` /
 `pricing_fast_priced_as_standard_turns` (corpus-wide totals mirroring
 the `usage` section's `pricing_closest_match`/
 `pricing_fast_priced_as_standard` tables above — unlike every other
@@ -2609,12 +2708,12 @@ and nothing here is the original session's real identifier.
 
 **Re-cache signature split** (`recache_signature_split`):
 
-| Signature | Turns | Cache-creation tokens | Avoidable cost | Median ctx | Median gap |
-|---|---|---|---|---|---|
-| full-expiry | 7 | 1,003,923 | 5.80 USD | 130,555 | 10m 21s |
-| prefix-invalidated | 0 | 0 | 0.00 USD | - | - |
-| post-compaction | 0 | 0 | 0.00 USD | - | - |
-| limit-expiry | 0 | 0 | 0.00 USD | - | - |
+| Signature | Turns | Cache-creation tokens | Avoidable cost | Median ctx | Median gap | API cause |
+|---|---|---|---|---|---|---|
+| full-expiry | 7 | 1,003,923 | 5.80 USD | 130,555 | 10m 21s | |
+| prefix-invalidated | 0 | 0 | 0.00 USD | - | - | |
+| post-compaction | 0 | 0 | 0.00 USD | - | - | |
+| limit-expiry | 0 | 0 | 0.00 USD | - | - | |
 
 Every re-cache turn in this session was a genuine TTL expiry
 (`full-expiry`), not a broken-prefix invalidation or a usage-limit

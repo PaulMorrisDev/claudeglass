@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from claudeglass import calibration, context_files, parse
-from claudeglass.model import Column, Table, TranscriptMeta, TranscriptResult, Turn
+from claudeglass.model import Column, EventKind, Table, TranscriptMeta, TranscriptResult, Turn
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import effective_rates, load_pricing
 
@@ -303,13 +303,18 @@ def _read_session(
     compact_after: int | None = None,
     failed: bool = False,
     loaded: list[tuple[str, int]] | None = None,
+    inherited_boundary_at: float | None = None,
 ):
     """A transcript with one assistant reply a minute per entry of
     ``reads``; each entry lists the ``(path, characters)`` the reply read
     with the Read tool. ``compact_after`` puts a compaction after that
     reply, ``failed`` makes every read fail, ``loaded`` is what Claude Code
-    loaded as instructions."""
+    loaded as instructions. ``inherited_boundary_at`` puts a compaction
+    ahead of the first reply, stamped that many minutes in: the one a
+    continued session carries over from the session it came from."""
     lines = []
+    if inherited_boundary_at is not None:
+        lines.append(system_line("compact_boundary", timestamp=_iso(days, inherited_boundary_at)))
     if loaded:
         lines.append(
             {
@@ -479,6 +484,25 @@ def test_a_read_is_carried_until_the_conversation_is_summarised(tmp_path):
     assert plain.reads[key].cost_usd == pytest.approx(carry.cost(8000, 1, 6))
     assert short.reads[key].cost_usd == pytest.approx(carry.cost(8000, 1, 3))
     assert 0 < short.reads[key].cost_usd < plain.reads[key].cost_usd
+
+
+def test_a_summary_the_session_inherited_does_not_end_a_reads_carry(tmp_path):
+    """A continued session's file opens with the boundary of the session it
+    came from, stamped by its clock. It is not a summary of this file's
+    conversation, so it cannot drop a read: the read is paid for to the
+    last reply, as if the boundary were not there."""
+    pricing = load_pricing()
+    reads = [[(CONTEXT_MD, 8000)], [], [], [], [], []]
+    plain = _read_session(tmp_path, "plain", reads)
+    continued = _read_session(tmp_path, "continued", reads, inherited_boundary_at=3.5)
+    (boundary,) = [e for e in continued.events if e.kind == EventKind.COMPACT_BOUNDARY]
+    assert boundary.detail.get("inherited") is True
+
+    key = parse.path_hash(CONTEXT_MD, SALT)
+    stats = context_files.ContextFileStats()
+    stats.add(continued, pricing, is_main=True)
+    carry = context_files._Carry(plain, pricing)
+    assert stats.reads[key].cost_usd == pytest.approx(carry.cost(8000, 1, 6))
 
 
 def test_a_read_in_the_last_reply_is_counted_but_costs_nothing_more(tmp_path):

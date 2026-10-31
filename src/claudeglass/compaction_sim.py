@@ -135,7 +135,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable
 
-from .compaction import CompactionRecord, compaction_records_for_transcript
+from .compaction import CompactionRecord, compaction_records_for_transcript, is_precomputed
 from .model import (
     Column,
     EventKind,
@@ -160,6 +160,14 @@ from .snapshots import (
 if TYPE_CHECKING:
     from .units import Units
 
+#: How far below its auto-compact window Claude Code summarises: a constant
+#: 33,000 tokens (a 250,000 window fires at 217,000, 300,000 at 267,000,
+#: 400,000 at 367,000 and 1,000,000 at 967,000). The trigger reserve a sweep
+#: falls back to when no real automatic summary under a known window says
+#: otherwise, and what ``context_budget``'s auto-compact table expects its
+#: implied buffer to be.
+CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS = 33_000
+
 #: Assumptions this module's simulation makes, printed verbatim in the
 #: report section's notes (same convention as ``ttl.ASSUMPTIONS``).
 ASSUMPTIONS: list[str] = [
@@ -171,7 +179,8 @@ ASSUMPTIONS: list[str] = [
     "a candidate window summarises at the window minus your median "
     "trigger reserve. The trigger reserve is the gap between the window "
     "and the context at each real automatic summary. It comes from "
-    "sessions whose window setting is known, and is 0 when there are none",
+    "sessions whose window setting is known, and is 33,000 (Claude Code's "
+    "own buffer) when there are none",
     "a simulated summary charges for the summary request: the context "
     "read again and your median real summary request's output (about "
     "twice the summary, as it writes an analysis first; the summary "
@@ -208,6 +217,9 @@ ASSUMPTIONS: list[str] = [
 #: rather than the ~200k a pre-Fable-5 model assumes; a corpus running
 #: one of those models would otherwise never see a realistic candidate
 #: near its actual window.
+#: A window at or above the one a session ran at replays unchanged (a real
+#: compaction is kept and the context never reaches the candidate's trigger),
+#: so the rows above the observed window all equal ``none``.
 #: Values must stay ascending (excluding ``None``) -- callers rely on
 #: "first candidate that fires" being the smallest one.
 CANDIDATE_WINDOWS: tuple[int | None, ...] = (
@@ -276,8 +288,8 @@ class CompactionSimThresholds:
     default_summary_tokens: int = 20_000
     #: Tokens below ``autoCompactWindow`` at which a compaction fires, used
     #: for a corpus with no real auto compaction in a session whose
-    #: configured window is known.
-    default_trigger_reserve_tokens: int = 0
+    #: configured window is known. Claude Code's own buffer, a constant.
+    default_trigger_reserve_tokens: int = CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS
     #: Share of a session's starting context still read from cache on the
     #: reply after a compaction, used for a corpus with no real one (0:
     #: the whole new context is written).
@@ -415,6 +427,18 @@ def _dominant_model(turns: list[Turn]) -> str | None:
 # -- real-compaction correlation -----------------------------------------
 
 
+def _own_boundaries(tr: TranscriptResult):
+    """The transcript's own ``COMPACT_BOUNDARY`` events. A boundary before
+    the file's first reply (``detail["inherited"]``, set by ``parse.py``)
+    belongs to the session this one was continued from, which already
+    counts it, so it is left out of every figure here."""
+    return (
+        event
+        for event in tr.events
+        if event.kind == EventKind.COMPACT_BOUNDARY and event.detail.get("inherited") is not True
+    )
+
+
 def _real_compaction_turn_indices(
     tr: TranscriptResult, priced_turns: list[Turn], th: CompactionSimThresholds
 ) -> dict[int, int]:
@@ -426,9 +450,7 @@ def _real_compaction_turn_indices(
     marked: dict[int, int] = {}
     idx = 0
     n = len(priced_turns)
-    for event in tr.events:
-        if event.kind != EventKind.COMPACT_BOUNDARY:
-            continue
+    for event in _own_boundaries(tr):
         event_dt = _parse_ts(event.ts)
         if event_dt is None:
             continue
@@ -455,12 +477,7 @@ def _corpus_summary_tokens(results: list[TranscriptResult], th: CompactionSimThr
     event in ``results``, or ``th.default_summary_tokens`` (flagged) when
     there are none. A flat size, not a ratio of the context: on a real
     corpus a summary barely grows with the conversation it replaces."""
-    sizes = [
-        event.post_tokens
-        for tr in results
-        for event in tr.events
-        if event.kind == EventKind.COMPACT_BOUNDARY and event.post_tokens
-    ]
+    sizes = [event.post_tokens for tr in results for event in _own_boundaries(tr) if event.post_tokens]
     if not sizes:
         return float(th.default_summary_tokens), True
     return float(statistics.median(sizes)), False
@@ -485,14 +502,17 @@ def _corpus_trigger_reserve(
     real auto compaction fired: the median ``window - pre_tokens`` across
     auto-triggered ``COMPACT_BOUNDARY`` events in top-level sessions whose
     configured window is known, or ``th.default_trigger_reserve_tokens``
-    (flagged) when there are none."""
+    (flagged) when there are none. A precomputed boundary is left out: its
+    summary was made in the background beforehand, so it lands wherever the
+    session happened to be (205,495 under a 400,000 window), not at the
+    point the window sets."""
     reserves: list[int] = []
     for tr in results:
         window = snapshot_windows.get(tr.meta.session_id) if tr.meta.kind == "top-level" else None
         if not window:
             continue
-        for event in tr.events:
-            if event.kind != EventKind.COMPACT_BOUNDARY or event.trigger != "auto" or not event.pre_tokens:
+        for event in _own_boundaries(tr):
+            if event.trigger != "auto" or not event.pre_tokens or is_precomputed(event):
                 continue
             reserve = window - event.pre_tokens
             if 0 <= reserve < window:
@@ -597,18 +617,36 @@ class _PricedTurn:
         self.web_search_requests = turn.web_search_requests
 
 
+def _output_tokens_of(turn: Turn) -> int:
+    """What the reply output: the estimate for a reply Claude Code logged
+    only mid-stream (``Turn.output_tokens_est``), else the logged count.
+    The same choice ``price_turn`` makes, for the replays that price a
+    changed copy of a turn instead of the turn itself."""
+    estimate = getattr(turn, "output_tokens_est", None)
+    return estimate if estimate is not None else turn.output_tokens
+
+
+def _write_split(turn: Turn) -> tuple[int, int]:
+    """``(5-minute, 1-hour)`` cache writes of ``turn`` with any part of
+    ``cache_creation_tokens`` that no split accounts for counted at the
+    5-minute rate, as ``price_turn`` prices it. A slim copy of a turn has
+    no flat count of its own for ``price_turn`` to take that from."""
+    unsplit = max(turn.cache_creation_tokens - turn.cc_5m - turn.cc_1h, 0)
+    return turn.cc_5m + unsplit, turn.cc_1h
+
+
 def _shrunk_cost(turn: Turn, rates: RatesArg, dropped: float, output_tokens: int | None = None) -> float:
     """Price ``turn`` with ``dropped`` tokens taken out of its context:
     out of its cache reads first (the dropped history is the old, cached
     part of the prefix), then out of its cache writes once the reads are
     used up (a turn that re-cached its whole prefix). ``output_tokens``,
-    when given, replaces the turn's own."""
+    when given, replaces the turn's own (a mid-stream reply's estimate
+    otherwise stands in for its logged count)."""
+    if dropped <= 0 and output_tokens is None:
+        return price_turn(turn, rates).total
+    cc_5m, cc_1h = _write_split(turn)
     if dropped <= 0:
-        if output_tokens is None:
-            return price_turn(turn, rates).total
-        request = _PricedTurn(
-            turn, turn.ctx, turn.input_tokens, output_tokens, turn.cache_read_tokens, turn.cc_5m, turn.cc_1h
-        )
+        request = _PricedTurn(turn, turn.ctx, turn.input_tokens, output_tokens, turn.cache_read_tokens, cc_5m, cc_1h)
         return price_turn(request, rates).total  # type: ignore[arg-type]
     ctx = max(0, int(round(turn.ctx - dropped)))
     read = max(0, int(round(turn.cache_read_tokens - dropped)))
@@ -619,10 +657,10 @@ def _shrunk_cost(turn: Turn, rates: RatesArg, dropped: float, output_tokens: int
         turn,
         ctx,
         turn.input_tokens,
-        turn.output_tokens if output_tokens is None else output_tokens,
+        _output_tokens_of(turn) if output_tokens is None else output_tokens,
         read,
-        int(round(turn.cc_5m * keep)),
-        int(round(turn.cc_1h * keep)),
+        int(round(cc_5m * keep)),
+        int(round(cc_1h * keep)),
     )
     return price_turn(shrunk, rates).total  # type: ignore[arg-type]
 
@@ -644,9 +682,10 @@ def _recached_reply_cost(turn: Turn, rates: RatesArg, new_ctx: float, cached_pre
     read = min(ctx, int(round(cached_prefix)))
     uncached = min(turn.input_tokens, ctx - read)
     write = ctx - read - uncached
-    written = turn.cc_5m + turn.cc_1h
-    write_1h = int(round(write * turn.cc_1h / written)) if written else 0
-    reply = _PricedTurn(turn, ctx, uncached, turn.output_tokens, read, write - write_1h, write_1h)
+    cc_5m, cc_1h = _write_split(turn)
+    written = cc_5m + cc_1h
+    write_1h = int(round(write * cc_1h / written)) if written else 0
+    reply = _PricedTurn(turn, ctx, uncached, _output_tokens_of(turn), read, write - write_1h, write_1h)
     return price_turn(reply, rates).total  # type: ignore[arg-type]
 
 
@@ -1080,6 +1119,7 @@ def replay_cost(
     rates: "RatesArg | RatesLookup",
     window: int | None,
     thresholds: CompactionSimThresholds | None = None,
+    snapshot_windows: dict[str, int | None] | None = None,
 ) -> float:
     """What ``results`` would have cost with ``window`` as the
     ``autoCompactWindow``: each transcript replayed the way
@@ -1087,11 +1127,18 @@ def replay_cost(
     summary size, trigger reserve and cached prefix measured from
     ``results`` themselves, and each real compaction kept.
     ``window=None`` gives the cost as it ran. Used by
-    ``counterfactual.py`` for a change that raised the window."""
+    ``counterfactual.py`` for a change that raised the window.
+
+    ``snapshot_windows`` maps a session id to the window it ran under, as
+    :func:`simulate_compaction_windows` takes it: the trigger reserve is
+    measured from the real automatic summaries of the sessions it names.
+    Without it no session's window is known, so the reserve is
+    ``thresholds.default_trigger_reserve_tokens``, Claude Code's own buffer
+    of 33,000 tokens."""
     th = thresholds or _DEFAULT_THRESHOLDS
     lookup = _as_lookup(rates)
     summary, _ = _corpus_summary_tokens(results, th)
-    reserve, _ = _corpus_trigger_reserve(results, {}, th)
+    reserve, _ = _corpus_trigger_reserve(results, snapshot_windows or {}, th)
     share, _ = _corpus_cached_prefix_share(results, th)
     output, _ = _corpus_summary_output_tokens(results, summary)
     shape = _Shape(summary, reserve, share, output)
@@ -1133,6 +1180,7 @@ def build_section(
         Column(key="cost", label="Total cost", kind="money"),
         Column(key="delta_usd", label="Change in cost", kind="money"),
         Column(key="delta_pct", label="Delta vs observed (%, negative = cheaper)", kind="pct"),
+        Column(key="within_limit", label="Within the summaries-per-session limit", kind="str"),
     ]
     window_rows = stats.by_window("top-level")
     by_window_table = Table(
@@ -1147,6 +1195,7 @@ def build_section(
                 r.cost,
                 r.delta_usd,
                 r.delta_pct,
+                r.compactions_per_session <= th.max_compactions_per_session,
             ]
             for r in window_rows
         ],

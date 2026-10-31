@@ -962,6 +962,7 @@ def test_privacy_mcp_server_fields_hold_only_identifiers_and_numbers(tmp_path: P
         *(getattr(turn, name) for turn in result.turns for name in (
             "deferred_list_chars_by_server", "mcp_instruction_chars_by_server", "mcp_resource_servers")),
         result.upfront_definition_chars_by_server,
+        result.upfront_tool_chars,
         result.mcp_tool_suffixes_by_server,
         result.mcp_connection_status,
     ]
@@ -975,6 +976,32 @@ def test_privacy_mcp_server_fields_hold_only_identifiers_and_numbers(tmp_path: P
                 assert value in {"pending", "needs sign-in", "failed to connect"}, value
                 continue
             assert all(len(suffix) <= _MAX_STR_LEN and ident.match(suffix) for suffix in value), value
+    assert "Private" not in repr(result) and "secret notes" not in repr(result)
+    assert_privacy(result)
+
+
+def test_privacy_request_sized_mcp_tools_are_kept_by_identifier_and_length_only(tmp_path: Path):
+    """The request line lists whole definitions. Of an MCP tool in it only
+    a name that is a plain identifier and a length survive: no description,
+    no schema, and no name made of a path or free text."""
+    hostile = "mcp__C:\\Users\\someone\\secret notes__" + "x" * 200
+    tools = [
+        {"name": "mcp__up__" + "u" * 100, "description": "Private description.", "input_schema": {"x": "Private"}},
+        {"name": hostile, "description": "Private.", "input_schema": {}},
+        {"name": "mcp__a b__c", "description": "Private.", "input_schema": {}},
+        {"name": "mcp__deferred__d", "description": "Private.", "input_schema": {}, "defer_loading": True},
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, [ignorable_line("api-request-shape", shape={"tools": tools}), turn_line(message_id="msg_1")])
+
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="s"))
+
+    ident = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+    assert result.upfront_request_tools == ["mcp__up__" + "u" * 100]
+    assert set(result.upfront_tool_chars) == {"mcp__up__" + "u" * 100}
+    for name in [*result.upfront_request_tools, *result.upfront_tool_chars, *result.upfront_definition_chars_by_server]:
+        assert ident.match(name), name
+    assert all(isinstance(chars, int) for chars in result.upfront_tool_chars.values())
     assert "Private" not in repr(result) and "secret notes" not in repr(result)
     assert_privacy(result)
 

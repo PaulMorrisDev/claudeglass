@@ -59,7 +59,7 @@ export var CHART_SPECS = {
     form: "line",
     title: "Would summarising conversations at a different size cost less?",
     summary: "Summarising at {best} tokens would cost {saving} less than now.",
-    alt: { cheapest: "None of the sizes tried would cost less than now." },
+    alt: { cheapest: "No size within the summaries-per-session limit would cost less than now." },
   },
   "session-outliers": {
     n: 4,

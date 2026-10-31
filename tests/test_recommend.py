@@ -1127,7 +1127,7 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
         ("Estimated memory files (est)", 7_000, table, "proj"),
         ("Estimated MCP tools you can turn off (est)", 14_000, table, "proj"),
         ("Mean first call (measured)", 95_000, table, "proj"),
-        ("Estimated system prompt and tools (est)", 59_700, table, "proj"),
+        ("Estimated everything else (est)", 59_700, table, "proj"),
     ]
     # Only what a setting can change competes for "largest".
     raw = recommend._rule_baseline_bloat(r, RecommendThresholds(), snapshot, None)[0]

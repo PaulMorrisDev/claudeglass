@@ -70,6 +70,15 @@ conversation only, and the compactions inside agent runs are counted apart
 (``CompactionStats.agent_compactions``). :func:`compactions_in` is the one
 count of a single transcript, which the agent run receipts reuse.
 
+Two kinds of boundary are not plain threshold compactions. One Claude Code
+2.1.309 wrote after summarising in the background (``precomputed``) only
+applies a summary that was already made, often after an idle gap and below
+the threshold: it is counted and priced like any compaction, but left out
+of :func:`effective_autocompact_threshold` and shown as ``auto
+(precomputed)`` in the trigger mix. One before the file's first reply
+(``detail["inherited"]``) belongs to the session this one continued from,
+so no record is made for it here.
+
 Compaction cost: :meth:`CompactionStats.heavy_session_cost_share` is the
 share of main-session cost spent in sessions that compacted
 ``HEAVY_COMPACTIONS`` times or more. It reads the cost the report already
@@ -110,6 +119,10 @@ HEAVY_COMPACTIONS = 3
 _MAIN_KIND = "top-level"
 AGENT_KINDS = ("subagent", "workflow-agent")
 
+#: The trigger-mix label of an automatic compaction Claude Code summarised
+#: in the background beforehand (``CompactionRecord.precomputed``).
+PRECOMPUTED_AUTO_TRIGGER = "auto (precomputed)"
+
 #: A ``CompactionRecord`` whose ``join_delta_s`` exceeds this many seconds
 #: (15 minutes) is excluded from every aggregate built from its
 #: ``next_turn_*`` fields (fix item 9) — the correlation only guarantees
@@ -125,14 +138,26 @@ def _join_is_tight(record: CompactionRecord) -> bool:
     return record.join_delta_s is None or record.join_delta_s <= _MAX_JOIN_DELTA_S
 
 
+def counts_toward_threshold(record: CompactionRecord) -> bool:
+    """Whether ``record`` says where the harness itself fired: an
+    automatic compaction with a usable ``pre_tokens`` that was not
+    precomputed. The one sample :func:`effective_autocompact_threshold`'s
+    median is drawn from and the context budget's automatic-compaction
+    count adds up."""
+    return record.trigger == "auto" and not record.precomputed and record.pre_tokens is not None
+
+
 def effective_autocompact_threshold(records: Iterable[CompactionRecord]) -> float | None:
     """The observed effective autocompact threshold: the median
     ``pre_tokens`` across every ``records`` entry whose ``trigger`` is
     exactly ``"auto"`` (a manual/unknown-trigger compaction says nothing
     about where the harness itself decided to fire, so it's excluded).
-    ``None`` when no auto-triggered record carries a ``pre_tokens`` value
-    at all -- deliberately not ``0``, which would misleadingly read as
-    "compacts almost immediately".
+    A precomputed boundary (``CompactionRecord.precomputed``) is excluded
+    too: its summary was made in the background beforehand, so the
+    boundary lands wherever the session happened to be, often well below
+    the threshold. ``None`` when no remaining record carries a
+    ``pre_tokens`` value at all -- deliberately not ``0``, which would
+    misleadingly read as "compacts almost immediately".
 
     S1-context-budget addition: this is the "new ``compaction.py``
     helper" the context-budget work package asks for, kept as a
@@ -143,7 +168,7 @@ def effective_autocompact_threshold(records: Iterable[CompactionRecord]) -> floa
     project-scoped record list without needing a whole second
     ``CompactionStats`` instance per project.
     """
-    values = [r.pre_tokens for r in records if r.trigger == "auto" and r.pre_tokens is not None]
+    values = [r.pre_tokens for r in records if counts_toward_threshold(r)]
     return statistics.median(values) if values else None
 
 
@@ -203,7 +228,20 @@ def _priced_turns(tr: TranscriptResult) -> list[Turn]:
 
 
 def _compaction_events(tr: TranscriptResult) -> list[Event]:
-    return [e for e in tr.events if e.kind == EventKind.COMPACT_BOUNDARY]
+    """The transcript's own ``COMPACT_BOUNDARY`` events. A boundary before
+    the file's first reply (``detail["inherited"]``, set by ``parse.py``)
+    belongs to the session this one was continued from, which already
+    counts it, so it is left out here."""
+    return [e for e in tr.events if e.kind == EventKind.COMPACT_BOUNDARY and e.detail.get("inherited") is not True]
+
+
+def is_precomputed(event: Event) -> bool:
+    """Whether Claude Code 2.1.309 and later wrote this boundary after
+    summarising in the background (``compactMetadata.precomputed``). The
+    boundary only applies a summary that was already made, so it fires
+    wherever the session happens to be, not where the auto-compact window
+    puts the threshold."""
+    return event.detail.get("precomputed") is True
 
 
 def _correlate_compactions_to_turn_index(
@@ -293,6 +331,11 @@ class CompactionRecord:
     #: timestamp is unparsable. See ``CompactionStats``'s join-tightness
     #: gate on the aggregates that read ``next_turn_*``.
     join_delta_s: float | None = None
+    #: Claude Code 2.1.309 and later wrote this boundary after summarising in
+    #: the background (``compactMetadata.precomputed``). It is a real
+    #: compaction everywhere (counted, priced), but not a sample of the
+    #: auto-compact threshold: see :func:`counts_toward_threshold`.
+    precomputed: bool = False
 
 
 def compaction_records_for_transcript(
@@ -386,6 +429,7 @@ def compaction_records_for_transcript(
                 next_turn_write_cost=next_write_cost,
                 next_turn_is_recache=next_is_recache,
                 join_delta_s=join_delta_s,
+                precomputed=is_precomputed(event),
             )
         )
     return records
@@ -530,9 +574,14 @@ class CompactionStats:
 
     @property
     def trigger_mix(self) -> dict[str, int]:
+        """Compactions by trigger. A precomputed automatic one is counted
+        apart as ``"auto (precomputed)"``: it did not fire at the threshold,
+        so it is not read as the harness choosing that point."""
         mix: dict[str, int] = {}
         for record in self.records:
             key = record.trigger or "unknown"
+            if record.precomputed and key == "auto":
+                key = PRECOMPUTED_AUTO_TRIGGER
             mix[key] = mix.get(key, 0) + 1
         return mix
 
@@ -862,6 +911,9 @@ __all__ = [
     "CompactionRecord",
     "HEAVY_COMPACTIONS",
     "compactions_in",
+    "counts_toward_threshold",
+    "is_precomputed",
+    "PRECOMPUTED_AUTO_TRIGGER",
     "compaction_records_for_transcript",
     "CompactionStats",
     "effective_autocompact_threshold",

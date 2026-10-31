@@ -867,6 +867,8 @@ def _merge_diagnostics(acc: Diagnostics, d: Diagnostics) -> None:
     acc.copied_lines += d.copied_lines
     acc.compaction_calls += d.compaction_calls
     acc.compaction_calls_unsized += d.compaction_calls_unsized
+    acc.partial_output_turns += d.partial_output_turns
+    acc.partial_output_est_tokens += d.partial_output_est_tokens
     acc.timestamp_parse_failures += d.timestamp_parse_failures
     acc.pre_split_turns += d.pre_split_turns
     acc.limit_hits += d.limit_hits
@@ -1319,6 +1321,22 @@ def _apply_autocompact_pct_override(configured_window: int, snap: Snapshot) -> i
     return configured_window
 
 
+def _window_at_start(
+    first_ts: str | None, snapshots: list[Snapshot] | None, project_key: tuple[str, ...] | str | None
+) -> int | None:
+    """The auto-compact window a session ran under: the one its own project's
+    snapshot in force when it started sets (``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
+    beating the setting, less any ``CLAUDE_AUTOCOMPACT_PCT_OVERRIDE``), found
+    by ``snapshots.snapshot_for`` with the hashed project keys so another
+    project's settings never leak in. ``None`` when there is no snapshot, the
+    session began before the first one, or it sets no window."""
+    snap = snapshots_mod.snapshot_for(first_ts, snapshots, project_key) if snapshots else None
+    if snap is None:
+        return None
+    value = snapshots_mod.auto_compact_window(snap)
+    return None if value is None else _apply_autocompact_pct_override(value, snap)
+
+
 #: Later than any snapshot, so ``snapshot_for`` finds a project's newest.
 _END_OF_TIME = "9999-12-31T00:00:00Z"
 
@@ -1351,6 +1369,19 @@ def _current_window_of(snapshots: list[Snapshot] | None, keys_by_session: dict[s
 # -- build_report -----------------------------------------------------------
 
 
+def measure_calibration(corpus: Corpus) -> Calibration:
+    """Characters per token, measured on ``corpus``'s own subagent first
+    calls (:func:`calibration.Calibration.from_calls`).
+
+    Every transcript is already in memory, so the pre-pass is one cheap
+    walk. :func:`build_report` runs it before any module turns characters
+    into tokens, unless its caller hands it a figure measured on a wider
+    corpus (its ``calibration`` parameter)."""
+    return Calibration.from_calls(
+        call for bundle in corpus.sessions for sub in bundle.subs if (call := context_budget.first_call(sub))
+    )
+
+
 def build_report(
     corpus: Corpus,
     pricing: Pricing,
@@ -1373,6 +1404,7 @@ def build_report(
     mod_events: list[dict] | None = None,
     all_projects: bool = False,
     known_slugs: tuple[str, ...] = (),
+    calibration: Calibration | None = None,
 ) -> ReportModel:
     """Assemble the whole :class:`ReportModel` for ``corpus``. See the
     module docstring for section order/keys and the deviations from the
@@ -1459,6 +1491,17 @@ def build_report(
     session in the window still shows once in the settings tables. It
     never changes which projects the report covers.
 
+    ``calibration`` is the characters per token to use instead of measuring
+    them on ``corpus`` (:func:`measure_calibration`). The dashboard passes
+    the figure it measured on every project in the window for a one-project
+    view: the ratio depends on the model, not the project, and a small
+    project has too few agent first calls (``calibration.MIN_CALLS``) to
+    measure it, so it would fall back to 4.0 characters per token. The CLI
+    passes none, since measuring there would mean loading every project's
+    transcripts, which is what an all-projects report costs. Defaults to
+    ``None`` (measure on ``corpus``), which behaves exactly as it did
+    before this parameter existed.
+
     ``ratings`` holds your dashboard ratings by session id
     (``Store.all_feedback``), for the ``habits`` section's outcomes; the
     CLI and the service pass them when the store has any. ``tip_feedback``
@@ -1516,6 +1559,12 @@ def build_report(
     #: the most in this window.
     project_cost: dict[str, float] = {}
     session_snapshot_key: dict[str, tuple[str, ...]] = {}
+    #: snapshot_windows: dict[session_id, int | None] -- the
+    #: autoCompactWindow each session actually ran under (:func:`_window_at_start`).
+    #: Known as each session is classified, so the re-cache table can measure
+    #: "very large" against the point its window summarises, and the compaction
+    #: sweep and the scorecard's context bands read the same windows.
+    snapshot_windows: dict[str, int | None] = {}
     session_cc_total: dict[str, int] = {}
     session_recache_cc: dict[str, int] = {}
     #: v0.3 Task 2: session -> classification.mode, so a baseline
@@ -1550,11 +1599,10 @@ def build_report(
     ts = ttl.TtlStats()
     cs = compaction.CompactionStats()
     # Characters per token, measured on this corpus's own subagent first
-    # calls before any module turns characters into tokens (every
-    # transcript is already in memory, so the pre-pass is one cheap walk).
-    calibration = Calibration.from_calls(
-        call for bundle in corpus.sessions for sub in bundle.subs if (call := context_budget.first_call(sub))
-    )
+    # calls before any module turns characters into tokens, unless the
+    # caller measured them on a wider corpus (see ``calibration`` above).
+    if calibration is None:
+        calibration = measure_calibration(corpus)
     tp = topology.TopologyStats(calibration=calibration)
     cb = context_budget.ContextBudgetStats(calibration=calibration)
     cf = context_files.ContextFileStats(calibration=calibration)
@@ -1597,6 +1645,7 @@ def build_report(
         record.project_key = snapshots_mod.snapshot_project_keys(bundle.slug)
         record.profile_id = snapshots_mod.profile_for(record.first_ts, profile_marks, record.session_id)
         session_snapshot_key[record.session_id] = record.project_key
+        snapshot_windows[record.session_id] = _window_at_start(record.first_ts, snapshots, record.project_key)
 
         features = _extract_workstyle_features(top, subs, bundle.workflows)
         archetype, _evidence = workstyle.detect_archetype(features)
@@ -1618,7 +1667,7 @@ def build_report(
             _merge_diagnostics(diagnostics, tr.diagnostics)
             _merge_parser_notes(parser_notes, tr.parser_notes)
 
-            rs.add(tr, pricing.resolve_model)
+            rs.add(tr, pricing.resolve_model, snapshot_windows.get(record.session_id))
             ls.add(tr, pricing.resolve_model)
             ts.add(recache.apply(tr, recache_th), pricing.resolve_model, ttl_th)
             ws.add(tr, pricing)
@@ -1707,7 +1756,7 @@ def build_report(
             if bundle.top is None:
                 continue
             for tr in _transcripts_of(bundle):
-                rs.add(tr, pricing.resolve_model)
+                rs.add(tr, pricing.resolve_model, snapshot_windows.get(bundle.top.meta.session_id))
 
     # -- cache economy (overview's cache ROI): summed per-transcript, not
     # over one concatenated turns list -- ttl.normalize_ttl_split/
@@ -1775,25 +1824,6 @@ def build_report(
 
     carry_stats = carry.compute_carry(all_results, pricing.resolve_model, carry_th)
     model_swap_stats = model_swap.compute_model_swap(all_results, pricing, model_swap_th)
-
-    # snapshot_windows: dict[session_id, int | None] -- the
-    # autoCompactWindow each session actually ran under: the snapshot its
-    # own project had when it started (``snapshot_for`` with the hashed
-    # project keys, so another project's settings never leak in).
-    snapshot_windows: dict[str, int | None] = {}
-    for record in session_records:
-        snap = (
-            snapshots_mod.snapshot_for(record.first_ts, snapshots, session_snapshot_key.get(record.session_id))
-            if snapshots
-            else None
-        )
-        configured_window = None
-        if snap is not None:
-            # CLAUDE_CODE_AUTO_COMPACT_WINDOW, when set, beats the setting.
-            value = snapshots_mod.auto_compact_window(snap)
-            if value is not None:
-                configured_window = _apply_autocompact_pct_override(value, snap)
-        snapshot_windows[record.session_id] = configured_window
 
     compaction_sim_stats = compaction_sim.simulate_compaction_windows(
         all_results, pricing.resolve_model, snapshot_windows, compaction_sim_th
@@ -2398,6 +2428,24 @@ def _representative_context_window(all_turns: list[Turn], pricing: Pricing) -> i
     return _SCORECARD_DEFAULT_CONTEXT_WINDOW
 
 
+def _scorecard_context_window(rs: recache.RecacheStats, all_turns: list[Turn], pricing: Pricing) -> int:
+    """The context size ``scorecard.py``'s context-hygiene bands are scaled
+    to. Claude Code summarises the conversation at the auto-compact window
+    in force, so a p90 is judged against that window: the one that covers
+    the most main-session priced turns (each session's own, as it started).
+    Against the model's own 1,000,000-token window a session that ran under
+    a 400,000 window would rate "good" at a p90 that is nearly its whole
+    window. With no snapshot recording a window, the model's own window
+    (:func:`_representative_context_window`) stands in."""
+    covered: dict[int, int] = {}
+    for record in rs.records:
+        if record.agent_type == "top-level" and record.compact_window:
+            covered[record.compact_window] = covered.get(record.compact_window, 0) + 1
+    if covered:
+        return max(covered, key=lambda window: (covered[window], window))
+    return _representative_context_window(all_turns, pricing)
+
+
 def _build_scorecard_section(
     rs: recache.RecacheStats,
     ls: limits.LimitStats,
@@ -2419,7 +2467,7 @@ def _build_scorecard_section(
     # is respected as-is, same convention as every other *_th.from_config
     # value in this module.
     if th.context_p90_ctx == scorecard.ScorecardThresholds().context_p90_ctx:
-        window = _representative_context_window(all_turns, pricing)
+        window = _scorecard_context_window(rs, all_turns, pricing)
         if window and window != _SCORECARD_DEFAULT_CONTEXT_WINDOW:
             scale = window / _SCORECARD_DEFAULT_CONTEXT_WINDOW
             th = dataclasses.replace(th, context_p90_ctx=tuple(v * scale for v in th.context_p90_ctx))

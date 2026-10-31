@@ -308,6 +308,29 @@ def test_every_diagnostics_field_has_a_plain_label():
     assert table.value_labels["lines"] == "Lines read"
 
 
+def test_the_data_quality_page_lists_models_with_no_price_in_plain_words():
+    """J3: replies on a model the rate card has no price for count as $0
+    everywhere, which nothing on the Data quality page said."""
+    from claudeglass.model import Diagnostics
+
+    none = helptext.diagnostics_table(Diagnostics())
+    assert "pricing_unknown_models" not in [row[0] for row in none.rows]
+    assert helptext.diagnostics_table(Diagnostics(), unpriced={}).rows == none.rows
+    table = helptext.diagnostics_table(
+        Diagnostics(),
+        unpriced={"claude-future-9-9": {"turns": 1200, "tokens": 3_400_000}, "claude-other-1": {"turns": 3, "tokens": 90}},
+    )
+    row = next(r for r in table.rows if r[0] == "pricing_unknown_models")
+    assert row[1] == "claude-future-9-9: 1,200 replies, 3,400,000 tokens; claude-other-1: 3 replies, 90 tokens"
+    assert row[2] == helptext.UNPRICED_MODELS_LABEL[1] == "Replies on a model the rate card has no price for are counted as $0."
+    assert table.value_labels["pricing_unknown_models"] == helptext.UNPRICED_MODELS_LABEL[0] == "Models with no price"
+    # It is the last row, after the counters, and every other row is where it was.
+    assert table.rows[-1] == row and table.rows[:-1] == none.rows
+    for text in (row[2], table.value_labels["pricing_unknown_models"]):
+        assert not SNAKE_CASE.search(text), text
+        _plain(text, "pricing_unknown_models")
+
+
 def test_usage_log_tables_have_help_and_measured_causes_sit_on_the_cache_tab(tmp_path):
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -971,3 +994,35 @@ def test_the_copy_the_plan_checks_and_the_plan_rounds_card_keep_to_the_help_rule
     assert len(strings) >= 35
     for where, text in strings:
         _plain(text, where)
+
+
+def test_every_trigger_the_summary_table_names_has_a_plain_label():
+    """`compactions_trigger_mix` lists what started each summary: the three
+    triggers Claude Code records and the automatic summary it made in the
+    background beforehand. Each reads in words, not as the raw key."""
+    from claudeglass import compaction
+
+    labels = helptext.TABLE_COPY["compactions_trigger_mix"].value_labels
+    for trigger in ("auto", compaction.PRECOMPUTED_AUTO_TRIGGER, "manual", "unknown"):
+        assert labels.get(trigger), trigger
+    assert labels[compaction.PRECOMPUTED_AUTO_TRIGGER] != labels["auto"]
+
+
+def test_the_sweep_table_explains_the_limit_column_and_the_autocompact_table_the_33000_gap():
+    columns = helptext.TABLE_COPY["compaction_sim_by_window"].columns
+    assert "within_limit" in columns and "2" in columns["within_limit"][1]
+
+    copy = helptext.TABLE_COPY["context_budget_autocompact"]
+    for text in (copy.help.read, copy.columns["implied_buffer"][1], copy.columns["drift"][1]):
+        assert "33,000" in text
+    # The model's window is the rate card's, not a guess from the alias.
+    assert "[1m]" not in copy.columns["context_window_source"][1]
+    assert "rate card" in copy.columns["context_window_source"][1]
+
+
+def test_the_agent_list_column_says_it_leaves_plugin_agents_out():
+    """The figure counts your own agents only, while Claude Code's Custom
+    agents category includes agents from plugins: the label and help say so."""
+    column = helptext.TABLE_COPY["context_budget_baseline"].columns["custom_agents_est"]
+    assert column[0].startswith("Your own agents")
+    assert "plugin" in column[1]
