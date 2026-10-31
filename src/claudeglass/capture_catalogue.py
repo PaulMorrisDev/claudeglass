@@ -353,6 +353,21 @@ SIGNAL_EVENTS = {
     "StopFailure": "turn_signals",
 }
 
+#: The short event name a signal line carries (``hooks/capture_hook.py``'s
+#: ``_SIGNAL_CODES`` writes it, ``signals.Signal.event`` reads it) -> the
+#: metric the line counts toward. The dashboard counts a metric's answers
+#: by it; ``Stop`` and ``StopFailure`` both land on ``turn_signals``. Not
+#: part of :func:`export_json`: the hook never reads it, so the packaged
+#: catalogue file is unchanged by it. A test holds it to
+#: :data:`SIGNAL_EVENTS` through the hook's codes.
+SIGNAL_CODE_METRICS = {
+    "end": "session_end",
+    "wait": "waits",
+    "perm": "permissions",
+    "turn": "turn_signals",
+    "fail": "turn_signals",
+}
+
 #: Why a session ended, as SessionEnd reports it; anything else is
 #: "other". ``bypass_permissions_disabled`` was removed in Claude Code
 #: v2.1.234 (docs/en/hooks.md, curl-verified) -- it is kept here only so
@@ -417,8 +432,13 @@ DEFAULT_TAGGER = "claude"
 #: so the hooks installed include the ``Stop`` entry that asks it.
 HAIKU_TAGGER_HOOK = "haiku_tagger"
 
-#: The model the hook asks, as ``claude --model`` takes it.
-JUDGE_MODEL = "haiku"
+#: The model the hook asks, as ``claude --model`` takes it. Pinned to the
+#: Haiku the tagger was measured on (``scripts/eval-tagger.py``,
+#: ``docs/tagger-eval.md``) and whose call cost is :data:`JUDGE_USD_PER_CALL`:
+#: the ``haiku`` alias follows whichever Haiku the installed ``claude``
+#: command knows, and a newer one (Haiku 5.5) thinks even with
+#: :data:`JUDGE_THINKING_TOKENS` at 0, which the figures here don't cover.
+JUDGE_MODEL = "claude-haiku-4-5"
 
 #: Folder under the data folder that holds Haiku's tags, one file per
 #: month (``YYYY-MM.jsonl``): the time, the salted session hash, the id
@@ -804,9 +824,10 @@ SENSOR_COUNT_FIELDS: dict[str, tuple[str, ...]] = {
     "compaction": ("kept", "missing", "added", "instructed", "referenced"),
     "tweak": ("before", "after"),
 }
-#: ``{event: counts it may leave out}``: a count here that is absent (or not
-#: a whole number) is left empty and the event is kept; any other count of
-#: the event must be there, or the event is dropped.
+#: ``{event: counts it may leave out}``: a count here that is absent or null
+#: is left empty and the event is kept; any other value that is not a whole
+#: number in range drops the event, as does a missing count that is not
+#: listed here.
 SENSOR_OPTIONAL_COUNTS: dict[str, tuple[str, ...]] = {
     "compaction": ("instructed", "referenced"),
     "tweak": ("after",),
@@ -3257,11 +3278,14 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     nothing waits on it; the other signals run in the background. While Haiku writes the tags
     (:data:`HAIKU_TAGGER_HOOK` in ``ids``), ``Stop`` runs in the
     foreground, shared with ``turn_signals``: it only hands the turn to a
-    worker of its own and returns, and ``claude -p`` exits without waiting
-    for a background hook, which would drop the turn. Coaching notes also
-    add a background ``Stop`` entry (unless one of those already runs it),
-    which prints nothing: it only keeps the newest reply's time and size
-    for the cold-return receipt."""
+    worker of its own and returns, and a background hook can be cancelled
+    before it has done that (as one was in ``claude -p``), which would drop
+    the turn. While Claude writes the tags, a ``Stop`` entry is what lets
+    Haiku fill in a tag Claude left out, so a set that asks for tags adds a
+    background one when ``turn_signals`` hasn't (a Custom pick of tag
+    metrics alone). Coaching notes also add a background ``Stop`` entry
+    (unless one of those already runs it), which prints nothing: it only
+    keeps the newest reply's time and size for the cold-return receipt."""
     wanted = set(ids)
     haiku = HAIKU_TAGGER_HOOK in wanted and bool(tagged_keys(wanted))
     main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
@@ -3290,6 +3314,12 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
             specs.append((HOOK_SCRIPT, event, "", event != "SessionEnd" and not (haiku and event == "Stop")))
     if haiku and not any(spec[1] == "Stop" for spec in specs):
         specs.append((HOOK_SCRIPT, "Stop", "", False))
+    if tagged_keys(wanted) and not haiku and not any(spec[1] == "Stop" for spec in specs):
+        # Claude writes the tags, and the hook's Stop entry fills in one it
+        # left out (``capture_hook.judge_job``). Every preset has
+        # ``turn_signals``, which brings the entry; a Custom set of tag
+        # metrics alone would otherwise never get a missed tag filled.
+        specs.append((HOOK_SCRIPT, "Stop", "", True))
     if coach and not any(spec[1] == "Stop" for spec in specs):
         # Writes the newest reply's time and size to coach-state.json and
         # prints nothing, so nothing waits on it.
@@ -3887,8 +3917,11 @@ def render_markdown() -> str:
         "[tagger-eval.md](tagger-eval.md) has the results."
     )
     p(
-        "- The `Stop` entry runs in the foreground, since `claude -p` exits without waiting for a background "
-        "hook, but only for as long as it takes to read the transcript's end. Deep's note after a large result "
+        "- The `Stop` entry runs in the foreground while Haiku writes the tags, but only for as long as it "
+        "takes to read the transcript's end: it hands the turn to the worker and returns. While Claude writes "
+        "the tags it runs in the background, since it only fills in a tag Claude left out. A `claude -p` or "
+        "Agent SDK run, with nobody at the screen, gets no capture note, no tags and no agent judging (its "
+        "free signals are still logged). Deep's note after a large result "
         "isn't added, as no reply carries a tag for its word. Agent runs are Haiku's to judge whichever writes "
         "the main session's tags."
     )
@@ -4054,7 +4087,9 @@ def render_markdown() -> str:
         "yourself. `init` has the same three choices as `--capture-for DURATION`, `--capture-level LEVEL "
         "--capture-no-limit`, or (interactively, or under `--non-interactive` with neither given) the "
         "default. Changing the level of capture that's already on leaves an existing time-box (or the "
-        "lack of one) exactly as it is — the default only ever applies to a fresh switch-on."
+        "lack of one) exactly as it is — the default only ever applies to a fresh switch-on. Capture whose "
+        "end time has passed counts as off here: turning it back on (`capture on`, a level, or a new end on "
+        f"the Capture page) starts a new span, {DEFAULT_CAPTURE_TIMEBOX_DAYS} days unless you say otherwise."
     )
     p(
         "- `claudeglass capture enable METRIC...` / `capture disable METRIC...` — turn individual "

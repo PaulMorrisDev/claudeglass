@@ -271,3 +271,27 @@ def test_prune_removes_only_the_files_not_written_for_the_retention(tmp_path):
     assert mod_sensor.prune(tmp_path, 30) == 1
     assert not old.exists() and new.exists()
     assert mod_sensor.prune(tmp_path, 30) == 0
+
+
+def test_the_catalogues_optional_counts_are_the_ones_clean_event_leaves_empty_and_no_others():
+    """J40: the comment on ``SENSOR_OPTIONAL_COUNTS`` said a count here that is
+    absent drops the event; ``clean_event`` keeps it with the count empty. A
+    count that is there and not a whole number drops it, and so does a
+    missing count the table does not list."""
+    base = {
+        "compaction": dict(kind="auto", kept=4, missing=1, added=0, instructed=1, referenced=2),
+        "tweak": dict(kind="readd", before=3, after=1),
+    }
+    for event, fields in cat.SENSOR_COUNT_FIELDS.items():
+        optional = set(cat.SENSOR_OPTIONAL_COUNTS.get(event, ()))
+        for field in fields:
+            gone = {k: v for k, v in base[event].items() if k != field}
+            nulled = {**base[event], field: None}
+            for raw in (_event(event, **gone), _event(event, **nulled)):
+                kept = mod_sensor.clean_event(raw)
+                if field in optional:
+                    assert kept is not None and kept[field] is None, (event, field)
+                else:
+                    assert kept is None, (event, field)
+            for bad in ("2", 1.5, True, -1, [1]):
+                assert mod_sensor.clean_event(_event(event, **{**base[event], field: bad})) is None, (event, field, bad)

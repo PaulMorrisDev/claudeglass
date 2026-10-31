@@ -1272,6 +1272,59 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
+    #: The pairs a missing transcript row and a present one are the same
+    #: transcript for: the same session, the same kind and the same agent
+    #: (``IS`` reads two NULLs as equal, which is the top-level case). One
+    #: file Claude Code moved to another project folder leaves such a pair:
+    #: the row of the path it left, now missing, and the row of the path it
+    #: arrived at.
+    _SUPERSEDED_SQL = (
+        "m.missing_since IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM transcripts p WHERE p.session_id = m.session_id AND p.missing_since IS NULL "
+        "AND p.kind = m.kind AND p.agent_id IS m.agent_id)"
+    )
+
+    def sessions_with_superseded_transcripts(self) -> list[str]:
+        """The sessions that hold a missing transcript row and a present one
+        of the same kind and agent (see :meth:`drop_superseded_transcripts`),
+        oldest first."""
+        rows = self._connection().execute(
+            f"SELECT DISTINCT m.session_id FROM transcripts m WHERE {self._SUPERSEDED_SQL} ORDER BY m.session_id"
+        ).fetchall()
+        return [row["session_id"] for row in rows]
+
+    def drop_superseded_transcripts(self, session_id: str) -> int:
+        """Delete the missing transcript rows of ``session_id`` that a present
+        row stands in for, with their ``turns_agg``/``recache_turns``/
+        ``events_agg``/``compactions`` rows, in one transaction. Returns how
+        many transcript rows went.
+
+        :meth:`remove_missing` keeps a missing transcript's rows on purpose,
+        for a file Claude Code has cleaned up. But a session Claude Code
+        *moved* to another project folder leaves them beside the rows of the
+        file at its new path, which read the same turns: every daily total
+        and summary sum added both, and a report read the old, stale main
+        transcript. A row goes only when the present row is the same kind
+        and the same agent (a session's one main transcript, or the agent
+        of that id), so a transcript whose file is gone and has no
+        successor is kept."""
+        conn = self._connection()
+        with _transaction(conn):
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    f"SELECT m.id FROM transcripts m WHERE m.session_id = ? AND {self._SUPERSEDED_SQL}",
+                    (session_id,),
+                ).fetchall()
+            ]
+            for transcript_id in ids:
+                conn.execute("DELETE FROM turns_agg WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM recache_turns WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM events_agg WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM compactions WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM transcripts WHERE id = ?", (transcript_id,))
+        return len(ids)
+
     def retention_prune(self, retention_days: int) -> int:
         """Delete every session (and its transcripts/workflow runs/tags/
         child rows) last active more than ``retention_days`` ago. Returns
@@ -1603,7 +1656,9 @@ class Store:
         (the same lossless ``cache.result_from_jsonable`` decode
         ``service/rebuild.py`` uses) -- never re-parses a file, never
         exposes ``path`` or any other store-internal column. ``None``
-        when the session has no stored top-level transcript.
+        when the session has no stored top-level transcript. A session
+        Claude Code moved to another folder can hold two (the old path's,
+        missing, and the new one's): the present one is read.
 
         ``turn_series``: one ``[turn_index, ctx, cache_creation_tokens,
         is_recache, preceding_primary]`` row per priced turn
@@ -1636,7 +1691,8 @@ class Store:
         ``turn_series``'s volume).
         """
         row = self._connection().execute(
-            "SELECT digest_blob FROM transcripts WHERE session_id = ? AND kind = 'top-level'",
+            "SELECT digest_blob FROM transcripts WHERE session_id = ? AND kind = 'top-level' "
+            "ORDER BY (missing_since IS NOT NULL), id",
             (session_id,),
         ).fetchone()
         result = self._decode_digest(row)

@@ -4,9 +4,10 @@ the sessions that ran with the mod and the ones that did not.
 The research on feedback tools says to expect small effects, so the
 dashboard measures this tool's own. The ``prompting_effect`` table (the
 ``prompting`` section, beside ``prompting_glass``) compares, over the
-sessions of the report's window and filters, the sessions the mod wrote that
-it was present in (any ``present`` event of ``Store.read_mod_events``) with
-the rest, on:
+sessions of the report's window and filters, the sessions the mod wrote
+events for (any event of ``Store.read_mod_events``: a ``present`` event, or
+one of a compaction, tweak, note, rebuild or cold-cache send, which can
+arrive in a session the mod wrote no ``present`` for) with the rest, on:
 
 1. ``cost_per_reply`` -- the median over sessions of the session's cost
    (``report.build_report``'s per-session cost: the main conversation plus
@@ -59,7 +60,11 @@ Non-interactive runs (the Agent SDK, :func:`is_headless`) never write a
 ``present`` event, since they have no surface for the mod, so they would
 always land in the "without" group whatever the mod did. They are left out of
 both groups. Most sessions without the mod are from before it was added, so
-the comparison is mostly before and after.
+the comparison is mostly before and after. One such run cannot be told apart:
+a ``claude -p`` started from inside a Desktop session inherits the desktop
+app's entrypoint, so its transcript reads as a Desktop session (no other mark
+in it tells the two apart). It lands in the "without" group and counts as a
+Desktop session in the tips figure, which the table's notes say.
 
 Beside it, the ``prompting_tweaks`` table (:func:`build_tweaks_table`) counts
 the tweaks the mod's buttons made: one row per kind of ``tweak`` event with
@@ -67,7 +72,9 @@ how often it was pressed, for ``summarise`` the share of keep-list items the
 summary kept (kept / (kept + missing), pooled over the ``compaction`` events)
 with the summariser told the keep list (``instructed`` = 1) and without
 (``instructed`` = 0), and for ``readd`` the re-added items later replies
-referenced (the ``referenced`` counts). A summary whose ``instructed`` the
+referenced (the ``after`` count of each ``readd`` press, once the mod knew it;
+not the ``compaction`` events' ``referenced``, a running count that every
+later summary repeats). A summary whose ``instructed`` the
 mod left out (an older mod) is in neither rate. It is counts, not a
 comparison of sessions, so it makes no claim about cause either.
 
@@ -101,6 +108,11 @@ DESKTOP_ENTRYPOINT = "claude-desktop"
 #: ones: ``sdk``, ``sdk-cli``, ``sdk-ts``, ``sdk-py``, ...).
 HEADLESS_ENTRYPOINTS = frozenset({"mcp"})
 HEADLESS_PREFIX = "sdk"
+
+#: The mod's events that show it ran in a session without a ``present`` among
+#: them: a session whose file holds a compaction, a tweak, a note, a rebuild
+#: or a cold-cache send has the mod, whether or not it logged its surface.
+MOD_EVENTS = tuple(kind for kind in catalogue.SENSOR_EVENTS if kind != "present")
 
 #: Main-conversation compactions that make a session "churning".
 CHURN_COMPACTIONS = 2
@@ -188,11 +200,12 @@ def facts_of(sessions, corpus, session_cost: dict, th: recache.RecacheThresholds
         top = bundle.top
         if mine is None or top is None or is_headless(top.meta.entrypoint):
             continue
-        glass = prompting.glass_tips(by_session.get(bundle.session_id), {bundle.session_id})
+        events = by_session.get(bundle.session_id)
+        glass = prompting.glass_tips(events, {bundle.session_id})
         priced = [t for t in top.turns if t.turn_index > 0]
         out.append(SessionFacts(
             session_id=bundle.session_id,
-            glass=bundle.session_id in glass.present,
+            glass=bundle.session_id in glass.present or any(e.get("event") in MOD_EVENTS for e in events or ()),
             desktop=top.meta.entrypoint == DESKTOP_ENTRYPOINT or glass.present_surfaces["desktop"] > 0,
             cost=float(session_cost.get(bundle.session_id) or 0.0),
             replies=sum(1 for t in priced if not t.estimated),
@@ -323,6 +336,8 @@ def build_table(sessions, corpus, session_cost: dict, th: recache.RecacheThresho
         "A difference here does not show that ClaudeGlass caused it.",
         "Most sessions without ClaudeGlass are from before you added it, so the comparison is mostly before and "
         "after. Runs from the Agent SDK are left out of both groups.",
+        "A claude -p run started inside a Desktop session cannot be told from it, so it counts as a Desktop "
+        "session without ClaudeGlass.",
         "Measurable means the difference stayed clear of zero in a 99% resampling of the sessions, checked across "
         "the five figures together.",
         "Cost per reply and the context at the end are the middle value across sessions. The context is the last "
@@ -382,8 +397,11 @@ def build_tweaks_table(sessions, mod_events) -> Table | None:
     ``summarise`` row the kept rate of the ``compaction`` events the
     summariser was told the keep list for (``kept_with``) and the ones it was
     not (``kept_without``), and on the ``readd`` row the re-added items later
-    replies referenced (``referenced``, summed over the ``compaction``
-    events that carry it). The rows are left out, and the dashboard says
+    replies referenced (``referenced``: the ``after`` count of each ``readd``
+    press, summed over the presses the mod has settled; ``None`` while none
+    has). A ``compaction`` event's own ``referenced`` is a running count of the
+    review's receipts settled as referenced when that summary ran, so it
+    repeats the earlier re-adds in every later summary and is not summed. The rows are left out, and the dashboard says
     nothing has been pressed, when there is no tweak and no summary with an
     ``instructed`` count to show."""
     ids = {s.session_id for s in sessions}
@@ -394,7 +412,7 @@ def build_tweaks_table(sessions, mod_events) -> Table | None:
     compactions = [e for e in mine if e.get("event") == "compaction"]
     with_list = [e for e in compactions if e.get("instructed") == 1]
     without_list = [e for e in compactions if e.get("instructed") == 0]
-    referenced = [e["referenced"] for e in compactions if e.get("referenced") is not None]
+    referenced = [e["after"] for e in tweaks if e.get("kind") == "readd" and e.get("after") is not None]
     rows: list[list] = []
     if tweaks or with_list or without_list:
         for kind in catalogue.SENSOR_TWEAK_KINDS:

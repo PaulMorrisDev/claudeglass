@@ -392,7 +392,8 @@ rather than a 30-day default. A `window_days` window is local calendar
 days (see "Report-backed routes: windowing query params"). An explicit
 `since`/`until` is rounded down to the minute the same way a named
 window's own resolved `since` already is, so two requests for "the same"
-bound issued a few seconds apart agree on exactly the same window.
+bound issued a few seconds apart agree on exactly the same window. A
+`since` that is not before the `until` is `400`.
 Additive: `previous` (`0`, the default, or `1`; anything else is `400`),
 below.
 
@@ -703,7 +704,11 @@ status line, at the foot of the sidebar.
   `report --since ... --until ...` does rather than being silently
   additionally clamped to the last 30 days. A `since` wins over
   `window_days`, which is then `null` in the response. A malformed
-  `since`/`until` is a `400 bad_request`. `report.meta.window` in the
+  `since`/`until`, or a `since` that is not before the `until` (a
+  window that ends before it starts, or is empty), is a `400 bad_request`
+  (`'since' must be before 'until'`) on every route that takes them,
+  `/api/summary` and `/api/sessions` included, rather than a `200` with
+  nothing in it. `report.meta.window` in the
   response is rendered identically to the CLI's own
   `_window_description` (`"last <N> days"` for a `window_days` window,
   `"since <since> until <until>"`, `"since the beginning until <until>"`,
@@ -2138,6 +2143,18 @@ session-id hash reads/writes its salt file inside this service's own
 `_default_waste_config_dir()` OS-temp-directory default — the fallback
 exists only for callers (tests, `baseline.py`, `team.py`) that never
 had a `config_dir` of their own to give it.
+
+For a one-project view `_build_report_model` also passes `calibration=`:
+the characters per token measured on every project in the window. The
+ratio follows the model, and a small project rarely has ten first calls of
+its own. The figure comes from the all-projects report kept for the same
+window when there is one, however old that report is. Otherwise it is
+measured with `report.measure_calibration` on an every-project
+`corpus_from_store` load, a second corpus rebuild on top of the project's
+own. With no project picked nothing is passed, and `build_report()`
+measures its own sessions. A CLI report always measures its own sessions,
+so a project's "Characters per token" table and token figures can differ
+between the dashboard and the CLI.
 
 **Memoization key: `Store.change_token()`.** Rebuilding a full report on
 every request would make every page switch in the UI (`docs/ui.md`)

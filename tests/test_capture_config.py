@@ -130,6 +130,51 @@ def test_raising_the_level_keeps_the_first_on_stamp(tmp_path):
     assert later.enabled_at == "2026-09-24T06:00:00+00:00"
 
 
+LATER = NOW + timedelta(days=20)  # past the default time-box of 14 days
+
+
+def test_capture_that_ended_starts_again_when_a_level_is_named(tmp_path):
+    # J19: 'capture on' with the level it already has changed nothing, so
+    # capture past its end stayed ended however often it was switched on.
+    set_capture(tmp_path, level="essentials", now=NOW)
+    assert load_config(config_dir=tmp_path).capture.expired(LATER)
+    again = set_capture(tmp_path, level="essentials", now=LATER)
+    assert again.enabled_at == "2026-10-14T06:00:00+00:00"
+    assert again.until == "2026-10-28T06:00:00+00:00" and not again.expired(LATER)
+    assert load_config(config_dir=tmp_path).capture == again
+    # It is a change like any other: the log says the span moved.
+    last = load_capture_log(tmp_path)[-1]
+    assert last["changed"]["until"] == {"from": "2026-10-08T06:00:00+00:00", "to": "2026-10-28T06:00:00+00:00"}
+
+
+def test_capture_that_ended_starts_again_for_metrics_or_a_new_end(tmp_path):
+    set_capture(tmp_path, level="standard", now=NOW)
+    by_metrics = set_capture(tmp_path, metrics=list(capture_catalogue.level_metrics("standard")), now=LATER)
+    assert by_metrics.enabled_at == "2026-10-14T06:00:00+00:00" and not by_metrics.expired(LATER)
+    # A new end of the user's own choosing is kept, not replaced by the default.
+    set_capture(tmp_path, level="standard", until="2026-10-01T00:00:00+00:00", now=NOW)
+    explicit = set_capture(tmp_path, until="2026-11-30T00:00:00+00:00", now=LATER)
+    assert explicit.enabled_at == "2026-10-14T06:00:00+00:00" and explicit.until == "2026-11-30T00:00:00+00:00"
+    # "No limit" is a deliberate choice too.
+    set_capture(tmp_path, level="standard", until="2026-10-01T00:00:00+00:00", now=NOW)
+    assert set_capture(tmp_path, level="standard", until="", now=LATER).until == ""
+
+
+def test_a_tagger_or_toggle_change_does_not_revive_capture_that_ended(tmp_path):
+    ended = set_capture(tmp_path, level="essentials", now=NOW)
+    for change in ({"tagger": "haiku"}, {"sample": 50}, {"coaching": []}, {"feedback": []}, {"projects": ["app"]}):
+        after = set_capture(tmp_path, now=LATER, **change)
+        assert (after.enabled_at, after.until) == (ended.enabled_at, ended.until), change
+        assert after.expired(LATER), change
+
+
+def test_capture_still_running_keeps_its_span_when_the_level_is_named_again(tmp_path):
+    first = set_capture(tmp_path, level="essentials", now=NOW)
+    soon = NOW + timedelta(days=2)
+    again = set_capture(tmp_path, level="deep", now=soon)
+    assert (again.enabled_at, again.until) == (first.enabled_at, first.until)
+
+
 def test_metrics_one_by_one_become_custom_or_the_preset_they_match(tmp_path):
     custom = set_capture(tmp_path, metrics=["task", "agent_brief"], now=NOW)
     assert custom.level == "custom" and custom.metrics == ["task", "result", "agent_brief"]

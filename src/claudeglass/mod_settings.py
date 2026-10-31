@@ -23,9 +23,7 @@ ClaudeGlass knows on this machine:
 Privacy: numbers, the model ids the rate card names, and closed words.
 No path, prompt or text from a transcript. Two things in ``coaching`` are
 mirrors of your own config rather than exports: the project slug patterns
-of ``[capture] projects`` and ``exclude_projects`` (as you wrote them), and
-the ids of sessions you rated lately (the ids the mod's heartbeat files are
-named by).
+of ``[capture] projects`` and ``exclude_projects`` (as you wrote them).
 
 :func:`build` makes the dict, :func:`write` puts it on disk atomically and
 leaves the file alone when only ``written_at`` would change, unless that
@@ -33,7 +31,7 @@ is a day old. ``update --finish`` writes it once, carrying forward what only
 a report knows from the file the service wrote (``previous``), and the
 dashboard's service again after a report build, at most hourly, and
 :func:`refresh_coaching` brings just the coaching block up to date when a
-rating or a capture setting changes.
+capture setting changes.
 """
 
 from __future__ import annotations
@@ -71,9 +69,6 @@ CACHE_HISTORY_DAYS = 14
 #: The cache lifetime when your writes were mostly one-hour ones, in seconds.
 ONE_HOUR_TTL_S = 3600
 
-#: How far back the dashboard ratings the settings file lists reach, in seconds.
-RATED_WINDOW_S = 30 * 86400
-
 #: A file holding the same content is rewritten once its ``written_at`` is
 #: this old, so the stamp says when the file was last known to be right.
 STALE_AFTER = timedelta(hours=24)
@@ -82,7 +77,7 @@ _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 #: Held while the file is written, and across :func:`refresh_coaching`'s
 #: read-and-write, so two writers in this process (the hourly report's
-#: thread and a rating's refresh) never interleave. Re-entrant: the refresh
+#: thread and a capture setting's refresh) never interleave. Re-entrant: the refresh
 #: writes through :func:`write` while holding it.
 _WRITE_LOCK = threading.RLock()
 
@@ -164,19 +159,18 @@ def _pattern_list(value) -> list[str]:
     return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
-def _coaching_block(config_dir: Path, now: datetime) -> dict:
+def _coaching_block(config_dir: Path) -> dict:
     """What the capture hook's coaching would use, worked out by the hook's
     own functions: whether it is on at all (``coaching_notes`` in ``[capture]
     coaching``), the project filter it applies, the thresholds, the muted and
-    once-a-session tips, the plan tip's opt-out, and what the rating reminder
-    needs (``feedback_reminder`` opted in, when the hook last reminded, and the
-    sessions rated on the dashboard lately).
+    once-a-session tips, and the plan tip's opt-out.
 
     ``projects`` and ``exclude_projects`` mirror the user's own config as
     written (slug patterns): this file is a local mirror of that config, not
     an export, and the mod applies the same filter to the project it runs in.
-    ``rated`` maps session ids (the ones the mod names its heartbeat files
-    by) to when the rating was given, for the last 30 days."""
+    The rating reminder is the capture hook's again, so nothing it needs (the
+    opt-in, when it last ran, the typical piece of work, the sessions rated
+    lately) is written: the mod reads none of it."""
     coaching = capture_hook.load_catalogue()["coaching"]
     try:
         config = capture_hook.load_config(config_dir)
@@ -184,26 +178,15 @@ def _coaching_block(config_dir: Path, now: datetime) -> dict:
         config = {}
     personal = capture_hook._read_json(config_dir / coaching["file"])
     capture = config.get("capture") if isinstance(config.get("capture"), dict) else {}
-    state = capture_hook._read_json(config_dir / coaching["state_file"])
-    gate = state.get("feedback") if isinstance(state.get("feedback"), dict) else {}
     return {
         "enabled": capture_hook.coaching_on(config),
         "projects": _pattern_list(capture.get("projects")),
         "exclude_projects": _pattern_list(config.get("exclude_projects")),
-        "feedback_reminder": "feedback_reminder" in capture_hook.feedback_ids(config),
         # ``coaching.json``'s ``plan_fresh: false`` switches the plan tip off.
         "plan_fresh": personal.get("plan_fresh", True) is not False,
         "thresholds": capture_hook.coaching_thresholds(coaching, config, personal),
         "muted": sorted(capture_hook._hint_names(personal.get("muted"))),
         "once": sorted(capture_hook._hint_names(personal.get("once"))),
-        # What the rating reminder compares a piece of work with (``coaching.json``).
-        "typical_piece_tokens": int(capture_hook._number(personal.get("typical_piece_tokens")) or 0),
-        # When the hook last gave the rating reminder (epoch seconds).
-        "reminded_at": capture_hook._number(gate.get("reminded_at")),
-        "rated": {
-            sid: round(when)
-            for sid, when in capture_hook.dashboard_ratings(config_dir, now.timestamp() - RATED_WINDOW_S).items()
-        },
     }
 
 
@@ -239,7 +222,9 @@ def build(
     ``calibration`` and ``dashboard_url`` carry forward, and its share and
     basis too when its billing mode is still this one. ``store`` adds "your
     usual" and the cache lifetime from your history. ``dashboard_url`` is
-    where the dashboard answers, when known. Raises ``ConfigError`` or
+    where the dashboard answers, when known; the file's own is kept only
+    when none is given, so a caller that knows the address (``update
+    --finish``) corrects a stale one. Raises ``ConfigError`` or
     ``PricingError`` for a config or rate card that can't be read."""
     config_dir = _resolve_config_dir(config_dir)
     config = load_config(config_dir)
@@ -264,7 +249,7 @@ def build(
                 billing["basis"] = old_billing["basis"]
         if isinstance(previous.get("calibration"), dict) and previous["calibration"]:
             measured = previous["calibration"]
-        if isinstance(previous.get("dashboard_url"), str) and previous["dashboard_url"]:
+        if not dashboard_url and isinstance(previous.get("dashboard_url"), str) and previous["dashboard_url"]:
             dashboard_url = previous["dashboard_url"]
     return {
         "schema": SCHEMA,
@@ -279,7 +264,7 @@ def build(
             "session_read_margin": recache.SESSION_READ_MARGIN,
         },
         "calibration": measured or calibration_mod.DEFAULT.to_dict(),
-        "coaching": _coaching_block(config_dir, stamp),
+        "coaching": _coaching_block(config_dir),
         "usual": _usual_block(store),
         "dashboard_url": dashboard_url,
     }
@@ -312,14 +297,14 @@ def write(config_dir: str | Path | None, data: dict, *, recompute_coaching: bool
     One writer at a time (:data:`_WRITE_LOCK`), each through a temporary
     file of its own. The ``coaching`` block of ``data`` is worked out again
     inside the lock, just before the write, unless ``recompute_coaching`` is
-    false: a report takes minutes to build, and a rating given in the
-    meantime must not be written over with the block as it stood when the
-    build began. (The block is reckoned as of ``data``'s ``written_at``.)"""
+    false: a report takes minutes to build, and a change to ``[capture]`` or
+    ``coaching.json`` in the meantime must not be written over with the
+    block as it stood when the build began."""
     path = settings_path(config_dir)
     with _WRITE_LOCK:
         if recompute_coaching and isinstance(data.get("coaching"), dict):
             try:
-                data = {**data, "coaching": _coaching_block(path.parent.parent, _stamp(data.get("written_at")) or datetime.now(timezone.utc))}
+                data = {**data, "coaching": _coaching_block(path.parent.parent)}
             except Exception:  # noqa: BLE001 -- the block as built stands
                 pass
         try:
@@ -344,10 +329,9 @@ def write(config_dir: str | Path | None, data: dict, *, recompute_coaching: bool
 
 def refresh_coaching(config_dir: str | Path | None, *, now: datetime | None = None) -> bool:
     """Bring the ``coaching`` block of the file up to date now, leaving the
-    rest of it as it is. A rating given on the dashboard or a change to
-    ``[capture]`` moves what the block says (the ratings, whether coaching
-    and the rating reminder are on, the project filter), and the mod
-    should not wait for the next report to hear of it. Cheap: no report and
+    rest of it as it is. A change to ``[capture]`` moves what the block says
+    (whether coaching is on, the project filter), and the mod should not
+    wait for the next report to hear of it. Cheap: no report and
     no store. Nothing is written when there is no file yet (the next report
     writes it whole) or it can't be read. Never raises; returns whether it
     wrote."""
@@ -358,7 +342,7 @@ def refresh_coaching(config_dir: str | Path | None, *, now: datetime | None = No
             if not isinstance(existing, dict) or existing.get("schema") != SCHEMA:
                 return False
             stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-            data = {**existing, "coaching": _coaching_block(directory, stamp), "written_at": stamp.strftime(_STAMP_FORMAT)}
+            data = {**existing, "coaching": _coaching_block(directory), "written_at": stamp.strftime(_STAMP_FORMAT)}
             return write(directory, data, recompute_coaching=False)
     except Exception:  # noqa: BLE001 -- a courtesy to the mod: the next report writes the whole file
         return False

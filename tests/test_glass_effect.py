@@ -131,6 +131,33 @@ def test_a_session_has_its_cost_replies_end_context_compactions_and_tips():
     assert glass_effect.facts_of([], corpus, cost, TH, events) == []
 
 
+@pytest.mark.parametrize("kind", glass_effect.MOD_EVENTS)
+def test_a_session_the_mod_wrote_any_event_for_has_the_mod_whether_or_not_it_logged_its_surface(kind):
+    """J10: only a ``present`` event put a session in the 'with' group, and a
+    session the mod saw reach a compaction or a cold send, whose surface the
+    first ask had missed, was counted among those without it."""
+    sessions, corpus, cost, events = _world([{"id": "s", "glass": False}, {"id": "t", "glass": False}])
+    assert [f.glass for f in glass_effect.facts_of(sessions, corpus, cost, TH, events)] == [False, False]
+    events.append(_event("s", kind))
+    by_id = {f.session_id: f for f in glass_effect.facts_of(sessions, corpus, cost, TH, events)}
+    assert by_id["s"].glass is True and by_id["t"].glass is False
+
+
+def test_the_events_that_show_the_mod_ran_are_every_event_but_present():
+    assert set(glass_effect.MOD_EVENTS) == set(catalogue.SENSOR_EVENTS) - {"present"}
+    assert {"note", "rebuild", "cold_send", "compaction", "tweak"} <= set(glass_effect.MOD_EVENTS)
+
+
+def test_a_session_with_only_a_non_present_event_does_not_make_it_desktop_but_does_make_it_a_group_member():
+    sessions, corpus, cost, events = _world([{"id": f"g{i}", "glass": False} for i in range(10)]
+                                            + _group("n", 10, glass=False))
+    events += [_event(f"g{i}", "compaction", kind="auto", kept=1, missing=0, added=0, instructed=1) for i in range(10)]
+    facts = glass_effect.facts_of(sessions, corpus, cost, TH, events)
+    assert sum(f.glass for f in facts) == 10 and not any(f.desktop for f in facts)
+    table = glass_effect.build_table(sessions, corpus, cost, TH, events)
+    assert table is not None and max(table.rows[0][3:5]) == 10
+
+
 def test_a_session_is_a_desktop_one_by_its_transcript_or_by_where_the_mod_ran():
     sessions, corpus, cost, events = _world([
         {"id": "a", "desktop": True}, {"id": "b", "glass": True}, {"id": "c"},
@@ -274,16 +301,27 @@ def test_the_table_carries_the_caveat_and_what_the_mod_recorded_about_cold_sends
     specs = _group("g", 10, glass=True, cost=1.0) + _group("n", 10, glass=False, cost=1.0)
     sessions, corpus, cost, events = _world(specs)
     events += [_event("g0", "cold_send", outcome="warned"), _event("g1", "cold_send", outcome="unwarned"),
-               _event("g2", "cold_send", outcome="warned"), _event("n0", "cold_send", outcome="warned")]
+               _event("g2", "cold_send", outcome="warned"), _event("elsewhere", "cold_send", outcome="warned")]
     table = glass_effect.build_table(sessions, corpus, cost, TH, events)
     notes = " ".join(table.notes)
     assert "does not show that ClaudeGlass caused it" in notes
     # Most sessions without the mod are from before it was added, and no note sentence is over 25 words.
     assert "mostly before and after" in notes and "99%" in notes
     assert all(len(sentence.split()) <= 25 for n in table.notes for sentence in n.replace("? ", ". ").split(". "))
-    # Only the mod's own sessions count, and only they can have been warned.
+    # Only the report's own sessions count, and only the mod can have warned (a cold send is the
+    # mod's event, so a session that has one is a session with the mod).
     assert "recorded 3 cold-cache sends" in notes and "warned before 2 of them" in notes
     assert not any("recorded" in n for n in glass_effect.build_table(sessions, corpus, cost, TH, events[:-4]).notes)
+
+
+def test_the_table_says_a_claude_p_run_inside_a_desktop_session_counts_as_a_desktop_session():
+    """J41: such a run inherits the desktop app's entrypoint, and nothing in
+    its transcript tells the two apart."""
+    table = _table(_group("g", 10, glass=True) + _group("n", 10, glass=False))
+    [note] = [n for n in table.notes if "claude -p" in n]
+    assert "Desktop session" in note and "without ClaudeGlass" in note
+    assert all(len(sentence.split()) <= 25 for sentence in note.replace("? ", ". ").split(". "))
+    assert "claude -p" in (glass_effect.__doc__ or "")
 
 
 def test_without_a_session_that_has_the_mod_there_is_no_table():
@@ -361,19 +399,31 @@ def test_a_rate_with_nothing_to_divide_is_blank_not_zero():
     assert row["kept_with"] is None and row["kept_without"] is None
 
 
-def test_the_re_added_items_later_replies_used_are_summed_for_the_readd_row():
+def test_the_re_added_items_later_replies_used_are_summed_over_the_presses_not_the_summaries():
+    """J23: a summary's ``referenced`` is a running count of the review's
+    receipts settled so far, so every later summary repeats the earlier
+    re-adds, and adding them up counted one item several times. The row
+    adds up what each ``readd`` press says it got back (its ``after``)."""
     events = [
         _event("g0", "compaction", kind="plugin", kept=6, missing=3, added=3, instructed=1, referenced=2),
-        _event("g1", "compaction", kind="auto", kept=7, missing=2, added=2, instructed=1, referenced=0),
-        _event("g2", "compaction", kind="auto", kept=7, missing=2, added=2, instructed=1),
+        _event("g0", "compaction", kind="auto", kept=7, missing=2, added=2, instructed=1, referenced=2),
+        _event("g1", "compaction", kind="auto", kept=7, missing=2, added=2, instructed=1, referenced=3),
         _event("g0", "tweak", kind="readd", before=3, after=2),
+        _event("g1", "tweak", kind="readd", before=2, after=1),
+        # Not settled yet: the mod has no count for this press.
+        _event("g2", "tweak", kind="readd", before=4),
     ]
     rows = _tweak_rows(_tweaks(events))
-    assert rows["readd"]["referenced"] == 2 and rows["readd"]["pressed"] == 1
+    assert rows["readd"]["referenced"] == 3 and rows["readd"]["pressed"] == 3
     assert rows["summarise"]["referenced"] is None
-    # A zero from the mod is a zero; nothing settled at all is blank.
-    assert _tweak_rows(_tweaks(events[1:2] + events[3:]))["readd"]["referenced"] == 0
-    assert _tweak_rows(_tweaks(events[2:]))["readd"]["referenced"] is None
+    # A zero from the mod is a zero; nothing settled at all is blank, whatever the summaries count.
+    zero = [_event("g1", "tweak", kind="readd", before=2, after=0)]
+    assert _tweak_rows(_tweaks(zero))["readd"]["referenced"] == 0
+    unsettled = events[:3] + [_event("g0", "tweak", kind="readd", before=3)]
+    assert _tweak_rows(_tweaks(unsettled))["readd"]["referenced"] is None
+    # A press in a session outside the report adds nothing.
+    outside = zero + [_event("elsewhere", "tweak", kind="readd", before=2, after=9)]
+    assert _tweak_rows(_tweaks(outside))["readd"]["referenced"] == 0
 
 
 def test_with_nothing_pressed_and_no_instructed_summary_the_table_has_no_rows_to_draw():

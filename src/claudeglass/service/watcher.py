@@ -27,7 +27,10 @@ Each :meth:`FileWatcher.run_once` tick:
    session's classification/cost totals via ``Store.upsert_session``. A
    session with nothing changed since the tick that last folded it is
    skipped (see ``FileWatcher._session_fingerprint``).
-4. Removes rows for files no longer on disk (``Store.remove_missing``),
+4. Marks rows for files no longer on disk as missing
+   (``Store.remove_missing``) and drops a missing row that a present one of
+   the same transcript stands in for (``Store.drop_superseded_transcripts``,
+   for a session Claude Code moved to another project folder),
    prunes old sessions when ``options.retention_days`` is set, and always
    prunes old capture signal files (``signals.prune``) and Claude Haiku's
    tag files (``haiku_tags.prune``), old
@@ -699,6 +702,17 @@ class FileWatcher:
             )
         else:
             stats.files_removed = self._time_store(stats, self.store.remove_missing, seen_paths)
+
+        # A session Claude Code moved to another project folder is stored
+        # twice by now: the rows of the path it left (just marked missing)
+        # and of the path it arrived at, which read the same turns. The
+        # missing rows are dropped, so no daily total or summary sum counts
+        # them and a report reads the live transcript. Nothing a session's
+        # fold reads comes from these rows (it works from the parsed files),
+        # so it is not folded again for this. Runs on every tick, whether or
+        # not the missing check did: one query finds the sessions to clean.
+        for session_id in self._time_store(stats, self.store.sessions_with_superseded_transcripts):
+            self._time_store(stats, self.store.drop_superseded_transcripts, session_id)
 
         stats.transcripts_missing = self.store.count_missing_transcripts()
 

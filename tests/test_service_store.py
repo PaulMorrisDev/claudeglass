@@ -2764,3 +2764,109 @@ def test_read_mod_events_from_a_file_needs_no_store_and_never_writes(tmp_path) -
     old.commit()
     old.close()
     assert store_mod.read_mod_events(tmp_path / "old.db") == []
+
+
+# -- a session Claude Code moved to another project folder (J5) ----------------------------
+
+
+def _moved_session(store: Store) -> None:
+    """One session read twice: from the folder it was in (``/old``, now gone
+    from disk, so missing), and from the folder Claude Code moved it to
+    (``/new``)."""
+    for path in ("/old/moved.jsonl", "/new/moved.jsonl"):
+        store.upsert_session(
+            session_id="moved", project_slug="proj-m", slug="proj-m",
+            first_ts="2026-09-10T00:00:00Z", last_ts="2026-09-12T00:00:00Z",
+        )
+        store.upsert_transcript(
+            session_id="moved", path=path, kind="top-level", digest_json="{}",
+            turns_agg=[_agg("2026-09-10T12:00:00Z", turns=4, cost=2.0)],
+            recache_turns=[{"turn_index": 2, "signature": "full-expiry", "cache_creation_tokens": 5,
+                            "preceding_primary": "HUMAN_TEXT", "gap_s": 400.0}],
+            events=[{"kind": "compact_boundary", "subkind": None, "count": 1, "dropped_tokens_sum": 0,
+                     "duration_ms_sum": 0}],
+            compactions=[{"ts": "2026-09-10T12:30:00Z", "pre_tokens": 100, "post_tokens": 10,
+                          "dropped_tokens": 90, "trigger": "auto", "join_delta_s": 1.0}],
+        )
+    assert store.remove_missing({"/new/moved.jsonl"}) == 1
+
+
+def _child_rows(store: Store, table: str) -> int:
+    return store._connection().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_a_moved_session_counted_its_turns_twice_until_the_old_paths_rows_are_dropped(store: Store) -> None:
+    _moved_session(store)
+    # The two rows read the same turns, and every sum added both.
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-10", 8)]
+    assert store.sessions_with_superseded_transcripts() == ["moved"]
+    assert store.drop_superseded_transcripts("moved") == 1
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-10", 4)]
+    assert store.sessions_with_superseded_transcripts() == []
+    # Nothing is left of the old row, in any of the four child tables either.
+    paths = [row["path"] for row in store._connection().execute("SELECT path FROM transcripts")]
+    assert paths == ["/new/moved.jsonl"] and store.count_missing_transcripts() == 0
+    for table in ("turns_agg", "recache_turns", "events_agg", "compactions"):
+        assert _child_rows(store, table) == 1, table
+    assert store.drop_superseded_transcripts("moved") == 0
+
+
+def test_a_transcript_with_no_present_successor_is_kept_when_its_file_is_gone(store: Store) -> None:
+    # Claude Code's cleanupPeriodDays removed the file and nothing replaced
+    # it: the store outlives that, which is what the missing mark is for.
+    _seed_agg(store, _agg("2026-09-10T12:00:00Z", turns=4), session_id="old", path="/gone/old.jsonl")
+    assert store.remove_missing(set()) == 1
+    assert store.sessions_with_superseded_transcripts() == []
+    assert store.drop_superseded_transcripts("old") == 0
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-10", 4)]
+    assert store.count_missing_transcripts() == 1
+
+
+def test_only_a_present_row_of_the_same_kind_and_agent_stands_in_for_a_missing_one(store: Store) -> None:
+    store.upsert_session(session_id="s", project_slug="proj-m", slug="proj-m",
+                         first_ts="2026-09-10T00:00:00Z", last_ts="2026-09-12T00:00:00Z")
+
+    def add(path, kind, agent_id):
+        store.upsert_transcript(session_id="s", path=path, kind=kind, agent_id=agent_id, digest_json="{}",
+                                turns_agg=[_agg("2026-09-10T12:00:00Z", turns=1)])
+
+    add("/old/s.jsonl", "top-level", None)
+    add("/old/agent-1.jsonl", "subagent", "agent-1")
+    add("/old/agent-2.jsonl", "subagent", "agent-2")
+    # What is present now: another agent of the session, but not these two,
+    # and no top-level transcript at all.
+    add("/new/agent-3.jsonl", "subagent", "agent-3")
+    store.remove_missing({"/new/agent-3.jsonl"})
+    assert store.count_missing_transcripts() == 3
+    assert store.sessions_with_superseded_transcripts() == []
+    # Agent 1 arrives at its new path: it, and only it, replaces its old row.
+    add("/new/agent-1.jsonl", "subagent", "agent-1")
+    assert store.sessions_with_superseded_transcripts() == ["s"]
+    assert store.drop_superseded_transcripts("s") == 1
+    remaining = sorted(row["path"] for row in store._connection().execute("SELECT path FROM transcripts"))
+    assert remaining == ["/new/agent-1.jsonl", "/new/agent-3.jsonl", "/old/agent-2.jsonl", "/old/s.jsonl"]
+    # A top-level transcript at a new path replaces the old top-level one.
+    add("/new/s.jsonl", "top-level", None)
+    assert store.drop_superseded_transcripts("s") == 1
+    assert "/old/s.jsonl" not in [row["path"] for row in store._connection().execute("SELECT path FROM transcripts")]
+
+
+def test_a_moved_sessions_series_is_read_from_the_present_transcript(store: Store) -> None:
+    from claudeglass.cache import encode_result
+    from claudeglass.model import EventKind, Turn, TranscriptMeta, TranscriptResult
+
+    def result(ctx: int) -> str:
+        return json.dumps(encode_result(TranscriptResult(
+            meta=TranscriptMeta(path="p", kind="top-level", session_id="moved"),
+            turns=[Turn(turn_index=1, ctx=ctx, cache_creation_tokens=1, preceding_primary=EventKind.HUMAN_TEXT)],
+        )))
+
+    store.upsert_session(session_id="moved", project_slug="proj-m", slug="proj-m")
+    # The old path's row was written first, so it has the lower id.
+    store.upsert_transcript(session_id="moved", path="/old/moved.jsonl", kind="top-level", digest_json=result(111))
+    store.upsert_transcript(session_id="moved", path="/new/moved.jsonl", kind="top-level", digest_json=result(222))
+    store.remove_missing({"/new/moved.jsonl"})
+    assert store.turns_for_session("moved")["turn_series"][0][1] == 222
+    # With neither present, the older row still answers rather than none.
+    store.remove_missing(set())
+    assert store.turns_for_session("moved")["turn_series"][0][1] == 111

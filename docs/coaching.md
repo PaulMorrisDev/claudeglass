@@ -632,8 +632,9 @@ characters to a token before any. It keeps a draft's length and word shape,
 never its words. `status_poll` also needs background work still running,
 which the mod knows from the result that said it was launched. `plan_fresh`
 shows on the status line when you approve the plan, until the next reply or a
-summary. The rating reminder is an end-of-reply note, at most one note every
-five replies; the mod keeps when it last asked in `mod/coach.json`.
+summary. The rating reminder is not the mod's: the capture hook gives it as a
+note on your next message, at most once every `coaching_rating_rest_days`
+days, whether or not the mod runs.
 
 A hint left out is not marked as shown, so it comes back at once if the mod
 stops. A mod that is missing, closed, or whose file is unreadable or stale

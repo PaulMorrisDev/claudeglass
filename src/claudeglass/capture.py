@@ -913,9 +913,13 @@ def _tag_weights(turn: Turn, subagent: bool) -> dict[str, float]:
 
 
 def _segment_ends(result: TranscriptResult, carry: _Carry) -> list[int]:
-    """Turn indexes where a compaction drops what was carried."""
+    """Turn indexes where a compaction drops what was carried. A continued
+    session's inherited boundary sits before its first reply: it drops
+    nothing this session carried."""
     return sorted(
-        carry.index_at(event.ts) for event in result.events if event.kind == EventKind.COMPACT_BOUNDARY and event.ts
+        carry.index_at(event.ts)
+        for event in result.events
+        if event.kind == EventKind.COMPACT_BOUNDARY and event.ts and not event.detail.get("inherited")
     )
 
 
@@ -1651,23 +1655,30 @@ def enough_data(use: CaptureUsage, metric_id: str, signal_sessions: int = 0) -> 
     return use.answers.get(metric_id, 0), target
 
 
-def weeks_since(since: str, now: datetime | None = None) -> float | None:
+def weeks_since(since: str, now: datetime | None = None, until: str | None = None) -> float | None:
     """Weeks between ``since`` (an ISO time, typically ``capture.
-    enabled_at``) and ``now``. ``None`` without a parseable ``since``, or
-    less than a day since it -- too little to spread a week's figure
-    over."""
+    enabled_at``) and ``now``, or ``until`` (capture's end time, typically
+    ``capture.until``) when that came first: capture that has ended stops
+    costing, so the weeks it ran don't keep growing with the clock.
+    ``None`` without a parseable ``since``, or less than a day between
+    them -- too little to spread a week's figure over."""
     start = _start(since)
     if start is None:
         return None
-    days = ((now or datetime.now(timezone.utc)) - start).total_seconds() / 86400
+    end = now or datetime.now(timezone.utc)
+    stop = _start(until) if until else None
+    if stop is not None and stop < end:
+        end = stop
+    days = (end - start).total_seconds() / 86400
     return days / 7 if days >= 1 else None
 
 
-def weekly_cost(use: CaptureUsage, now: datetime | None = None) -> float | None:
+def weekly_cost(use: CaptureUsage, now: datetime | None = None, until: str | None = None) -> float | None:
     """What capture has cost a week, from ``use.cost`` spread over the
-    time since ``use.since``. ``None`` without a start time to divide by,
-    or less than a day since it (too little to price a week from)."""
-    weeks = weeks_since(use.since, now)
+    time since ``use.since`` (up to ``until`` when capture has ended).
+    ``None`` without a start time to divide by, or less than a day of it
+    (too little to price a week from)."""
+    weeks = weeks_since(use.since, now, until)
     return use.cost / weeks if weeks else None
 
 

@@ -323,6 +323,59 @@ def test_thresholds_must_be_a_table(tmp_path):
         load_config(config_dir=claudeglass_dir)
 
 
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        # One key from each of several of the loaders that call float() or
+        # int() on what they are given, and so used to reach 'report' as a
+        # bare ValueError and a traceback.
+        ("dominance", '"high"'),  # ttl
+        ("ctx_floor", '"big"'),  # recache
+        ("min_r2", '"good"'),  # elasticity
+        ("default_summary_tokens", '"some"'),  # compaction_sim
+        ("saving_pct_min", '"ten"'),  # model_swap
+        ("share_pct", '"half"'),  # waste
+        ("csv_exhaustion_pct", '"most"'),  # limits
+        ("later_compliant_for_info", '"yes"'),  # agent_models
+        ("switch_usd", "[1, 2]"),  # a list is no number either
+    ],
+)
+def test_a_threshold_that_is_not_a_number_is_a_config_error_naming_the_key(tmp_path, key, value):
+    claudeglass_dir = tmp_path / "claudeglass"
+    claudeglass_dir.mkdir()
+    (claudeglass_dir / "config.toml").write_text(f"[thresholds]\n{key} = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as caught:
+        load_config(config_dir=claudeglass_dir)
+    message = str(caught.value)
+    assert f"[thresholds] {key} = " in message and "is not a number" in message
+    assert str(claudeglass_dir / "config.toml") in message
+
+
+def test_valid_thresholds_still_load_whatever_loader_reads_them(tmp_path):
+    claudeglass_dir = tmp_path / "claudeglass"
+    claudeglass_dir.mkdir()
+    (claudeglass_dir / "config.toml").write_text(
+        "[thresholds]\n"
+        "dominance = 0.6\n"
+        "ctx_floor = 20000\n"
+        "min_r2 = 0.5\n"
+        "default_summary_tokens = 8000\n"
+        "saving_pct_min = 12\n"
+        "share_pct = 30.5\n"
+        "csv_exhaustion_pct = 90\n"
+        "a_key_no_loader_reads = \"text\"\n"
+        "[thresholds.classify.mode]\n"
+        "plan_words = 3\n"
+        "[thresholds.recommend]\n"
+        "anything = \"the recommender checks its own table\"\n",
+        encoding="utf-8",
+    )
+    config = load_config(config_dir=claudeglass_dir)
+    assert config.thresholds["dominance"] == 0.6 and config.thresholds["ctx_floor"] == 20000
+    assert config.thresholds["a_key_no_loader_reads"] == "text"
+    assert config.thresholds["classify"] == {"mode": {"plan_words": 3}}
+
+
 def test_thresholds_classify_subdict_round_trips_as_a_nested_table(tmp_path):
     """Fix 5: classify.py reads its own overrides out of
     Config.thresholds["classify"]["mode"/"purpose"] (see

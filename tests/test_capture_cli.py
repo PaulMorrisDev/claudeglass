@@ -663,6 +663,27 @@ def test_a_fresh_on_with_neither_flag_gets_the_default_time_box(tmp_path):
     assert capture.until == "2026-10-08T06:00:00+00:00"
 
 
+def test_capture_that_ended_is_started_again_by_capture_on(tmp_path):
+    # J19: 'capture on' on capture past its end changed nothing and printed
+    # "already on", though the status line told the user to run exactly this.
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--for", "3d", "--yes")
+    later = NOW + timedelta(days=10)
+    rc, status = _capture(config_dir, now=later)
+    assert "Its end time has passed" in status and "'claudeglass capture on' starts capture again" in status
+    assert "capture's notes, tags and signals have stopped" in status
+    rc, out = _capture(config_dir, "on", "--yes", now=later)
+    assert rc == 0 and "Its end time had passed, so this starts capture again for a new span." in out
+    capture = load_config(config_dir=config_dir).capture
+    assert capture.enabled_at == "2026-10-04T06:00:00+00:00"
+    assert capture.until == (later + timedelta(days=14)).isoformat(timespec="seconds")
+    assert not capture.expired(later)
+    # Running capture is left alone: no renewal line, nothing rewritten.
+    rc, out = _capture(config_dir, "on", "--yes", now=later)
+    assert "starts capture again" not in out
+    assert load_config(config_dir=config_dir).capture == capture
+
+
 def test_no_limit_switches_on_with_no_time_box(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "on", "--no-limit", "--yes")

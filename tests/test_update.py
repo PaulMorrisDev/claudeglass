@@ -712,7 +712,10 @@ def test_finish_keeps_what_the_service_wrote_that_only_a_report_knows(tmp_path):
     data = _settings(tmp_path)
     assert data["billing"] == written["billing"] and data["billing"]["share_per_usd"] == 0.0125
     assert data["calibration"] == written["calibration"]
-    assert data["dashboard_url"] == "http://127.0.0.1:8787/"  # not update's own --port default
+    # The address update has just registered the service at wins over the
+    # one the previous file held; the --no-service case is in
+    # test_update_dashboard_url.py.
+    assert data["dashboard_url"] == "http://127.0.0.1:8765/"
 
 
 def test_finish_drops_the_share_and_basis_when_the_billing_mode_has_changed(tmp_path):

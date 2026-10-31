@@ -1020,6 +1020,57 @@ def test_removed_file_cleanup(tmp_path: Path, store: Store):
     assert stats2.transcripts_missing == 1
 
 
+def test_a_session_moved_to_another_project_folder_is_stored_once(tmp_path: Path, store: Store):
+    """J5: the old path's rows stayed beside the new path's, missing but still
+    summed, so every daily total counted the session's turns twice and a
+    report could read the stale transcript."""
+    root = tmp_path / "projects"
+    old = _write_session(root, "proj-a", "sess-moved", _two_turns())
+    options = _options(tmp_path)
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [row["turns"] for row in store.daily_usage(days=None)] == [2]
+
+    # Claude Code moves the session, which has since had two more replies.
+    old.unlink()
+    moved = _two_turns() + [
+        turn_line(timestamp="2026-09-18T12:10:00.000Z", input_tokens=130, output_tokens=13),
+        turn_line(timestamp="2026-09-18T12:15:00.000Z", input_tokens=140, output_tokens=14),
+    ]
+    _write_session(root, "proj-b", "sess-moved", moved)
+    stats = watcher.run_once()
+    assert_privacy(stats)
+    # Marked missing and then dropped within the tick: nothing left to count.
+    assert stats.files_removed == 1 and stats.transcripts_missing == 0
+    assert store.count_missing_transcripts() == 0
+    assert [row["turns"] for row in store.daily_usage(days=None)] == [4]
+    assert len(store.session("sess-moved")["transcripts"]) == 1
+    # A report reads the live transcript, not the stale one.
+    from claudeglass.service.rebuild import corpus_from_store
+
+    [bundle] = corpus_from_store(store).sessions
+    assert len([t for t in bundle.top.turns if t.turn_index > 0]) == 4
+    # Another tick changes nothing.
+    again = watcher.run_once()
+    assert again.files_removed == 0 and [row["turns"] for row in store.daily_usage(days=None)] == [4]
+
+
+def test_a_vanished_transcript_with_no_new_path_is_still_kept(tmp_path: Path, store: Store):
+    """Dropping a moved session's old rows must not touch the store's
+    outliving of Claude Code's own cleanup: a file that is simply gone stays."""
+    root = tmp_path / "projects"
+    gone = _write_session(root, "proj-a", "sess-gone", _two_turns())
+    _write_session(root, "proj-a", "sess-stays", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    watcher.run_once()
+    gone.unlink()
+    for _ in range(2):
+        stats = watcher.run_once()
+    assert stats.transcripts_missing == 1 and store.count_missing_transcripts() == 1
+    assert sum(row["turns"] for row in store.daily_usage(days=None)) == 4
+    assert store.session("sess-gone") is not None
+
+
 def test_reappeared_file_clears_missing_since(tmp_path: Path, store: Store):
     """A file that comes back (e.g. a transient mount hiccup, or the
     watcher briefly racing a rewrite) has its ``missing_since`` cleared

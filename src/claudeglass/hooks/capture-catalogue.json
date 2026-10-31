@@ -403,7 +403,7 @@
  ],
  "signals_dir": "signals",
  "judge": {
-  "model": "haiku",
+  "model": "claude-haiku-4-5",
   "dir": "tags",
   "env": "CLAUDEGLASS_JUDGE",
   "timeout_s": 60,

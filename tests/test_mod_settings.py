@@ -106,7 +106,8 @@ def test_the_rate_card_gives_each_model_its_aliases_five_rates_and_window(tmp_pa
     pricing = mod_settings.build(_config(tmp_path), now=NOW)["pricing"]
     assert isinstance(pricing["version"], str) and pricing["models"]
     for model_id, entry in pricing["models"].items():
-        assert set(entry) == {
+        # A model with a long-context rule (Haiku 5.5's) carries it as a sixth key.
+        assert set(entry) - {"long_context"} == {
             "aliases",
             "input",
             "output",
@@ -122,8 +123,13 @@ def test_the_rate_card_gives_each_model_its_aliases_five_rates_and_window(tmp_pa
 
 
 def test_a_long_context_rule_reaches_the_rate_card_and_a_model_without_one_has_none(tmp_path):
-    models = mod_settings.pricing_block(load_pricing())["models"]
-    assert models and not any("long_context" in entry for entry in models.values())
+    packaged = load_pricing()
+    models = mod_settings.pricing_block(packaged)["models"]
+    # In the packaged card too: a rule is in the block exactly when the model has one.
+    assert models and all(
+        ("long_context" in entry) == (packaged.models[model_id].long_context is not None)
+        for model_id, entry in models.items()
+    )
     rule_models = {
         "by-multiplier": ModelRates("by-multiplier", 3.0, 15.0, 3.75, 6.0, 0.3, long_context=LongContextRule(200_000, multiplier=2.0)),
         "by-rates": ModelRates(
@@ -274,14 +280,10 @@ def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
         "enabled": False,
         "projects": [],
         "exclude_projects": [],
-        "feedback_reminder": False,
         "plan_fresh": True,
         "thresholds": capture_catalogue.COACHING_THRESHOLDS,
         "muted": [],
         "once": [],
-        "typical_piece_tokens": 0,
-        "reminded_at": None,
-        "rated": {},
     }
     (folder / "coaching.json").write_text(
         json.dumps({"thresholds": {"cold_min_tokens": 50_000}, "muted": ["b", "a", 3], "once": ["c"], "typical_piece_tokens": 2_500_000}),
@@ -292,7 +294,8 @@ def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
     assert coaching["thresholds"]["cold_rest_hours"] == capture_catalogue.COACHING_THRESHOLDS["cold_rest_hours"]
     assert coaching["muted"] == ["a", "b"]
     assert coaching["once"] == ["c"]
-    assert coaching["typical_piece_tokens"] == 2_500_000
+    # The rating reminder is the capture hook's own, so its piece size is not a setting of the mod.
+    assert "typical_piece_tokens" not in coaching
 
 
 def test_coaching_is_off_until_coaching_notes_is_in_capture_coaching(tmp_path):
@@ -302,7 +305,7 @@ def test_coaching_is_off_until_coaching_notes_is_in_capture_coaching(tmp_path):
     assert mod_settings.build(on, now=NOW)["coaching"]["enabled"] is True
 
 
-def test_the_project_filter_and_the_feedback_opt_in_are_mirrored_as_written(tmp_path):
+def test_the_project_filter_is_mirrored_as_written_and_the_feedback_opt_in_is_not(tmp_path):
     folder = _config(
         tmp_path,
         'exclude_projects = ["scratch"]\n[capture]\ncoaching = ["coaching_notes"]\n'
@@ -311,7 +314,8 @@ def test_the_project_filter_and_the_feedback_opt_in_are_mirrored_as_written(tmp_
     block = mod_settings.build(folder, now=NOW)["coaching"]
     assert block["projects"] == ["work-", "!private"]
     assert block["exclude_projects"] == ["scratch"]
-    assert block["feedback_reminder"] is True
+    # J33: nothing in the mod reads whether the reminder is opted in.
+    assert "feedback_reminder" not in block
     # The hook's own answer for the same config agrees with what was mirrored.
     config = capture_hook.load_config(folder)
     assert capture_hook.feedback_ids(config) == ("plan_check", "feedback_reminder")
@@ -325,7 +329,10 @@ def test_the_plan_tip_opt_out_reaches_the_file(tmp_path):
     assert mod_settings.build(folder, now=NOW)["coaching"]["plan_fresh"] is False
 
 
-def test_the_hooks_last_reminder_and_the_lately_rated_sessions_reach_the_file(tmp_path):
+def test_the_rating_reminders_state_and_the_lately_rated_sessions_stay_out_of_the_file(tmp_path):
+    """J33: the reminder runs in the capture hook, not the mod, so when it last
+    ran, the typical piece of work and the ids of rated sessions were
+    written every hour for nothing to read."""
     folder = _config(tmp_path)
     (folder / "coach-state.json").write_text(json.dumps({"feedback": {"reminded_at": 1_780_000_000.5}}), encoding="utf-8")
     store = sqlite3.connect(folder / "service.db")
@@ -337,9 +344,12 @@ def test_the_hooks_last_reminder_and_the_lately_rated_sessions_reach_the_file(tm
     )
     store.commit()
     store.close()
-    block = mod_settings.build(folder, now=NOW)["coaching"]
-    assert block["reminded_at"] == 1_780_000_000.5
-    assert block["rated"] == {"s-recent": round(recent.timestamp())}
+    data = mod_settings.build(folder, now=NOW)
+    block = data["coaching"]
+    for key in ("reminded_at", "rated", "typical_piece_tokens", "feedback_reminder"):
+        assert key not in block, key
+    assert set(block) == {"enabled", "projects", "exclude_projects", "plan_fresh", "thresholds", "muted", "once"}
+    assert "s-recent" not in json.dumps(data) and not hasattr(mod_settings, "RATED_WINDOW_S")
 
 
 def test_a_threshold_in_config_toml_reaches_the_file(tmp_path):
@@ -399,7 +409,23 @@ def test_without_a_report_the_previous_files_figures_carry_forward_in_the_same_b
     assert data["billing"] == previous["billing"]
     assert data["billing"]["share_per_usd"] == 0.0125
     assert data["calibration"] == previous["calibration"]
-    assert data["dashboard_url"] == "http://127.0.0.1:8787/"
+
+
+def test_the_address_update_finish_passes_wins_over_the_one_the_previous_file_holds(tmp_path):
+    """J32: the file's own address won, so a dashboard that had moved to
+    another port kept being offered at the old one until the service wrote
+    the file again."""
+    folder = _config(tmp_path, 'billing = "subscription"\n')
+    previous = _service_written(folder)
+    assert previous["dashboard_url"] == "http://127.0.0.1:8787/"
+    data = mod_settings.build(folder, dashboard_url="http://127.0.0.1:8765/", previous=previous, now=NOW)
+    assert data["dashboard_url"] == "http://127.0.0.1:8765/"
+    # With no address given, the one the service wrote is kept, as before.
+    assert mod_settings.build(folder, previous=previous, now=NOW)["dashboard_url"] == "http://127.0.0.1:8787/"
+    assert mod_settings.build(folder, dashboard_url="", previous=previous, now=NOW)["dashboard_url"] == (
+        "http://127.0.0.1:8787/"
+    )
+    assert mod_settings.build(folder, now=NOW)["dashboard_url"] is None
 
 
 def test_a_change_of_billing_mode_carries_no_share_or_basis_forward(tmp_path):
@@ -638,7 +664,7 @@ def test_a_failure_to_write_never_reaches_the_request(served, monkeypatch, capsy
     assert not mod_settings.settings_path(served.options.config_dir).exists()
 
 
-# -- refresh_coaching: a rating or a capture change reaches the mod at once ---------------
+# -- refresh_coaching: a capture change reaches the mod at once ---------------
 
 
 def test_refresh_coaching_moves_only_the_coaching_block(tmp_path):
@@ -646,10 +672,10 @@ def test_refresh_coaching_moves_only_the_coaching_block(tmp_path):
     data = mod_settings.build(tmp_path, now=NOW)
     data["usual"] = {"session_cost_usd": 1.5, "end_context_tokens": 90000}
     assert mod_settings.write(tmp_path, data)
-    (tmp_path / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\nfeedback = ["feedback_reminder"]\n', encoding="utf-8")
+    (tmp_path / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\nprojects = ["work-"]\n', encoding="utf-8")
     assert mod_settings.refresh_coaching(tmp_path, now=NOW + timedelta(minutes=5))
     written = json.loads(path.read_text(encoding="utf-8"))
-    assert written["coaching"]["enabled"] is True and written["coaching"]["feedback_reminder"] is True
+    assert written["coaching"]["enabled"] is True and written["coaching"]["projects"] == ["work-"]
     assert written["usual"] == {"session_cost_usd": 1.5, "end_context_tokens": 90000}
     assert written["written_at"] == "2026-09-18T12:35:05Z"
     # Nothing changed since: the file is left alone.
@@ -666,33 +692,29 @@ def test_refresh_coaching_never_raises_and_writes_nothing_without_a_readable_fil
     assert (path.read_text(encoding="utf-8") if content is not None else None) == content
 
 
-# -- two writers: the hourly report and a rating's refresh ---------------------------------
+# -- two writers: the hourly report and a capture setting's refresh ---------------------------------
 
 
-def test_a_rating_saved_while_the_report_builds_survives_the_hourly_write(tmp_path):
+def test_a_capture_setting_changed_while_the_report_builds_survives_the_hourly_write(tmp_path):
     folder = _config(tmp_path)
     assert mod_settings.write(folder, mod_settings.build(folder, now=NOW))
     path = mod_settings.settings_path(folder)
 
     class SlowStore(FakeStore):
-        """Takes its time over "your usual": a rating is saved and reaches the file meanwhile."""
+        """Takes its time over "your usual": coaching is switched on and reaches the file meanwhile."""
 
         def median_session_cost(self):
-            sqlite = sqlite3.connect(folder / "service.db")
-            sqlite.execute("CREATE TABLE session_feedback (session_id TEXT, set_at TEXT)")
-            sqlite.execute("INSERT INTO session_feedback VALUES (?, ?)", ("s-rated", (NOW + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")))
-            sqlite.commit()
-            sqlite.close()
+            (folder / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\nprojects = ["work-"]\n', encoding="utf-8")
             assert mod_settings.refresh_coaching(folder, now=NOW + timedelta(minutes=2))
             return super().median_session_cost()
 
     data = mod_settings.build(folder, store=SlowStore(cost=2.0, context=90000), now=NOW)
-    assert data["coaching"]["rated"] == {}  # the block the build worked out before the rating
-    assert "s-rated" in json.loads(path.read_text(encoding="utf-8"))["coaching"]["rated"]
+    assert data["coaching"]["enabled"] is False  # the block the build worked out before the change
+    assert json.loads(path.read_text(encoding="utf-8"))["coaching"]["enabled"] is True
 
     assert mod_settings.write(folder, data)
     written = json.loads(path.read_text(encoding="utf-8"))
-    assert "s-rated" in written["coaching"]["rated"]  # not written over with the older block
+    assert written["coaching"]["enabled"] is True and written["coaching"]["projects"] == ["work-"]  # not written over with the older block
     assert written["usual"]["session_cost_usd"] == 2.0  # the rest of the report's file is what it built
 
 
@@ -749,7 +771,7 @@ def test_write_never_raises_when_the_coaching_block_cannot_be_worked_out(tmp_pat
     folder = _config(tmp_path)
     data = mod_settings.build(folder, now=NOW)
 
-    def broken(config_dir, now):
+    def broken(config_dir):
         raise RuntimeError("config on fire")
 
     monkeypatch.setattr(mod_settings, "_coaching_block", broken)

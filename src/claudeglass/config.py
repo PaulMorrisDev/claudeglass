@@ -414,6 +414,80 @@ def _read_toml(path: Path, *, what: str) -> dict | None:
 # -- config.toml --------------------------------------------------------
 
 
+def _threshold_loaders() -> tuple:
+    """The ``from_config`` of every ``*Thresholds`` class that reads its
+    keys straight from ``[thresholds]``. Imported here, not at the top,
+    because each of these modules imports the model and pricing code that
+    in turn imports this one.
+
+    Three loaders are left out on purpose. ``RecommendThresholds``,
+    ``SaverThresholds`` and ``ScorecardThresholds`` read their own
+    ``[thresholds.recommend]``, ``[thresholds.savers]`` and
+    ``[thresholds.scorecard]`` tables, never a key of ``[thresholds]``
+    itself; the first two already skip a value they can't use, and the
+    scorecard raises its own ``ScorecardError`` for a misordered one."""
+    from . import (
+        agent_models,
+        carry,
+        compaction_sim,
+        elasticity,
+        handoff,
+        hook_costs,
+        limits,
+        model_swap,
+        recache,
+        run_split,
+        tool_search,
+        ttl,
+        waste,
+    )
+
+    return tuple(
+        cls.from_config
+        for cls in (
+            agent_models.AgentModelThresholds,
+            carry.CarryThresholds,
+            compaction_sim.CompactionSimThresholds,
+            elasticity.ElasticityThresholds,
+            handoff.HandoffThresholds,
+            hook_costs.HookThresholds,
+            limits.LimitThresholds,
+            model_swap.ModelSwapThresholds,
+            recache.RecacheThresholds,
+            run_split.RunSplitThresholds,
+            tool_search.ToolSearchThresholds,
+            ttl.TtlThresholds,
+            waste.WasteThresholds,
+        )
+    )
+
+
+def _check_thresholds(thresholds: dict, path: Path) -> None:
+    """Refuse a ``[thresholds]`` value that one of the report's loaders
+    would crash on, naming the key.
+
+    Most ``*Thresholds.from_config`` loaders keep their default for a
+    value they can't read, but a few (``TtlThresholds``,
+    ``RecacheThresholds``, ``CompactionSimThresholds`` and others) call
+    ``float()`` or ``int()`` on it, so ``dominance = "high"`` reached
+    ``report`` as a bare ``ValueError`` and a traceback. Each key is passed
+    alone through every loader, so a key that only one of them reads is
+    still found; the first one that raises is the answer. A table with no
+    keys costs nothing: nothing is imported."""
+    if not thresholds:
+        return
+    loaders = _threshold_loaders()
+    for key, value in thresholds.items():
+        for load in loaders:
+            try:
+                load({key: value})
+            except (TypeError, ValueError, OverflowError):
+                raise ConfigError(
+                    f"config file {path}: [thresholds] {key} = {value!r} is not a number; "
+                    f"give it a number (for example {key} = 0.5) or remove the line"
+                ) from None
+
+
 def _build_config(data: dict, path: Path) -> Config:
     config = Config()
 
@@ -432,6 +506,7 @@ def _build_config(data: dict, path: Path) -> Config:
     thresholds = data.get("thresholds", {})
     if not isinstance(thresholds, dict):
         raise ConfigError(f"config file {path}: 'thresholds' must be a table")
+    _check_thresholds(thresholds, path)
     config.thresholds = dict(thresholds)
 
     recache = data.get("recache", {})
@@ -1117,7 +1192,13 @@ def set_capture(
     ``metrics``); ``metrics`` picks metrics one by one, and the level
     becomes the preset they match, else ``"custom"``. Switching from off
     to on stamps ``enabled_at``; switching off clears it and ``until``.
-    A switch from off to on that leaves ``until`` unsaid (``None``) gets
+    Capture that is on but past its ``until`` is switched on again the same
+    way when the call names a level, a set of metrics or a new ``until``
+    (``capture on``, a level or a new end picked on the Capture page): a
+    fresh ``enabled_at``, and the default time-box when ``until`` is unsaid.
+    A change to the tagger, the sample, the project filter or the feedback
+    and coaching toggles leaves it ended. A switch from off to on that
+    leaves ``until`` unsaid (``None``) gets
     :data:`~claudeglass.capture_catalogue.DEFAULT_CAPTURE_TIMEBOX_DAYS`
     days by default (CAP-8), so capture can't run forever unnoticed --
     pass ``until=""`` for a deliberate "no limit" instead. A switch into
@@ -1169,16 +1250,22 @@ def set_capture(
     if table["level"] == "off":
         table["enabled_at"] = ""
         table["until"] = ""
-    elif not current.is_on:
+    elif not current.is_on or (
+        current.expired(moment) and (level is not None or metrics is not None or until is not None)
+    ):
         table["enabled_at"] = stamp
         # CAP-8: a fresh "off" -> "on" switch gets a default time-box when
         # nothing says otherwise, so capture can't run forever unnoticed
         # just because nobody set one. An explicit --until/--for/"" (a
         # deliberate "no limit") already set table["until"] above, and an
-        # *existing* until can't reach this branch at all -- it's cleared
-        # to "" whenever level is "off", which is the only way to get here
-        # -- so this is exactly the "skipped when --capture-no-limit/--for/
-        # --until is given or an until exists" case the audit calls for.
+        # *existing* until can't reach this branch from a running capture
+        # -- it's cleared to "" whenever level is "off" -- so this is
+        # exactly the "skipped when --capture-no-limit/--for/--until is
+        # given or an until exists" case the audit calls for. The one
+        # until that does reach it is one that has passed: capture that
+        # ended, turned on again, is a fresh switch-on and gets a fresh
+        # span, since 'capture on' keeping the level would otherwise change
+        # nothing and leave it ended.
         # Every path that can turn capture on (non-interactive init,
         # 'capture on'/'level', POST /api/capture) funnels through this one
         # place, so none of them need to duplicate the default themselves.

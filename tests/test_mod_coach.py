@@ -378,37 +378,3 @@ def test_a_heartbeat_rewritten_with_seen_zero_at_the_end_of_a_session_reads_as_a
     os.utime(present / "s1.json", (now + 5, now + 5))
     assert capture_hook._mod_present(tmp_path, catalogue, "s1", now) is False
     assert capture_hook._moved(tmp_path, catalogue, "s1", now) == frozenset()
-
-
-def test_the_mods_reminder_rests_the_hooks_and_the_later_of_the_two_counts(tmp_path: Path) -> None:
-    catalogue = capture_hook.load_catalogue()
-    now = 1_700_000_000.0
-    scan = {"replies": {"m": {"i": 4, "tokens": 3_000_000, "admit": False}}, "piece": 0, "piece_key": "k1", "piece_at": None}
-
-    def due(state: dict) -> str:
-        return capture_hook._reminder_due(scan, {}, dict(TH), COACHING, state, "s1", now, tmp_path, "s1", catalogue)
-
-    assert capture_hook._mod_reminded_at(tmp_path, catalogue) is None
-    assert due({}) != ""
-    coach_file = _mod_folder(tmp_path) / "coach.json"
-
-    def write(text: str) -> None:
-        # Two rewrites of one size inside the clock's tick look unchanged to
-        # the hook's cache (time and size), so start each read afresh.
-        coach_file.write_text(text, encoding="utf-8")
-        capture_hook._MOD_COACH.clear()
-
-    write(json.dumps({"schema": 1, "reminded_at": now - 3600}))
-    assert capture_hook._mod_reminded_at(tmp_path, catalogue) == now - 3600
-    assert due({}) == ""
-    # An old reminder of the mod's, and a newer one of the hook's: the hook's counts.
-    write(json.dumps({"schema": 1, "reminded_at": now - 30 * 86400}))
-    assert due({}) != ""
-    assert due({"feedback": {"reminded_at": now - 3600}}) == ""
-    # A file that says nothing usable changes nothing.
-    for text in ("not json", json.dumps({"schema": 2, "reminded_at": now}), json.dumps({"schema": 1, "reminded_at": "x"})):
-        write(text)
-        assert capture_hook._mod_reminded_at(tmp_path, catalogue) is None
-    coach_file.unlink()
-    coach_file.mkdir()
-    assert capture_hook._mod_reminded_at(tmp_path, catalogue) is None

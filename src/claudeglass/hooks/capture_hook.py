@@ -589,8 +589,11 @@ def _scheduled_session(path, prefix: str) -> bool:
     return False
 
 
-#: The ``source`` values a SessionStart payload carries.
-_SESSION_SOURCES = ("startup", "resume", "clear", "compact")
+#: The ``source`` values a SessionStart payload this hook is called for
+#: carries. ``resume`` is not one: a resumed session already carries the
+#: note, so the entry's matcher (``capture_catalogue.SESSION_START_MATCHER``)
+#: leaves it out and the hook never sees that source.
+_SESSION_SOURCES = ("startup", "clear", "compact")
 #: Where :func:`log_payload_keys` writes, in the data folder.
 PAYLOAD_KEYS_FILE = "payload-keys.json"
 _KEY_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
@@ -599,12 +602,18 @@ _MAX_LOGGED_KEYS = 40
 
 def log_payload_keys(config_dir: Path, payload: dict, scope: str) -> None:
     """Write the key names of this SessionStart payload to
-    ``payload-keys.json``, once for each source and scope (``startup``,
+    ``payload-keys.json``, under each source and scope (``startup``,
     ``compact``, ``compact:subagent`` ...), to see whether Claude Code
     ever sends an agent field there; a SubagentStop's go under
-    ``subagent_stop``, once. Names only, in a closed shape: never a value,
+    ``subagent_stop``. Names only, in a closed shape: never a value,
     and a name that isn't plain letters, digits and underscores is left
-    out."""
+    out.
+
+    A label's names grow: a key Claude Code adds to a payload later joins
+    the ones already logged (up to :data:`_MAX_LOGGED_KEYS`, never pushing
+    one out), and the file is written only when a name is new. The file's
+    purpose is to show a key appear, which a list kept from the first call
+    could not."""
     source = payload.get("source")
     label = source if source in _SESSION_SOURCES else "other"
     if payload.get("hook_event_name") == "SubagentStop":
@@ -613,9 +622,13 @@ def log_payload_keys(config_dir: Path, payload: dict, scope: str) -> None:
         label = f"{label}:{scope}"
     path = config_dir / PAYLOAD_KEYS_FILE
     seen = _read_json(path)
-    if label in seen:
+    before = seen.get(label)
+    logged = [k for k in before if isinstance(k, str) and _KEY_NAME_RE.fullmatch(k)] if isinstance(before, list) else []
+    fresh = sorted({k for k in payload if isinstance(k, str) and _KEY_NAME_RE.fullmatch(k)} - set(logged))
+    fresh = fresh[: max(0, _MAX_LOGGED_KEYS - len(logged))]
+    if not fresh and label in seen:
         return
-    seen[label] = sorted(k for k in payload if isinstance(k, str) and _KEY_NAME_RE.fullmatch(k))[:_MAX_LOGGED_KEYS]
+    seen[label] = sorted({*logged, *fresh})
     _write_json(path, seen)
 
 
@@ -933,36 +946,6 @@ def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) ->
     if not _mod_present(config_dir, catalogue, session_id, now_ts):
         return frozenset()
     return frozenset(catalogue["mod"]["moved"])
-
-
-#: The mod's own file of when it last gave the rating reminder, in its folder
-#: (``{"schema": 1, "reminded_at": <epoch seconds>}``).
-_MOD_COACH_FILE = "coach.json"
-
-#: That file as the hook last read it, ``{(path, mtime_ns, size): seconds or
-#: None}``; one entry at most, like :data:`_MOD_PRESENT`.
-_MOD_COACH: dict = {}
-
-
-def _mod_reminded_at(config_dir: Path, catalogue: dict) -> float | None:
-    """When the ClaudeGlass mod last gave the rating reminder (``reminded_at``
-    in ``<config-dir>/mod/coach.json``, epoch seconds), so a reminder the mod
-    gave rests the hook's, and the other way round (the mod reads the hook's
-    time from its settings file). ``None`` for a missing, unreadable or
-    odd file. Never raises."""
-    try:
-        mod = catalogue.get("mod") if isinstance(catalogue, dict) else None
-        folder = mod["dir"] if isinstance(mod, dict) and mod.get("dir") else "mod"
-        path = config_dir / folder / _MOD_COACH_FILE
-        stat = path.stat()
-        key = (str(path), stat.st_mtime_ns, stat.st_size)
-        if key not in _MOD_COACH:
-            _MOD_COACH.clear()
-            data = _read_json(path)
-            _MOD_COACH[key] = _number(data.get("reminded_at")) if data.get("schema") == 1 else None
-        return _MOD_COACH[key]
-    except Exception:  # noqa: BLE001 - a fault here must leave the reminder as it was
-        return None
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
@@ -3085,10 +3068,10 @@ def feedback_note_for(
         if plan_id is not None and not _noted_before(state, "plans", session, plan_id):
             _note_made(state, "plans", session, plan_id)
             note = _feedback_note(coaching, "plan_check", feedback["text"]["plan_check"])
-        elif "feedback_reminder" in ids and "rating_reminder" not in _moved(config_dir, catalogue, session_id, now_ts):
-            # The mod shows the reminder at the end of a reply instead, so
-            # it is neither noted nor stamped here while the mod runs.
-            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id, catalogue)
+        elif "feedback_reminder" in ids:
+            # The reminder is the hook's alone: the mod shows no end-of-reply
+            # notes, so whether it runs changes nothing here.
+            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
         dirty = dirty or bool(note)
     if dirty:
         _write_json(state_path, state)
@@ -3097,13 +3080,11 @@ def feedback_note_for(
 
 def _reminder_due(
     scan: dict, personal: dict, th: dict, coaching: dict, state: dict, session: str, now_ts: float,
-    config_dir: Path, session_id: str, catalogue: dict | None = None,
+    config_dir: Path, session_id: str,
 ) -> str:
     """The rating-reminder note when this piece of work is big enough and
     hasn't been reminded, and no reminder has gone out in the last
-    ``rating_rest_days`` days (this hook's, or the ClaudeGlass mod's, which
-    :func:`_mod_reminded_at` reads: the later counts); ``""`` otherwise.
-    A piece that was rated
+    ``rating_rest_days`` days; ``""`` otherwise. A piece that was rated
     (a ``/cg-feedback`` run in the transcript, or a rating of the
     session on the dashboard since the piece started,
     :func:`_dashboard_rated_at`) is over: the work after the run is a piece
@@ -3114,9 +3095,6 @@ def _reminder_due(
         return ""
     gate = _feedback_state(state)
     last = _number(gate.get("reminded_at"))
-    modded = _mod_reminded_at(config_dir, catalogue or {})
-    if modded is not None and (last is None or modded > last):
-        last = modded
     if (last is not None and now_ts - last < th["rating_rest_days"] * _SECONDS_PER_DAY
             or _noted_before(state, "pieces", session, scan["piece_key"])):
         return ""

@@ -39,6 +39,7 @@ TAG_EXAMPLE = "[cg: task=bugfix brief=clear]"
 
 CONNECT_COMMAND = "claudeglass capture connect"
 STATUS_COMMAND = "claudeglass capture status"
+ON_COMMAND = "claudeglass capture on"
 FEEDBACK_COMMAND = "claudeglass capture feedback on"
 BRIEF_COMMAND = "claudeglass capture brief on"
 
@@ -532,7 +533,7 @@ def _worth(rows: list[dict], capture: CaptureConfig, use, units, now: datetime |
         return []
     if use.sessions < habits.MIN_GROUP:
         return []
-    weeks = capture_mod.weeks_since(capture.enabled_at, now)
+    weeks = capture_mod.weeks_since(capture.enabled_at, now, capture.until)
     if not weeks:
         return []
     worth = []
@@ -756,7 +757,12 @@ def _banner(
     unrated=None,
 ) -> dict:
     """The banner's lines: a headline, then any notes worth acting on, and
-    the sessions waiting for a rating (``unrated``)."""
+    the sessions waiting for a rating (``unrated``).
+
+    Capture past its end time is reported as off (``on`` false) with a
+    headline that says it ended: it captures nothing, so the hook, the
+    cost-against-value and the lower-the-level notes, which all assume it
+    is running, are left out."""
     notes: list[str] = []
     feedback_note = catalogue.FEEDBACK_NOTE if "feedback_note" in capture.feedback else None
     waiting = _unrated_block(unrated)
@@ -779,8 +785,11 @@ def _banner(
             )
         return {"on": False, "headline": invite, "notes": notes, "feedback_note": feedback_note, "unrated": waiting}
 
+    expired = config["expired"]
     parts = [f"Metrics capture: {config['title']}"]
-    if capture.enabled_at:
+    if expired:
+        parts.append(f"ended {capture.until[:10]}")
+    elif capture.enabled_at:
         parts.append(f"since {capture.enabled_at[:10]}")
     if capture.sample < 100:
         parts.append(f"{capture.sample}% of sessions")
@@ -793,10 +802,27 @@ def _banner(
             parts.append(f"tagged on {measured['coverage_text']} of messages")
     elif measured is not None:
         parts.append("no captured sessions yet")
-    if config["expired"]:
-        notes.append(
-            f"Its end time ({capture.until[:16].replace('T', ' ')}) has passed, so nothing is captured now."
+    low_coverage = (
+        f"Claude tagged only {_pct(use.coverage)} of your messages, so some figures rest on few answers."
+        if (
+            use is not None
+            and use.cycles >= LOW_COVERAGE_MIN_CYCLES
+            and use.coverage is not None
+            and use.coverage < LOW_COVERAGE_PCT
         )
+        else None
+    )
+    if expired:
+        notes.append(
+            f"Its end time ({capture.until[:16].replace('T', ' ')}) has passed, so nothing is captured now. "
+            f"'{ON_COMMAND}' starts it again."
+        )
+        if low_coverage is not None:
+            notes.append(low_coverage)
+        return {
+            "on": False, "headline": " · ".join(parts), "notes": notes, "feedback_note": feedback_note,
+            "unrated": waiting,
+        }
     if hooks.get("ok") is False:
         notes.append(hooks["summary"])
     elif (
@@ -809,15 +835,8 @@ def _banner(
             f"No capture note seen in the {_plural(started_since, 'session')} started since it was turned on: "
             f"the hook may be blocked. '{STATUS_COMMAND}' checks it."
         )
-    if (
-        use is not None
-        and use.cycles >= LOW_COVERAGE_MIN_CYCLES
-        and use.coverage is not None
-        and use.coverage < LOW_COVERAGE_PCT
-    ):
-        notes.append(
-            f"Claude tagged only {_pct(use.coverage)} of your messages, so some figures rest on few answers."
-        )
+    if low_coverage is not None:
+        notes.append(low_coverage)
     if roi is not None and roi["cost"]["usd"] > 0 and roi["cost"]["text"]:
         # UX-2: roi["cost"]["text"]/["value"]["text"] already carry their
         # own "about" (see _roi) -- not repeated here, or a subscription's
@@ -886,7 +905,7 @@ def view(
     ``capture.coaching_usage`` over the same days, while coaching notes
     are on. ``statusline`` is whether Claude Code's
     status line is this tool's (``None`` when not checked).
-    ``weekly_cost`` is ``capture.weekly_cost(use)`` and ``dependent_value``
+    ``weekly_cost`` is ``capture.weekly_cost(use, until=capture.until)`` and ``dependent_value``
     ``habits.capture_dependent_value`` over the same window: together
     they're the capture-pays-for-itself figures in ``roi`` and the
     banner (``None`` while there's no measured cost to weigh anything
@@ -1033,6 +1052,7 @@ __all__ = [
     "BRIEF_SKILL_NOTES",
     "BRIEF_SKILL_STATES",
     "COACHING_NOTES_ON",
+    "ON_COMMAND",
     "OVERHEAD_DAYS",
     "SKILL_NOTES",
     "SKILL_STATES",

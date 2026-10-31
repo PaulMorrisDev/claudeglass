@@ -115,7 +115,9 @@ from .. import __version__ as _TOOL_VERSION
 from .. import baseline as baseline_mod
 from .. import capture_catalogue, classify, coaching, discovery, helptext, hook_health, ignores, invocation, mod_settings
 from .. import ratings as ratings_mod
+from .. import report as report_mod
 from .. import snapshots as snapshots_mod
+from ..calibration import Calibration
 from ..config import (
     CAPTURE_SAMPLES,
     ConfigError,
@@ -213,10 +215,6 @@ _RESTART_ADVICE = "Restart the dashboard: claudeglass install-service, or stop a
 _CAPTURE_HISTORY_TTL_S = 1800.0
 #: How long kept estimates may be served while newer ones are built.
 _CAPTURE_HISTORY_MAX_AGE_S = 6 * 3600.0
-
-#: What each free signal's hook logs, by the metric it belongs to
-#: (``signals.Signal.event``).
-_SIGNAL_METRICS = {"end": "session_end", "wait": "waits", "perm": "permissions"}
 
 #: G5: the largest POST body this server will read off the socket, on
 #: any route. Every current POST body (a profile, a tag list, a feedback
@@ -739,6 +737,8 @@ def _window_query(
     for label, value in (("since", since), ("until", until)):
         if value is not None and not _parse_iso8601(value):
             return None, _bad_request(f"{label!r} must be an ISO 8601 timestamp")
+    if since is not None and until is not None and discovery._parse_bound(since) >= discovery._parse_bound(until):
+        return None, _bad_request("'since' must be before 'until'")
     has_since_until = since is not None or until is not None
     default_days = None if has_since_until else _DEFAULT_WINDOW_DAYS
     window_days, err = _int_query(query, "window_days", default_days, minimum=1)
@@ -1233,6 +1233,27 @@ def make_handler(
             window_by=window_by,
             project_slugs=list(project) if project else None,
         )
+        # Characters per token depend on the model, not the project, and a
+        # small project has too few agent first calls to measure them
+        # (calibration.MIN_CALLS), so a one-project view takes the figure
+        # measured on every project in its window: from the all-projects
+        # report kept for this window when there is one (however old it is),
+        # else measured here on the whole window's sessions. With no project
+        # picked the corpus is that whole window, so build_report measures
+        # it itself.
+        calibration = None
+        if project:
+            all_key = (window_days, since, until, window_by, None)
+            with report_lock:
+                kept = report_cache.get(_slot_for(all_key))
+            if kept and kept["key"] == all_key:
+                calibration = Calibration.from_dict(kept["model"].meta.calibration)
+            else:
+                calibration = report_mod.measure_calibration(
+                    rebuild.corpus_from_store(
+                        store, days=window_days, since=since, until=until, window_by=window_by
+                    )
+                )
         snaps = _snapshots_from_store()
         # The picked project counts even with no session in the window, so
         # its settings still show (report._settings_snapshots) and the
@@ -1290,6 +1311,7 @@ def make_handler(
             # drive-letter snapshot keys fold into one even when it has
             # no session in the window.
             known_slugs=tuple(store.project_slugs()),
+            calibration=calibration,
             # Spend > Usage shows cost by phase. The CLI keeps it behind
             # --phases; here it costs about 1% of the build.
             phases=True,
@@ -1653,7 +1675,7 @@ def make_handler(
         rates = _capture_rates(config)
         corpus = rebuild.corpus_from_store(store, since=enabled_at)
         use = capture_mod.usage(corpus, rates, since=enabled_at)
-        weekly_cost = capture_mod.weekly_cost(use)
+        weekly_cost = capture_mod.weekly_cost(use, until=config.capture.until)
         dependent_value = habits_mod.capture_dependent_value(
             habits_mod.collect(
                 corpus, rates, ratings=store.all_feedback(), signals=_capture_signals(corpus, options.config_dir),
@@ -1671,7 +1693,7 @@ def make_handler(
                 continue
         seen: dict[str, set] = {}
         for signal in signals_mod.load(options.config_dir, since=start):
-            metric_id = _SIGNAL_METRICS.get(signal.event)
+            metric_id = capture_catalogue.SIGNAL_CODE_METRICS.get(signal.event)
             if metric_id is not None:
                 seen.setdefault(metric_id, set()).add(signal.session_hash)
         return (
@@ -1795,8 +1817,8 @@ def make_handler(
         if capture.is_on and capture.enabled_at:
             use, started, signal_sessions, weekly_cost, dependent_value = _capture_part(
                 "usage",
-                (store.change_token(), capture.enabled_at, *soft),
-                (capture.enabled_at, *soft),
+                (store.change_token(), capture.enabled_at, capture.until, *soft),
+                (capture.enabled_at, capture.until, *soft),
                 lambda: _capture_usage(config, capture.enabled_at),
                 _STALE_REPORT_MAX_AGE_S,
             )
@@ -1981,7 +2003,7 @@ def make_handler(
         except ConfigError:
             pass
         if after != before:
-            # Coaching, the rating reminder and the project filter are in the mod's settings file: say so now.
+            # Whether coaching is on and the project filter are in the mod's settings file: say so now.
             mod_settings.refresh_coaching(options.config_dir)
         data = _capture_view(config)
         data["changed"] = after != before
@@ -2393,8 +2415,6 @@ def make_handler(
         if reason is not None:
             return _bad_request(reason)
         store.set_feedback(session_id, builds=builds, **values)
-        # The mod hears of the rating at once, not with the next hourly report.
-        mod_settings.refresh_coaching(options.config_dir)
         return _ok({"session_id": session_id, "feedback": store.feedback(session_id)})
 
     def _plan_builds(value) -> tuple[list[dict], str | None]:
@@ -2872,10 +2892,27 @@ def make_handler(
         model = _get_report_model(*window, project)
         hook = hook_health.check(options.config_dir)
         statusline = hook_health.statusline_check(options.config_dir, store.entrypoint_counts())
+        # Models the rate card can't price count as $0 everywhere; the usage
+        # section's table names them, so this page can too.
+        unknown = next(
+            (
+                table
+                for section in model.sections
+                if section.key == "usage"
+                for table in section.tables
+                if table.name == "pricing_unknown_models"
+            ),
+            None,
+        )
+        unpriced = {row[0]: {"turns": row[1], "tokens": row[2]} for row in unknown.rows} if unknown else None
         return _ok(
             to_jsonable(
                 helptext.diagnostics_table(
-                    model.diagnostics, hook=hook, statusline=statusline, parser_notes=model.parser_notes
+                    model.diagnostics,
+                    hook=hook,
+                    statusline=statusline,
+                    parser_notes=model.parser_notes,
+                    unpriced=unpriced,
                 )
             )
         )

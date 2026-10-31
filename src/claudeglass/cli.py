@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import available_timezones
 
-from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, discovery, installer as installer_mod
+from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, compaction, discovery, installer as installer_mod
 from . import invocation, onboarding, setup_flow
 from . import mod_settings as mod_settings_mod
 from . import pages
@@ -60,7 +60,7 @@ from .config import (
 )
 from .corpus import Corpus, load_corpus
 from .parse import load_or_create_salt
-from .model import Diagnostics, EventKind, PricingMeta, ReportMeta, ReportModel, Section, TranscriptResult
+from .model import Diagnostics, PricingMeta, ReportMeta, ReportModel, Section, TranscriptResult
 from .pricing import Pricing, PricingCoverage, PricingError, load_pricing, price_turn
 from .render.csv_out import write_csv_dir
 from .render.html import render_html
@@ -1938,7 +1938,7 @@ def _build_session_metrics(
                 cc_total += turn.cache_creation_tokens
                 turns += 1
 
-        compactions = sum(1 for e in bundle.top.events if e.kind == EventKind.COMPACT_BOUNDARY)
+        compactions = compaction.compactions_in(bundle.top)[0]
 
         metrics.append(
             {
@@ -3278,14 +3278,21 @@ def _update_finish_args(args: argparse.Namespace) -> list[str]:
     return out
 
 
-def _write_mod_settings(config_dir: Path, dashboard_url: str | None) -> None:
+def _write_mod_settings(config_dir: Path, dashboard_url: str | None, *, address_known: bool = True) -> None:
     """Write the mod's settings file (``mod_settings``) so it exists
     without the dashboard running. "Your usual" comes from the dashboard's
     store when there is one, read without writing to it; the measured
     figures wait for the dashboard's next report, so the file as the
     service wrote it is carried forward (see ``mod_settings.build``). A
     config or rate card that can't be read leaves the file as it was:
-    ``update`` reports those elsewhere."""
+    ``update`` reports those elsewhere.
+
+    ``dashboard_url`` is where the dashboard answers and wins over the
+    address in the file (a dashboard that moved to another port must be
+    found at its new one). ``address_known`` is false when ``update`` left
+    the dashboard alone (``--no-service``): the address its ``--port`` names
+    is then only a default, not where the dashboard really is, so an address
+    the service wrote to the file is kept."""
     from .service.serve import STORE_FILENAME
     from .service.store import Store
 
@@ -3293,6 +3300,8 @@ def _write_mod_settings(config_dir: Path, dashboard_url: str | None) -> None:
         previous = json.loads(mod_settings_mod.settings_path(config_dir).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         previous = None
+    if not address_known and isinstance(previous, dict) and previous.get("dashboard_url"):
+        dashboard_url = None
     store = Store.open_read_only(config_dir / STORE_FILENAME)
     try:
         mod_settings_mod.write(
@@ -3385,7 +3394,9 @@ def _cmd_update_finish(
             refreshed = []
         if refreshed:
             stdout.write(f"Refreshed {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''} this version changed.\n")
-        _write_mod_settings(config_dir, mod_settings_mod.dashboard_url(args.bind, args.port))
+        _write_mod_settings(
+            config_dir, mod_settings_mod.dashboard_url(args.bind, args.port), address_known=not args.no_service
+        )
 
     # -- the dashboard ---------------------------------------------------
     status = 0
@@ -4225,7 +4236,10 @@ def _capture_status(
     ids = capture.active_metrics()
     if capture.is_on:
         if capture.expired():
-            stdout.write("Its end time has passed, so the hook adds nothing now. Turn it back on with 'claudeglass capture on'.\n")
+            stdout.write(
+                "Its end time has passed, so capture's notes, tags and signals have stopped; coaching notes and the "
+                "feedback facts line, if you have them on, still run. 'claudeglass capture on' starts capture again.\n"
+            )
         if capture.projects:
             only = [p for p in capture.projects if not p.startswith("!")]
             skip = [p[1:] for p in capture.projects if p.startswith("!")]
@@ -4474,6 +4488,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 )
         return 0
     if preview != current:
+        if current.is_on and current.expired(now) and preview.is_on and not preview.expired(now):
+            stdout.write("Its end time had passed, so this starts capture again for a new span.\n")
         if capture_view.describe(current) != capture_view.describe(preview):
             stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":
