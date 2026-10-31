@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+Costs and parsing:
+
+- **Sonnet 5.5 cache reads are priced at the published $0.10 per million
+  tokens (was $0.20).** The rate card has no dates, so replies from before
+  about 14 October now price lower than Claude Code billed for them.
+- **Haiku 5.5 replies are priced instead of costing $0, and `haiku` now means
+  Haiku 5.5.** It has its own rate card row, with the higher rates once the
+  context passes 100,000 tokens. Haiku 4.5 keeps its row without a
+  data-residency uplift, and Mythos 5.1 has a row at Fable 5.1's rates. The
+  Data quality page lists any model the rate card has no price for.
+- **A subagent's output is no longer priced at its first few tokens.** Claude
+  Code logs about half of subagent replies while they are still being
+  written. ClaudeGlass now estimates their output from how much the next
+  request's context grew, and Data quality and the cost record count them.
+- **A session forked into another project folder, and agent transcripts
+  copied into a fork, are no longer priced twice.** Their copied lines are
+  skipped, compaction boundaries included.
+- **A session Claude Code moved to another project folder is no longer
+  counted twice.** The dashboard drops the old path's rows once the session
+  has a live transcript, and keeps a transcript whose file is simply gone.
+- **A session continued after a compaction no longer counts the compaction
+  it inherited**, a zeroed copy of the reply Claude Code preserved, or an
+  extra session start. Its first reply no longer reads as following a
+  summary.
+- **The cost record compares a Claude Code process once, not once per forked
+  session.** A process that moves through several sessions writes its whole
+  running total into each file; it is now one row against all their replies.
+- **A cache write with no 5-minute or 1-hour split is priced at the 5-minute
+  rate instead of at nothing.**
+- **A summary Claude Code computed in the background beforehand is dated at
+  the reply before it**, and one written on a cold cache is priced as plain
+  input, not a cache write (about four times Claude Code's figure). Such
+  summaries show as "auto (precomputed)" and are left out of where Claude
+  Code summarises.
+- **A reply that fell back to another model after a refusal is priced on the
+  cache write of the model that answered.**
+- **The request-log lines Claude Code 2.1.30x writes before every request no
+  longer show up as unknown events.**
+- **Hook health counts a background hook that fails.**
+
+Context and compaction:
+
+- **The auto-compact table no longer judges a 400,000-token project against
+  the model's 1,000,000-token window.** "Room left" now reads about 33,000,
+  and "Differs from setting" is measured against the window minus 33,000.
+- **The scorecard's context hygiene rating, the re-cache table's "very large
+  context" bar and the compaction-window sweep use each session's own
+  auto-compact window.** A p90 of 316,000 tokens used to rate "good" against
+  1,000,000; against 400,000 it rates "poor". "Very large" is 80% of where the
+  session summarises.
+- **The compaction-window sweep assumes Claude Code's 33,000-token buffer
+  instead of none.**
+- **The dashboard no longer offers a summary window the advice refuses.** The
+  savings lever, the summary-size chart and the glossary skip windows that
+  would summarise more than twice per session.
+- **Tool sizes follow what Claude Code actually sent.** The prompt snapshot's
+  tool entries run about 1.6 times the real definitions, so built-in and MCP
+  tool sizes now come from the request Claude Code logs when it logs one.
+- **Tool search sizes a deferred MCP tool from its own server's tools**, else
+  from the MCP tools loaded in the window when at least ten were measured,
+  else at a typical 550 tokens a tool (Claude Code's own count over 219 MCP
+  tools). Claude Code's own tools were mixed into that average, which put the
+  saving about 28% too high; it now lands within about 8% of Claude Code's
+  count.
+- **Claude in Chrome counts as part of the desktop app**, with its `/chrome`
+  switch (not verified in the desktop app).
+- **The unused MCP server card says how many days it looked back** ("haven't
+  used in N days") instead of "never used", and no longer claims more days
+  than every reply was seen for.
+- **The card for MCP servers an agent hardly uses says to add
+  `mcp__<server>` to the agent's `disallowedTools`**, the lever Claude Code
+  documents. An `mcpServers` list only adds servers.
+- **"Memory files (est)" includes your auto memory (MEMORY.md).**
+- **The context budget's baseline shows Claude Code's system prompt and
+  built-in tools as measured figures**, and "Everything else (est)" is no
+  longer blank for the busiest projects.
+- **A one-project dashboard view converts characters to tokens at the ratio
+  measured on every project in its window**, so a small project no longer
+  falls back to 4.0 characters per token.
+
+Capture and dashboard:
+
+- **Capture that had reached its end time can be started again.** `capture
+  on` did nothing and said it was already on. It now starts a new span, the
+  banner reads "ended" instead of "on", and the weekly cost stops shrinking
+  after the end date.
+- **The Capture page counts answers for the per-turn signals** instead of
+  showing 0.
+- **The Haiku judge asks for Haiku 4.5 by its exact name**, so its model no
+  longer depends on which `claude` command it finds.
+- **A Custom capture set of tag metrics registers the background Stop hook**
+  that fills in a missed tag.
+- **The Tweaks table no longer counts re-added items used later several
+  times over.**
+- **`update --finish` keeps the dashboard address it has just registered** in
+  the mod's settings file.
+- **`payload-keys.json` picks up a key Claude Code adds later**, up to 40
+  names a label.
+- **A since/until window that ends before it starts answers 400** instead of
+  200 with zeros.
+- **A threshold written as text in config.toml names the key and asks for a
+  number** instead of crashing a report.
+
+The mod:
+
+- **The mod notes which app a Desktop, VS Code or mobile session runs in.** It
+  asked only once, before the app attached, so most such sessions counted as
+  sessions without ClaudeGlass. Any event the mod wrote now puts a session in
+  the "with" group of the effect table.
+- **A resumed or restarted session no longer loses its earlier sensor
+  events.** History written before this version may be partial.
+- **The Startup pane and the startup/conversation split use Claude Code's
+  counted figures**, asked for once a session after the first reply, instead
+  of its quick estimate (about 12k too high in one session).
+- **With auto-compact off, the band and the Checkpoint pane say Claude won't
+  summarise by itself** instead of naming a point near the end of the window.
+
+### Changed
+
+- **Re-cache turns show the API's own reason for a cache miss**, and a miss
+  the API blames on a changed prefix is no longer called an expiry.
+- **The cost record names spend on a response stopped by safeguards.**
+- **"Agent list (est)" is now "Your own agents (est)"**; plugin agents were
+  never in that figure.
+- **The mod's settings file no longer carries rating-reminder fields nothing
+  reads**, and dead mod code went with them.
+- **SECURITY.md and the capture docs name the four background hooks and say
+  what headless runs get.**
+- **The command and whole-percent Node tests run in CI, and the Haiku worker
+  end-to-end tests run on Windows.**
+
 ## [0.16.0] - 2026-10-09
 
 ### Added
