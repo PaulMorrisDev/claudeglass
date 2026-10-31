@@ -61,7 +61,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from . import capture_catalogue, discovery, snapshots
+from . import capture_catalogue, compaction, discovery, snapshots
 from .model import EventKind, TranscriptResult
 
 HOOK_SCRIPT_NAME = "snapshot-config.py"
@@ -1275,7 +1275,14 @@ def connect(plan: ConnectPlan, *, now: datetime | None = None) -> Path | None:
 #: numerator and the denominator here rather than counted as a "failure";
 #: hook_system_message/hook_cancelled/capture_note aren't a pass/fail
 #: outcome of the hook itself and are left out too.
-_HOOK_CALL_SUBKINDS = frozenset({"hook_success", "hook_non_blocking_error"})
+#:
+#: Accounting-audit addition (``PARSER_VERSION`` 45): an
+#: ``async_hook_response`` is the result of a hook Claude Code ran in the
+#: background (this tool installs its Stop, StopFailure, Notification and
+#: PermissionRequest hooks that way), and a background hook cannot block,
+#: so a nonzero exit code is a failure like a non-blocking error
+#: (:func:`_hook_call_failed`).
+_HOOK_CALL_SUBKINDS = frozenset({"hook_success", "hook_non_blocking_error", "async_hook_response"})
 
 #: Below this many calls in the window, a hook's error rate is too noisy
 #: to act on (a hook that ran twice and failed once is not "fails on
@@ -1360,13 +1367,27 @@ class HookErrorHealth:
         )
 
 
+def _hook_call_failed(event) -> bool:
+    """Whether a counted hook call failed: a non-blocking error, or a
+    background hook's response with a nonzero exit code (one with none
+    recorded passes)."""
+    if event.subkind == "hook_non_blocking_error":
+        return True
+    if event.subkind == "async_hook_response":
+        code = event.detail.get("exitCode")
+        return isinstance(code, int) and not isinstance(code, bool) and code != 0
+    return False
+
+
 def count_hook_errors(results: Iterable[TranscriptResult], stopped: Iterable[str] = ()) -> HookErrorHealth:
     """Tally ``HOOK_OUTPUT`` events across ``results`` (already-parsed
     transcripts -- this module never reads or parses one itself, matching
     :func:`check_capture`'s own "cheap, no transcript read here"
     contract; the caller does the parsing, e.g. via ``corpus.load_corpus``)
     by hook event name (never the matcher/tool-name suffix -- see
-    ``events._hook_name_bucket``'s docstring for why).
+    ``events._hook_name_bucket``'s docstring for why). A background hook's
+    ``async_hook_response`` counts as a call, and as an error when its exit
+    code is not zero.
 
     ``stopped`` names hooks (by label) that have stopped failing
     (``hook_costs.HookRow.stopped``): their old failures are left out, so
@@ -1385,7 +1406,7 @@ def count_hook_errors(results: Iterable[TranscriptResult], stopped: Iterable[str
                 continue
             stat = tally.setdefault(name, HookErrorStat(hook_name=name))
             stat.calls += 1
-            if event.subkind == "hook_non_blocking_error":
+            if _hook_call_failed(event):
                 stat.errors += 1
                 if event.ts and (stat.last_error_ts is None or event.ts > stat.last_error_ts):
                     stat.last_error_ts = event.ts
@@ -1594,7 +1615,7 @@ def _fires(spec: HookSpec, mains: list[TranscriptResult], agents: list[Transcrip
         sources = set(spec.matcher.split("|")) if spec.matcher not in ("", "*") else {"startup", "clear", "compact"}
         # An agent run has no start of its own but compacts like a session,
         # and a /clear starts a new session file, so it is counted as a start.
-        compactions = sum(1 for result in [*mains, *agents] for e in result.events if e.kind == EventKind.COMPACT_BOUNDARY)
+        compactions = sum(compaction.compactions_in(result)[0] for result in [*mains, *agents])
         return (len(mains) if sources & {"startup", "clear"} else 0) + (compactions if "compact" in sources else 0)
     if event == "SessionEnd":
         return len(mains)

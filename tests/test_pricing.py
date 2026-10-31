@@ -48,6 +48,8 @@ REQUIRED_PACKAGED_MODEL_IDS = {
     "claude-sonnet-4-5",
     "claude-sonnet-4",
     "claude-haiku-4-5-20251001",
+    "claude-haiku-5-5",
+    "claude-mythos-5-1",
     "claude-3-5-haiku-20241022",
     "claude-3-5-sonnet-20241022",
     "claude-3-7-sonnet-20250219",
@@ -83,7 +85,7 @@ def _turn(**overrides) -> model.Turn:
 
 def test_packaged_default_loads():
     pricing = load_pricing()
-    assert pricing.version == "2026-10-01"
+    assert pricing.version == "2026-10-30"
     assert pricing.currency == "USD"
     assert pricing.sha256
     assert len(pricing.sha8) == 8
@@ -102,7 +104,7 @@ def test_packaged_default_covers_every_required_model_id():
 def test_packaged_default_currency_and_version_surfaced():
     pricing = load_pricing()
     assert pricing.currency == "USD"
-    assert pricing.version == "2026-10-01"
+    assert pricing.version == "2026-10-30"
     assert pricing.source_url
 
 
@@ -319,14 +321,18 @@ def test_packaged_claude_sonnet_5_has_no_alias_of_its_own():
     assert resolved.matched_via == "exact"
 
 
-def test_packaged_sonnet_5_5_rates_match_sonnet_5():
+def test_packaged_sonnet_5_5_rates_match_sonnet_5_except_cache_reads():
     # Same list price, 1M window and data-residency uplift as Sonnet 5,
     # and no fast mode (documented only for Opus 5.5, Opus 5, Opus 4.8).
+    # A cache hit or refresh is 0.05x input on Sonnet 5.5 (2.0 x 0.05 =
+    # 0.1), half of Sonnet 5's 0.2: priced at 0.2 every cached token read
+    # was overcharged twice over.
     pricing = load_pricing()
     rates = pricing.models["claude-sonnet-5-5"]
     assert (rates.input, rates.output, rates.cache_write_5m, rates.cache_write_1h, rates.cache_read) == (
-        2.0, 10.0, 2.5, 4.0, 0.2,
+        2.0, 10.0, 2.5, 4.0, 0.1,
     )
+    assert pricing.models["claude-sonnet-5"].cache_read == 0.2
     assert rates.geo_multipliers == {"us": 1.1}
     assert rates.fast is None
     assert rates.context_window_tokens == 1_000_000
@@ -1396,3 +1402,145 @@ def test_model_name_reads_an_id_as_people_say_it():
     assert model_name("claude-opus-5[1m]") == "Opus 5 [1m]"
     assert model_name("gpt-4") == "gpt-4"
     assert model_names_in("claude-sonnet-5 (+2 more), not claudeglass") == "Sonnet 5 (+2 more), not claudeglass"
+
+
+# --------------------------------------------------------------------
+# Accounting audit: the 2026-10-30 rate card, unsplit writes, estimated output
+# --------------------------------------------------------------------
+
+
+def test_sonnet_5_5_cache_reads_are_priced_at_a_tenth_of_a_dollar_per_million():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-sonnet-5-5")
+    breakdown = price_turn(_turn(model="claude-sonnet-5-5", cache_read_tokens=3_000_000), resolved)
+    assert breakdown.cache_read_cost == pytest.approx(0.30)
+
+
+def test_the_haiku_alias_points_at_haiku_5_5_and_haiku_4_5_keeps_its_own_row():
+    pricing = load_pricing()
+    alias = pricing.resolve_model("haiku")
+    assert alias is not None
+    assert alias.canonical_id == "claude-haiku-5-5"
+    assert alias.matched_via == "alias"
+    old = pricing.resolve_model("claude-haiku-4-5-20251001")
+    assert old.canonical_id == "claude-haiku-4-5-20251001"
+    assert pricing.resolve_model("claude-haiku-4-5").canonical_id == "claude-haiku-4-5-20251001"
+    assert pricing.aliases["haiku"] == "claude-haiku-5-5"
+
+
+def test_haiku_5_5_bills_more_above_a_hundred_thousand_tokens_of_context():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-haiku-5-5")
+    rates = resolved.rates
+    assert (rates.input, rates.output, rates.cache_write_5m, rates.cache_write_1h, rates.cache_read) == (
+        0.1, 0.5, 0.125, 0.2, 0.01,
+    )
+    below = _turn(model="claude-haiku-5-5", input_tokens=100_000, ctx=100_000, output_tokens=1_000_000)
+    above = _turn(model="claude-haiku-5-5", input_tokens=100_001, ctx=100_001, output_tokens=1_000_000)
+    assert price_turn(below, resolved).long_context_applied is False
+    assert price_turn(below, resolved).output_cost == pytest.approx(0.5)
+    long = price_turn(above, resolved)
+    assert long.long_context_applied is True
+    assert long.output_cost == pytest.approx(2.5)
+    assert long.input_cost == pytest.approx(100_001 / 1_000_000 * 0.5)
+
+
+def test_haiku_5_5_is_priced_at_both_tiers_and_on_a_real_reply():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("haiku")
+    assert resolved.canonical_id == "claude-haiku-5-5"
+    # A real reply (in 2, out 4, 29,361 cache reads, 23,892 one-hour
+    # writes, context 53,255) at the first tier.
+    reply = _turn(model="claude-haiku-5-5", input_tokens=2, output_tokens=4, cache_read_tokens=29_361,
+                  cache_creation_tokens=23_892, cc_1h=23_892, ctx=53_255)
+    assert price_turn(reply, resolved).total == pytest.approx(0.00507421)
+    assert price_turn(reply, resolved).long_context_applied is False
+    # The same counts with a 150,000-token context are billed at the
+    # second tier's rates throughout.
+    long = _turn(model="claude-haiku-5-5", input_tokens=2, output_tokens=4, cache_read_tokens=29_361,
+                 cache_creation_tokens=23_892, cc_1h=23_892, ctx=150_000)
+    expected = 2 * 0.5e-6 + 4 * 2.5e-6 + 29_361 * 0.05e-6 + 23_892 * 1.0e-6
+    assert price_turn(long, resolved).total == pytest.approx(expected)
+    assert price_turn(long, resolved).long_context_applied is True
+
+
+def test_a_haiku_5_5_reply_is_no_longer_priced_at_zero():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-haiku-5-5")
+    breakdown = price_turn(_turn(model="claude-haiku-5-5", input_tokens=1_000_000), resolved)
+    assert breakdown.model_known is True
+    assert breakdown.input_cost == pytest.approx(0.10)
+
+
+def test_haiku_4_5_has_no_data_residency_uplift():
+    # Haiku 4.5 predates the 1.1x uplift (it applies from Opus 4.6 / Sonnet
+    # 4.6 on): a US-only reply costs the plain rate.
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-haiku-4-5-20251001")
+    assert resolved.rates.geo_multipliers in (None, {})
+    plain = price_turn(_turn(model="claude-haiku-4-5-20251001", input_tokens=1_000_000, inference_geo="global"),
+                       resolved)
+    us = price_turn(_turn(model="claude-haiku-4-5-20251001", input_tokens=1_000_000, inference_geo="us"), resolved)
+    assert us.total == pytest.approx(plain.total)
+    assert us.total == pytest.approx(1.0)
+
+
+def test_fable_5_1_and_mythos_5_1_are_priced_at_the_same_list_rates():
+    pricing = load_pricing()
+    fable = pricing.models["claude-fable-5-1"]
+    mythos = pricing.models["claude-mythos-5-1"]
+    for field in ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read", "context_window_tokens"):
+        assert getattr(mythos, field) == getattr(fable, field), field
+
+
+def test_an_opus_5_5_write_with_no_ttl_split_is_priced_at_the_five_minute_rate():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-opus-5-5")
+    flat = _turn(model="claude-opus-5-5", cache_creation_tokens=1_000_000, ttl_split_unknown=True)
+    assert price_turn(flat, resolved).cache_write_cost == pytest.approx(5.0)
+    # 200,000 tokens attributed to the 5-minute bucket and the rest unsplit.
+    part = _turn(model="claude-opus-5-5", cache_creation_tokens=1_000_000, cc_5m=200_000)
+    assert price_turn(part, resolved).cache_write_cost == pytest.approx(5.0)
+    # A turn normalised to the 1-hour lifetime has no remainder: unchanged.
+    hour = _turn(model="claude-opus-5-5", cache_creation_tokens=1_000_000, cc_1h=1_000_000)
+    assert price_turn(hour, resolved).cache_write_cost == pytest.approx(8.0)
+
+
+def test_a_write_with_no_ttl_split_is_priced_at_the_five_minute_rate():
+    # An older Claude Code logged only the flat cache_creation count, so
+    # cc_5m and cc_1h are both 0: that write used to cost nothing.
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-sonnet-5")
+    flat = _turn(cache_creation_tokens=1_000_000, ttl_split_unknown=True)
+    assert price_turn(flat, resolved).cache_write_cost == pytest.approx(2.5)
+
+
+def test_a_write_with_a_full_ttl_split_is_not_counted_twice():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-sonnet-5")
+    split = _turn(cache_creation_tokens=1_500_000, cc_5m=1_000_000, cc_1h=500_000)
+    assert price_turn(split, resolved).cache_write_cost == pytest.approx(2.5 + 2.0)
+
+
+def test_a_partial_ttl_split_prices_the_remainder_at_the_five_minute_rate():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-sonnet-5")
+    partial = _turn(cache_creation_tokens=1_000_000, cc_5m=0, cc_1h=400_000)
+    assert price_turn(partial, resolved).cache_write_cost == pytest.approx(0.6 * 2.5 + 0.4 * 4.0)
+
+
+def test_output_is_priced_at_the_estimate_when_a_reply_was_logged_mid_stream():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-sonnet-5")
+    partial = _turn(output_tokens=7, output_partial=True, output_tokens_est=1_000_000)
+    assert price_turn(partial, resolved).output_cost == pytest.approx(10.0)
+    plain = _turn(output_tokens=1_000_000)
+    assert price_turn(plain, resolved).output_cost == pytest.approx(10.0)
+
+
+def test_the_output_estimate_is_used_by_the_simulation_path_too():
+    pricing = load_pricing()
+    resolved = pricing.resolve_model("claude-sonnet-5")
+    partial = _turn(output_tokens=7, output_partial=True, output_tokens_est=1_000_000)
+    simulated = price_turn(partial, resolved, write_split={"5m": 0}, read_tokens=0)
+    assert simulated.output_cost == pytest.approx(10.0)

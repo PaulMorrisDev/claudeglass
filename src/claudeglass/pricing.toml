@@ -1,7 +1,7 @@
-version = "2026-10-01"
+version = "2026-10-30"
 currency = "USD"
 source_url = "https://platform.claude.com/docs/en/about-claude/pricing"
-retrieved = "2026-10-01"
+retrieved = "2026-10-30"
 notes = """
 Manually curated USD list prices, per million tokens, read from the
 Claude pricing page on the date above. Never fetched automatically (see
@@ -16,20 +16,39 @@ them for anything other than relative comparisons.
 
 # Geo multiplier rule: the documented 1.1x "us" data-residency uplift is
 # only stated for the 4.6-generation and later models. Earlier models
-# (4.5 and below, and every legacy dated id below) deliberately carry no
-# [models.<id>.geo_multipliers] table — that's the asymmetry documented
-# here, not an omission to fix.
+# (Haiku 4.5, the 4.5 generation and below, and every legacy dated id
+# below) deliberately carry no [models.<id>.geo_multipliers] table —
+# that's the asymmetry documented here, not an omission to fix.
 
-# Context-window rule (D2/D4/COV-12): Fable 5.1, Fable 5, Sonnet 5.5,
-# Sonnet 5, Sonnet 4.6 and Opus 4.6+ have a native 1M token context
-# window (docs/en/model-config; the 4.6 models need no beta header).
-# Those models set context_window_tokens = 1000000 below; every other
-# model omits the key and gets pricing.py's 200,000-token default, the
-# window every earlier generation shipped with. Claude Code itself
-# compacts a 1M-window session before the window fills, at about 967K
-# tokens by default — callers that need that trigger point derive it
-# from this field (see ModelRates.context_window_tokens's docstring)
-# rather than a second hard-coded constant.
+# Context-window rule (D2/D4/COV-12): Mythos 5.1, Fable 5.1, Fable 5,
+# Sonnet 5.5, Sonnet 5, Sonnet 4.6, Haiku 5.5 and Opus 4.6+ have a
+# native 1M token context window (docs/en/model-config; the 4.6 models
+# need no beta header). Those models set context_window_tokens =
+# 1000000 below; every other model omits the key and gets pricing.py's
+# 200,000-token default, the window every earlier generation shipped
+# with. Claude Code itself compacts a 1M-window session before the
+# window fills, at about 967K tokens by default, or at autoCompactWindow
+# minus 33K when that setting is on (a 400K window compacts at about
+# 367K) — callers that need that trigger point derive it from this field
+# (see ModelRates.context_window_tokens's docstring) rather than a
+# second hard-coded constant.
+
+# --- Mythos -----------------------------------------------------------
+
+# Mythos 5.1 is listed at Fable 5.1's rates ($10 / $50 per million
+# in/out, $12.50 / $20 cache writes, $0.25 cache reads). It carries no
+# alias: no Claude Code model shortcut points at it.
+[models."claude-mythos-5-1"]
+aliases = []
+input = 10.0
+output = 50.0
+cache_write_5m = 12.5
+cache_write_1h = 20.0
+cache_read = 0.25
+context_window_tokens = 1000000
+
+[models."claude-mythos-5-1".geo_multipliers]
+us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
 
 # --- Fable ------------------------------------------------------------
 
@@ -185,7 +204,7 @@ input = 2.0
 output = 10.0
 cache_write_5m = 2.5
 cache_write_1h = 4.0
-cache_read = 0.2
+cache_read = 0.1 # cache hits and refreshes are 0.05x input (2.0 x 0.05)
 context_window_tokens = 1000000
 
 [models."claude-sonnet-5-5".geo_multipliers]
@@ -233,16 +252,41 @@ cache_read = 0.3
 
 # --- Haiku ---------------------------------------------------------------
 
+# Haiku 5.5 is the model Claude Code's "haiku" shortcut resolves to. It
+# has two price tiers, split on the request's prompt length (input +
+# cache writes + cache reads, the same ctx price_turn tests): up to
+# 100,000 tokens is the base rate below, over 100,000 is the
+# [.long_context] rate. The 1.1x "us" uplift applies to both tiers.
+[models."claude-haiku-5-5"]
+aliases = ["haiku"]
+input = 0.1
+output = 0.5
+cache_write_5m = 0.125
+cache_write_1h = 0.2
+cache_read = 0.01
+context_window_tokens = 1000000
+
+[models."claude-haiku-5-5".geo_multipliers]
+us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
+
+# The page says "over 100,000 tokens"; price_turn tests ctx >= the
+# threshold, so the first priced size is 100,001.
+[models."claude-haiku-5-5".long_context]
+threshold_tokens = 100001
+input = 0.5
+output = 2.5
+cache_write_5m = 0.625
+cache_write_1h = 1.0
+cache_read = 0.05
+
+# No geo table: the 1.1x "us" uplift is stated for 4.6 and later only.
 [models."claude-haiku-4-5-20251001"]
-aliases = ["haiku", "claude-haiku-4-5"]
+aliases = ["claude-haiku-4-5"]
 input = 1.0
 output = 5.0
 cache_write_5m = 1.25
 cache_write_1h = 2.0
 cache_read = 0.1
-
-[models."claude-haiku-4-5-20251001".geo_multipliers]
-us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
 
 # --- Legacy dated ids -------------------------------------------------
 #

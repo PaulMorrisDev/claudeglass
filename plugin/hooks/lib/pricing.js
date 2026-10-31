@@ -27,7 +27,7 @@
  * @property {number} cache_write_1h
  * @property {number} cache_read
  * @property {number} [context_window_tokens]
- * @property {LongContextRule} [long_context]  Optional; the packaged rate card has none today.
+ * @property {LongContextRule} [long_context]  Optional; the packaged rate card gives it to models that bill above a size (Haiku 5.5).
  */
 
 /**

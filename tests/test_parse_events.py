@@ -1196,3 +1196,189 @@ def test_full_fixture_every_kind_resolves_and_diagnostics_count_correctly(tmp_pa
     assert result.diagnostics.unparsable_lines == 1  # the "{not valid json" line
     assert result.diagnostics.truncated_final_line is True
     assert len(result.turns) == 2
+
+
+# -- Accounting audit: request-log lines, wire tool sizes, async hooks -------
+
+_REQUEST_LOG_TYPES = ["api-request", "api-request-blob", "api-request-shape", "relocated", "dev-mods"]
+
+
+@pytest.mark.parametrize("line_type", _REQUEST_LOG_TYPES)
+def test_a_request_log_line_is_dropped_not_unknown(line_type):
+    assert events.classify_line(ignorable_line(line_type)) is None
+
+
+def test_request_log_lines_leave_no_unknown_event_before_the_reply(tmp_path: Path):
+    """Claude Code 2.1.30x writes several of these before every request:
+    none is a conversation event, so none may land in the reply's
+    ``preceding_event_kinds`` as ``UNKNOWN``."""
+    path = tmp_path / "session.jsonl"
+    lines = [user_str_line("hi")]
+    lines += [ignorable_line(line_type) for line_type in _REQUEST_LOG_TYPES]
+    lines.append(turn_line(message_id="msg_1"))
+    from helpers import write_jsonl
+
+    write_jsonl(path, lines)
+
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="session"))
+
+    assert EventKind.UNKNOWN not in result.turns[0].preceding_event_kinds
+    assert not [event for event in result.events if event.kind == EventKind.UNKNOWN]
+    assert sum(result.diagnostics.ignored_line_types.get(t, 0) for t in _REQUEST_LOG_TYPES) == len(_REQUEST_LOG_TYPES)
+
+
+def _tool(name: str, description: str = "d", **extra) -> dict:
+    return {"name": name, "description": description, **extra}
+
+
+def test_wire_tool_sizes_measure_the_definitions_in_an_api_request_shape_line():
+    read = _tool("Read", "r" * 40, input_schema={"type": "object"})
+    figma = _tool("mcp__figma__get", "f" * 30)
+    line = ignorable_line("api-request-shape", shape={"tools": [read, figma, "not a tool"]})
+
+    sizes = events.wire_tool_sizes(line)
+
+    def size(tool):
+        return len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
+
+    assert sizes == {
+        "tools_chars": size(read) + size(figma),
+        "tool_chars": {"Read": size(read)},
+        "server_chars": {"figma": size(figma)},
+    }
+
+
+@pytest.mark.parametrize("shape", [None, {}, {"tools": []}, {"tools": "x"}, "x"])
+def test_a_shape_with_no_tools_gives_no_wire_sizes(shape):
+    assert events.wire_tool_sizes(ignorable_line("api-request-shape", shape=shape)) is None
+
+
+def _snapshot_session(tmp_path: Path, *, shape_first: bool, with_shape: bool = True):
+    """A prompt snapshot whose tool entries (name, description, schema and
+    more) run 1.6 times the definitions the request sent, and the
+    ``api-request-shape`` line listing those."""
+    from helpers import write_jsonl
+
+    wire = [_tool("Read", "r" * 100, input_schema={"type": "object"}), _tool("mcp__figma__get", "f" * 50)]
+    snapshot_tools = [{**tool, "extra": "e" * int(len(json.dumps(tool)) * 0.6)} for tool in wire]
+    snapshot = attachment_line("prompt_snapshot", systemPrompt=["s" * 10], tools=snapshot_tools)
+    shape = ignorable_line("api-request-shape", shape={"tools": wire})
+    lines = [user_str_line("hi")]
+    lines += [shape, snapshot] if shape_first and with_shape else [snapshot]
+    if with_shape and not shape_first:
+        lines.append(shape)
+    lines.append(turn_line(message_id="msg_1"))
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="session"))
+    event = next(e for e in result.events if e.subkind == "prompt_snapshot")
+    return wire, snapshot_tools, event.detail
+
+
+def _chars(tool: dict) -> int:
+    return len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
+
+
+@pytest.mark.parametrize("shape_first", [True, False])
+def test_the_snapshots_tool_sizes_are_the_definitions_the_request_sent(tmp_path: Path, shape_first: bool):
+    wire, snapshot_tools, detail = _snapshot_session(tmp_path, shape_first=shape_first)
+
+    assert detail["tools_chars"] == sum(_chars(t) for t in wire)
+    assert detail["tool_chars"] == {"Read": _chars(wire[0])}
+    assert detail["server_chars"] == {"figma": _chars(wire[1])}
+    assert detail["tools_source"] == "request"
+    # The snapshot's own entries are what the sizes used to be.
+    assert sum(_chars(t) for t in snapshot_tools) > 1.5 * detail["tools_chars"]
+    # The tool count is still the snapshot's, and no name or text is kept.
+    assert detail["tool_count"] == 2
+    assert "rrrr" not in repr(detail)
+
+
+def test_with_no_request_line_the_snapshots_own_sizes_stand(tmp_path: Path):
+    _, snapshot_tools, detail = _snapshot_session(tmp_path, shape_first=True, with_shape=False)
+
+    assert detail["tools_chars"] == sum(_chars(t) for t in snapshot_tools)
+    assert "tools_source" not in detail
+
+
+def test_only_the_first_snapshot_that_lists_tools_takes_the_wire_sizes(tmp_path: Path):
+    from helpers import write_jsonl
+
+    wire = [_tool("Read", "r" * 100)]
+    later = [_tool("Read", "r" * 300), _tool("Bash", "b" * 50)]
+    lines = [
+        user_str_line("hi"),
+        ignorable_line("api-request-shape", shape={"tools": wire}),
+        attachment_line("prompt_snapshot", tools=[_tool("Read", "r" * 160)]),
+        turn_line(message_id="msg_1"),
+        attachment_line("prompt_snapshot", tools=later),
+        turn_line(message_id="msg_2"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="session"))
+    snapshots = [e for e in result.events if e.subkind == "prompt_snapshot"]
+
+    assert snapshots[0].detail["tools_chars"] == _chars(wire[0])
+    assert snapshots[0].detail["tools_source"] == "request"
+    assert snapshots[1].detail["tools_chars"] == sum(_chars(t) for t in later)
+    assert "tools_source" not in snapshots[1].detail
+
+
+# -- async_hook_response ------------------------------------------------------
+
+
+def test_an_async_hook_response_is_a_hook_output_with_its_event_and_exit_code():
+    line = attachment_line(
+        "async_hook_response", hookEvent="StopFailure", exitCode="66", stdout="private output", stderr="private error",
+        command="python C:/Users/someone/hook.py",
+    )
+
+    event = events.classify_line(line)
+
+    assert event.kind == EventKind.HOOK_OUTPUT
+    assert event.subkind == "async_hook_response"
+    assert event.detail == {"hookName": "StopFailure", "exitCode": 66}
+    assert "private" not in repr(event.detail)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(0, 0), (2, 2), ("0", 0), ("-1", -1), ("66", 66), (True, None), ("sixty-six", None), ("1" * 9, None), (None, None),
+     (1.5, None), ([1], None)],
+)
+def test_an_async_hook_exit_code_is_kept_only_when_it_is_an_integer(raw, expected):
+    line = attachment_line("async_hook_response", hookEvent="Stop", exitCode=raw)
+
+    detail = events.classify_line(line).detail
+
+    assert detail.get("exitCode") == expected
+    if expected is None:
+        assert "exitCode" not in detail
+
+
+def test_an_async_hook_response_from_an_unknown_event_gets_a_closed_name():
+    line = attachment_line("async_hook_response", hookEvent="/home/someone/private-event", exitCode=1)
+
+    detail = events.classify_line(line).detail
+
+    assert "private" not in repr(detail)
+    assert detail["exitCode"] == 1
+
+
+def test_an_async_hook_response_keeps_no_text_through_a_full_parse(tmp_path: Path):
+    from helpers import write_jsonl
+
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, [
+        user_str_line("hi"),
+        attachment_line("async_hook_response", hookEvent="Notification", exitCode=3, stdout="secret-token-123"),
+        turn_line(message_id="msg_1"),
+    ])
+
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="session"))
+
+    hook = next(e for e in result.events if e.subkind == "async_hook_response")
+    assert hook.detail == {"hookName": "Notification", "exitCode": 3}
+    assert "secret-token" not in repr(result.events)

@@ -34,11 +34,19 @@ counted in ``Diagnostics.replayed_lines`` the second and later time its
 
 Copied sessions: after ``/clear`` in a web or mobile session, Claude Code
 writes the new session's lines both to that session's own file and into
-the earlier session's file, keeping the new session's ``sessionId``. In a
-top-level transcript, a line whose ``sessionId`` names another session
-is skipped and counted in ``Diagnostics.copied_lines`` when that
-session's own ``<sessionId>.jsonl`` sits in the same folder, so its
-replies are priced once, from its own file. When there is no such file
+the earlier session's file, keeping the new session's ``sessionId``. A
+fork or a continue does the same the other way round: the new session's
+file starts with the source session's lines, still carrying the source's
+``sessionId``, and its ``subagents/`` folder gets copies of the source's
+agent transcripts. In a top-level transcript, a line whose ``sessionId``
+names another session is skipped and counted in
+``Diagnostics.copied_lines`` when that session's own ``<sessionId>.jsonl``
+sits in the same project folder or in any other project folder under the
+same projects root (a fork can land in another worktree's folder), so its
+replies, its compactions and its first time are counted once, from its own
+file. In a subagent or workflow-agent transcript a line is a copy when the
+session it names holds the same agent file (the same path below the
+session's folder, under any project folder). When there is no such file
 the line is kept: many logs (and fixtures) carry a ``sessionId`` that
 isn't their file name, and a copy with no original is the only record.
 
@@ -61,10 +69,21 @@ length of each server's instructions then in context
 and the servers whose resources it read (``Turn.mcp_resource_servers``).
 The transcript keeps each server's tool names after the prefix
 (``TranscriptResult.mcp_tool_suffixes_by_server``), the size of the tools
-a ``prompt_snapshot`` shows were sent in full
-(``upfront_definition_chars_by_server``) and the last connection problem
-``deferred_tools_delta`` reported (``mcp_connection_status``). Names,
-lengths and counts only: never an instruction or a definition.
+sent in full, per server (``upfront_definition_chars_by_server``) and per
+tool name (``upfront_tool_chars``, which sizes a server's deferred tools
+when none of them was loaded), and the last connection problem
+``deferred_tools_delta`` reported (``mcp_connection_status``). A tool's
+size comes from the ``api-request-shape`` line where the transcript has
+one (the definition Claude Code sent, measured as name, description and
+``input_schema``, the keys a ``deferred_tools_record`` is measured on; the
+largest across lines), else from a ``prompt_snapshot`` (:class:`_McpServers`
+and the "Tool sizes" paragraph below: a snapshot's entries run about 1.6
+times as large, so mixing the two scales in one average would size a
+server by the wrong scale). A server's total is the sum of its tools'
+sizes, and ``upfront_request_tools`` names the tools sized from the
+request, so a window that holds older sessions too can tell the scales
+apart. Names, lengths and counts only: never an instruction or a
+definition.
 
 Compaction calls: Claude Code bills the request that writes a
 compaction's summary, but logs only the ``compact_boundary`` line, never
@@ -73,7 +92,19 @@ turn (``Turn.estimated == "compaction"``) placed right after the reply
 before it, on that reply's model. It reads that reply's cached prefix
 (its cache read plus cache write) from the cache, or writes it again at
 the same lifetime when the cache would have expired by the time the
-compaction started (the boundary's time less ``durationMs``). What
+compaction started (the boundary's time less ``durationMs``). A cold
+prefix is sent as plain input, not written to the cache again: Claude
+Code's own tokens for a compaction on a cold resume wrote almost nothing.
+A boundary Claude Code 2.1.309 marks ``precomputed`` had its summary
+computed in the background right after the reply before it, and applied
+here after whatever gap, so its request is dated at that reply
+(``Turn.compaction_precomputed``) and reads the prefix from the cache.
+A boundary before any reply in its file (a session continued after a
+compaction carries the one it came from) is marked
+``detail["inherited"]`` and gets no call, and neither it nor the summary
+that follows it, before any reply, counts among what precedes the first
+reply (``Turn.preceding_event_kinds``, ``preceding_primary``): that reply
+doesn't follow a summary of this session. What
 ``preTokens`` counts beyond that prefix is plain input. The output is
 twice the summary Claude Code keeps (the summary line after the
 boundary, at four characters a token): the request writes an analysis
@@ -84,6 +115,27 @@ earlier reply, or with neither, is left out and counted
 (``Diagnostics.compaction_calls_unsized``). Over 15 sessions with a
 ``cost-state`` line this came within $1 of Claude Code's own figure on
 14; ``postTokens`` alone ran $36 high across them.
+
+Mid-stream replies: a reply Claude Code logs as snapshots only (no
+``stop_reason`` on any line, no ``output_tokens_details``) keeps the
+output count of its first block. Its input and cache counts are right.
+Once the transcript is read, each such reply (``Turn.output_partial``)
+with a priced reply after it gets ``Turn.output_tokens_est``: how much the
+next request's context grew over this one's, less the tool results and the
+message typed in between (characters at four a token)
+(:func:`_estimate_partial_outputs`). A transcript in which no reply records
+a stop reason or a final usage count at all has no reply called partial:
+nothing in it could tell.
+
+Tool sizes: a ``prompt_snapshot``'s tool entries run about 1.6 times the
+definitions Claude Code actually sends, which its ``api-request-shape``
+line lists. Where a transcript has one, the first snapshot that lists
+tools takes its tool sizes from that line (``detail["tools_source"] ==
+"request"``). The MCP tools sent in full take the request's size too, tool
+by tool and across every such line, not just the first: a tool the
+request lists without ``defer_loading`` is sent in full, and its size
+replaces the snapshot's. A tool the request doesn't list keeps the
+snapshot's size.
 
 ``gap_s`` is measured request-start to request-start: the interval between
 the *first* JSONL line's timestamp of one priced turn and the first line's
@@ -790,6 +842,17 @@ class _PendingTurn:
     #: difference, not a sum invariant breach.
     ttl_split_unknown: bool = False
     inference_geo: str | None = None
+    #: Accounting-audit addition (see model.py's ``Turn.output_partial``):
+    #: whether any line of this message carried ``output_tokens_details``
+    #: (the final line does; a mid-stream snapshot does not).
+    saw_output_details: bool = False
+    #: Accounting-audit addition: the usage was all zero on a reply that is
+    #: not a placeholder, which is a copy of a reply paid for in the
+    #: session this one continues (see ``_apply_usage``).
+    zeroed_copy: bool = False
+    #: Accounting-audit addition (see model.py's ``Turn.cache_miss_reason``).
+    cache_miss_reason: str | None = None
+    cache_missed_tokens: int | None = None
     attribution_mcp_server: str | None = None
     attribution_mcp_tool: str | None = None
     attribution_skill: str | None = None
@@ -1045,7 +1108,7 @@ class _McpServers:
     """MCP servers, as a transcript records them beyond tool search's own
     list (see the module docstring). Names, lengths and counts only."""
 
-    __slots__ = ("instructions", "suffixes", "upfront", "status")
+    __slots__ = ("instructions", "suffixes", "upfront", "upfront_tools", "request_tools", "status")
 
     def __init__(self) -> None:
         #: Server -> characters of its instructions now in context.
@@ -1053,8 +1116,21 @@ class _McpServers:
         #: Server -> its tools' names after ``mcp__<server>__``.
         self.suffixes: dict[str, set[str]] = {}
         #: Server -> characters of its tools a ``prompt_snapshot`` shows
-        #: were sent in full (the largest snapshot's).
+        #: were sent in full (the largest snapshot's). On the snapshot's
+        #: scale; :meth:`sizes` is what the transcript keeps.
         self.upfront: dict[str, int] = {}
+        #: MCP tool name -> characters of its definition in a
+        #: ``prompt_snapshot`` (the largest one seen), so a server's tools
+        #: sent in full can size its deferred ones. On the snapshot's
+        #: scale, which runs about 1.6 times the request's.
+        self.upfront_tools: dict[str, int] = {}
+        #: MCP tool name -> characters of its definition in an
+        #: ``api-request-shape`` line (the largest one seen): the
+        #: definition Claude Code sent, measured on the keys a
+        #: ``deferred_tools_record`` is. A tool the line marks
+        #: ``defer_loading`` is left out: it isn't sent in full, and when
+        #: it is loaded its size comes from the record.
+        self.request_tools: dict[str, int] = {}
         #: Server -> the last connection problem reported for it, cleared
         #: once its tools or instructions arrive.
         self.status: dict[str, str] = {}
@@ -1103,8 +1179,47 @@ class _McpServers:
                 definition = {key: entry.get(key) for key in ("name", "description", "schema")}
                 chars = len(json.dumps(definition, ensure_ascii=False, separators=(",", ":"), default=str))
                 sizes[server] = sizes.get(server, 0) + chars
+                self.upfront_tools[name] = max(chars, self.upfront_tools.get(name, 0))
             for server, chars in sizes.items():
                 self.upfront[server] = max(chars, self.upfront.get(server, 0))
+
+    def request(self, line: dict) -> None:
+        """Fold in an ``api-request-shape`` line: the size of each MCP tool
+        it lists without ``defer_loading``, as the definition Claude Code
+        sent (name, description and ``input_schema`` as compact JSON, the
+        keys :meth:`_DeferredTools.note` measures a loaded definition on).
+        Sizes and names only."""
+        shape = line.get("shape")
+        tools = shape.get("tools") if isinstance(shape, dict) else None
+        for entry in tools if isinstance(tools, list) else ():
+            if not isinstance(entry, dict) or entry.get("defer_loading"):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not _TOOL_NAME_RE.match(name) or tool_server(name) == BUILT_IN_TOOLS:
+                continue
+            self.tool(name)
+            definition = {key: entry.get(key) for key in ("name", "description", "input_schema")}
+            chars = len(json.dumps(definition, ensure_ascii=False, separators=(",", ":"), default=str))
+            self.request_tools[name] = max(chars, self.request_tools.get(name, 0))
+
+    def sizes(self) -> tuple[dict[str, int], dict[str, int], list[str]]:
+        """What the transcript keeps of the tools sent in full: each
+        server's total, each tool's size, and the tools whose size is the
+        request's. A tool takes the size of the request's definition where
+        an ``api-request-shape`` line listed it and the ``prompt_snapshot``'s
+        otherwise (the snapshot's entries run about 1.6 times the
+        definitions sent, so the request is the size to trust). A server
+        with a request-sized tool is the sum of its tools' sizes, so its
+        total and theirs are on one scale; any other server keeps its
+        snapshot total. The names of the request-sized tools are kept so
+        that sizes from several transcripts can be told apart by scale
+        (``tool_search``): a transcript from before the request was logged
+        has only the snapshot's."""
+        tools = {**self.upfront_tools, **self.request_tools}
+        by_server = dict(self.upfront)
+        for server in {tool_server(name) for name in self.request_tools}:
+            by_server[server] = sum(chars for name, chars in tools.items() if tool_server(name) == server)
+        return by_server, tools, sorted(self.request_tools)
 
 
 def _tool_names(value) -> list[str]:
@@ -1379,6 +1494,7 @@ def _new_pending(
 
     if isinstance(usage, dict):
         _apply_usage(pending, usage)
+    _apply_cache_miss(pending, message)
 
     _merge_content_blocks(pending, message.get("content"), tool_use_names, d.get("cwd"), blocked_calls)
     _merge_stop_reason(pending, message)
@@ -1396,6 +1512,17 @@ def _apply_usage(pending: _PendingTurn, usage: dict) -> None:
     pending.cache_creation_tokens = int(usage.get("cache_creation_input_tokens") or 0)
     pending.cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
     pending.output_tokens = int(usage.get("output_tokens") or 0)
+    # A reply Claude Code carries over from the session it continues (the
+    # preserved last reply after a compaction) is written with its flat
+    # usage zeroed, so it was paid for in the source session. Its 5m/1h
+    # split is not zeroed, and priced as it stands would charge a write
+    # that was never made here. It has no usage of its own (a placeholder
+    # reply Claude Code wrote itself has none either, and is not this).
+    pending.zeroed_copy = not pending.is_synthetic and not (
+        pending.input_tokens or pending.output_tokens or pending.cache_read_tokens or pending.cache_creation_tokens
+    )
+    if pending.zeroed_copy:
+        pending.has_usage = False
     service_tier = usage.get("service_tier")
     pending.service_tier = service_tier if isinstance(service_tier, str) else None
     inference_geo = usage.get("inference_geo")
@@ -1404,6 +1531,8 @@ def _apply_usage(pending: _PendingTurn, usage: dict) -> None:
     pending.speed = speed if isinstance(speed, str) else None
     details = usage.get("output_tokens_details")
     pending.thinking_tokens = int(details.get("thinking_tokens") or 0) if isinstance(details, dict) else 0
+    if isinstance(details, dict):
+        pending.saw_output_details = True
     server_tool_use = usage.get("server_tool_use")
     if isinstance(server_tool_use, dict):
         pending.web_search_requests = int(server_tool_use.get("web_search_requests") or 0)
@@ -1413,8 +1542,15 @@ def _apply_usage(pending: _PendingTurn, usage: dict) -> None:
         pending.web_fetch_requests = 0
     pending.ttl_sum_mismatch = False
     pending.ttl_split_unknown = False
-    cache_creation = usage.get("cache_creation")
-    if isinstance(cache_creation, dict):
+    cache_creation = _matching_iteration_split(usage)
+    if cache_creation is None:
+        cache_creation = usage.get("cache_creation")
+    if not pending.has_usage:
+        # The zeroed copy above: nothing was written here, whatever its
+        # split says, and it is no breach of the sum rule either.
+        pending.cc_5m = 0
+        pending.cc_1h = 0
+    elif isinstance(cache_creation, dict):
         pending.cc_5m = int(cache_creation.get("ephemeral_5m_input_tokens") or 0)
         pending.cc_1h = int(cache_creation.get("ephemeral_1h_input_tokens") or 0)
 
@@ -1444,6 +1580,65 @@ def _apply_usage(pending: _PendingTurn, usage: dict) -> None:
         pending.ttl_split_unknown = True
 
 
+def _matching_iteration_split(usage: dict) -> dict | None:
+    """The ``cache_creation`` split of the ``usage.iterations`` entry that
+    matches the top-level counts, or ``None`` when the reply has fewer than
+    two iterations or none matches (then the top-level split stands).
+
+    After a model-refusal fallback the top-level usage holds the fallback
+    model's input, output and cache counts, but the nested 5m/1h split
+    still holds the refused first attempt's write (``iterations`` lists
+    both: a ``message`` on the refused model, a ``fallback_message`` on the
+    one that answered). The split taken from the entry the top-level counts
+    agree with is the answering model's own, so the refused attempt's write
+    is not priced at the fallback model's rate."""
+    iterations = usage.get("iterations")
+    if not isinstance(iterations, list) or len(iterations) < 2:
+        return None
+    wanted = tuple(
+        int(usage.get(key) or 0)
+        for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    )
+    for entry in iterations:
+        if not isinstance(entry, dict):
+            continue
+        got = tuple(
+            entry.get(key)
+            for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        )
+        if got == wanted and isinstance(entry.get("cache_creation"), dict):
+            return entry["cache_creation"]
+    return None
+
+
+#: The API's own cache-miss reasons (``message.diagnostics.cache_miss_reason
+#: .type``) the parser keeps; any other word becomes ``"other"``.
+_CACHE_MISS_REASONS = frozenset(
+    {
+        "messages_changed",
+        "system_changed",
+        "tools_changed",
+        "model_changed",
+        "previous_message_not_found",
+        "unavailable",
+    }
+)
+
+
+def _apply_cache_miss(pending: _PendingTurn, message) -> None:
+    """Keep the API's own account of a cache miss, when this line carries
+    one: its reason from the closed set above and the tokens it says were
+    missed. The reason is a short word, never text."""
+    diagnostics = message.get("diagnostics") if isinstance(message, dict) else None
+    reason = diagnostics.get("cache_miss_reason") if isinstance(diagnostics, dict) else None
+    if not isinstance(reason, dict):
+        return
+    kind = reason.get("type")
+    pending.cache_miss_reason = kind if isinstance(kind, str) and kind in _CACHE_MISS_REASONS else "other"
+    missed = reason.get("cache_missed_input_tokens")
+    pending.cache_missed_tokens = missed if isinstance(missed, int) and not isinstance(missed, bool) and missed >= 0 else None
+
+
 def _merge_stop_reason(pending: _PendingTurn, message) -> None:
     """Quality-signals addition: keep the last non-null ``stop_reason``
     across the lines of one message (streamed lines carry null until the
@@ -1467,10 +1662,13 @@ def _merge_into_pending(
     # partial count (often single digits) and only the last line carries
     # output_tokens_details. Keep the most complete snapshot seen.
     usage = message.get("usage") if isinstance(message, dict) else None
+    if isinstance(usage, dict) and isinstance(usage.get("output_tokens_details"), dict):
+        pending.saw_output_details = True
     if isinstance(usage, dict) and (
         not pending.has_usage or int(usage.get("output_tokens") or 0) >= pending.output_tokens
     ):
         _apply_usage(pending, usage)
+    _apply_cache_miss(pending, message)
     content = message.get("content") if isinstance(message, dict) else None
     _merge_content_blocks(pending, content, tool_use_names, d.get("cwd"), blocked_calls)
     _merge_stop_reason(pending, message)
@@ -2116,6 +2314,11 @@ def _finalize_turn(
             diagnostics.ttl_sum_mismatch += 1
         if pending.ttl_split_unknown:
             diagnostics.pre_split_turns += 1
+    elif pending.zeroed_copy:
+        # A copy of a reply the session this one continues already paid
+        # for: counted with the other copied lines, not as a reply whose
+        # usage is missing.
+        diagnostics.copied_lines += 1
     else:
         diagnostics.turns_missing_usage += 1
 
@@ -2145,7 +2348,11 @@ def _finalize_turn(
         edit_kind = None
 
     preceding_tool, preceding_cmd_prefix = _resolve_preceding_tool(previous_turn)
-    preceding_primary = events_mod.primary_kind(pending_events)
+    # An inherited compaction (see the module docstring) is the summary of
+    # the session this one continues, not of this one: the reply after it
+    # doesn't follow a summary, so it isn't among what precedes the reply.
+    preceding = [event for event in pending_events if not event.detail.get("inherited")]
+    preceding_primary = events_mod.primary_kind(preceding)
     # Parser-signals addition (see model.py's ``Turn.preceding_denials``):
     # the denied tool calls since the previous reply, by bucket word.
     preceding_denials: dict[str, int] = {}
@@ -2313,7 +2520,7 @@ def _finalize_turn(
         attribution_skill=pending.attribution_skill,
         preceding_tool=preceding_tool,
         preceding_cmd_prefix=preceding_cmd_prefix,
-        preceding_event_kinds=tuple(event.kind for event in pending_events),
+        preceding_event_kinds=tuple(event.kind for event in preceding),
         preceding_attachment_types=tuple(pending_attachment_types),
         preceding_primary=preceding_primary,
         inference_geo=pending.inference_geo,
@@ -2343,6 +2550,11 @@ def _finalize_turn(
         shell_change_count=pending.shell_change_count,
         human_correction=human_correction,
         speed=pending.speed,
+        output_partial=(
+            pending.has_usage and not pending.is_synthetic and pending.stop_reason is None and not pending.saw_output_details
+        ),
+        cache_miss_reason=pending.cache_miss_reason,
+        cache_missed_tokens=pending.cache_missed_tokens,
         retry_marker=retry_marker,
         result_marker=result_marker,
         cap=cap,
@@ -2491,15 +2703,55 @@ _SESSION_FILE_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def _has_own_file(folder: Path, session_id: str) -> bool:
-    """Whether ``session_id``'s own transcript sits in ``folder``, so a
-    copy of its lines in another transcript can be skipped (see the
-    module docstring's copied sessions)."""
+    """Whether ``session_id``'s own transcript sits in ``folder`` or, when
+    it does not, in any other project folder beside it (a fork can land in
+    another worktree's folder), so a copy of its lines in another
+    transcript can be skipped (see the module docstring's copied
+    sessions)."""
     if not _SESSION_FILE_RE.match(session_id):
         return False
     try:
-        return (folder / f"{session_id}.jsonl").is_file()
+        if (folder / f"{session_id}.jsonl").is_file():
+            return True
+        return any((other / f"{session_id}.jsonl").is_file() for other in folder.parent.iterdir())
     except OSError:
         return False
+
+
+def _has_own_agent_file(projects_root: Path, session_id: str, rel: Path) -> bool:
+    """Whether ``session_id`` holds the agent transcript at ``rel`` (its
+    path below the session's folder, ``subagents/agent-x.jsonl`` or
+    ``subagents/workflows/<run>/agent-x.jsonl``) in any project folder
+    under ``projects_root``. A fork or a continue copies its source's agent
+    transcripts into its own ``subagents/`` folder; the copies' lines still
+    carry the source's ``sessionId``."""
+    if not _SESSION_FILE_RE.match(session_id):
+        return False
+    try:
+        return any((folder / session_id / rel).is_file() for folder in projects_root.iterdir())
+    except OSError:
+        return False
+
+
+def _copy_source_check(path: str | Path, meta: TranscriptMeta):
+    """A function from another session's id to whether that session's own
+    file holds the lines this transcript copied from it, or ``None`` when
+    this transcript can't be placed in a projects folder (its session id
+    is unknown or not in its path). A top-level transcript looks for the
+    session's file; a subagent or workflow-agent transcript for the same
+    agent file in that session's folder."""
+    if not meta.session_id:
+        return None
+    if meta.kind == "top-level":
+        folder = Path(path).parent
+        return lambda session_id: _has_own_file(folder, session_id)
+    here = Path(os.path.abspath(path))
+    session_dir = next((parent for parent in here.parents[:5] if parent.name == meta.session_id), None)
+    if session_dir is None:
+        return None
+    rel = here.relative_to(session_dir)
+    projects_root = session_dir.parent.parent
+    return lambda session_id: _has_own_agent_file(projects_root, session_id, rel)
 
 
 #: Cost record (see ``model.py``'s module docstring): a model id as Claude
@@ -2523,6 +2775,15 @@ def _cost_by_model(model_usage) -> dict[str, float]:
         ):
             out[model] = float(cost)
     return out
+
+
+def _epoch_ms(value) -> int | None:
+    """``cost-state``'s ``startTime`` as whole milliseconds since the
+    epoch, or ``None`` when it isn't a positive number: the key that says
+    which sessions share one Claude Code process's running total."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return None
+    return int(value)
 
 
 def _epoch_ms_iso(value) -> str | None:
@@ -2591,15 +2852,25 @@ def _compaction_turn(replies: list[Turn], event: Event, summary_chars: int | Non
 
     previous_at = _utc(previous.ts)
     end = _utc(event.ts)
+    # A precomputed summary was made in the background right after the
+    # reply before it; the boundary only applied it, after whatever gap
+    # (and often below the threshold). Its request is dated at that reply,
+    # so the cache is judged warm as it was then, not by the gap.
+    precomputed = event.detail.get("precomputed") is True
     started = None
-    if end is not None:
+    if precomputed:
+        started = previous_at
+    elif end is not None:
         started = end.astimezone(timezone.utc) - timedelta(milliseconds=max(_count(event.duration_ms) or 0, 1))
         if previous_at is not None and started < previous_at:
             started = previous_at
     lifetime = _cache_lifetime_s(replies)
     warm = started is not None and previous_at is not None and (started - previous_at).total_seconds() <= lifetime
-    read, write = (prefix, 0) if warm else (0, prefix)
-    one_hour = write if lifetime == _ONE_HOUR_S else 0
+    # A cold prefix was not written to the cache again: it went as plain
+    # input (Claude Code's own tokens for a compaction on a cold resume
+    # show almost no cache write).
+    read = prefix if warm else 0
+    plain = new if warm else new + prefix
     ts = started.strftime("%Y-%m-%dT%H:%M:%S.") + f"{started.microsecond // 1000:03d}Z" if started else previous.ts
     return Turn(
         message_id=f"compaction-{ts}",
@@ -2609,18 +2880,72 @@ def _compaction_turn(replies: list[Turn], event: Event, summary_chars: int | Non
         service_tier=previous.service_tier,
         is_synthetic=True,
         effort=previous.effort,
-        input_tokens=new,
-        cache_creation_tokens=write,
+        input_tokens=plain,
+        cache_creation_tokens=0,
         cache_read_tokens=read,
         output_tokens=output,
-        cc_5m=write - one_hour,
-        cc_1h=one_hour,
+        cc_5m=0,
+        cc_1h=0,
         ctx=new + prefix,
         preceding_tool="n/a",
         inference_geo=previous.inference_geo,
         speed=previous.speed,
         estimated="compaction",
+        compaction_precomputed=precomputed,
     )
+
+
+#: Characters a token covers when sizing the tool results and the typed
+#: message between two replies (the same rough rule the compaction summary
+#: uses).
+_PARTIAL_OUTPUT_CHARS_PER_TOKEN = 4.0
+
+
+def _prefix_tokens(turn: Turn) -> int:
+    return turn.input_tokens + turn.cache_creation_tokens + turn.cache_read_tokens
+
+
+def _estimate_partial_outputs(turns: list[Turn], diagnostics: Diagnostics) -> list[Turn]:
+    """``turns`` with each mid-stream reply (``Turn.output_partial``)
+    that has a priced reply after it given an output estimate.
+
+    A reply Claude Code logged as snapshots only keeps the output count of
+    its first block, though its input and cache counts are right. The next
+    request's context holds this reply's output plus the tool results and
+    the message typed since, so::
+
+        estimate = prefix(next) - prefix(this) - results / 4
+
+    with ``prefix`` the input, cache-write and cache-read tokens and
+    ``results`` the characters of this reply's tool results and of the
+    message typed before the next reply. It is never below the logged
+    count, and the transcript's last reply, with nothing after it, keeps
+    ``None``. The reply is still counted in
+    ``Diagnostics.partial_output_turns``; ``partial_output_est_tokens``
+    totals what the estimates add to the logged counts.
+
+    When no reply in the transcript records a stop reason or a final usage
+    count, nothing can tell a partial one from a complete one (an older
+    Claude Code, a hand-built log), so none is called partial.
+    """
+    priced = [i for i, turn in enumerate(turns) if turn.turn_index > 0 and not turn.is_synthetic]
+    if not any(not turns[i].output_partial for i in priced):
+        return [replace(turn, output_partial=False) if turn.output_partial else turn for turn in turns]
+    out = list(turns)
+    for position, i in enumerate(priced):
+        turn = turns[i]
+        if not turn.output_partial:
+            continue
+        diagnostics.partial_output_turns += 1
+        if position + 1 >= len(priced):
+            continue
+        following = turns[priced[position + 1]]
+        chars = sum(turn.tool_result_chars_by_tool.values()) + (following.human_prompt_chars or 0)
+        growth = _prefix_tokens(following) - _prefix_tokens(turn) - chars / _PARTIAL_OUTPUT_CHARS_PER_TOKEN
+        estimate = max(turn.output_tokens, round(growth))
+        diagnostics.partial_output_est_tokens += estimate - turn.output_tokens
+        out[i] = replace(turn, output_tokens_est=estimate)
+    return out
 
 
 def _with_compaction_calls(
@@ -2709,6 +3034,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     cc_cost_as_of: str | None = None
     cc_cost_by_model: dict[str, float] = {}
     cc_cost_since: str | None = None
+    cc_cost_process_start: int | None = None
     #: Batch C addition: first non-empty ``entrypoint``/``version`` field
     #: seen on any raw line, in file order. Every line type carries these
     #: (when present), not just assistant lines.
@@ -2753,9 +3079,12 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: Copied sessions (see module docstring): only a top-level
     #: transcript is named after its session. Other session id -> whether
     #: that session's own file is beside this one, looked up once each.
-    own_session_id = meta.session_id if meta.kind == "top-level" else ""
-    session_folder = Path(path).parent
+    own_session_id = meta.session_id
+    is_copy_of = _copy_source_check(path, meta)
     copied_from: dict[str, bool] = {}
+    #: Tool sizes (see module docstring): the tool definitions the first
+    #: ``api-request-shape`` line lists, as sizes.
+    wire_tools: dict | None = None
     #: Tool search (see module docstring): the deferred list and the
     #: definitions loaded from it so far.
     deferred_tools = _DeferredTools()
@@ -2767,6 +3096,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: turn still open is finalised, and the length of the summary that
     #: follows it (``None`` until one does).
     compactions: list[tuple[int, Event, int | None]] = []
+    #: A ``compact_boundary`` before any reply was seen (``inherited``), so
+    #: the summary that follows it is inherited too.
+    inherited_boundary = False
 
     current: _PendingTurn | None = None
     current_key: str | None = None
@@ -2776,12 +3108,12 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     priced_turn_count = 0
 
     for _line_no, d in jsonl.iter_lines(path, stats=line_stats):
-        if own_session_id:
+        if own_session_id and is_copy_of is not None:
             line_session = d.get("sessionId")
             if isinstance(line_session, str) and line_session and line_session != own_session_id:
                 copied = copied_from.get(line_session)
                 if copied is None:
-                    copied = copied_from[line_session] = _has_own_file(session_folder, line_session)
+                    copied = copied_from[line_session] = is_copy_of(line_session)
                 if copied:
                     diagnostics.copied_lines += 1
                     continue
@@ -2919,6 +3251,15 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                 cc_cost_as_of = latest_ts
                 cc_cost_by_model = _cost_by_model(d.get("modelUsage"))
                 cc_cost_since = _epoch_ms_iso(d.get("startTime"))
+                cc_cost_process_start = _epoch_ms(d.get("startTime"))
+        elif line_type == "api-request-shape":
+            # Tool sizes (see module docstring): the first one lists the
+            # tools the first request sent. Sizes only; the line itself is
+            # ignored as an event below like the other request-log lines.
+            if wire_tools is None:
+                wire_tools = events_mod.wire_tool_sizes(d)
+            # Every one of them sizes the MCP tools it lists in full.
+            mcp_servers.request(d)
         elif line_type == "attachment":
             attachment = d.get("attachment")
             if isinstance(attachment, dict) and attachment.get("type") == "skill_listing":
@@ -2952,7 +3293,24 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                     event.kind = EventKind.CACHE_SIGNAL
                 output_style = style
         if event.kind == EventKind.COMPACT_BOUNDARY:
-            compactions.append((len(turns) + (current is not None), event, None))
+            if len(turns) + (current is not None) == 0:
+                # Before any reply in this file: a session continued after
+                # a compaction carries the boundary of the session it came
+                # from. Not this session's compaction, so no call is
+                # estimated for it.
+                event.detail["inherited"] = True
+                inherited_boundary = True
+            else:
+                compactions.append((len(turns) + (current is not None), event, None))
+        elif (
+            event.kind == EventKind.COMPACT_SUMMARY
+            and inherited_boundary
+            and len(turns) + (current is not None) == 0
+        ):
+            # The summary after an inherited boundary, before any reply, is
+            # that compaction's: just as much the other session's. A file
+            # that opens with a summary and no boundary is left alone.
+            event.detail["inherited"] = True
         elif event.kind == EventKind.COMPACT_SUMMARY and compactions:
             # Only the summary written right after a boundary, before any
             # reply, is that compaction's.
@@ -3048,7 +3406,23 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     diagnostics.truncated_final_line = line_stats.truncated_final_line
     diagnostics.oversized_lines = line_stats.oversized_lines
     diagnostics.distinct_turns = len(turns)
+    turns = _estimate_partial_outputs(turns, diagnostics)
     turns = _with_compaction_calls(turns, compactions, diagnostics)
+
+    # Tool sizes (see module docstring): the first snapshot that lists
+    # tools takes the sizes of the definitions the request sent.
+    if wire_tools is not None:
+        for event in events:
+            if (
+                event.kind == EventKind.CONTEXT_INJECT
+                and event.subkind == "prompt_snapshot"
+                and event.detail.get("tools_chars")
+            ):
+                for key in ("tools_chars", "tool_chars", "server_chars"):
+                    event.detail.pop(key, None)
+                event.detail.update(wire_tools)
+                event.detail["tools_source"] = "request"
+                break
 
     # Batch C addition: the transcript's own first turn with a model is
     # the authoritative provider signal (see module docstring), taking
@@ -3097,6 +3471,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         cc_cost_as_of=cc_cost_as_of,
         cc_cost_by_model=cc_cost_by_model,
         cc_cost_since=cc_cost_since,
+        cc_cost_process_start=cc_cost_process_start,
     )
 
     # Parser-signals addition (SURV-6/7): only present when non-empty, so
@@ -3107,6 +3482,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     if unsized_blocks:
         parser_notes["unsized_blocks"] = unsized_blocks
 
+    upfront_by_server, upfront_tools, upfront_requested = mcp_servers.sizes()
     return TranscriptResult(
         meta=final_meta,
         turns=turns,
@@ -3117,7 +3493,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         parser_notes=parser_notes,
         tool_definition_chars=dict(deferred_tools.definition_chars),
         mcp_tool_suffixes_by_server={server: sorted(names) for server, names in mcp_servers.suffixes.items()},
-        upfront_definition_chars_by_server=dict(mcp_servers.upfront),
+        upfront_definition_chars_by_server=upfront_by_server,
+        upfront_tool_chars=upfront_tools,
+        upfront_request_tools=upfront_requested,
         mcp_connection_status=dict(mcp_servers.status),
     )
 
@@ -3202,6 +3580,7 @@ READ_KEYS: dict[str, frozenset[str]] = {
     "agent-setting": _BASE_READ_KEYS | frozenset({"agentSetting"}),
     "mode": _BASE_READ_KEYS | frozenset({"mode"}),
     "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage", "startTime"}),
+    "api-request-shape": _BASE_READ_KEYS | frozenset({"shape"}),
 }
 
 

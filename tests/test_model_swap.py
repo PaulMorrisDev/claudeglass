@@ -39,7 +39,9 @@ PRICING = load_pricing()
 #: An observed Sonnet id. The cheaper tier a row names is whatever the
 #: rate card's "sonnet" alias points at, PRICING.aliases["sonnet"].
 SONNET = "claude-sonnet-5"
-HAIKU = "claude-haiku-4-5-20251001"
+#: What the rate card's "haiku" alias points at: Haiku 5.5, the model
+#: Claude Code's "haiku" shortcut runs.
+HAIKU = "claude-haiku-5-5"
 OPUS = "claude-opus-5"
 FABLE = "claude-fable-5-1"
 
@@ -166,6 +168,15 @@ def test_alias_handling_bare_alias_resolves_same_as_full_id():
     # workstyle.model_tier substring-matches "sonnet" either way.
     assert row_alias.tier_verdict.state == row_full.tier_verdict.state == "cheaper_available"
     assert row_alias.tier_verdict.alt_model == row_full.tier_verdict.alt_model == HAIKU
+
+
+def test_the_haiku_alias_is_haiku_five_five_and_haiku_four_five_keeps_its_own_id():
+    """"haiku" is what Claude Code's shortcut runs today, Haiku 5.5; the
+    older Haiku 4.5 stays priced under its own ids, no longer under the
+    bare alias."""
+    assert PRICING.resolve_model("haiku").canonical_id == "claude-haiku-5-5"
+    assert PRICING.resolve_model("claude-haiku-4-5").canonical_id == "claude-haiku-4-5-20251001"
+    assert PRICING.resolve_model("claude-haiku-4-5-20251001").canonical_id == "claude-haiku-4-5-20251001"
 
 
 # -- which runs the agent file's model line decides ------------------------------

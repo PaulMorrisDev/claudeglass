@@ -83,6 +83,19 @@ detail also carries each built-in tool's definition size by name
 descriptions and no other name. ``BUILT_IN_TOOLS``, ``TOOL_NAME_RE`` and
 :func:`tool_server`, the rule that splits them, live here and ``parse.py``
 re-exports them.
+
+Accounting-audit batch (``PARSER_VERSION`` 45, see model.py's module
+docstring): Claude Code 2.1.304 on writes ``api-request``,
+``api-request-blob`` and ``api-request-shape`` lines before each request,
+and ``relocated`` and ``dev-mods`` lines besides. None is a conversation
+event, so they are ignored like the types before them, instead of landing
+as ``UNKNOWN`` (62,000 of them in one month, one before every reply).
+``api-request-shape`` is read by ``parse.py`` for the size of the tool
+definitions actually sent (:func:`wire_tool_sizes`), which the snapshot's
+own entries overstate by about 1.6 times. A ``compact_boundary`` keeps
+``compactMetadata.precomputed`` (``detail["precomputed"]``), and an
+``async_hook_response`` attachment is a ``HOOK_OUTPUT`` carrying its hook
+event and integer exit code (:func:`_async_hook_detail`).
 """
 
 from __future__ import annotations
@@ -143,6 +156,16 @@ _IGNORABLE_TYPES = frozenset(
         #: Parser-signals addition (PARSER_VERSION 37): the permission
         #: mode is already on each user line's own ``permissionMode``.
         "permission-mode",
+        #: Accounting-audit addition (PARSER_VERSION 45): the request log
+        #: Claude Code 2.1.304 on writes beside the conversation. Not a
+        #: conversation event. ``api-request-shape`` is read by
+        #: ``parse.parse_transcript`` for the size of the tool definitions
+        #: sent (:func:`wire_tool_sizes`) and then ignored here too.
+        "api-request",
+        "api-request-blob",
+        "api-request-shape",
+        "relocated",
+        "dev-mods",
     }
 )
 _IGNORABLE_PREFIXES = ("file-history-", "artifact-")
@@ -172,6 +195,13 @@ _HOOK_ATTACHMENT_TYPES = frozenset(
         "hook_cancelled",
     }
 )
+
+#: Accounting-audit addition (PARSER_VERSION 45): the result of a hook
+#: Claude Code ran asynchronously (ClaudeGlass installs its Stop,
+#: StopFailure, Notification and PermissionRequest hooks that way). It is
+#: a ``HOOK_OUTPUT`` too, with its own detail (:func:`_async_hook_detail`),
+#: so ``hook_health`` can see an async hook that fails.
+_ASYNC_HOOK_ATTACHMENT = "async_hook_response"
 
 #: SURV-HE: every hook *event* name Claude Code documents (verified
 #: against code.claude.com/docs/en/hooks.md 2026-09-24) -- closed, so a
@@ -263,6 +293,27 @@ def _hook_output_detail(attachment: dict) -> dict:
     command = attachment.get("command")
     if isinstance(command, str) and HOOK_SCRIPT in command:
         detail["capture"] = True
+    return detail
+
+
+def _async_hook_detail(attachment: dict) -> dict:
+    """``detail`` for an ``async_hook_response`` attachment: the closed
+    hook-event bucket it ran under (``hookEvent``, else the event part of
+    ``hookName``) and its integer ``exitCode``, nothing else -- its
+    stdout, stderr and response can hold anything a hook printed."""
+    named = attachment.get("hookEvent")
+    if isinstance(named, str) and named in _HOOK_EVENT_NAMES:
+        name = named
+    else:
+        name = _hook_name_bucket(attachment)
+    detail: dict = {"hookName": name}
+    exit_code = attachment.get("exitCode")
+    if isinstance(exit_code, bool):
+        return detail
+    if isinstance(exit_code, int):
+        detail["exitCode"] = exit_code
+    elif isinstance(exit_code, str) and re.fullmatch(r"-?[0-9]{1,4}", exit_code):
+        detail["exitCode"] = int(exit_code)
     return detail
 
 _CACHE_SIGNAL_TYPES = frozenset(
@@ -821,28 +872,51 @@ def _prompt_snapshot_detail(attachment: dict) -> dict:
     tools = attachment.get("tools")
     if isinstance(tools, list) and tools:
         detail["tool_count"] = len(tools)
-        total = 0
-        by_tool: dict[str, int] = {}
-        by_server: dict[str, int] = {}
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            chars = len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
-            total += chars
-            name = tool.get("name")
-            if not isinstance(name, str) or not TOOL_NAME_RE.match(name):
-                continue
-            server = tool_server(name)
-            if server == BUILT_IN_TOOLS:
-                by_tool[name] = by_tool.get(name, 0) + chars
-            else:
-                by_server[server] = by_server.get(server, 0) + chars
-        detail["tools_chars"] = total
-        if by_tool:
-            detail["tool_chars"] = by_tool
-        if by_server:
-            detail["server_chars"] = by_server
+        detail.update(_tool_size_detail(tools))
     return detail
+
+
+def _tool_size_detail(tools: list) -> dict:
+    """``tools_chars`` (all definitions together), ``tool_chars`` (a
+    built-in tool's name -> its definition) and ``server_chars`` (an MCP
+    server's name -> all its tools together) for a list of tool
+    definitions, each measured as compact JSON. Lengths and names only."""
+    total = 0
+    by_tool: dict[str, int] = {}
+    by_server: dict[str, int] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        chars = len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
+        total += chars
+        name = tool.get("name")
+        if not isinstance(name, str) or not TOOL_NAME_RE.match(name):
+            continue
+        server = tool_server(name)
+        if server == BUILT_IN_TOOLS:
+            by_tool[name] = by_tool.get(name, 0) + chars
+        else:
+            by_server[server] = by_server.get(server, 0) + chars
+    detail: dict = {"tools_chars": total}
+    if by_tool:
+        detail["tool_chars"] = by_tool
+    if by_server:
+        detail["server_chars"] = by_server
+    return detail
+
+
+def wire_tool_sizes(d: dict) -> dict | None:
+    """The tool sizes of an ``api-request-shape`` line, in the keys of a
+    ``prompt_snapshot`` event's detail (:func:`_tool_size_detail`), or
+    ``None`` when the line lists no tools. This is the tools Claude Code
+    actually sends (name, description, ``input_schema``); the snapshot's
+    own entries carry about 1.6 times as much, so a snapshot's sizes are
+    replaced by these wherever the line exists (``parse.py``)."""
+    shape = d.get("shape")
+    tools = shape.get("tools") if isinstance(shape, dict) else None
+    if not isinstance(tools, list) or not tools:
+        return None
+    return _tool_size_detail(tools)
 
 
 #: Matches an opening angle-bracket tag at the very start of a string,
@@ -1666,6 +1740,10 @@ def classify_line(d: dict) -> Event | None:
     if line_type == "system" and d.get("subtype") == "compact_boundary":
         meta = d.get("compactMetadata")
         meta = meta if isinstance(meta, dict) else {}
+        # Claude Code 2.1.309 marks a boundary whose summary was computed
+        # in the background beforehand (``precomputed``): the boundary only
+        # applied it, after whatever gap, so it is no threshold crossing.
+        precomputed = meta.get("precomputed")
         return Event(
             kind=EventKind.COMPACT_BOUNDARY,
             subkind="compact_boundary",
@@ -1675,6 +1753,7 @@ def classify_line(d: dict) -> Event | None:
             dropped_tokens=meta.get("cumulativeDroppedTokens"),
             duration_ms=meta.get("durationMs"),
             trigger=meta.get("trigger"),
+            detail={"precomputed": precomputed} if isinstance(precomputed, bool) else {},
         )
 
     # 2. COMPACT_SUMMARY
@@ -1732,6 +1811,10 @@ def classify_line(d: dict) -> Event | None:
     # 6. HOOK_OUTPUT
     if line_type == "system" and d.get("subtype") == "stop_hook_summary":
         return Event(kind=EventKind.HOOK_OUTPUT, subkind="stop_hook_summary", ts=ts)
+    if attachment_type == _ASYNC_HOOK_ATTACHMENT:
+        return Event(
+            kind=EventKind.HOOK_OUTPUT, subkind=attachment_type, ts=ts, detail=_async_hook_detail(attachment)
+        )
     if attachment_type in _HOOK_ATTACHMENT_TYPES:
         if attachment_type == "hook_additional_context":
             note = _capture_note(d, attachment)

@@ -115,15 +115,30 @@ def test_the_next_reply_keeps_its_own_gap_and_compaction_record(tmp_path: Path):
     assert records[0].next_turn_cache_creation == 37767
 
 
-def test_an_expired_cache_is_written_again_at_the_same_lifetime(tmp_path: Path):
+def test_an_expired_cache_is_sent_as_plain_input_not_written_again(tmp_path: Path):
+    # Claude Code's own tokens for a compaction on a cold resume show
+    # almost no cache write: the whole context goes as uncached input, so
+    # pricing it as a write overcharged it (a 1-hour write is 2x input).
     lines = _session(before_ts="2026-09-26T12:20:00.000Z", boundary_ts="2026-09-26T13:28:40.321Z")
 
     estimate = _parse(tmp_path, lines).turns[1]
 
     assert estimate.cache_read_tokens == 0
-    assert estimate.cache_creation_tokens == 782273
-    assert estimate.cc_1h == 782273
-    assert estimate.cc_5m == 0
+    assert estimate.cache_creation_tokens == 0
+    assert (estimate.cc_5m, estimate.cc_1h) == (0, 0)
+    assert estimate.input_tokens == 783870
+    assert estimate.ctx == 783870
+
+
+def test_a_cold_summary_costs_the_input_rate_for_the_whole_context(tmp_path: Path):
+    pricing = load_pricing()
+    lines = _session(before_ts="2026-09-26T12:20:00.000Z", boundary_ts="2026-09-26T13:28:40.321Z")
+    estimate = _parse(tmp_path, lines).turns[1]
+
+    cost = price_turn(estimate, pricing.resolve_model(estimate.model)).total
+
+    # Opus 5.5: $4 input and $20 output per million tokens, no cache write.
+    assert cost == pytest.approx(783870 * 4e-6 + 8577 * 20e-6)
 
 
 def test_a_five_minute_cache_expires_after_five_minutes(tmp_path: Path):
@@ -135,9 +150,9 @@ def test_a_five_minute_cache_expires_after_five_minutes(tmp_path: Path):
 
     estimate = _parse(tmp_path, lines).turns[1]
 
-    assert (estimate.cache_read_tokens, estimate.cache_creation_tokens) == (0, 100000)
-    assert (estimate.cc_5m, estimate.cc_1h) == (100000, 0)
-    assert estimate.input_tokens == 1000
+    assert (estimate.cache_read_tokens, estimate.cache_creation_tokens) == (0, 0)
+    assert (estimate.cc_5m, estimate.cc_1h) == (0, 0)
+    assert estimate.input_tokens == 101000
 
 
 def test_a_compaction_with_no_reply_before_it_is_left_out_and_counted(tmp_path: Path):
@@ -150,7 +165,12 @@ def test_a_compaction_with_no_reply_before_it_is_left_out_and_counted(tmp_path: 
 
     assert [turn.message_id for turn in result.turns] == ["msg_after"]
     assert result.diagnostics.compaction_calls == 0
-    assert result.diagnostics.compaction_calls_unsized == 1
+    # A boundary before any reply in its file belongs to the session this
+    # one was continued from: there is no request of this session's to
+    # size, so it is not an unsized one either.
+    assert result.diagnostics.compaction_calls_unsized == 0
+    boundary = next(e for e in result.events if e.kind.value == "compact_boundary")
+    assert boundary.detail["inherited"] is True
 
 
 def test_a_compaction_with_no_summary_size_is_left_out_and_counted(tmp_path: Path):
@@ -253,3 +273,54 @@ def test_the_compaction_section_shows_what_the_summaries_cost(tmp_path: Path):
     assert rows["Summary requests (estimated, USD)"] == pytest.approx(
         price_turn(result.turns[1], pricing.resolve_model(MODEL)).total
     )
+
+
+def test_a_boundary_after_a_reply_is_this_sessions_own_compaction(tmp_path: Path):
+    result = _parse(tmp_path, _session())
+
+    boundary = next(e for e in result.events if e.kind.value == "compact_boundary")
+
+    assert "inherited" not in boundary.detail
+    assert result.diagnostics.compaction_calls == 1
+
+
+def test_a_precomputed_summary_is_dated_at_the_reply_before_it(tmp_path: Path):
+    # Claude Code 2.1.309 computes the summary in the background right
+    # after a reply and applies it at the boundary, here 80 minutes later
+    # (past the hour this reply's cache lasts): the request itself ran
+    # while the cache was warm.
+    lines = _session(
+        before_ts="2026-09-26T12:00:00.000Z", boundary_ts="2026-09-26T13:20:00.000Z",
+        precomputed=True, durationMs=0,
+    )
+
+    result = _parse(tmp_path, lines)
+    estimate = result.turns[1]
+
+    assert estimate.compaction_precomputed is True
+    assert estimate.ts == "2026-09-26T12:00:00.000Z"
+    assert estimate.cache_read_tokens == 782273
+    assert estimate.input_tokens == 783870 - 782273
+
+
+def test_the_same_gap_without_precomputed_is_cold(tmp_path: Path):
+    lines = _session(
+        before_ts="2026-09-26T12:00:00.000Z", boundary_ts="2026-09-26T13:20:00.000Z", durationMs=1000,
+    )
+
+    estimate = _parse(tmp_path, lines).turns[1]
+
+    assert estimate.compaction_precomputed is False
+    assert estimate.cache_read_tokens == 0
+    assert estimate.input_tokens == 783870
+
+
+def test_the_boundary_event_keeps_whether_the_summary_was_precomputed(tmp_path: Path):
+    flagged = _parse(tmp_path, _session(precomputed=True))
+    plain = _parse(tmp_path, _session())
+
+    def detail(result):
+        return next(e for e in result.events if e.kind.value == "compact_boundary").detail
+
+    assert detail(flagged)["precomputed"] is True
+    assert "precomputed" not in detail(plain)

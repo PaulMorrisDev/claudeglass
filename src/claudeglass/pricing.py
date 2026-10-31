@@ -746,11 +746,18 @@ def price_turn(
     The default path (``write_split=None``, ``read_tokens=None``) uses
     the turn's own observed split: ``turn.cc_5m``/``turn.cc_1h`` for
     cache-write tokens and ``turn.cache_read_tokens`` for cache-read
-    tokens. The simulation path (used by the TTL package) overrides one
-    or both: ``write_split`` replaces the write split entirely (keys
-    ``300``/``"300"``/``"5m"`` -> the 5-minute bucket, ``3600``/
-    ``"3600"``/``"1h"`` -> the 1-hour bucket; any other key raises
-    ``ValueError``), and ``read_tokens`` replaces the read count. Calling
+    tokens. A write the transcript gave no 5-minute/1-hour split for (an
+    older Claude Code logged only the flat ``cache_creation_tokens``, so
+    ``cc_5m`` and ``cc_1h`` are both 0 and ``ttl_split_unknown`` is set)
+    would otherwise be priced at nothing: whatever part of
+    ``cache_creation_tokens`` the split does not account for is priced at
+    the 5-minute rate, the default ``ttl.normalize_ttl_split`` uses when
+    no lifetime dominates. A turn that already carries a full split has no
+    remainder, so nothing is counted twice. The simulation path (used by
+    the TTL package) overrides one or both: ``write_split`` replaces the
+    write split entirely (keys ``300``/``"300"``/``"5m"`` -> the 5-minute
+    bucket, ``3600``/``"3600"``/``"1h"`` -> the 1-hour bucket; any other
+    key raises ``ValueError``), and ``read_tokens`` replaces the read count. Calling
     this with the turn's own observed values passed explicitly must equal
     the default-path result exactly — later packages rely on that
     invariant.
@@ -775,6 +782,13 @@ def price_turn(
     A model's ``long_context`` rule applies when ``turn.ctx`` is at or
     above its threshold: explicit ``overrides`` win over ``multiplier``
     when both are present.
+
+    Output is priced at ``turn.output_tokens_est`` when it is set, else at
+    ``turn.output_tokens``: a reply Claude Code logged only mid-stream
+    (``Turn.output_partial``) keeps the count of its first block, and
+    ``parse._estimate_partial_outputs`` replaces it with an estimate from
+    the next request's growth. Both the default and the simulation path
+    use it, since the output is the same whatever the cache did.
 
     An unresolved model (``rates`` is ``None``) prices every component
     at zero with ``model_known=False``, so it is inert to sum but
@@ -801,7 +815,12 @@ def price_turn(
         return CostBreakdown(model_known=False)
 
     if write_split is None:
-        write_5m = turn.cc_5m
+        # ``getattr``: the TTL and compaction replays hand this function
+        # slim stand-ins for a turn that hold only the counts they change
+        # (``compaction_sim._PricedTurn``), whose split is always explicit.
+        flat = getattr(turn, "cache_creation_tokens", None)
+        unsplit = max(flat - turn.cc_5m - turn.cc_1h, 0) if flat is not None else 0
+        write_5m = turn.cc_5m + unsplit
         write_1h = turn.cc_1h
     else:
         write_5m, write_1h = _normalize_write_split(write_split)
@@ -841,8 +860,12 @@ def price_turn(
             write_1h_rate *= rule.multiplier
             read_rate *= rule.multiplier
 
+    # A reply logged only mid-stream keeps a partial output count; its
+    # estimate, from the next request's growth, stands in for it.
+    estimate = getattr(turn, "output_tokens_est", None)
+    output_tokens = estimate if estimate is not None else turn.output_tokens
     input_cost = turn.input_tokens / 1_000_000 * input_rate
-    output_cost = turn.output_tokens / 1_000_000 * output_rate
+    output_cost = output_tokens / 1_000_000 * output_rate
     cache_write_cost = (write_5m / 1_000_000 * write_5m_rate) + (
         write_1h / 1_000_000 * write_1h_rate
     )

@@ -13,7 +13,11 @@ Two numbers per model family, and nothing else is kept:
 - **tool definitions**: the characters of the tool definitions in the
   first tools-bearing prompt snapshot, over the first call's cache-read
   tokens. A subagent's first call reads exactly that shared tool prefix
-  from cache, so the two describe the same text.
+  from cache, so the two describe the same text. Where Claude Code logged
+  the request itself (``api-request-shape``, 2.1.304 on), the characters
+  are those of the tools it actually sent (``parse.py`` swaps them into
+  the snapshot's sizes): the snapshot's own entries run about 1.6 times
+  that, which would make this figure read high against the tokens.
 - **text**: the characters of everything else the transcript records
   before that call (task prompt, CLAUDE.md, skills list, environment
   notes, system prompt, tool lists), over its cache-write plus uncached
@@ -43,6 +47,14 @@ is passed to the four modules that turn characters into tokens
 Every one of them starts from an all-fallback ``Calibration()`` (equal to
 :data:`DEFAULT`), so a hand-built accumulator behaves as ``chars / 4``
 did.
+
+A report is measured on the sessions it covers, with one exception: a
+dashboard view of one project is measured on every project in its window
+(``service/api.py`` passes that figure to ``build_report``). The ratio
+follows the model, not the project, and a small project rarely has
+:data:`MIN_CALLS` first calls of its own. The CLI has no such figure, since
+measuring it would load every project, so a small project in a CLI report
+can still fall back to :data:`FALLBACK`.
 
 Privacy: a :class:`FirstCall` is five numbers and a model id; a
 :class:`Calibration` is two floats per model family.

@@ -52,7 +52,7 @@ ranking rather than inventing a cost-derived ordering of its own. Each
 family's bare alias (``"fable"``/``"opus"``/``"sonnet"``/``"haiku"``)
 resolves in ``pricing.toml`` to that family's current model
 (``claude-fable-5-1``, ``claude-opus-5-5``, ``claude-sonnet-5-5`` and
-``claude-haiku-4-5-20251001`` today — newer than two of the four the
+``claude-haiku-5-5`` today — newer than two of the four the
 work order names as "at minimum" present, ``claude-opus-5`` and
 ``claude-sonnet-5``, which stay priced), so "one tier down" is resolved
 via ``Pricing.aliases[family]`` — the public alias table, per the work

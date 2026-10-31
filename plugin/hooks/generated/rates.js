@@ -71,8 +71,7 @@ export const RATES = {
     },
     "claude-haiku-4-5-20251001": {
       "aliases": [
-        "claude-haiku-4-5",
-        "haiku"
+        "claude-haiku-4-5"
       ],
       "cache_read": 0.1,
       "cache_write_1h": 2.0,
@@ -80,6 +79,36 @@ export const RATES = {
       "context_window_tokens": 200000,
       "input": 1.0,
       "output": 5.0
+    },
+    "claude-haiku-5-5": {
+      "aliases": [
+        "haiku"
+      ],
+      "cache_read": 0.01,
+      "cache_write_1h": 0.2,
+      "cache_write_5m": 0.125,
+      "context_window_tokens": 1000000,
+      "input": 0.1,
+      "long_context": {
+        "overrides": {
+          "cache_read": 0.05,
+          "cache_write_1h": 1.0,
+          "cache_write_5m": 0.625,
+          "input": 0.5,
+          "output": 2.5
+        },
+        "threshold_tokens": 100001
+      },
+      "output": 0.5
+    },
+    "claude-mythos-5-1": {
+      "aliases": [],
+      "cache_read": 0.25,
+      "cache_write_1h": 20.0,
+      "cache_write_5m": 12.5,
+      "context_window_tokens": 1000000,
+      "input": 10.0,
+      "output": 50.0
     },
     "claude-opus-4": {
       "aliases": [],
@@ -197,7 +226,7 @@ export const RATES = {
         "sonnet",
         "sonnet[1m]"
       ],
-      "cache_read": 0.2,
+      "cache_read": 0.1,
       "cache_write_1h": 4.0,
       "cache_write_5m": 2.5,
       "context_window_tokens": 1000000,
@@ -205,5 +234,5 @@ export const RATES = {
       "output": 10.0
     }
   },
-  "version": "2026-10-01"
+  "version": "2026-10-30"
 };

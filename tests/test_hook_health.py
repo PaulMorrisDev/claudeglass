@@ -957,3 +957,78 @@ def test_corpus_results_flattens_each_session_and_skips_a_bundle_with_no_top():
     )
     assert hook_health.corpus_results(corpus) == [top, sub, other_top]
     assert hook_health.corpus_results(SimpleNamespace(sessions=[])) == []
+
+
+# -- Accounting audit: background (async) hook responses ----------------------
+
+
+def _async_response(hook_name: str | None = "StopFailure", exit_code=None, ts: str | None = None) -> Event:
+    detail: dict = {}
+    if hook_name is not None:
+        detail["hookName"] = hook_name
+    if exit_code is not None:
+        detail["exitCode"] = exit_code
+    return Event(kind=EventKind.HOOK_OUTPUT, subkind="async_hook_response", ts=ts, detail=detail)
+
+
+def test_a_background_hook_that_exits_nonzero_counts_as_a_failed_call():
+    results = [_result(_async_response(exit_code=66), _async_response(exit_code=0), _async_response(exit_code=0))]
+
+    [stat] = hook_health.count_hook_errors(results).stats
+
+    assert (stat.hook_name, stat.calls, stat.errors) == ("StopFailure", 3, 1)
+
+
+def test_a_background_hook_response_with_no_exit_code_is_a_call_that_passed():
+    [stat] = hook_health.count_hook_errors([_result(_async_response(exit_code=None))]).stats
+
+    assert (stat.calls, stat.errors) == (1, 0)
+
+
+def test_a_background_hook_failure_adds_to_the_same_hooks_other_errors():
+    results = [
+        _result(
+            _hook_event("hook_success", "Stop"),
+            _hook_event("hook_non_blocking_error", "Stop"),
+            _async_response("Stop", exit_code=1, ts="2026-10-20T10:00:00.000Z"),
+        )
+    ]
+
+    [stat] = hook_health.count_hook_errors(results).stats
+
+    assert (stat.hook_name, stat.calls, stat.errors) == ("Stop", 3, 2)
+    assert stat.last_error_ts == "2026-10-20T10:00:00.000Z"
+
+
+def test_a_background_hook_that_keeps_failing_gets_a_recommendation():
+    results = [_result(*[_async_response("Notification", exit_code=66) for _ in range(25)])]
+
+    text = hook_health.count_hook_errors(results).recommendation()
+
+    assert text is not None
+    assert "Notification" in text
+    assert "25 times" in text
+
+
+def test_a_background_response_with_no_hook_name_is_skipped():
+    assert hook_health.count_hook_errors([_result(_async_response(hook_name=None, exit_code=1))]).stats == ()
+
+
+def test_a_parsed_transcript_with_a_failing_background_hook_is_counted(tmp_path):
+    from claudeglass.model import TranscriptMeta
+    from claudeglass.parse import parse_transcript
+
+    from helpers import attachment_line, turn_line, user_str_line, write_jsonl
+
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, [
+        user_str_line("hi"),
+        attachment_line("async_hook_response", hookEvent="StopFailure", exitCode="66"),
+        attachment_line("async_hook_response", hookEvent="StopFailure", exitCode="0"),
+        turn_line(message_id="msg_1"),
+    ])
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="session"))
+
+    [stat] = hook_health.count_hook_errors([result]).stats
+
+    assert (stat.hook_name, stat.calls, stat.errors) == ("StopFailure", 2, 1)

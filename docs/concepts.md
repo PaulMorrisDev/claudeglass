@@ -50,19 +50,38 @@ of request don't fit that exactly:
   request that writes a summary (auto-compaction or `/compact`) but logs
   only a `compact_boundary` line. ClaudeGlass adds one estimated turn
   for it (`Turn.estimated == "compaction"`): the reply before it's
-  cached context read once more (or written again, if the cache had
-  expired by then), whatever else `preTokens` counts as input, and
-  twice the summary Claude Code keeps as the output. The request writes
+  cached context read once more, whatever else `preTokens` counts as
+  input, and twice the summary Claude Code keeps as the output. When the
+  cache had expired by then, that context is charged as plain input, not
+  as a cache write: Claude Code's own tokens for a compaction on a cold
+  resume show almost no cache write. The request writes
   an analysis before the summary and Claude Code drops it; twice the
   summary came within $1 of Claude Code's own figure on 14 of 15
   sessions. The output never exceeds `postTokens`, and is `postTokens`
   when no summary follows the boundary. It counts in spend and tokens,
   not as a reply.
+
+  Two boundaries are handled on their own. Claude Code 2.1.309 marks a
+  summary it computed in the background beforehand as `precomputed`: the
+  boundary only applied it, after whatever gap, so the request is dated
+  at the reply before it and the cache is judged warm as it was then. A
+  boundary at the start of a continued session belongs to the session it
+  came from, so that session's file gets no call for it.
 - **A reply stopped mid-stream** (you pressed Esc, say) before it
   called a tool. The tokens it read and wrote so far were used, so
   ClaudeGlass prices what the transcript records. Claude Code's own
-  running total leaves it out. A subagent's reply is often logged
-  mid-stream while the tool it asked for runs; that one is billed.
+  running total leaves it out.
+- **A reply logged only while it was still being written.** Claude Code
+  often records a subagent's reply as snapshots with no stop reason and
+  no final count (36,466 of 76,018 subagent replies in one 30-day
+  corpus, a main-session reply almost never). Its input and cache
+  counts are right, but the output count is only the first few tokens,
+  and the reply was billed in full. ClaudeGlass estimates the output
+  from how much the next request's context grew, less the tool results
+  and typed message in between (`Turn.output_tokens_est`), and prices
+  that. The last reply in a file has nothing after it, so it keeps the
+  logged count. Data quality counts these replies and shows the
+  estimated share of the cost on its own.
 - **Small requests no log records**, such as the one that names a
   session. Claude Code counts them; no transcript shows them, so
   ClaudeGlass can't.
@@ -71,10 +90,22 @@ Where Claude Code writes its own running total (a `cost-state` line),
 Data quality compares the two over the same span and splits these out
 (`claudeglass check cost-record`). The total counts from when that
 Claude Code process started, so for a resumed session the comparison
-starts at the resume. On three real Claude Code 2.1.283
-sessions — 659 replies and one 780,000-token summary, $66 in all —
-token counts matched Claude Code's to the token and 0.01% of cost was
-left unexplained.
+starts at the resume. There is one row per Claude Code process, which
+can span forked sessions: a process that moves through several session
+ids writes its whole running total into each file, so the largest total
+is compared with every one of those sessions' replies. When a response
+was stopped by safeguards, Claude Code bills the refused request but
+the log keeps only a placeholder reply with no usage; that spend is
+labelled as such instead of being listed with the small unlogged
+requests. On three real Claude Code 2.1.283
+sessions — 659 main-session replies and one 780,000-token summary, $66
+in all — token counts matched Claude Code's to the token and 0.01% of
+cost was left unexplained. That held for replies recorded complete. A
+subagent's reply logged mid-stream has its output estimated (see above),
+so a session with many of them matches to the accuracy of that estimate,
+not to the token. In one real session the estimated output of its
+Sonnet 5.5 subagents came to 69,000 tokens, 7% above the 64,800 Claude
+Code's own total implied; the logged counts alone gave 30,000.
 
 ## 2. How caching works in Claude Code
 

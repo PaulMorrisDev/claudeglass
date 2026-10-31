@@ -163,3 +163,35 @@ def test_the_rows_list_the_most_common_family_first():
     rows = Calibration.from_calls(calls).rows()
     assert [row[0] for row in rows] == ["claude-haiku-4-5", "claude-sonnet-5"]
     assert rows[0][1] == pytest.approx(5.81)
+
+
+def test_a_first_calls_tool_characters_are_those_of_the_request_claude_code_logged(tmp_path):
+    """Claude Code 2.1.30x logs the tools it actually sent
+    (``api-request-shape``); the prompt snapshot's own entries run about
+    1.6 times that. The characters per token measured from the first call
+    must follow the request, or the ratio reads far too high."""
+    import json
+
+    from claudeglass import context_budget
+    from claudeglass.model import TranscriptMeta
+    from claudeglass.parse import parse_transcript
+
+    from helpers import attachment_line, ignorable_line, turn_line, user_str_line, write_jsonl
+
+    wire = [{"name": "Read", "description": "r" * 400}, {"name": "Bash", "description": "b" * 600}]
+    snapshot = [{**tool, "extra": "e" * int(len(json.dumps(tool)) * 0.6)} for tool in wire]
+    wire_chars = sum(len(json.dumps(t, separators=(",", ":"), ensure_ascii=False)) for t in wire)
+    snapshot_chars = sum(len(json.dumps(t, separators=(",", ":"), ensure_ascii=False)) for t in snapshot)
+    path = tmp_path / "agent-x.jsonl"
+    write_jsonl(path, [
+        ignorable_line("api-request-shape", shape={"tools": wire}),
+        attachment_line("prompt_snapshot", systemPrompt=["s" * 100], tools=snapshot),
+        user_str_line("do it"),
+        turn_line(message_id="msg_1", input_tokens=50, cache_read_input_tokens=300, cache_creation_input_tokens=20),
+    ])
+    sub = parse_transcript(path, TranscriptMeta(path=str(path), kind="subagent", session_id="s", agent_type="Explore"))
+
+    call = context_budget.first_call(sub)
+
+    assert snapshot_chars > 1.5 * wire_chars
+    assert call.tool_chars == wire_chars

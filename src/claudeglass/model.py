@@ -552,7 +552,10 @@ Names, lengths and counts only, never an instruction or a definition:
   -> its tools' names after the ``mcp__<server>__`` prefix (at most 64
   characters each), so two names for one server can be matched.
 - ``TranscriptResult.upfront_definition_chars_by_server: dict = {}`` --
-  characters of each server's tools sent in full (``prompt_snapshot``).
+  characters of each server's tools sent in full: a ``prompt_snapshot``
+  shows them, and an ``api-request-shape`` line, where the transcript has
+  one, gives the size of each (see ``upfront_tool_chars``). A server with a
+  tool sized from the request is the sum of its tools' sizes.
 - ``TranscriptResult.mcp_connection_status: dict = {}`` -- the last
   connection problem reported per server.
 
@@ -849,6 +852,72 @@ A subagent's transcript writes this snapshot after its first call, so
 ``context_budget`` takes the first snapshot that lists tools wherever it
 sits. A header-only snapshot later on has no ``tools_chars`` and changes
 nothing.
+
+Accounting-audit addition (``PARSER_VERSION`` 45). What the cost audit
+found the parser was missing, all numbers and closed words:
+
+- ``Turn.output_partial: bool = False`` -- the reply reached the log only
+  as mid-stream snapshots: no ``stop_reason`` on any of its lines and no
+  ``output_tokens_details``, so its ``output_tokens`` is the count when
+  the first block was written, not the reply's. Input and cache counts on
+  such a line are right. About half of all subagent replies look like this.
+- ``Turn.output_tokens_est: int | None = None`` -- for such a reply with
+  a priced reply after it, the output the next request's growth implies
+  (``parse._estimate_partial_outputs``), never below ``output_tokens``.
+  ``pricing.price_turn`` prices output at this when it is set.
+  ``Diagnostics.partial_output_turns`` counts the replies,
+  ``partial_output_est_tokens`` the tokens the estimates add to what was
+  logged.
+- ``Turn.compaction_precomputed: bool = False`` -- on the estimated
+  compaction call (``estimated == "compaction"``) of a ``compact_boundary``
+  Claude Code 2.1.309 wrote with ``compactMetadata.precomputed``: the
+  summary was made in the background beforehand and the boundary only
+  applied it. Its ``COMPACT_BOUNDARY`` event carries
+  ``detail["precomputed"]``. Such a boundary is not where the harness
+  fired by itself, so threshold measures leave it out.
+- ``Event.detail["inherited"] = True`` on a ``COMPACT_BOUNDARY`` that sits
+  before any reply in its file: a session continued after a compaction
+  carries the boundary of the session it came from. It is not this
+  session's compaction and gets no estimated call, and, with the
+  ``COMPACT_SUMMARY`` after it (also ``detail["inherited"]``), is left out
+  of the first reply's ``preceding_event_kinds`` and ``preceding_primary``:
+  that reply doesn't follow a summary of this session.
+- ``TranscriptResult.upfront_tool_chars: dict = {}`` -- MCP tool name ->
+  characters of its definition sent in full. Where the transcript has an
+  ``api-request-shape`` line that lists the tool without ``defer_loading``,
+  this is the definition Claude Code sent (name, description and
+  ``input_schema`` as compact JSON, the keys a ``deferred_tools_record`` is
+  measured on; the largest across lines). Otherwise it is the
+  ``prompt_snapshot``'s entry (name, description and schema as compact
+  JSON; the largest snapshot's), which runs about 1.6 times the request's.
+  A server's tools sent in full size its deferred ones when none of them
+  was loaded (``tool_search``).
+- ``TranscriptResult.upfront_request_tools: list = []`` -- the sorted names
+  among ``upfront_tool_chars`` whose size is the request's, not a
+  snapshot's. A window holds sessions from before Claude Code logged the
+  request as well as after, and ``tool_search`` prefers the request's
+  size for a tool wherever any transcript has one: taking the largest
+  across transcripts would pick the snapshot's, 1.5 times as large.
+- ``Turn.cache_miss_reason: str | None`` / ``cache_missed_tokens: int |
+  None`` -- the API's own account of a cache miss
+  (``message.diagnostics.cache_miss_reason``): ``messages_changed``,
+  ``system_changed``, ``tools_changed``, ``model_changed``,
+  ``previous_message_not_found``, ``unavailable``, else ``other``, and
+  the tokens it says were missed.
+- ``TranscriptMeta.cc_cost_process_start: int | None`` -- the
+  ``startTime`` (milliseconds since the epoch) of the ``cost-state`` line
+  that supplied ``cc_cost_usd``. The total is a running one for a Claude
+  Code *process*, which can move through several session ids, each file
+  getting a line with the whole total.
+- ``Event.detail["exitCode"]`` on a ``HOOK_OUTPUT`` event of subkind
+  ``async_hook_response``: the integer exit code of an async hook (the
+  ``hookName`` is the closed hook-event name, as for the other hook
+  attachments).
+- ``tools_chars`` / ``tool_chars`` / ``server_chars`` on a
+  ``prompt_snapshot`` event's ``detail`` are measured from the tool
+  definitions in the ``api-request-shape`` line Claude Code logs when
+  there is one (``detail["tools_source"] == "request"``): the snapshot's
+  entries run about 1.6 times the definitions actually sent.
 
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
@@ -1397,6 +1466,19 @@ class Turn:
     #: ``run_in_background`` and then from a result that says it went to
     #: the background. A word per call, never the call.
     agent_launches: dict[str, str] = field(default_factory=dict)
+    #: Accounting-audit addition (``PARSER_VERSION`` 45, see module
+    #: docstring): the reply was logged only mid-stream, so its
+    #: ``output_tokens`` is a partial count; ``output_tokens_est`` is the
+    #: estimate from the next request's growth (``None`` when the reply is
+    #: complete, or no priced reply follows it).
+    output_partial: bool = False
+    output_tokens_est: int | None = None
+    #: Accounting-audit addition: the estimated compaction call of a
+    #: boundary whose summary was computed beforehand.
+    compaction_precomputed: bool = False
+    #: Accounting-audit addition: the API's own cache-miss account.
+    cache_miss_reason: str | None = None
+    cache_missed_tokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -1451,6 +1533,10 @@ class TranscriptMeta:
     cc_cost_by_model: dict = field(default_factory=dict)
     #: When the process that total counts from started (``startTime``).
     cc_cost_since: str | None = None
+    #: The same ``startTime`` as milliseconds since the epoch, the key
+    #: that tells which sessions share one process's running total
+    #: (accounting-audit addition, ``PARSER_VERSION`` 45).
+    cc_cost_process_start: int | None = None
     #: Agent-roles addition (see module docstring): the canonical word
     #: ``agent_roles.role_word`` finds in the agent's phase, then its named
     #: type, then the first four words of its description ("implement",
@@ -1494,6 +1580,11 @@ class Diagnostics:
     #: summary request was estimated and priced, and those left out.
     compaction_calls: int = 0
     compaction_calls_unsized: int = 0
+    #: Accounting-audit addition (``PARSER_VERSION`` 45, see module
+    #: docstring): replies logged only mid-stream, and the output tokens
+    #: the estimates add to what was logged for them.
+    partial_output_turns: int = 0
+    partial_output_est_tokens: int = 0
     #: Independent-review addition (see module docstring): a priced turn's
     #: timestamp was present but failed to parse.
     timestamp_parse_failures: int = 0
@@ -1579,8 +1670,20 @@ class TranscriptResult:
     #: sorted names of its tools after ``mcp__<server>__``.
     mcp_tool_suffixes_by_server: dict = field(default_factory=dict)
     #: MCP-servers addition: MCP server -> characters of its tools sent in
-    #: full, as a ``prompt_snapshot`` shows them.
+    #: full, from the request Claude Code logged where there is one and
+    #: from a ``prompt_snapshot`` otherwise (the sum of ``upfront_tool_chars``
+    #: for a server with a tool sized from the request).
     upfront_definition_chars_by_server: dict = field(default_factory=dict)
+    #: Accounting-audit addition (``PARSER_VERSION`` 45): MCP tool name ->
+    #: characters of its definition sent in full: the ``api-request-shape``
+    #: line's where there is one, else a ``prompt_snapshot``'s (the largest
+    #: one seen).
+    upfront_tool_chars: dict = field(default_factory=dict)
+    #: Which of ``upfront_tool_chars``' tools are sized from the request
+    #: rather than a snapshot (sorted names), so that sizes from different
+    #: transcripts can be compared on one scale: a window can hold sessions
+    #: from before Claude Code logged the request.
+    upfront_request_tools: list = field(default_factory=list)
     #: MCP-servers addition: MCP server -> the last connection problem
     #: reported for it: "pending", "needs sign-in" or "failed to connect".
     mcp_connection_status: dict = field(default_factory=dict)
