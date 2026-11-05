@@ -41,6 +41,12 @@ def store() -> Store:
     return s
 
 
+#: A retention window that drops the 2000-01-01 sessions the prune tests
+#: add but keeps ``_seed``'s 2026-09-18 session for years. A 30-day window
+#: stopped keeping it once the seed date was a month in the past.
+_RETENTION_KEEPS_SEED = 3650
+
+
 def _seed(store: Store) -> None:
     snapshot_id = store.upsert_snapshot(
         project_slug="proj-a",
@@ -673,7 +679,7 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
 
     db_path = tmp_path / "roundtrip.db"
     store = Store(str(db_path))
-    store.open()  # built fresh at the real, current SCHEMA_VERSION (9)
+    store.open()  # built fresh at the real, current SCHEMA_VERSION (11)
     _seed(store)
     store.set_feedback("session-a", outcome="delivered", slow=("scope",), worth="yes", helped=("clearer-brief",))
     store.set_tag("session-a", "purpose", "refactor")
@@ -683,17 +689,17 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     )
     store.close()
 
-    # "Downgrade": a build that only knows up to v8 opens this v9 store.
-    # v9 is newer than that build's own SCHEMA_VERSION, so migrate() takes
+    # "Downgrade": a build that only knows up to v10 opens this v11 store.
+    # v11 is newer than that build's own SCHEMA_VERSION, so migrate() takes
     # the backup-then-drop-and-rebuild path (same branch as the test
-    # above), stamping the store back down to "8".
+    # above), stamping the store back down to "10".
     monkeypatch.setattr(schema, "SCHEMA_VERSION", schema.SCHEMA_VERSION - 1)
     downgraded = Store(str(db_path))
     downgraded.open()
-    assert downgraded.schema_version() == 8
+    assert downgraded.schema_version() == schema.SCHEMA_VERSION == 10
     downgraded.close()
 
-    # Upgrade back to the real, current build: v8 -> v9 walks the
+    # Upgrade back to the real, current build: v10 -> v11 walks the
     # additive MIGRATIONS ladder (it never drops a table, and finds the
     # columns the rebuilt tables already carry), so this step alone was
     # never the risk -- the ratings must already have survived the
@@ -702,7 +708,7 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
         assert upgraded.feedback("session-a") == {
             "outcome": "delivered", "slow": ["scope"], "worth": "yes", "helped": ["clearer-brief"],
             "why": [], "missed_in": None, "plan": None, "handoff": None, "tip": None, "tip_hint": None, "builds": [],
@@ -924,7 +930,7 @@ def test_retention_prune_removes_old_sessions(store: Store) -> None:
         first_ts="2000-01-01T00:00:00Z",
         last_ts="2000-01-01T01:00:00Z",
     )
-    removed = store.retention_prune(retention_days=30)
+    removed = store.retention_prune(retention_days=_RETENTION_KEEPS_SEED)
     assert removed == 1
     assert store.session("session-old") is None
     assert store.session("session-a") is not None
@@ -952,7 +958,7 @@ def test_sessions_listing_has_no_transcripts_key(store: Store) -> None:
 
 def test_daily_usage_aggregates_across_transcripts(store: Store) -> None:
     _seed(store)
-    rows = store.daily_usage(days=30)
+    rows = store.daily_usage(days=None)
     assert len(rows) == 1
     row = rows[0]
     assert row["day"] == "2026-09-18"
@@ -972,18 +978,19 @@ def test_daily_usage_accepts_since_until_like_summary(store: Store) -> None:
 
 def test_daily_usage_split_agent_separates_main_from_subagents(store: Store) -> None:
     _seed(store)  # one top-level transcript (10 turns), one subagent (5 turns)
-    rows = {(r["agent"], r["model"]): r for r in store.daily_usage(split="agent")}
+    # days=None: the seed is a fixed past date, outside any rolling window.
+    rows = {(r["agent"], r["model"]): r for r in store.daily_usage(split="agent", days=None)}
     assert set(rows) == {("main", "claude-sonnet-5"), ("subagent", "claude-sonnet-5")}
     assert rows[("main", "claude-sonnet-5")]["turns"] == 10
     assert rows[("subagent", "claude-sonnet-5")]["turns"] == 5
     # split="model" (and the default) keep the original, unsplit shape.
-    assert store.daily_usage(split="model") == store.daily_usage()
-    assert "agent" not in store.daily_usage()[0]
+    assert store.daily_usage(split="model", days=None) == store.daily_usage(days=None)
+    assert "agent" not in store.daily_usage(days=None)[0]
 
 
 def test_cache_read_tokens_by_model(store: Store) -> None:
     _seed(store)  # top-level cache_read_tokens=2000, subagent=400, same model
-    assert store.cache_read_tokens_by_model() == {"claude-sonnet-5": 2400}
+    assert store.cache_read_tokens_by_model(days=None) == {"claude-sonnet-5": 2400}
     assert store.cache_read_tokens_by_model(since="2026-09-19T00:00:00Z") == {}
 
 
@@ -1472,6 +1479,69 @@ def test_turns_for_session_downsamples_above_the_point_cap(store: Store) -> None
     assert marker_turn_index in kept_turn_indices
 
 
+# -- median_end_context --------------------------------------------------
+
+
+def _store_session_ending_at(store: Store, session_id: str, last_ts: str, ctxs: list[int], *, kind: str = "top-level") -> None:
+    """A session whose priced turns end at the last of ``ctxs`` (plus a
+    synthetic turn 0 that never counts)."""
+    from claudeglass.cache import encode_result
+    from claudeglass.model import Turn, TranscriptMeta, TranscriptResult
+
+    turns = [Turn(turn_index=0, ctx=999_999)] + [Turn(turn_index=i, ctx=c) for i, c in enumerate(ctxs, start=1)]
+    result = TranscriptResult(meta=TranscriptMeta(path=_FAKE_PATH, kind=kind, session_id=session_id), turns=turns)
+    store.upsert_session(session_id=session_id, project_slug="proj-a", slug="proj-a", last_ts=last_ts)
+    store.upsert_transcript(
+        session_id=session_id,
+        path=f"{_FAKE_PATH}.{session_id}",
+        kind=kind,
+        digest_json=json.dumps(encode_result(result)),
+    )
+
+
+def test_median_end_context_is_none_without_a_stored_transcript(store: Store) -> None:
+    assert store.median_end_context() is None
+    store.upsert_session(session_id="ghost", project_slug="proj-a", slug="proj-a", last_ts="2026-09-18T10:00:00Z")
+    _store_session_ending_at(store, "sub-only", "2026-09-18T11:00:00Z", [5000], kind="subagent")
+    assert store.median_end_context() is None
+
+
+def test_median_end_context_takes_each_sessions_last_priced_turn(store: Store) -> None:
+    _store_session_ending_at(store, "s1", "2026-09-18T10:00:00Z", [1000, 90_000])
+    _store_session_ending_at(store, "s2", "2026-09-18T11:00:00Z", [2000, 50_000, 120_000])
+    _store_session_ending_at(store, "s3", "2026-09-18T12:00:00Z", [3000, 10_000])
+    assert store.median_end_context() == 90_000
+    _store_session_ending_at(store, "s4", "2026-09-18T13:00:00Z", [400_000])
+    assert store.median_end_context() == 105_000  # the mean of the middle two
+
+
+def test_median_end_context_looks_only_at_the_most_recent_sessions(store: Store) -> None:
+    _store_session_ending_at(store, "old", "2026-09-01T10:00:00Z", [900_000])
+    _store_session_ending_at(store, "new-a", "2026-09-18T10:00:00Z", [10_000])
+    _store_session_ending_at(store, "new-b", "2026-09-18T11:00:00Z", [20_000])
+    assert store.median_end_context(limit=2) == 15_000
+    assert store.median_end_context() == 20_000
+
+
+def test_cache_write_split_counts_a_windows_top_level_writes_by_lifetime(store: Store) -> None:
+    now = datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
+
+    def row(day: str, cc_5m: int, cc_1h: int) -> dict:
+        return {**_agg(f"{day}T10:00:00Z"), "cc_5m": cc_5m, "cc_1h": cc_1h}
+
+    assert store.cache_write_split(14, now) == (0, 0)
+    _seed_agg(
+        store,
+        row("2026-09-30", 100, 0),
+        row("2026-09-16", 20, 3000),  # the window's first day counts
+        row("2026-09-15", 7000, 7000),  # one day before it does not
+        {**_agg(None, day="unknown"), "cc_5m": 9000},
+    )
+    _seed_agg(store, row("2026-09-30", 0, 50_000), session_id="sub", kind="subagent")
+    assert store.cache_write_split(14, now) == (120, 3000)
+    assert store.cache_write_split(1, now) == (100, 0)
+
+
 # -- privacy guard ---------------------------------------------------------
 
 
@@ -1689,7 +1759,7 @@ def test_retention_prune_removes_an_old_sessions_plan_builds(store: Store) -> No
     )
     store.set_feedback("session-old", builds=[{"build": 1, "plan": "gap", "handoff": "no"}])
     store.set_tip_feedback("recommendation", "model.default", "wrong")
-    assert store.retention_prune(retention_days=30) == 1
+    assert store.retention_prune(retention_days=_RETENTION_KEEPS_SEED) == 1
     assert store._connection().execute("SELECT COUNT(*) FROM session_plan_feedback").fetchone()[0] == 0
     # A card answer is not tied to one session, so the prune leaves it.
     assert store.tip_feedback_count() == 1
@@ -1806,7 +1876,7 @@ def test_migrate_upgrades_a_v8_store_with_the_redesigned_rating(tmp_path) -> Non
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
         # The old rating is kept as it was, with the newer answers empty.
         saved = upgraded.feedback("session-a")
         assert saved["outcome"] == "met" and saved["slow"] == ["tools"] and saved["helped"] == ["context"]
@@ -1871,7 +1941,7 @@ def test_retention_prune_removes_old_ratings(store: Store) -> None:
         first_ts="2000-01-01T00:00:00Z", last_ts="2000-01-01T01:00:00Z",
     )
     store.set_feedback("session-old", outcome="missed", worth="no")
-    assert store.retention_prune(retention_days=30) == 1
+    assert store.retention_prune(retention_days=_RETENTION_KEEPS_SEED) == 1
     assert store.all_feedback() == {}
 
 
@@ -1967,7 +2037,7 @@ def test_migrate_upgrades_a_v5_store_with_the_feedback_table(tmp_path) -> None:
     store = Store(str(db_path))
     store.open()
     try:
-        assert store.schema_version() == schema.SCHEMA_VERSION == 9
+        assert store.schema_version() == schema.SCHEMA_VERSION
         assert store.session("session-a") is not None
         assert store.tags("session-a") == {"purpose": "refactor-override"}
         store.set_feedback("session-a", outcome="met", worth="yes")
@@ -2408,7 +2478,7 @@ def test_migrate_upgrades_a_v7_store_and_marks_every_transcript_for_a_re_parse(t
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
         assert "bucket" in {row["name"] for row in upgraded._connection().execute("PRAGMA table_info(turns_agg)")}
         # Every row is kept, with no bucket until its transcript is parsed again.
         assert _agg_rows(upgraded) == rows_before
@@ -2458,6 +2528,8 @@ def test_the_migration_ladder_reaches_the_current_version() -> None:
 
     assert set(store_mod.MIGRATIONS) == set(range(4, schema.SCHEMA_VERSION))
     assert store_mod.MIGRATIONS[7] is store_mod._migrate_7_to_8
+    assert store_mod.MIGRATIONS[9] is store_mod._migrate_9_to_10
+    assert store_mod.MIGRATIONS[10] is store_mod._migrate_10_to_11
 
 
 def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
@@ -2474,3 +2546,327 @@ def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
             row["detail"] for row in conn.execute(f"EXPLAIN QUERY PLAN SELECT a.id FROM turns_agg a WHERE {condition}", params)
         )
         assert "idx_turns_agg_day" in plan, plan
+
+
+# -- the mod's sensor events (schema 10) -------------------------------------------------
+
+
+def _mod_event(ts, event="note", **fields):
+    row = {"ts": ts, "event": event, "kind": None, "surface": None, "outcome": None,
+           "kept": None, "missing": None, "added": None,
+           "instructed": None, "referenced": None, "before": None, "after": None}
+    return {**row, **fields}
+
+
+def _note(ts, kind="cold_return", surface="hint", outcome="none"):
+    return _mod_event(ts, kind=kind, surface=surface, outcome=outcome)
+
+
+def test_migrate_upgrades_a_v9_store_with_the_mod_events_table(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v9.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    conn = store._connection()
+    conn.execute("DROP TABLE mod_events")
+    conn.execute("UPDATE meta SET value = '9' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    store.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 11
+        # What was there stays; the new table works and has its indexes.
+        assert upgraded.summary()["sessions"] == 1
+        assert upgraded.replace_mod_events("session-a", [_note("2026-09-21T10:00:00Z")]) == 1
+        indexes = {
+            row["name"] for row in upgraded._connection().execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert {"idx_mod_events_session_ts", "idx_mod_events_event"} <= indexes
+    finally:
+        upgraded.close()
+
+
+def test_migrate_upgrades_a_v10_store_with_the_receipt_columns(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v10.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    conn = store._connection()
+    # A v10 table: the same columns less the four receipt ones, with a row already in it.
+    conn.execute("DROP TABLE mod_events")
+    conn.execute(
+        "CREATE TABLE mod_events (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, ts TEXT NOT NULL, "
+        "event TEXT NOT NULL, kind TEXT, surface TEXT, outcome TEXT, kept INTEGER, missing INTEGER, "
+        "added INTEGER, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO mod_events (session_id, ts, event, kind, kept, missing, added, updated_at) "
+        "VALUES ('s0', '2026-09-20T10:00:00Z', 'compaction', 'auto', 5, 1, 0, '2026-09-20T10:00:01Z')"
+    )
+    conn.execute("UPDATE meta SET value = '10' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    store.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 11
+        # The old row stays, with the new columns empty, and the new ones take values.
+        assert upgraded.read_mod_events() == [
+            {"session_id": "s0", **_mod_event("2026-09-20T10:00:00Z", "compaction", kind="auto", kept=5, missing=1, added=0)}
+        ]
+        assert upgraded.replace_mod_events("s1", [_mod_event("2026-09-21T10:00:00Z", "tweak", kind="check", before=2, after=1)]) == 1
+        assert upgraded.read_mod_events(event="tweak")[0]["before"] == 2
+    finally:
+        upgraded.close()
+
+
+def test_migrate_10_to_11_is_a_no_op_when_run_again(store: Store) -> None:
+    from claudeglass.service import store as store_mod
+
+    store.replace_mod_events("s1", [_mod_event("2026-09-21T10:00:00Z", "tweak", kind="hold", before=1, after=0)])
+    before = store.read_mod_events()
+    store_mod._migrate_10_to_11(store._connection())  # the columns are there already
+    assert store.read_mod_events() == before
+
+
+def test_the_read_only_reader_gives_the_receipt_columns_and_reads_a_v10_store(tmp_path) -> None:
+    import sqlite3
+
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "ro.db"
+    store = Store(str(db_path))
+    store.open()
+    events = [_mod_event("2026-09-21T10:06:00Z", "tweak", kind="summarise", before=9, after=7)]
+    store.replace_mod_events("s1", events)
+    store.close()
+    assert store_mod.read_mod_events(db_path) == [{"session_id": "s1", **events[0]}]
+
+    # A store from before v11 has no such columns: its events read with them empty.
+    old = tmp_path / "old.db"
+    conn = sqlite3.connect(old)
+    conn.execute(
+        "CREATE TABLE mod_events (id INTEGER PRIMARY KEY, session_id TEXT, ts TEXT, event TEXT, kind TEXT, "
+        "surface TEXT, outcome TEXT, kept INTEGER, missing INTEGER, added INTEGER, updated_at TEXT)"
+    )
+    conn.execute("INSERT INTO mod_events VALUES (1, 's0', '2026-09-20T10:00:00Z', 'compaction', 'auto', NULL, NULL, 5, 1, 0, 'x')")
+    conn.commit()
+    conn.close()
+    assert store_mod.read_mod_events(old) == [
+        {"session_id": "s0", **_mod_event("2026-09-20T10:00:00Z", "compaction", kind="auto", kept=5, missing=1, added=0)}
+    ]
+
+
+def test_migrate_9_to_10_is_a_no_op_when_run_again(store: Store) -> None:
+    from claudeglass.service import store as store_mod
+
+    store.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z")])
+    before = store.read_mod_events()
+    store_mod._migrate_9_to_10(store._connection())  # the table and indexes are there already
+    assert store.read_mod_events() == before
+
+
+def test_mod_events_round_trip_every_column(store: Store) -> None:
+    events = [
+        _mod_event("2026-09-21T10:00:00Z", "present", surface="vscode"),
+        _note("2026-09-21T10:01:00Z", "runway", "status", "sent"),
+        _mod_event("2026-09-21T10:02:00Z", "rebuild", kind="expiry", outcome="expected"),
+        _mod_event("2026-09-21T10:03:00Z", "cold_send", outcome="unwarned"),
+        _mod_event("2026-09-21T10:04:00Z", "compaction", kind="auto", kept=12, missing=2, added=1),
+        _mod_event("2026-09-21T10:05:00Z", "compaction", kind="plugin", kept=9, missing=3, added=3, instructed=1, referenced=2),
+        _mod_event("2026-09-21T10:06:00Z", "tweak", kind="summarise", before=9, after=7),
+        _mod_event("2026-09-21T10:07:00Z", "tweak", kind="readd", before=3),
+    ]
+    assert store.replace_mod_events("s1", events) == 8
+    assert store.read_mod_events() == [{"session_id": "s1", **event} for event in events]
+    assert store.read_mod_events(event="note") == [{"session_id": "s1", **events[1]}]
+    assert [e["event"] for e in store.read_mod_events(since="2026-09-21T10:03:00Z")] == [
+        "cold_send", "compaction", "compaction", "tweak", "tweak",
+    ]
+    assert store.read_mod_events(event="tweak") == [{"session_id": "s1", **events[6]}, {"session_id": "s1", **events[7]}]
+    assert_privacy(store.read_mod_events())
+
+
+def test_ingesting_the_same_file_again_changes_nothing(store: Store) -> None:
+    events = [_note("2026-09-21T10:00:00Z"), _note("2026-09-21T10:05:00Z", "big_paste", "note", "sent")]
+    store.replace_mod_events("s1", events)
+    first = store.read_mod_events()
+    for _ in range(3):
+        store.replace_mod_events("s1", events)
+    assert store.read_mod_events() == first
+
+
+def test_a_rewritten_file_replaces_from_its_first_event_and_keeps_the_older_ones(store: Store) -> None:
+    store.replace_mod_events("s1", [_note("2026-09-21T09:00:00Z"), _note("2026-09-21T10:00:00Z"), _note("2026-09-21T11:00:00Z")])
+    # The mod's newest-500 file has dropped the 09:00 event and grown a new one.
+    store.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z"), _note("2026-09-21T11:00:00Z"), _note("2026-09-21T12:00:00Z")])
+    assert [e["ts"] for e in store.read_mod_events()] == [
+        "2026-09-21T09:00:00Z", "2026-09-21T10:00:00Z", "2026-09-21T11:00:00Z", "2026-09-21T12:00:00Z",
+    ]
+    # Another session is never touched, and an empty file changes nothing.
+    store.replace_mod_events("s2", [_note("2026-09-21T10:30:00Z")])
+    store.replace_mod_events("s1", [_note("2026-09-21T12:00:00Z")])
+    assert store.replace_mod_events("s1", []) == 0
+    assert len(store.read_mod_events()) == 5
+
+
+def test_a_failed_replace_keeps_the_old_rows(store: Store) -> None:
+    store.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z")])
+    with pytest.raises(Exception):
+        # No "event" key: the insert fails after the delete, and the whole replace rolls back.
+        store.replace_mod_events("s1", [{"ts": "2026-09-21T10:00:00Z"}])
+    assert [e["ts"] for e in store.read_mod_events()] == ["2026-09-21T10:00:00Z"]
+
+
+def test_prune_mod_events_removes_the_old_rows_only(store: Store) -> None:
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store.replace_mod_events("s1", [_note(old), _note(new)])
+    assert store.prune_mod_events(30) == 1
+    assert [e["ts"] for e in store.read_mod_events()] == [new]
+
+
+def test_retention_prune_takes_a_removed_sessions_mod_events_with_it(store: Store) -> None:
+    _seed(store)
+    store.upsert_session(
+        session_id="session-old", project_slug="proj-a", slug="proj-a",
+        first_ts="2000-01-01T00:00:00Z", last_ts="2000-01-01T01:00:00Z",
+    )
+    store.replace_mod_events("session-old", [_note("2026-09-21T10:00:00Z")])
+    store.replace_mod_events("session-a", [_note("2026-09-21T10:00:00Z")])
+    assert store.retention_prune(retention_days=_RETENTION_KEEPS_SEED) == 1
+    assert {e["session_id"] for e in store.read_mod_events()} == {"session-a"}
+
+
+def test_read_mod_events_from_a_file_needs_no_store_and_never_writes(tmp_path) -> None:
+    from claudeglass.service import store as store_mod
+
+    assert store_mod.read_mod_events(tmp_path / "none.db") == []
+    path = tmp_path / "service.db"
+    s = Store(str(path))
+    s.open()
+    s.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z")])
+    s.close()
+    assert [e["session_id"] for e in store_mod.read_mod_events(path)] == ["s1"]
+    # A store from before the table: no events, no error.
+    old = sqlite3.connect(str(tmp_path / "old.db"))
+    old.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    old.commit()
+    old.close()
+    assert store_mod.read_mod_events(tmp_path / "old.db") == []
+
+
+# -- a session Claude Code moved to another project folder (J5) ----------------------------
+
+
+def _moved_session(store: Store) -> None:
+    """One session read twice: from the folder it was in (``/old``, now gone
+    from disk, so missing), and from the folder Claude Code moved it to
+    (``/new``)."""
+    for path in ("/old/moved.jsonl", "/new/moved.jsonl"):
+        store.upsert_session(
+            session_id="moved", project_slug="proj-m", slug="proj-m",
+            first_ts="2026-09-10T00:00:00Z", last_ts="2026-09-12T00:00:00Z",
+        )
+        store.upsert_transcript(
+            session_id="moved", path=path, kind="top-level", digest_json="{}",
+            turns_agg=[_agg("2026-09-10T12:00:00Z", turns=4, cost=2.0)],
+            recache_turns=[{"turn_index": 2, "signature": "full-expiry", "cache_creation_tokens": 5,
+                            "preceding_primary": "HUMAN_TEXT", "gap_s": 400.0}],
+            events=[{"kind": "compact_boundary", "subkind": None, "count": 1, "dropped_tokens_sum": 0,
+                     "duration_ms_sum": 0}],
+            compactions=[{"ts": "2026-09-10T12:30:00Z", "pre_tokens": 100, "post_tokens": 10,
+                          "dropped_tokens": 90, "trigger": "auto", "join_delta_s": 1.0}],
+        )
+    assert store.remove_missing({"/new/moved.jsonl"}) == 1
+
+
+def _child_rows(store: Store, table: str) -> int:
+    return store._connection().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_a_moved_session_counted_its_turns_twice_until_the_old_paths_rows_are_dropped(store: Store) -> None:
+    _moved_session(store)
+    # The two rows read the same turns, and every sum added both.
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-10", 8)]
+    assert store.sessions_with_superseded_transcripts() == ["moved"]
+    assert store.drop_superseded_transcripts("moved") == 1
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-10", 4)]
+    assert store.sessions_with_superseded_transcripts() == []
+    # Nothing is left of the old row, in any of the four child tables either.
+    paths = [row["path"] for row in store._connection().execute("SELECT path FROM transcripts")]
+    assert paths == ["/new/moved.jsonl"] and store.count_missing_transcripts() == 0
+    for table in ("turns_agg", "recache_turns", "events_agg", "compactions"):
+        assert _child_rows(store, table) == 1, table
+    assert store.drop_superseded_transcripts("moved") == 0
+
+
+def test_a_transcript_with_no_present_successor_is_kept_when_its_file_is_gone(store: Store) -> None:
+    # Claude Code's cleanupPeriodDays removed the file and nothing replaced
+    # it: the store outlives that, which is what the missing mark is for.
+    _seed_agg(store, _agg("2026-09-10T12:00:00Z", turns=4), session_id="old", path="/gone/old.jsonl")
+    assert store.remove_missing(set()) == 1
+    assert store.sessions_with_superseded_transcripts() == []
+    assert store.drop_superseded_transcripts("old") == 0
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-10", 4)]
+    assert store.count_missing_transcripts() == 1
+
+
+def test_only_a_present_row_of_the_same_kind_and_agent_stands_in_for_a_missing_one(store: Store) -> None:
+    store.upsert_session(session_id="s", project_slug="proj-m", slug="proj-m",
+                         first_ts="2026-09-10T00:00:00Z", last_ts="2026-09-12T00:00:00Z")
+
+    def add(path, kind, agent_id):
+        store.upsert_transcript(session_id="s", path=path, kind=kind, agent_id=agent_id, digest_json="{}",
+                                turns_agg=[_agg("2026-09-10T12:00:00Z", turns=1)])
+
+    add("/old/s.jsonl", "top-level", None)
+    add("/old/agent-1.jsonl", "subagent", "agent-1")
+    add("/old/agent-2.jsonl", "subagent", "agent-2")
+    # What is present now: another agent of the session, but not these two,
+    # and no top-level transcript at all.
+    add("/new/agent-3.jsonl", "subagent", "agent-3")
+    store.remove_missing({"/new/agent-3.jsonl"})
+    assert store.count_missing_transcripts() == 3
+    assert store.sessions_with_superseded_transcripts() == []
+    # Agent 1 arrives at its new path: it, and only it, replaces its old row.
+    add("/new/agent-1.jsonl", "subagent", "agent-1")
+    assert store.sessions_with_superseded_transcripts() == ["s"]
+    assert store.drop_superseded_transcripts("s") == 1
+    remaining = sorted(row["path"] for row in store._connection().execute("SELECT path FROM transcripts"))
+    assert remaining == ["/new/agent-1.jsonl", "/new/agent-3.jsonl", "/old/agent-2.jsonl", "/old/s.jsonl"]
+    # A top-level transcript at a new path replaces the old top-level one.
+    add("/new/s.jsonl", "top-level", None)
+    assert store.drop_superseded_transcripts("s") == 1
+    assert "/old/s.jsonl" not in [row["path"] for row in store._connection().execute("SELECT path FROM transcripts")]
+
+
+def test_a_moved_sessions_series_is_read_from_the_present_transcript(store: Store) -> None:
+    from claudeglass.cache import encode_result
+    from claudeglass.model import EventKind, Turn, TranscriptMeta, TranscriptResult
+
+    def result(ctx: int) -> str:
+        return json.dumps(encode_result(TranscriptResult(
+            meta=TranscriptMeta(path="p", kind="top-level", session_id="moved"),
+            turns=[Turn(turn_index=1, ctx=ctx, cache_creation_tokens=1, preceding_primary=EventKind.HUMAN_TEXT)],
+        )))
+
+    store.upsert_session(session_id="moved", project_slug="proj-m", slug="proj-m")
+    # The old path's row was written first, so it has the lower id.
+    store.upsert_transcript(session_id="moved", path="/old/moved.jsonl", kind="top-level", digest_json=result(111))
+    store.upsert_transcript(session_id="moved", path="/new/moved.jsonl", kind="top-level", digest_json=result(222))
+    store.remove_missing({"/new/moved.jsonl"})
+    assert store.turns_for_session("moved")["turn_series"][0][1] == 222
+    # With neither present, the older row still answers rather than none.
+    store.remove_missing(set())
+    assert store.turns_for_session("moved")["turn_series"][0][1] == 111

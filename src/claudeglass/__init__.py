@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
@@ -423,7 +423,36 @@ __version__ = "0.15.0"
 #: (``last_human_challenge``), so an admission in the reply after it is
 #: ``admit_caught == "user"``. A pre-44 digest has such commands as test
 #: runs and such admissions as ``self``.
-PARSER_VERSION = 44
+#:
+#: Bumped to 45: the accounting audit. A reply Claude Code logged only
+#: mid-stream (no stop reason on any line, no ``output_tokens_details``)
+#: records ``Turn.output_partial`` and, when a priced reply follows,
+#: ``Turn.output_tokens_est``, which output is priced at; a compaction
+#: boundary marked ``precomputed`` is dated at the reply before it
+#: (``Turn.compaction_precomputed``) and a cold compaction prefix is plain
+#: input, not a cache write; a boundary before any reply in its file is
+#: ``detail["inherited"]``; a reply written with zeroed usage (the
+#: preserved copy after a compaction) is no priced turn; lines copied into
+#: a fork in another project folder, and agent transcripts copied into a
+#: fork, are skipped; the first ``api-request-shape`` line sets the tool
+#: sizes of the first prompt snapshot that lists tools; the request-log
+#: line types are ignored instead of ``UNKNOWN``; the API's own
+#: ``cache_miss_reason`` is kept (``Turn.cache_miss_reason``); a
+#: model-refusal fallback takes its cache split from the answering
+#: iteration; a ``cost-state`` line's ``startTime`` is kept as
+#: ``TranscriptMeta.cc_cost_process_start``; an ``async_hook_response``
+#: attachment is a ``HOOK_OUTPUT`` with its exit code; each MCP tool sent
+#: in full keeps its size (``TranscriptResult.upfront_tool_chars``), from an
+#: ``api-request-shape`` line when one lists it (those names are
+#: ``TranscriptResult.upfront_request_tools``) and else from the
+#: ``prompt_snapshot``, which runs about 1.6 times larger, and
+#: ``upfront_definition_chars_by_server`` follows the request sizes; the summary after an inherited
+#: boundary is ``detail["inherited"]`` too, and neither is among the first
+#: reply's ``preceding_event_kinds``. A pre-45 digest has
+#: none of these, so those replies are priced on their partial output
+#: counts and a cold compaction as a cache write, and its copies, UNKNOWN
+#: request-log events and zeroed copies are still in it.
+PARSER_VERSION = 45
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

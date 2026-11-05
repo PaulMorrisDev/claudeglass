@@ -33,6 +33,8 @@ def test_a_near_miss_is_not_on_the_list(server):
 def test_a_switch_is_known_only_for_the_servers_that_have_one():
     assert "computer use" in desktop_servers.switch("computer-use")
     assert "not verified" in desktop_servers.switch("computer-use")
+    assert "/chrome" in desktop_servers.switch("claude-in-chrome")
+    assert "not verified" in desktop_servers.switch("claude-in-chrome")
     assert desktop_servers.switch("terminal") == ""
     assert desktop_servers.switch("github") == ""
     assert set(desktop_servers.SWITCHES) <= desktop_servers.BUILT_IN

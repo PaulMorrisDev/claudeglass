@@ -42,6 +42,8 @@ import pytest
 from claudeglass import capture_catalogue, capture_view, parse
 from claudeglass import corpus as corpus_mod
 from claudeglass import discovery
+from claudeglass import report as report_mod
+from claudeglass.calibration import Calibration
 from claudeglass.config import ConfigError, load_config, load_session_overrides
 from claudeglass.fixes import PROMPT_RESTART
 from claudeglass.pricing import load_pricing
@@ -790,6 +792,28 @@ def test_summary_accepts_since_and_until(server):
     assert body["error"]["code"] == "bad_request"
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/api/summary", "/api/sessions", "/api/report.json", "/api/diagnostics", "/api/daily-usage"],
+)
+def test_a_window_that_ends_before_it_starts_is_a_bad_request_not_an_empty_answer(server, path):
+    """J42: since after until answered 200 with zeros, while every other
+    malformed window parameter got a 400."""
+    inverted = "since=2026-10-29T00:00:00Z&until=2026-10-28T00:00:00Z"
+    resp, body = server.get_json(f"{path}?{inverted}")
+    assert resp.status == 400 and body["error"]["code"] == "bad_request"
+    assert "'since' must be before 'until'" in body["error"]["message"]
+    # An empty window is no window either; a window the right way round is.
+    resp, body = server.get_json(f"{path}?since=2026-10-28T00:00:00Z&until=2026-10-28T00:00:00Z")
+    assert resp.status == 400 and body["error"]["code"] == "bad_request"
+    resp, _ = server.get_json(f"{path}?since=2026-10-28T00:00:00Z&until=2026-10-29T00:00:00Z")
+    assert resp.status == 200
+    # Either bound alone is fine.
+    for one in ("since=2026-10-29T00:00:00Z", "until=2026-10-28T00:00:00Z"):
+        resp, _ = server.get_json(f"{path}?{one}")
+        assert resp.status == 200, one
+
+
 def test_sessions_listing_has_no_transcripts_key(server):
     resp, body = server.get_json("/api/sessions")
     assert resp.status == 200
@@ -1051,14 +1075,15 @@ def test_daily_usage_split_agent_separates_main_from_subagents(server):
             }
         ],
     )
-    resp, body = server.get_json("/api/daily-usage?split=agent")
+    # window=all: the rows are dated 2026-09-18, outside a rolling window.
+    resp, body = server.get_json("/api/daily-usage?split=agent&window=all")
     assert resp.status == 200
     by_agent = {row["agent"]: row for row in body["data"]}
     assert set(by_agent) == {"main", "subagent"}
     assert by_agent["main"]["turns"] == 3
     assert by_agent["subagent"]["turns"] == 1
     assert_privacy(body)
-    resp, body = server.get_json("/api/daily-usage?split=model")
+    resp, body = server.get_json("/api/daily-usage?split=model&window=all")
     assert resp.status == 200
     assert "agent" not in body["data"][0]
 
@@ -2493,6 +2518,41 @@ def test_diagnostics_route_returns_the_labelled_table(server):
     assert_privacy(body)
 
 
+def test_diagnostics_names_a_model_the_rate_card_has_no_price_for(tmp_path, monkeypatch):
+    """J3: replies on a model without a rate-card row count as $0 in every
+    figure, and the only trace was a table of the report nobody opens; the
+    Data quality page lists them too."""
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+    write_jsonl(
+        project_dir / "session-a.jsonl",
+        [turn_line(model="claude-sonnet-5", input_tokens=100, output_tokens=20)]
+        + [turn_line(model="claude-future-9-9", input_tokens=400, output_tokens=60, cache_read_input_tokens=40)] * 2,
+    )
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+    try:
+        resp, body = handle.get_json("/api/diagnostics")
+        assert resp.status == 200
+        table = body["data"]
+        rows = {row[0]: row for row in table["rows"]}
+        check, value, meaning = rows["pricing_unknown_models"]
+        assert "claude-future-9-9: " in value and "claude-sonnet-5" not in value
+        assert "replies" in value and "tokens" in value
+        assert meaning == "Replies on a model the rate card has no price for are counted as $0."
+        assert table["value_labels"]["pricing_unknown_models"] == "Models with no price"
+        assert_privacy(body)
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_diagnostics_has_no_unpriced_models_row_when_every_model_is_priced(server):
+    resp, body = server.get_json("/api/diagnostics")
+    assert "pricing_unknown_models" not in [row[0] for row in body["data"]["rows"]]
+    # The label stays known to the page whether or not a row uses it.
+    assert body["data"]["value_labels"]["pricing_unknown_models"] == "Models with no price"
+
+
 # -- Host allowlist (DNS rebinding) -------------------------------------------
 
 
@@ -3101,6 +3161,10 @@ def test_the_corpus_the_last_change_window_reads_is_the_default_reach_of_the_cha
 
 
 def test_a_window_past_the_default_reads_the_sessions_from_further_back(server, monkeypatch):
+    # The days are counted in UTC: a zone that changed its clocks in the last
+    # 30 days starts the 30-day window more than 30 x 24 hours back in the hour
+    # before midnight, and that moves the reach (_impact_reach).
+    _use_zone(monkeypatch, timezone.utc)
     reads = _spy_corpus_reads(monkeypatch)
     now = datetime.now(timezone.utc)
 
@@ -3132,6 +3196,10 @@ def test_the_change_cards_are_kept_per_project_and_reach_not_per_window(tmp_path
     now = datetime.now(timezone.utc)
     corpus = _two_project_change_corpus(tmp_path, now, beta_changes=True)
     handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    # The days are counted in UTC: a zone that changed its clocks in the last
+    # 30 days starts the 30-day window more than 30 x 24 hours back in the hour
+    # before midnight, and that moves the reach (_impact_reach).
+    _use_zone(monkeypatch, timezone.utc)
     try:
         handle.get_json("/api/report.json")  # the units the changes are worked out in
         reads = _spy_corpus_reads(monkeypatch)
@@ -3973,6 +4041,43 @@ def test_rating_a_session_saves_words_and_an_empty_rating_clears_it(server):
     assert resp.status == 200 and payload["data"]["feedback"] is None
 
 
+def _seed_mod_settings(server):
+    """The mod's settings file as the service wrote it once: coaching off."""
+    from claudeglass import mod_settings
+
+    data = mod_settings.build(server.options.config_dir)
+    assert mod_settings.write(server.options.config_dir, data)
+    assert data["coaching"]["enabled"] is False and "rated" not in data["coaching"]
+    return mod_settings.settings_path(server.options.config_dir)
+
+
+def test_rating_a_session_leaves_the_mods_settings_file_alone(server):
+    """J33: the mod never read which sessions had been rated, so a rating no
+    longer rewrites its settings file."""
+    path = _seed_mod_settings(server)
+    before = path.read_bytes()
+    resp, _payload = server.post_json(f"/api/sessions/{server.session_id}/feedback", {"outcome": "met"})
+    assert resp.status == 200
+    assert path.read_bytes() == before
+    assert "rated" not in json.loads(before.decode("utf-8"))["coaching"]
+
+
+def test_changing_the_capture_settings_refreshes_the_mods_settings_file_at_once(server):
+    path = _seed_mod_settings(server)
+    resp, _payload = server.post_json("/api/capture", {"coaching": ["coaching_notes"], "feedback": ["feedback_reminder"]})
+    assert resp.status == 200
+    coaching = json.loads(path.read_text(encoding="utf-8"))["coaching"]
+    assert coaching["enabled"] is True and "feedback_reminder" not in coaching
+
+
+def test_the_mods_settings_file_is_left_alone_when_there_is_none_yet(server):
+    from claudeglass import mod_settings
+
+    resp, _payload = server.post_json(f"/api/sessions/{server.session_id}/feedback", {"outcome": "met"})
+    assert resp.status == 200
+    assert not mod_settings.settings_path(server.options.config_dir).exists()
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -4519,6 +4624,66 @@ def test_the_banner_follows_your_own_reminder_threshold(server):
     assert _banner(server)["unrated"] is None
 
 
+def _log_signals(config_dir: Path, *records: dict) -> None:
+    """Signal lines as the capture hook writes them, stamped a minute from
+    now so they fall after the moment capture was switched on."""
+    moment = datetime.now(timezone.utc) + timedelta(minutes=1)
+    folder = config_dir / capture_catalogue.SIGNALS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"ts": moment.strftime("%Y-%m-%dT%H:%M:%SZ"), **record}) for record in records]
+    with open(folder / moment.strftime("%Y-%m.jsonl"), "a", encoding="utf-8") as out:
+        out.write("\n".join(lines) + "\n")
+
+
+def test_the_capture_page_counts_turn_and_failure_signals_toward_turn_signals(server):
+    """J18: only the end, wait and perm codes were mapped, so a metric whose
+    lines are ``turn`` and ``fail`` showed 'Collected 0 answers' however many
+    the signal files held."""
+    sid = lambda n: f"{n:016x}"
+    # Written before capture is switched on, which is no matter: they are
+    # stamped after it, and the page reads them when it first works the counts out.
+    _log_signals(
+        server.options.config_dir,
+        {"sid": sid(1), "e": "turn", "state": "normal"},
+        {"sid": sid(1), "e": "turn", "state": "reentrant"},
+        {"sid": sid(2), "e": "turn", "state": "normal"},
+        {"sid": sid(3), "e": "fail", "error": "rate_limit"},
+        {"sid": sid(4), "e": "end", "reason": "clear"},
+        {"sid": sid(5), "e": "wait", "kind": "permission"},
+        {"sid": sid(5), "e": "perm", "tool": "Bash"},
+    )
+    resp, _payload = server.post_json("/api/capture", {"level": "free"})
+    assert resp.status == 200
+    resp, payload = server.get_json("/api/capture")
+    rows = {row["id"]: row for section in payload["data"]["sections"] for row in section["metrics"]}
+    # Sessions, not lines: two sessions with a turn line and one with a failure.
+    assert rows["turn_signals"]["answers"] == 3
+    assert (rows["session_end"]["answers"], rows["waits"]["answers"], rows["permissions"]["answers"]) == (1, 1, 1)
+
+
+def test_the_capture_page_reports_capture_past_its_end_as_off_and_a_new_level_starts_it_again(server):
+    """J19: the banner said capture was on after its end time, and picking
+    the same level again on the Capture page changed nothing."""
+    config_path = server.options.config_dir / "config.toml"
+    config_path.write_text(
+        '[capture]\nlevel = "essentials"\nenabled_at = "2026-01-01T00:00:00+00:00"\nuntil = "2026-01-08T00:00:00+00:00"\n',
+        encoding="utf-8",
+    )
+    resp, payload = server.get_json("/api/capture")
+    data = payload["data"]
+    assert data["config"]["expired"] is True and data["config"]["effective"] is False
+    assert data["banner"]["on"] is False and "ended 2026-01-08" in data["banner"]["headline"]
+    assert any("'claudeglass capture on' starts it again" in note for note in data["banner"]["notes"])
+    # The level it already has, named again from the page, starts a new span.
+    resp, payload = server.post_json("/api/capture", {"level": "essentials"})
+    assert resp.status == 200
+    capture = load_config(config_dir=server.options.config_dir).capture
+    assert capture.enabled_at > "2026-01-08" and not capture.expired()
+    assert capture.until > capture.enabled_at
+    resp, payload = server.get_json("/api/capture")
+    assert payload["data"]["banner"]["on"] is True and payload["data"]["config"]["expired"] is False
+
+
 def test_capture_shows_feedback_counts_and_the_skill_install_note(server):
     import os
 
@@ -4948,6 +5113,56 @@ def test_report_json_scoped_by_project(two_project_server):
     report = body["report"]
     assert report["meta"]["projects"] == ["proj-beta"]
     assert _overview_metric(report, "sessions") == 1
+
+
+def test_a_project_view_takes_its_characters_per_token_from_every_project(tmp_path, monkeypatch):
+    """The ratio depends on the model, not the project, and a small project
+    has too few agent first calls to measure it (``calibration.MIN_CALLS``),
+    so a one-project view is measured on every project in its window."""
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch)
+    try:
+        seen = []
+        real = report_mod.measure_calibration
+
+        def measure(corpus):
+            seen.append({bundle.slug for bundle in corpus.sessions})
+            return real(corpus)
+
+        monkeypatch.setattr(report_mod, "measure_calibration", measure)
+        resp, _body = handle.get_json("/api/report.json?project=proj-alpha")
+        assert resp.status == 200
+        assert {"proj-alpha", "proj-beta"} in seen
+        assert {"proj-alpha"} not in seen
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_project_view_reuses_the_ratio_of_the_all_projects_report_kept_for_its_window(tmp_path, monkeypatch):
+    """Nothing is measured again for the project: its figure is the kept
+    all-projects report's."""
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch)
+    try:
+        family = "claude-sonnet-5"
+        measured = Calibration(tool={family: 4.4}, text={family: 3.9}, default_family=family)
+        seen = []
+
+        def measure(corpus):
+            seen.append(corpus)
+            return measured
+
+        monkeypatch.setattr(report_mod, "measure_calibration", measure)
+        _resp, everything = handle.get_json("/api/report.json")
+        assert len(seen) == 1
+        assert everything["report"]["meta"]["calibration"] == measured.to_dict()
+
+        _resp, alpha = handle.get_json("/api/report.json?project=proj-alpha")
+        assert len(seen) == 1
+        assert alpha["report"]["meta"]["projects"] == ["proj-alpha"]
+        assert alpha["report"]["meta"]["calibration"] == measured.to_dict()
+    finally:
+        handle.close()
+        handle.store.close()
 
 
 def test_report_meta_projects_sorted_by_cost_descending_at_the_api_level(two_project_server):
@@ -6028,7 +6243,7 @@ def test_capture_levels_and_rows_carry_the_warning_for_what_they_do(server):
     data = payload["data"]
     levels = {level["id"]: level for level in data["levels"]}
     assert levels["free"]["warning"].startswith("This level uses none of your Claude tokens")
-    assert "after a large read, search or web result" in levels["deep"]["warning"]
+    assert "after a large read or web result" in levels["deep"]["warning"]
     assert "after a large read" not in levels["essentials"]["warning"]
     for level in ("essentials", "standard", "deep"):
         assert "subagents and workflow agents are asked for nothing" in levels[level]["warning"]

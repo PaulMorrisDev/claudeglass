@@ -173,10 +173,13 @@ def test_corpus_from_store_window_filters_like_discovery(tmp_path: Path):
     old_path = project_dir / "sess-old.jsonl"
     new_path = project_dir / "sess-new.jsonl"
     write_jsonl(old_path, [turn_line(timestamp="2020-01-01T00:00:00.000Z")])
-    write_jsonl(new_path, [turn_line(timestamp="2026-09-18T00:00:00.000Z")])
-
     import os
     import time
+    from datetime import datetime, timedelta, timezone
+
+    # A day ago, so it stays inside the 30-day window whatever today is.
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    write_jsonl(new_path, [turn_line(timestamp=recent)])
 
     old_mtime = time.time() - 10 * 365 * 24 * 3600
     os.utime(old_path, (old_mtime, old_mtime))
@@ -288,6 +291,43 @@ def test_corpus_from_store_session_ids_keep_only_those_sessions_whatever_the_win
     assert corpus_from_store(store, session_ids=["sess-new"], project_slugs=["proj-b"]).sessions == []
     assert corpus_from_store(store, session_ids=[]).sessions == []
     assert len(corpus_from_store(store, session_ids=None).sessions) == 3
+
+
+def test_corpus_from_store_reads_the_present_transcript_of_a_session_held_twice(tmp_path: Path):
+    """J5: a session Claude Code moved to another folder is in the store
+    under both paths until the watcher drops the old one; the report reads
+    the live file, and one row for each subagent."""
+    store = Store(":memory:")
+    store.open()
+    store.upsert_session(
+        session_id="moved", project_slug="proj-b", slug="proj-b",
+        first_ts="2026-09-18T12:00:00Z", last_ts="2026-09-18T13:00:00Z",
+    )
+
+    def result(path: str, kind: str, turns: int, agent_id: str | None = None) -> str:
+        from claudeglass.cache import encode_result
+        from claudeglass.model import TranscriptMeta, TranscriptResult, Turn
+
+        return json.dumps(encode_result(TranscriptResult(
+            meta=TranscriptMeta(path=path, kind=kind, session_id="moved", agent_id=agent_id),
+            turns=[Turn(turn_index=n, ctx=n) for n in range(turns + 1)],
+        )))
+
+    def add(path: str, kind: str, turns: int, agent_id: str | None = None) -> None:
+        store.upsert_transcript(session_id="moved", path=path, kind=kind, agent_id=agent_id,
+                                digest_json=result(path, kind, turns, agent_id))
+
+    # Written in this order, so the old path's rows have the lower ids.
+    add("/old/moved.jsonl", "top-level", 2)
+    add("/old/agent-1.jsonl", "subagent", 1, "agent-1")
+    add("/new/moved.jsonl", "top-level", 5)
+    add("/new/agent-1.jsonl", "subagent", 3, "agent-1")
+    store.remove_missing({"/new/moved.jsonl", "/new/agent-1.jsonl"})
+    assert store.count_missing_transcripts() == 2
+
+    [bundle] = corpus_from_store(store).sessions
+    assert len(bundle.top.turns) == 6
+    assert [len(sub.turns) for sub in bundle.subs] == [4]
 
 
 def test_corpus_from_store_skips_session_with_no_stored_transcripts(tmp_path: Path):

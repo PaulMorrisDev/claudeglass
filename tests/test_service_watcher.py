@@ -1020,6 +1020,57 @@ def test_removed_file_cleanup(tmp_path: Path, store: Store):
     assert stats2.transcripts_missing == 1
 
 
+def test_a_session_moved_to_another_project_folder_is_stored_once(tmp_path: Path, store: Store):
+    """J5: the old path's rows stayed beside the new path's, missing but still
+    summed, so every daily total counted the session's turns twice and a
+    report could read the stale transcript."""
+    root = tmp_path / "projects"
+    old = _write_session(root, "proj-a", "sess-moved", _two_turns())
+    options = _options(tmp_path)
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [row["turns"] for row in store.daily_usage(days=None)] == [2]
+
+    # Claude Code moves the session, which has since had two more replies.
+    old.unlink()
+    moved = _two_turns() + [
+        turn_line(timestamp="2026-09-18T12:10:00.000Z", input_tokens=130, output_tokens=13),
+        turn_line(timestamp="2026-09-18T12:15:00.000Z", input_tokens=140, output_tokens=14),
+    ]
+    _write_session(root, "proj-b", "sess-moved", moved)
+    stats = watcher.run_once()
+    assert_privacy(stats)
+    # Marked missing and then dropped within the tick: nothing left to count.
+    assert stats.files_removed == 1 and stats.transcripts_missing == 0
+    assert store.count_missing_transcripts() == 0
+    assert [row["turns"] for row in store.daily_usage(days=None)] == [4]
+    assert len(store.session("sess-moved")["transcripts"]) == 1
+    # A report reads the live transcript, not the stale one.
+    from claudeglass.service.rebuild import corpus_from_store
+
+    [bundle] = corpus_from_store(store).sessions
+    assert len([t for t in bundle.top.turns if t.turn_index > 0]) == 4
+    # Another tick changes nothing.
+    again = watcher.run_once()
+    assert again.files_removed == 0 and [row["turns"] for row in store.daily_usage(days=None)] == [4]
+
+
+def test_a_vanished_transcript_with_no_new_path_is_still_kept(tmp_path: Path, store: Store):
+    """Dropping a moved session's old rows must not touch the store's
+    outliving of Claude Code's own cleanup: a file that is simply gone stays."""
+    root = tmp_path / "projects"
+    gone = _write_session(root, "proj-a", "sess-gone", _two_turns())
+    _write_session(root, "proj-a", "sess-stays", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    watcher.run_once()
+    gone.unlink()
+    for _ in range(2):
+        stats = watcher.run_once()
+    assert stats.transcripts_missing == 1 and store.count_missing_transcripts() == 1
+    assert sum(row["turns"] for row in store.daily_usage(days=None)) == 4
+    assert store.session("sess-gone") is not None
+
+
 def test_reappeared_file_clears_missing_since(tmp_path: Path, store: Store):
     """A file that comes back (e.g. a transient mount hiccup, or the
     watcher briefly racing a rewrite) has its ``missing_since`` cleared
@@ -1887,3 +1938,149 @@ def test_a_transcript_stored_without_buckets_gets_them_when_it_is_parsed_again(t
     rows = conn.execute("SELECT day, bucket, turns FROM turns_agg ORDER BY bucket").fetchall()
     # Both replies (12:00 and 12:05) are in one quarter hour.
     assert [(row["day"], row["bucket"], row["turns"]) for row in rows] == [("2026-09-18", "2026-09-18T12:00:00Z", 2)]
+
+
+# -- the ClaudeGlass mod's sensor files -------------------------------------------------
+
+
+def _write_sensor(config_dir: Path, session_id: str, events: list, *, schema: int = 1) -> Path:
+    folder = config_dir / "mod" / "sensor"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{session_id}.json"
+    path.write_text(
+        json.dumps({"schema": schema, "session_id": session_id, "version": "1.0.0", "events": events}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _sensor_note(ts: float, kind: str = "cold_return", surface: str = "hint", outcome: str = "none") -> dict:
+    return {"ts": ts, "event": "note", "kind": kind, "surface": surface, "outcome": outcome}
+
+
+def test_run_once_ingests_the_mod_sensor_files(tmp_path: Path, store: Store):
+    options = _options(tmp_path)
+    now = time.time()
+    _write_sensor(options.config_dir, "sess-a", [
+        {"ts": now - 60, "event": "present", "surface": "desktop"},
+        _sensor_note(now - 30),
+        {"ts": now - 20, "event": "compaction", "kind": "auto", "kept": 9, "missing": 1, "added": 0},
+    ])
+    _write_sensor(options.config_dir, "sess-b", [_sensor_note(now - 10, "runway", "status", "sent")])
+
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.errors == 0
+    rows = store.read_mod_events()
+    assert [(r["session_id"], r["event"]) for r in rows] == [
+        ("sess-a", "present"), ("sess-a", "note"), ("sess-a", "compaction"), ("sess-b", "note"),
+    ]
+    assert rows[2]["kept"] == 9 and rows[3]["kind"] == "runway" and rows[3]["outcome"] == "sent"
+    assert_privacy(rows)
+    assert_privacy(stats)
+
+
+def test_a_mod_sensor_file_is_read_only_when_it_changed(tmp_path: Path, store: Store, monkeypatch):
+    from claudeglass import mod_sensor
+
+    options = _options(tmp_path)
+    now = time.time()
+    path = _write_sensor(options.config_dir, "sess-a", [_sensor_note(now - 60)])
+    reads: list[str] = []
+    real = mod_sensor.load
+    monkeypatch.setattr(mod_sensor, "load", lambda p: reads.append(Path(p).name) or real(p))
+
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    watcher.run_once()
+    assert reads == ["sess-a.json"]
+
+    # The mod rewrote the whole file with one more event: read again, the old rows kept once.
+    _write_sensor(options.config_dir, "sess-a", [_sensor_note(now - 60), _sensor_note(now - 5, "big_paste", "note", "sent")])
+    later = path.stat().st_mtime + 5
+    os.utime(path, (later, later))
+    watcher.run_once()
+    assert reads == ["sess-a.json", "sess-a.json"]
+    assert [r["kind"] for r in store.read_mod_events()] == ["cold_return", "big_paste"]
+
+    # A restart reads every file once more and changes nothing.
+    FileWatcher(store, options).run_once()
+    assert len(store.read_mod_events()) == 2
+
+
+def test_only_the_vocabulary_of_a_mod_sensor_file_reaches_the_store(tmp_path: Path, store: Store):
+    options = _options(tmp_path)
+    now = time.time()
+    _write_sensor(options.config_dir, "sess-a", [
+        {**_sensor_note(now - 30), "text": "fix my login at C:\\Users\\paul\\app", "path": "/home/paul/app"},
+        _sensor_note(now - 20, kind="a prompt of mine", surface="hint"),
+        _sensor_note(now - 10, surface="C:\\Users\\paul"),
+        {"ts": now - 5, "event": "summary", "text": "the whole summary"},
+    ])
+    # A file of another schema, and one speaking for another session, are not read at all.
+    _write_sensor(options.config_dir, "sess-b", [_sensor_note(now - 30)], schema=2)
+    other = _write_sensor(options.config_dir, "sess-c", [_sensor_note(now - 30)])
+    other.write_text(other.read_text(encoding="utf-8").replace("sess-c", "sess-a"), encoding="utf-8")
+
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.errors == 0
+    rows = store.read_mod_events()
+    assert [(r["session_id"], r["kind"], r["surface"]) for r in rows] == [("sess-a", "cold_return", "hint")]
+    assert_privacy(rows)
+    blob = json.dumps(rows)
+    assert "login" not in blob and "paul" not in blob and "summary" not in blob
+
+
+def test_a_broken_mod_sensor_file_does_not_stop_the_rest(tmp_path: Path, store: Store):
+    options = _options(tmp_path)
+    folder = options.config_dir / "mod" / "sensor"
+    folder.mkdir(parents=True)
+    (folder / "bad.json").write_text("{not json", encoding="utf-8")
+    _write_sensor(options.config_dir, "good", [_sensor_note(time.time() - 5)])
+
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.errors == 0
+    assert [r["session_id"] for r in store.read_mod_events()] == ["good"]
+
+
+def test_run_once_prunes_old_mod_sensor_files_and_rows_with_no_retention_days_set(tmp_path: Path, store: Store):
+    # Like the signal files, the mod's telemetry is pruned at the 180-day default.
+    options = _options(tmp_path)
+    now = time.time()
+    old = _write_sensor(options.config_dir, "old", [_sensor_note(now - 200 * 86400)])
+    os.utime(old, (now - 200 * 86400, now - 200 * 86400))
+    recent = _write_sensor(options.config_dir, "recent", [_sensor_note(now - 5 * 86400)])
+    store.replace_mod_events("gone", [{
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 300 * 86400)), "event": "cold_send",
+        "kind": None, "surface": None, "outcome": "warned", "kept": None, "missing": None, "added": None,
+    }])
+
+    FileWatcher(store, options).run_once()
+
+    assert not old.exists() and recent.exists()
+    assert [r["session_id"] for r in store.read_mod_events()] == ["recent"]
+
+
+def test_run_once_removes_the_mods_heartbeat_files_after_a_day(tmp_path: Path, store: Store):
+    # Whatever retention_days says: the hook reads only the last ten minutes of one.
+    options = _options(tmp_path, retention_days=30)
+    now = time.time()
+    folder = options.config_dir / "mod" / "present"
+    folder.mkdir(parents=True)
+    old, recent = folder / "old.json", folder / "recent.json"
+    for path, age in ((old, 25 * 3600), (recent, 3600)):
+        path.write_text('{"schema": 1, "session_id": "' + path.stem + '", "seen": 1}', encoding="utf-8")
+        os.utime(path, (now - age, now - age))
+    FileWatcher(store, options).run_once()
+    assert not old.exists() and recent.exists()
+
+
+def test_run_once_uses_an_explicit_retention_days_for_the_mod_sensor_files(tmp_path: Path, store: Store):
+    options = _options(tmp_path, retention_days=30)
+    now = time.time()
+    old = _write_sensor(options.config_dir, "old", [_sensor_note(now - 60 * 86400)])
+    os.utime(old, (now - 60 * 86400, now - 60 * 86400))
+    FileWatcher(store, options).run_once()
+    assert not old.exists() and store.read_mod_events() == []

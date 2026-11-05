@@ -469,7 +469,7 @@ def test_mcp_instructions_stay_under_a_tools_list():
     assert "mcp__playwright__*" in rec.action
     assert "leaves MCP server instructions in" in rec.saving_basis
     assert "600 tokens per spawn" in rec.saving_basis
-    # Switching the server off removes them; an mcpServers list is unverified.
+    # Switching the server off removes them; withholding it is unverified.
     assert "Switching the server off drops them" in rec.saving_basis and "isn't verified" in rec.saving_basis
 
 
@@ -496,7 +496,16 @@ def test_unused_mcp_names_a_server_only_at_two_percent_of_spawns_and_five_dollar
     recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": big})), units=Units())
     rec = next(r for r in recs if r.id == "spawn-unused-mcp" and r.agent_type == "searcher")
     assert "playwright (used in 0 of 50 spawns)" in rec.action
-    assert "mcpServers" in rec.action and rec.changes[0].key == "mcpServers"
+    assert "mcp__playwright" in rec.action and "disallowedTools" in rec.action
+    assert "mcpServers" not in rec.action
+    assert rec.changes[0].key == "disallowedTools"
+    # A custom agent is taken to have its own file, which may already list
+    # tools, so the change adds to the list. A built-in one has no file: the
+    # new file lists just these.
+    assert rec.changes[0].value is None and not rec.changes[0].new_agent_file
+    built_in = _recs(_report(_diet_acc("statusline-setup", spawns=50, servers={"playwright": big})), units=Units())
+    (new_file,) = [r for r in built_in if r.id == "spawn-unused-mcp"]
+    assert new_file.changes[0].value == ["mcp__playwright"] and new_file.changes[0].new_agent_file
     # ... exactly 2% (1 of 50) still counts, 2 of 50 (4%) does not.
     two = (1, 25_000.0, 800.0, 300.0)
     recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": two})), units=Units())
@@ -523,10 +532,27 @@ def test_unused_mcp_goes_per_server_and_is_a_breakdown_not_an_addition():
     assert "instructions stay under a tools list" in rec.saving_basis
     # The tools list card carries the one saving that the dashboard sums.
     assert _tools_rec(recs, "searcher").saving_usd
-    # mcpServers is not in the config snapshot, so the change says so.
-    note = rec.changes[0].note
-    assert "doesn't record" in note and "mcpServers" in rec.changes[0].key
-    assert rec.changes[0].value is None and rec.changes[0].suggested
+    # An agent file may already list tools, so the change adds to the list.
+    change = rec.changes[0]
+    assert change.key == "disallowedTools" and change.value is None and change.new_agent_file is False
+    assert "mcp__playwright" in change.suggested and "mcp__sentry" in change.suggested
+    assert "keeping anything already there" in change.suggested
+    assert change.note == ""
+    assert rec.action.startswith("Add mcp__playwright, mcp__sentry to the disallowedTools of searcher")
+
+
+def test_unused_mcp_leaves_off_a_server_whose_name_would_withhold_others():
+    """``mcp__<server>`` is a prefix to Claude Code, so a name with ``__`` in
+    it would also withhold the servers that share its start."""
+    servers = {"reports__v2": (0, 25_000.0, 800.0, 300.0)}
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers=servers)), units=Units())
+    assert not any(r.id == "spawn-unused-mcp" for r in recs)
+    # Another server, beside it, still gets the card, and the card leaves it out.
+    servers["playwright"] = (0, 25_000.0, 800.0, 300.0)
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers=servers)), units=Units())
+    rec = next(r for r in recs if r.id == "spawn-unused-mcp")
+    assert "reports__v2" not in rec.action and "mcp__reports" not in rec.action
+    assert "mcp__playwright" in rec.changes[0].suggested and "reports" not in rec.changes[0].suggested
 
 
 def test_unused_mcp_is_not_offered_to_workflow_agents():

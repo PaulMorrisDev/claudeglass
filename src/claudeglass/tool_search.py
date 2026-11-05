@@ -6,14 +6,26 @@ definition when Claude searches for it. Without it, every definition
 would sit at the front of every request. ``parse.py`` keeps, per reply,
 how many listed tools had no definition loaded, by MCP server
 (``Turn.deferred_tools_by_server``), and per transcript the size of each
-definition it did load (``TranscriptResult.tool_definition_chars``).
+definition it did load (``TranscriptResult.tool_definition_chars``) and
+of each MCP tool sent in full (``TranscriptResult.upfront_tool_chars``:
+the size in the request Claude Code logged where there is one, else in a
+``prompt_snapshot``, which runs about 1.6 times the request's).
 
 The model, per reply requested with tools deferred:
 
 - **Kept out.** Each unloaded tool is sized at the average definition of
-  its own MCP server, measured from the definitions loaded anywhere in
-  the window, or at the average of every server when none of its own was
-  loaded. Nothing is priced when no definition was loaded at all.
+  its own MCP server, measured from the definitions loaded or sent in
+  full anywhere in the window (a loaded size wins for a tool that is in
+  both, and for a tool sent in full a size from the logged request wins
+  over a snapshot's, which runs about 1.5 times as large). A server none
+  of whose tools was measured takes the average of the MCP tools loaded
+  through tool search in the window, when at least
+  :data:`MIN_MCP_SAMPLE` were measured, else :data:`DEFAULT_MCP_TOOL_TOKENS`.
+  Tools sent in full don't feed that average: they are a server's small
+  always-load tools, so they size only their own server. Claude Code's
+  own tools are a different kind of definition and never join it. They
+  take their own average, else the average of every tool. Nothing is
+  priced when no definition was measured at all.
 - **Priced** at that reply's own rate for the front of the prompt: its
   cache read rate when it read the cache, its cache write rate when it
   wrote the cache from the start, its input rate when it cached nothing
@@ -52,8 +64,13 @@ removing it takes, comes from generic evidence only.
   A lower bound: a reply that rebuilt the cache paid the write rate.
 
 The ``mcp-unused-server`` rule (:data:`RULES`) lists the servers offered
-in many main sessions, recently and for a while, that Claude never used,
-each with the fix for its kind.
+in many main sessions, recently and for a while, that Claude didn't use in
+the window, each with the fix for its kind. The window is all it can see,
+so the card says how many days it looked back. That is no further than
+every reply was seen: a session is in the window when its last reply is,
+and one that started earlier brings its earlier turns, but the sessions
+that ended in those days aren't in the corpus, so the look-back is capped
+at the earliest last reply of a main session (``McpServerRow.first_seen_days``).
 
 Same shape as ``hook_costs.py``: :class:`ToolSearchThresholds`,
 :func:`compute_tool_search`, :func:`build_section` and :data:`RULES`.
@@ -80,8 +97,9 @@ SEARCH_TOOL = "ToolSearch"
 ASSUMPTIONS: tuple[str, ...] = (
     "a tool definition tool search kept out would have been at the front of every request, so it is priced at "
     "that reply's cache read rate, or its cache write rate when the reply wrote the cache from the start",
-    "a definition that was never loaded is sized at the average of the loaded definitions from its own MCP "
-    "server, or from every server when none of its own were loaded",
+    "a deferred tool is sized at the average of its own server's tools that were loaded or sent in full, "
+    "else at the average of the MCP tools loaded in this window when at least ten were, "
+    "else at 550 tokens, the average Claude Code counted over 219 MCP tool definitions",
     "a reply that only searched for tools wouldn't have happened without tool search, so its whole cost is "
     "taken off the saving",
     "characters become tokens at the figure measured on your own first calls for the model that read them "
@@ -140,9 +158,9 @@ class ToolSearchThresholds:
             f"\"By MCP server\" lists the top {self.top_n}; \"Each MCP server\" lists every one.",
             f"An MCP server is flagged as unused when it was offered in at least {self.unused_min_sessions} main "
             f"sessions, first at least {self.unused_min_age_days:g} days and last at most "
-            f"{self.unused_max_idle_days:g} days before the window's end, Claude never used it, and keeping it "
-            f"cost at least ${self.unused_min_server_usd:.2f}; the card needs ${self.unused_min_total_usd:.2f} "
-            "in all.",
+            f"{self.unused_max_idle_days:g} days before the window's end, Claude didn't use it in the window, "
+            f"and keeping it cost at least ${self.unused_min_server_usd:.2f}; the card needs "
+            f"${self.unused_min_total_usd:.2f} in all.",
         ]
 
 
@@ -156,12 +174,18 @@ class ServerRow:
     server: str
     #: Most of its tools listed by name only in one request.
     most_deferred: int = 0
-    #: Its tools whose definitions were loaded somewhere in the window.
+    #: Its tools whose definitions were loaded, or sent in full at the
+    #: start, somewhere in the window.
     measured: int = 0
     #: Average definition size its unloaded tools were given, in tokens.
     definition_tokens: float = 0.0
-    #: Whether that average came from its own loaded tools.
+    #: Whether that average came from its own measured tools.
     own_sizes: bool = False
+    #: Where that average came from, in words: "its own tools", "MCP tools
+    #: loaded in this window" or "typical MCP tool" (an MCP server with no
+    #: tool measured of its own) or "all servers" (Claude Code's own tools
+    #: with none measured). Blank when no definition was measured at all.
+    sized_from: str = ""
     replies: int = 0
     kept_tokens: float = 0.0
     saving_usd: float = 0.0
@@ -180,7 +204,8 @@ class ToolSearchStats:
     #: came from MCP servers.
     most_deferred: int = 0
     most_deferred_mcp: int = 0
-    #: Distinct definitions loaded in the window, and their average size.
+    #: Distinct definitions loaded or sent in full in the window, and their
+    #: average size.
     definitions_measured: int = 0
     mean_definition_tokens: float = 0.0
     kept_tokens: float = 0.0
@@ -199,7 +224,8 @@ class ToolSearchStats:
 
     @property
     def measurable(self) -> bool:
-        """Whether any definition was loaded, so sizes can be estimated."""
+        """Whether any definition was loaded or sent in full, so sizes can
+        be estimated."""
         return self.definitions_measured > 0
 
     def ranked(self) -> list[ServerRow]:
@@ -273,7 +299,11 @@ class McpServerRow:
     main_sessions: int = 0
     subagent_runs: int = 0
     uses: int = 0
-    #: Days before the window's end it was first and last offered.
+    #: Days before the window's end it was first and last offered. The first
+    #: is at most as far back as every reply was seen: a session that
+    #: started before the window brings its earlier turns, but the sessions
+    #: that ended in those days aren't in the corpus, so nothing is known
+    #: about whether the server was used then.
     first_seen_days: float | None = None
     last_seen_days: float | None = None
     samples: tuple[str, ...] = ()
@@ -488,10 +518,19 @@ def _mcp_servers(
             entry.in_other = True
         return entry
 
+    #: Session id -> its last reply, across its main transcript and its
+    #: subagents' (the way ``corpus`` windows a session by its last reply),
+    #: and the main sessions among them: see the look-back below.
+    last_reply: dict[str, datetime] = {}
+    main_sessions: set[str] = set()
+
     for tr in results:
         desktop = tr.meta.entrypoint == _DESKTOP_ENTRYPOINT
         main = tr.meta.kind == "top-level"
         run = tr.meta.session_id if main else tr.meta.path
+        session = tr.meta.session_id or (tr.meta.path if main else "")
+        if main and session:
+            main_sessions.add(session)
         slug = tr.meta.project_slug or ""
         project = redact_slug(slug) if slug else ""
         if slug:
@@ -509,9 +548,11 @@ def _mcp_servers(
         for turn in tr.turns:
             for server, n in _used_in(turn, savers).items():
                 get(server, desktop).uses += n
+            at = _parse_ts(turn.ts)
+            if at is not None and session and (session not in last_reply or at > last_reply[session]):
+                last_reply[session] = at
             if turn.turn_index <= 0 or turn.is_synthetic:
                 continue
-            at = _parse_ts(turn.ts)
             if at is not None and (end is None or at > end):
                 end = at
             offered: dict[str, list[int]] = {}
@@ -539,6 +580,15 @@ def _mcp_servers(
                 if at is not None:
                     entry.first = at if entry.first is None or at < entry.first else entry.first
                     entry.last = at if entry.last is None or at > entry.last else entry.last
+
+    # How far back every reply was seen. A session is in the window when its
+    # last reply is, and it brings every earlier turn with it; a session that
+    # ended before the window is not in the corpus at all, so a use in it
+    # can't be seen. Every reply after the earliest last reply of a main
+    # session is in the corpus, which makes that the span the figures can
+    # vouch for (a lower bound on the window's length).
+    reached = [last_reply[session] for session in main_sessions if session in last_reply]
+    covered_days = max(0.0, (end - min(reached)).total_seconds() / 86400) if end and reached else None
 
     seen.pop(BUILT_IN_TOOLS, None)
     config = _read_config(snapshots, slugs, canonical, set(seen))
@@ -573,6 +623,9 @@ def _mcp_servers(
             in_other=any(e.in_other for e in entries),
         )
         tools = sorted(set().union(*(e.tools for e in entries)))
+        first_seen_days = (end - min(firsts)).total_seconds() / 86400 if end and firsts else None
+        if first_seen_days is not None and covered_days is not None:
+            first_seen_days = min(first_seen_days, covered_days)
         row = McpServerRow(
             server=names[0],
             aliases=tuple(names[1:]),
@@ -580,7 +633,7 @@ def _mcp_servers(
             main_sessions=len(set().union(*(e.main for e in entries))),
             subagent_runs=len(set().union(*(e.runs for e in entries))),
             uses=sum(e.uses for e in entries),
-            first_seen_days=(end - min(firsts)).total_seconds() / 86400 if end and firsts else None,
+            first_seen_days=first_seen_days,
             last_seen_days=(end - max(lasts)).total_seconds() / 86400 if end and lasts else None,
             samples=tuple(tools[:_SAMPLES]),
             list_usd=sum(e.list_usd for e in entries),
@@ -659,6 +712,49 @@ def _definition_sizes(results: list[TranscriptResult]) -> dict[str, int]:
     return sizes
 
 
+def _upfront_sizes(results: list[TranscriptResult]) -> dict[str, int]:
+    """MCP tool name -> characters of its largest definition sent in full
+    at the start, which no ``deferred_tools_record`` ever loads. A size
+    from the request Claude Code logged is on the scale of a loaded
+    definition; a ``prompt_snapshot``'s runs about 1.5 times that. A window
+    holds sessions from before the request was logged as well as after, so
+    a tool takes its largest size among the transcripts that sized it from
+    the request, and its largest snapshot size only when none did: the
+    largest of all would pick the snapshot's for a tool both kinds saw, and
+    mix two scales into one average."""
+    sent: dict[str, int] = {}
+    shown: dict[str, int] = {}
+    for tr in results:
+        from_request = set(tr.upfront_request_tools or ())
+        for name, chars in (tr.upfront_tool_chars or {}).items():
+            if not isinstance(chars, int):
+                continue
+            sizes = sent if name in from_request else shown
+            if chars > sizes.get(name, 0):
+                sizes[name] = chars
+    return {**shown, **sent}
+
+
+#: Where a server's average definition came from (``ServerRow.sized_from``).
+SIZED_OWN = "its own tools"
+SIZED_LOADED_MCP = "MCP tools loaded in this window"
+SIZED_DEFAULT = "typical MCP tool"
+SIZED_ALL = "all servers"
+
+#: The fewest MCP tools loaded through tool search that size a server with
+#: no tool of its own measured. Fewer is too small a sample to stand for
+#: servers in general.
+MIN_MCP_SAMPLE = 10
+
+#: The mean size of an MCP tool definition, in tokens: taken over 219 MCP
+#: tool definitions that Claude Code counted exactly with its token-count
+#: request (``get_context_usage``, Claude Code 2.1.309, 2026-10-30). It
+#: stands in for a server with no tool of its own measured when the window
+#: loaded too few MCP tools to measure (:data:`MIN_MCP_SAMPLE`). Already in
+#: tokens, so no calibration applies.
+DEFAULT_MCP_TOOL_TOKENS = 550.0
+
+
 def compute_tool_search(
     results: list[TranscriptResult],
     pricing: Pricing,
@@ -680,10 +776,18 @@ def compute_tool_search(
     calibration = calibration or Calibration()
     stats = ToolSearchStats()
     stats.mcp_servers = _mcp_servers(results, pricing.resolve_model, snapshots, all_projects, th, calibration)
-    sizes = _definition_sizes(results)
+    # The samples: every definition loaded, and every MCP tool sent in
+    # full at the start. A loaded size wins for a tool that is in both.
+    sizes = {**_upfront_sizes(results), **_definition_sizes(results)}
     by_server: dict[str, list[int]] = {}
     for name, chars in sizes.items():
         by_server.setdefault(tool_server(name), []).append(chars)
+    # Tools sent in full are a server's small always-load tools: they size
+    # their own server only. The fallback for another server is the MCP tools
+    # loaded through tool search.
+    loaded_mcp = [
+        chars for name, chars in _definition_sizes(results).items() if tool_server(name) != BUILT_IN_TOOLS
+    ]
     stats.definitions_measured = len(sizes)
     if sizes:
         stats.mean_definition_tokens = calibration.tool_tokens(sum(sizes.values()) / len(sizes))
@@ -692,13 +796,25 @@ def compute_tool_search(
         row = stats.servers.get(server)
         if row is None:
             own = by_server.get(server)
+            if own:
+                tokens, sized_from = calibration.tool_tokens(sum(own) / len(own)), SIZED_OWN
+            elif server != BUILT_IN_TOOLS and len(loaded_mcp) >= MIN_MCP_SAMPLE:
+                tokens = calibration.tool_tokens(sum(loaded_mcp) / len(loaded_mcp))
+                sized_from = SIZED_LOADED_MCP
+            elif server != BUILT_IN_TOOLS and sizes:
+                # Claude Code's own tools are a different kind of definition,
+                # and the default is already in tokens.
+                tokens, sized_from = DEFAULT_MCP_TOOL_TOKENS, SIZED_DEFAULT
+            elif sizes:
+                tokens, sized_from = calibration.tool_tokens(sum(sizes.values()) / len(sizes)), SIZED_ALL
+            else:
+                tokens, sized_from = 0.0, ""
             row = stats.servers[server] = ServerRow(
                 server=server,
                 measured=len(own or ()),
-                definition_tokens=(
-                    calibration.tool_tokens(sum(own) / len(own)) if own else stats.mean_definition_tokens
-                ),
+                definition_tokens=tokens,
                 own_sizes=bool(own),
+                sized_from=sized_from,
             )
         return row
 
@@ -798,7 +914,7 @@ def build_section(stats: ToolSearchStats, thresholds: ToolSearchThresholds | Non
                 s.most_deferred,
                 s.measured,
                 s.definition_tokens if measurable else None,
-                ("its own tools" if s.own_sizes else "all servers") if measurable else "",
+                s.sized_from if measurable else "",
                 s.replies,
                 s.kept_per_reply if measurable else None,
                 s.saving_usd if measurable else None,
@@ -809,8 +925,8 @@ def build_section(stats: ToolSearchStats, thresholds: ToolSearchThresholds | Non
     notes = list(ASSUMPTIONS) + list(SERVER_ASSUMPTIONS) + [f"Thresholds: {' '.join(th.describe())}"]
     if stats.replies and not measurable:
         notes.append(
-            "No tool definition was loaded in this window, so there is nothing to size the deferred ones by: "
-            "the saving isn't worked out."
+            "No tool definition was loaded or sent in full in this window, so there is nothing to size the "
+            "deferred ones by: the saving isn't worked out."
         )
     if len(ranked) > th.top_n:
         notes.append(f"{len(ranked) - th.top_n} more servers aren't in \"By MCP server\".")
@@ -1008,9 +1124,12 @@ def _names(labels: list[str]) -> str:
 def _rule_unused_servers(report: ReportModel, th: ToolSearchThresholds) -> list[Recommendation]:
     """``mcp-unused-server``: every server ``compute_tool_search`` marked
     ``remove`` (offered in many main sessions, recently and for a while,
-    never used, of a kind you can turn off), on one card, each with the
-    fix for its kind. Amounts are left to ``advice.py``, which words them
-    for the billing mode."""
+    not used in the window, of a kind you can turn off), on one card, each
+    with the fix for its kind. The window is all the evidence there is (no
+    store table keeps tool use beyond it), so the card words itself by it:
+    it says how many days it looked back, and that a server used before
+    then can still get the card. Amounts are left to ``advice.py``, which
+    words them for the billing mode."""
     rows = [r for r in _server_rows(report) if r.get("status") == STATUS_REMOVE]
     total = sum(_num(r.get("removable_usd")) for r in rows)
     if not rows or total < th.unused_min_total_usd:
@@ -1031,6 +1150,10 @@ def _rule_unused_servers(report: ReportModel, th: ToolSearchThresholds) -> list[
         fixes.append(f"{_names([labels[i] for i in members])}: {fix}.")
     one = len(rows) == 1
     sessions = max(int(_num(r.get("main_sessions"))) for r in rows)
+    # How far back the evidence goes: the earliest any of them was offered,
+    # no further than every reply was seen (the column is already capped).
+    days = max(1, int(min(_num(r.get("first_seen_days")) for r in rows)))
+    unit = "day" if days == 1 else "days"
     evidence = []
     for label, r in zip(labels, rows):
         server = r["server"]
@@ -1053,16 +1176,17 @@ def _rule_unused_servers(report: ReportModel, th: ToolSearchThresholds) -> list[
             category="workflow",
             archetypes=(),
             title=(
-                f"{labels[0]} is an MCP server you never use" if one
-                else f"{len(rows)} MCP servers you never use are loaded into your sessions"
+                f"{labels[0]} is an MCP server you haven't used in {days} {unit}" if one
+                else f"{len(rows)} MCP servers you haven't used in {days} {unit} are loaded into your sessions"
             ),
             why=(
-                f"{_names(labels)} {'was' if one else 'were'} offered in up to {sessions:,} main sessions and "
-                f"Claude never used {'it' if one else 'them'}, yet every reply carried "
-                f"{'its' if one else 'their'} tool names, instructions or tools."
+                f"{_names(labels)} {'was' if one else 'were'} offered in up to {sessions:,} main sessions over "
+                f"the last {days} {unit}, and Claude didn't use {'it' if one else 'them'}. Every reply still "
+                f"carried {'its' if one else 'their'} tool names, instructions or tools."
             ),
             action=(
                 " ".join(fixes)
+                + f" ClaudeGlass looked back only {days} {unit}, so keep any server you still use now and then."
                 + " The saving starts with your next new session, or once a conversation is summarised."
             ),
             lever=None,
@@ -1084,6 +1208,8 @@ RULES: list[Callable[[ReportModel, ToolSearchThresholds], list[Recommendation]]]
 
 __all__ = [
     "ASSUMPTIONS",
+    "DEFAULT_MCP_TOOL_TOKENS",
+    "MIN_MCP_SAMPLE",
     "McpServerRow",
     "RULES",
     "SEARCH_TOOL",

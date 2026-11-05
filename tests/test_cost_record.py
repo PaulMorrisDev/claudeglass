@@ -8,6 +8,7 @@ now and then (see ``model.py``'s module docstring).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -21,7 +22,7 @@ from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing, price_turn
 from claudeglass.units import Units
 
-from helpers import tool_use_block, turn_line, user_str_line, write_jsonl
+from helpers import tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
 
 SESSION = "7e5fd47d-1816-569f-9241-e02958cf9196"
 SONNET = "claude-sonnet-5"
@@ -104,7 +105,14 @@ def test_a_stopped_reply_and_an_unlogged_request_explain_the_difference(tmp_path
 
     [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
 
-    assert cost.stopped_usd == pytest.approx(_sonnet_cost(input_tokens=2000, output_tokens=9))
+    # The reply has no stop reason, so it also counts as logged mid-stream
+    # and carries an output estimate; pressing Esc after it makes it a
+    # stopped one, and its whole cost, estimate included, is that cause.
+    [stopped_turn] = [t for t in corpus.sessions[0].top.turns if t.message_id == "msg_2"]
+    assert stopped_turn.output_partial
+    assert cost.stopped_usd == pytest.approx(
+        price_turn(stopped_turn, load_pricing().resolve_model(SONNET)).total
+    )
     assert cost.unlogged_usd == pytest.approx(0.001)
     assert cost.local_cost_usd - cost.cc_cost_usd == pytest.approx(cost.stopped_usd - cost.unlogged_usd)
     assert cost.unexplained_usd == pytest.approx(0.0, abs=1e-12)
@@ -214,3 +222,244 @@ def test_the_section_adds_up_the_sessions_and_their_reasons():
     assert row["difference_pct"] == pytest.approx(100 * 0.4 / 15)
     assert row["unexplained_pct"] == pytest.approx(0.0, abs=1e-9)
     assert [r[0] for r in sessions.rows] == ["b", "a"]
+
+
+# -- replies logged mid-stream (output estimated) ---------------------------
+
+
+def _partial_lines(*, esc: bool = False, tool: bool = True) -> list[dict]:
+    """A finished reply, a reply logged only mid-stream (output 7, no stop
+    reason) whose context the next request shows grew by 2,000 tokens
+    with 4,000 characters of tool result (so it wrote 1,000), a finished
+    reply, then Claude Code's total. Without a tool the reply is a text
+    one, and ``esc`` adds the interrupt line Esc leaves after it."""
+    content = [tool_use_block("Read", "toolu_2", {"file_path": "a.py"})] if tool else [{"type": "text", "text": "ok"}]
+    lines = [
+        user_str_line("start", timestamp="2026-09-26T10:00:00.000Z", sessionId=SESSION),
+        _reply("msg_1", "2026-09-26T10:00:05.000Z", input_tokens=3000, output_tokens=40, sessionId=SESSION),
+        _reply("msg_2", "2026-09-26T10:00:10.000Z", stop_reason=None, input_tokens=5000, output_tokens=7,
+               content=content, sessionId=SESSION),
+    ]
+    if tool:
+        lines.append(user_block_line([tool_result_block("toolu_2", "x" * 4000)], timestamp="2026-09-26T10:00:12.000Z",
+                                     sessionId=SESSION))
+    if esc:
+        lines.append(user_str_line("[Request interrupted by user]", timestamp="2026-09-26T10:00:13.000Z",
+                                   sessionId=SESSION))
+    lines.append(_reply("msg_3", "2026-09-26T10:00:20.000Z", input_tokens=7000, output_tokens=300, sessionId=SESSION))
+    local = (
+        _sonnet_cost(input_tokens=3000, output_tokens=40)
+        + _sonnet_cost(input_tokens=5000, output_tokens=1000)
+        + _sonnet_cost(input_tokens=7000, output_tokens=300)
+    )
+    lines.append(_cost_state(local, {SONNET: local}))
+    return lines
+
+
+def test_the_estimated_output_of_a_reply_logged_mid_stream_is_its_own_share(tmp_path: Path):
+    corpus = load_corpus([_write(tmp_path, _partial_lines())])
+
+    [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    # 993 tokens beyond the 7 logged, at Sonnet 5's $10 per million.
+    assert cost.partial_usd == pytest.approx(993 * 10e-6)
+    assert cost.stopped_usd == 0.0
+    assert cost.local_cost_usd == pytest.approx(cost.cc_cost_usd)
+    assert cost.unexplained_usd == pytest.approx(0.0, abs=1e-12)
+
+
+def test_a_mid_stream_reply_nobody_stopped_is_not_listed_as_stopped_too(tmp_path: Path):
+    """A subagent's last reply is a text one, logged mid-stream; Claude
+    Code bills it, so it is not taken out of ClaudeGlass's side."""
+    corpus = load_corpus([_write(tmp_path, _partial_lines(tool=False))])
+
+    [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    assert cost.stopped_usd == 0.0
+    assert cost.partial_usd > 0.0
+
+
+def test_a_mid_stream_reply_you_pressed_esc_on_is_a_stopped_one(tmp_path: Path):
+    corpus = load_corpus([_write(tmp_path, _partial_lines(tool=False, esc=True))])
+
+    [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    [stopped_turn] = [t for t in corpus.sessions[0].top.turns if t.message_id == "msg_2"]
+    assert cost.stopped_usd == pytest.approx(price_turn(stopped_turn, load_pricing().resolve_model(SONNET)).total)
+
+
+def test_the_estimated_share_is_a_column_of_the_summary():
+    costs = [reconcile.ClaudeCodeCost(session_id="a", cc_cost_usd=10.0, local_cost_usd=10.0, as_of="x", partial_usd=1.5)]
+
+    summary = reconcile.build_cost_record_section(costs).tables[0]
+    row = dict(zip([c.key for c in summary.columns], summary.rows[0]))
+
+    assert row["partial_usd"] == pytest.approx(1.5)
+    assert row["unexplained_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+# -- one row per Claude Code process ----------------------------------------
+
+PROCESS_START = 1790415397937  # 2026-09-26T09:36:37Z, before every reply below
+FORK_A = "aaaaaaaa-1816-569f-9241-e02958cf9196"
+FORK_B = "bbbbbbbb-1816-569f-9241-e02958cf9196"
+FORK_C = "cccccccc-1816-569f-9241-e02958cf9196"
+
+
+def _fork_lines(session_id: str, reply_ts: str, total: float, *, start: int | None = PROCESS_START) -> list[dict]:
+    """One session of a process that moves through several: its own reply,
+    then the process's whole running total so far (the same Haiku request
+    in every file)."""
+    state = _cost_state(total, {SONNET: total - 0.126, HAIKU: 0.126})
+    state["sessionId"] = session_id
+    if start is None:
+        del state["startTime"]
+    else:
+        state["startTime"] = start
+    return [
+        user_str_line("go", timestamp=reply_ts, sessionId=session_id),
+        _reply(f"msg_{session_id[:4]}", reply_ts, input_tokens=2000, output_tokens=300, sessionId=session_id),
+        state,
+    ]
+
+
+def _forks(tmp_path: Path, **overrides) -> Path:
+    folder = tmp_path / "-home-user-shop"
+    folder.mkdir(parents=True, exist_ok=True)
+    spec = {
+        FORK_A: ("2026-10-01T10:00:05.000Z", 9.9649),
+        FORK_B: ("2026-10-01T10:10:05.000Z", 10.6284),
+        FORK_C: ("2026-10-01T10:20:05.000Z", 11.2921),
+    }
+    for session_id, (ts, total) in spec.items():
+        write_jsonl(folder / f"{session_id}.jsonl", _fork_lines(session_id, ts, total, **overrides))
+    return folder
+
+
+def test_forked_sessions_that_share_a_process_make_one_row(tmp_path: Path):
+    corpus = load_corpus([_forks(tmp_path)])
+
+    costs = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    [cost] = costs
+    assert cost.cc_cost_usd == pytest.approx(11.2921)
+    assert cost.session_id == FORK_C
+    assert set(cost.sessions) == {FORK_A, FORK_B, FORK_C}
+    # The three sessions' replies, all of them, against the one total.
+    assert cost.local_cost_usd == pytest.approx(3 * _sonnet_cost(input_tokens=2000, output_tokens=300))
+
+
+def test_a_model_only_claude_code_billed_is_counted_once_across_the_forks(tmp_path: Path):
+    corpus = load_corpus([_forks(tmp_path)])
+
+    [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    assert cost.unlogged_usd == pytest.approx(0.126)
+
+
+def test_sessions_with_no_process_start_stay_one_row_each(tmp_path: Path):
+    corpus = load_corpus([_forks(tmp_path, start=None)])
+
+    costs = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    assert len(costs) == 3
+    assert {c.session_id for c in costs} == {FORK_A, FORK_B, FORK_C}
+
+
+def test_every_session_of_a_process_is_covered_by_the_cost_state_row(tmp_path: Path):
+    corpus = load_corpus([_forks(tmp_path)])
+
+    gaps = reconcile.cost_ground_truth_gaps(corpus, load_pricing(), None)
+
+    assert [g.source for g in gaps] == ["cost_state"]
+    assert gaps[0].cc_cost_usd == pytest.approx(11.2921)
+
+
+def test_the_summary_counts_the_sessions_of_a_process(tmp_path: Path):
+    corpus = load_corpus([_forks(tmp_path)])
+    costs = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    summary = reconcile.build_cost_record_section(costs).tables[0]
+    row = dict(zip([c.key for c in summary.columns], summary.rows[0]))
+
+    assert row["sessions"] == 3
+    assert row["cc_usd"] == pytest.approx(11.2921)
+
+
+def test_the_parser_keeps_when_the_process_started(tmp_path: Path):
+    path = _write(tmp_path, _session_lines()) / f"{SESSION}.jsonl"
+
+    meta = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id=SESSION)).meta
+
+    assert meta.cc_cost_process_start == 1790415397937
+
+
+# -- a response stopped by safeguards ---------------------------------------
+
+FABLE = "claude-fable-5-1"
+
+
+def _refusal_lines(*, refused: bool = True) -> list[dict]:
+    """A Sonnet reply, then (when ``refused``) the placeholder reply Claude
+    Code logs for a response stopped by safeguards, with no usage; Claude
+    Code's total bills Fable 4.084 for the refused request and a title
+    request on Haiku."""
+    first = _sonnet_cost(input_tokens=1000, output_tokens=500)
+    lines = [
+        user_str_line("start", timestamp="2026-09-26T10:00:00.000Z", sessionId=SESSION),
+        _reply("msg_1", "2026-09-26T10:00:05.000Z", input_tokens=1000, output_tokens=500, sessionId=SESSION),
+    ]
+    if refused:
+        placeholder = turn_line(message_id="msg_refused", model="<synthetic>", timestamp="2026-09-26T10:00:30.000Z",
+                                input_tokens=0, output_tokens=0, sessionId=SESSION)
+        placeholder["message"]["stop_reason"] = "refusal"
+        lines.append(placeholder)
+    lines.append(_cost_state(first + 4.084 + 0.001, {SONNET: first, FABLE: 4.084, HAIKU: 0.001}))
+    return lines
+
+
+def test_spend_on_a_response_stopped_by_safeguards_is_labelled_not_left_with_the_small_requests(tmp_path: Path):
+    corpus = load_corpus([_write(tmp_path, _refusal_lines())])
+
+    [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    assert cost.safeguards_usd == pytest.approx(4.084)
+    # Still unlogged: the safeguards share is part of it, the Haiku title
+    # request is the rest.
+    assert cost.unlogged_usd == pytest.approx(4.085)
+
+
+def test_unlogged_spend_with_no_refusal_in_the_log_is_not_called_safeguards(tmp_path: Path):
+    corpus = load_corpus([_write(tmp_path, _refusal_lines(refused=False))])
+
+    [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    assert cost.safeguards_usd == 0.0
+    assert cost.unlogged_usd == pytest.approx(4.085)
+
+
+def test_the_safeguards_share_is_a_column_of_the_summary():
+    costs = [reconcile.ClaudeCodeCost(session_id="a", cc_cost_usd=10.0, local_cost_usd=6.0, as_of="x",
+                                      unlogged_usd=4.0, safeguards_usd=4.0)]
+
+    summary = reconcile.build_cost_record_section(costs).tables[0]
+    row = dict(zip([c.key for c in summary.columns], summary.rows[0]))
+
+    assert row["safeguards_usd"] == pytest.approx(4.0)
+    assert "A response stopped by safeguards" in summary.columns[-1].label
+
+
+def test_the_cost_record_notes_keep_to_short_plain_sentences():
+    """The dashboard shows these notes as written: 25 words at most to a
+    sentence, no camelCase setting key, no " -- " aside."""
+    costs = [reconcile.ClaudeCodeCost(session_id="a", cc_cost_usd=10.0, local_cost_usd=6.0, as_of="x",
+                                      unlogged_usd=4.0, safeguards_usd=4.0)]
+
+    notes = reconcile.build_cost_record_section(costs).notes
+
+    assert len(notes) >= 6
+    for note in notes:
+        for sentence in re.split(r"(?<=[.?!])[\"')]*\s+", note):
+            assert len(sentence.split()) <= 25, sentence
+        assert not re.search(r"[a-z]+[A-Z][A-Za-z]*", note), note
+        assert " -- " not in note, note

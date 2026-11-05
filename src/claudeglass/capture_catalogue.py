@@ -353,6 +353,21 @@ SIGNAL_EVENTS = {
     "StopFailure": "turn_signals",
 }
 
+#: The short event name a signal line carries (``hooks/capture_hook.py``'s
+#: ``_SIGNAL_CODES`` writes it, ``signals.Signal.event`` reads it) -> the
+#: metric the line counts toward. The dashboard counts a metric's answers
+#: by it; ``Stop`` and ``StopFailure`` both land on ``turn_signals``. Not
+#: part of :func:`export_json`: the hook never reads it, so the packaged
+#: catalogue file is unchanged by it. A test holds it to
+#: :data:`SIGNAL_EVENTS` through the hook's codes.
+SIGNAL_CODE_METRICS = {
+    "end": "session_end",
+    "wait": "waits",
+    "perm": "permissions",
+    "turn": "turn_signals",
+    "fail": "turn_signals",
+}
+
 #: Why a session ended, as SessionEnd reports it; anything else is
 #: "other". ``bypass_permissions_disabled`` was removed in Claude Code
 #: v2.1.234 (docs/en/hooks.md, curl-verified) -- it is kept here only so
@@ -417,8 +432,13 @@ DEFAULT_TAGGER = "claude"
 #: so the hooks installed include the ``Stop`` entry that asks it.
 HAIKU_TAGGER_HOOK = "haiku_tagger"
 
-#: The model the hook asks, as ``claude --model`` takes it.
-JUDGE_MODEL = "haiku"
+#: The model the hook asks, as ``claude --model`` takes it. Pinned to the
+#: Haiku the tagger was measured on (``scripts/eval-tagger.py``,
+#: ``docs/tagger-eval.md``) and whose call cost is :data:`JUDGE_USD_PER_CALL`:
+#: the ``haiku`` alias follows whichever Haiku the installed ``claude``
+#: command knows, and a newer one (Haiku 5.5) thinks even with
+#: :data:`JUDGE_THINKING_TOKENS` at 0, which the figures here don't cover.
+JUDGE_MODEL = "claude-haiku-4-5"
 
 #: Folder under the data folder that holds Haiku's tags, one file per
 #: month (``YYYY-MM.jsonl``): the time, the salted session hash, the id
@@ -689,9 +709,129 @@ FEEDBACK_HINTS = ("plan_check", "rating_reminder")
 #: relevant to what the user asked ("if most of the message is a log").
 #: Every other hint that carries a tip asks for it every time, so Claude
 #: passing it on is a relay; for these, Claude showing it is a judgement,
-#: and a tip it doesn't show is not a miss (``prompting``'s "Tips Claude
-#: showed" counts the two differently).
+#: and a tip it doesn't show is not a miss (``prompting``'s "Coaching tips
+#: shown" counts the two differently).
 CONDITIONAL_TIP_HINTS = ("big_paste",)
+
+#: The hints the ClaudeGlass mod delivers itself, in its own UI, while it
+#: is running for a session (``capture_hook._mod_present``): the capture
+#: hook leaves their notes out then, so Claude is not asked to pass on a
+#: tip you are already shown, and nothing is stamped as shown. The first
+#: four are what you do before sending (the mod's hint line shows them
+#: before the cost is paid); ``plan_fresh`` is a status line at plan
+#: approval. ``report_reread``, ``split_run`` and ``rating_reminder`` are
+#: the hook's again: the mod no longer draws agent rows or end-of-reply
+#: notes. ``plan_fresh_early``
+#: (Claude writes it inside the plan), ``quiet_output``, ``plan_check``,
+#: the facts line and the capture note steer Claude or feed a skill, so
+#: they stay with the hook. Every name is a hint of
+#: :data:`COACHING_HINTS` or :data:`FEEDBACK_HINTS`.
+MOVED_TO_MOD = frozenset(
+    {
+        "cold_return",
+        "status_poll",
+        "drip_feed",
+        "big_paste",
+        "plan_fresh",
+    }
+)
+
+#: The mod's folder under the data folder, and the two things the mod
+#: writes there for the hook and the watcher to read. The ``present``
+#: folder holds one ``<session id>.json`` per session, ``{"schema": 1,
+#: "session_id", "seen": <epoch seconds>, "active": <epoch seconds>}``
+#: (``active`` is the session's last request, 0 before its first): the mod
+#: refreshes it every minute on a timer while the session is open (so an
+#: idle session stays fresh), rewrites it with ``seen`` at 0 when the session
+#: ends (it can't delete files), and the watcher removes any left for
+#: :data:`MOD_PRESENT_PRUNE_S`. A file per session
+#: because two sessions writing one shared file would drop each other's
+#: entry. The sensor folder holds one ``<session id>.json`` per session,
+#: ``{"schema": 1, "session_id", "version", "events": [...]}``, rewritten
+#: whole at each turn's end with the newest :data:`MOD_SENSOR_MAX_EVENTS`
+#: events. ``mod_settings.MOD_DIRNAME`` is the same folder name (a test
+#: holds them together).
+MOD_DIR = "mod"
+MOD_PRESENT_DIR = "present"
+MOD_SENSOR_DIR = "sensor"
+MOD_SENSOR_MAX_EVENTS = 500
+
+#: The mod counts as running for a session when its file in the
+#: ``present`` folder was refreshed within this many seconds: ten times the
+#: refresh interval, so a missed write or two does not bring the notes back.
+MOD_PRESENT_WINDOW_S = 600
+
+#: A ``present`` file not written for this long (24 hours) is removed: the
+#: session it was for is long over, and the mod could not delete it.
+MOD_PRESENT_PRUNE_S = 86400
+
+#: The notes only the mod writes, beside the hints above: the context
+#: runway, the cost of a result, a model switch, the effort level, how
+#: often the session was summarised, and a summary made after the cache
+#: went cold.
+MOD_NOTE_KINDS = ("runway", "result", "switch", "effort", "compactions", "cold_compaction")
+
+#: What the mod's prompt help can show, beside the notes above: the hint
+#: line's checks on a draft (a new topic in a large context, a change
+#: asked for with no file named, "read everything") and the note that a
+#: session passed the budget it was given. The capture hook never shows
+#: these, so they are not in :data:`COACHING_HINTS`.
+MOD_PROMPT_KINDS = ("draft_topic", "draft_no_paths", "draft_read_all", "budget")
+
+#: What the mod's sensor file may say, as closed words (the watcher drops
+#: any event with a word outside these, ``mod_sensor.clean``). ``event``
+#: names what happened; each event takes the ``kind``, ``surface`` and
+#: ``outcome`` words listed for it, and a ``compaction`` event also counts
+#: ``kept``, ``missing`` and ``added``, and may count ``instructed`` and
+#: ``referenced`` (see below). ``present``: the mod ran in the
+#: session, on this surface of Claude Code. ``note``: the mod showed a
+#: note (``kind``) in a place (``surface``), and ``outcome`` is what
+#: followed within two replies: sent anyway, ``/clear``, ``/compact`` or
+#: nothing. ``rebuild``: a cache rebuild, whether the mod had said to
+#: expect it. ``cold_send``: a message sent after the cache expired, whether
+#: the hint line had warned. ``compaction``: the review of a summary;
+#: ``instructed`` is 1 when the mod told the summariser the keep list, 0
+#: when it did not, and ``referenced`` is how many re-added items a later
+#: reply referenced, as far as the mod has settled them (both may be absent:
+#: an older mod, or nothing settled yet). ``tweak``: a button the mod
+#: offered was pressed; ``kind`` says which, ``before`` is the count it
+#: acted on (items to keep, items lost, items checked; for the hold
+#: switch, 1 for on and 0 for off) and ``after`` the count that came out of
+#: it, absent until the mod knows (and always absent for the hold switch).
+SENSOR_EVENTS = ("present", "note", "rebuild", "cold_send", "compaction", "tweak")
+SENSOR_PRESENT_SURFACES = ("desktop", "terminal", "vscode", "mobile")
+SENSOR_NOTE_SURFACES = ("note", "hint", "log", "status", "band", "agent")
+SENSOR_NOTE_KINDS = (*COACHING_HINTS, *FEEDBACK_HINTS, *MOD_NOTE_KINDS, *MOD_PROMPT_KINDS)
+SENSOR_NOTE_OUTCOMES = ("sent", "clear", "compact", "none")
+SENSOR_REBUILD_KINDS = ("limit", "compaction", "expiry", "prefix", "unknown")
+SENSOR_REBUILD_OUTCOMES = ("expected", "unexpected")
+SENSOR_COLD_OUTCOMES = ("warned", "unwarned")
+SENSOR_COMPACTION_KINDS = ("auto", "manual", "plugin")
+#: The tweaks the mod offers: summarise with the keep list, re-add the lost
+#: items, check a summary with a model, and hold an automatic summary.
+SENSOR_TWEAK_KINDS = ("summarise", "readd", "check", "hold")
+#: ``{event: {field: allowed words}}``, the words above by event.
+SENSOR_VOCAB: dict[str, dict[str, tuple[str, ...]]] = {
+    "present": {"surface": SENSOR_PRESENT_SURFACES},
+    "note": {"kind": SENSOR_NOTE_KINDS, "surface": SENSOR_NOTE_SURFACES, "outcome": SENSOR_NOTE_OUTCOMES},
+    "rebuild": {"kind": SENSOR_REBUILD_KINDS, "outcome": SENSOR_REBUILD_OUTCOMES},
+    "cold_send": {"outcome": SENSOR_COLD_OUTCOMES},
+    "compaction": {"kind": SENSOR_COMPACTION_KINDS},
+    "tweak": {"kind": SENSOR_TWEAK_KINDS},
+}
+#: ``{event: counts it carries}``: whole numbers, not words.
+SENSOR_COUNT_FIELDS: dict[str, tuple[str, ...]] = {
+    "compaction": ("kept", "missing", "added", "instructed", "referenced"),
+    "tweak": ("before", "after"),
+}
+#: ``{event: counts it may leave out}``: a count here that is absent or null
+#: is left empty and the event is kept; any other value that is not a whole
+#: number in range drops the event, as does a missing count that is not
+#: listed here.
+SENSOR_OPTIONAL_COUNTS: dict[str, tuple[str, ...]] = {
+    "compaction": ("instructed", "referenced"),
+    "tweak": ("after",),
+}
 
 #: The hook events whose output reaches Claude or you (``additionalContext``
 #: or ``systemMessage``). Claude Code runs a hook registered async without
@@ -1923,11 +2063,11 @@ METRICS: tuple[Metric, ...] = (
         group="deep",
         section="tools",
         title="Large tool outputs",
-        what=f"After a read, search or web result of about {BIG_OUTPUT_TOKENS:,} tokens or more, how much of it "
+        what=f"After a read or web result of about {BIG_OUTPUT_TOKENS:,} tokens or more, how much of it "
         "Claude needed: all, part or none. Only what Claude reads counts. "
         f"A picture counts for at most {RESULT_IMAGE_MAX_TOKENS:,} tokens. A result Claude Code saved to a file "
         "counts for its preview alone. Shell and MCP results are not asked about. Claude Code waits for the hook "
-        "after each read, search or web result. Setup > Capture and 'claudeglass capture status' show how many runs, "
+        "after each read or web result. Setup > Capture and 'claudeglass capture status' show how many runs, "
         "the median time each and the time summed, from your own sessions.",
         why="Quieter commands, offset reads and output caps where big outputs weren't needed.",
         powers=("tool_output",),
@@ -2124,7 +2264,7 @@ METRICS: tuple[Metric, ...] = (
         title="Coaching notes from Claude",
         what="Live hints for where the status line doesn't show, such as the desktop app. When one applies, a "
         "hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large "
-        "read, search or web result, an agent run that ended too big for one task (it had to summarise its own "
+        "read or web result, an agent run that ended too big for one task (it had to summarise its own "
         "context, or began from a very long brief), a plan approved "
         "on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, "
         "asking how background work is going while it still runs, or starting background agents when the session "
@@ -2134,7 +2274,7 @@ METRICS: tuple[Metric, ...] = (
         "task without a plan.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
         "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
-        "read, search or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show "
+        "read or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show "
         "how many runs, the median time each and the time summed, from your own sessions. A hook after each reply "
         "runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is "
         "right after a resume. A hook when an agent run ends keeps only whether it ended too big, as counts.",
@@ -3138,11 +3278,14 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     nothing waits on it; the other signals run in the background. While Haiku writes the tags
     (:data:`HAIKU_TAGGER_HOOK` in ``ids``), ``Stop`` runs in the
     foreground, shared with ``turn_signals``: it only hands the turn to a
-    worker of its own and returns, and ``claude -p`` exits without waiting
-    for a background hook, which would drop the turn. Coaching notes also
-    add a background ``Stop`` entry (unless one of those already runs it),
-    which prints nothing: it only keeps the newest reply's time and size
-    for the cold-return receipt."""
+    worker of its own and returns, and a background hook can be cancelled
+    before it has done that (as one was in ``claude -p``), which would drop
+    the turn. While Claude writes the tags, a ``Stop`` entry is what lets
+    Haiku fill in a tag Claude left out, so a set that asks for tags adds a
+    background one when ``turn_signals`` hasn't (a Custom pick of tag
+    metrics alone). Coaching notes also add a background ``Stop`` entry
+    (unless one of those already runs it), which prints nothing: it only
+    keeps the newest reply's time and size for the cold-return receipt."""
     wanted = set(ids)
     haiku = HAIKU_TAGGER_HOOK in wanted and bool(tagged_keys(wanted))
     main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
@@ -3171,6 +3314,12 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
             specs.append((HOOK_SCRIPT, event, "", event != "SessionEnd" and not (haiku and event == "Stop")))
     if haiku and not any(spec[1] == "Stop" for spec in specs):
         specs.append((HOOK_SCRIPT, "Stop", "", False))
+    if tagged_keys(wanted) and not haiku and not any(spec[1] == "Stop" for spec in specs):
+        # Claude writes the tags, and the hook's Stop entry fills in one it
+        # left out (``capture_hook.judge_job``). Every preset has
+        # ``turn_signals``, which brings the entry; a Custom set of tag
+        # metrics alone would otherwise never get a missed tag filled.
+        specs.append((HOOK_SCRIPT, "Stop", "", True))
     if coach and not any(spec[1] == "Stop" for spec in specs):
         # Writes the newest reply's time and size to coach-state.json and
         # prints nothing, so nothing waits on it.
@@ -3217,6 +3366,13 @@ def export_json() -> dict:
         "big_output_tokens": BIG_OUTPUT_TOKENS,
         "result_tools": list(COACHING_TOOLS),
         "spawn_tools": list(SPAWN_TOOLS),
+        "mod": {
+            "moved": sorted(MOVED_TO_MOD),
+            "dir": MOD_DIR,
+            "present_dir": MOD_PRESENT_DIR,
+            "present_window_s": MOD_PRESENT_WINDOW_S,
+            "sensor_dir": MOD_SENSOR_DIR,
+        },
         "result_image_max_tokens": RESULT_IMAGE_MAX_TOKENS,
         "result_image_patch_px": RESULT_IMAGE_PATCH_PX,
         "result_persist_chars": dict(RESULT_PERSIST_CHARS),
@@ -3761,8 +3917,11 @@ def render_markdown() -> str:
         "[tagger-eval.md](tagger-eval.md) has the results."
     )
     p(
-        "- The `Stop` entry runs in the foreground, since `claude -p` exits without waiting for a background "
-        "hook, but only for as long as it takes to read the transcript's end. Deep's note after a large result "
+        "- The `Stop` entry runs in the foreground while Haiku writes the tags, but only for as long as it "
+        "takes to read the transcript's end: it hands the turn to the worker and returns. While Claude writes "
+        "the tags it runs in the background, since it only fills in a tag Claude left out. A `claude -p` or "
+        "Agent SDK run, with nobody at the screen, gets no capture note, no tags and no agent judging (its "
+        "free signals are still logged). Deep's note after a large result "
         "isn't added, as no reply carries a tag for its word. Agent runs are Haiku's to judge whichever writes "
         "the main session's tags."
     )
@@ -3928,7 +4087,9 @@ def render_markdown() -> str:
         "yourself. `init` has the same three choices as `--capture-for DURATION`, `--capture-level LEVEL "
         "--capture-no-limit`, or (interactively, or under `--non-interactive` with neither given) the "
         "default. Changing the level of capture that's already on leaves an existing time-box (or the "
-        "lack of one) exactly as it is — the default only ever applies to a fresh switch-on."
+        "lack of one) exactly as it is — the default only ever applies to a fresh switch-on. Capture whose "
+        "end time has passed counts as off here: turning it back on (`capture on`, a level, or a new end on "
+        f"the Capture page) starts a new span, {DEFAULT_CAPTURE_TIMEBOX_DAYS} days unless you say otherwise."
     )
     p(
         "- `claudeglass capture enable METRIC...` / `capture disable METRIC...` — turn individual "

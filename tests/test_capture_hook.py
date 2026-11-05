@@ -353,7 +353,7 @@ def test_the_main_note_tells_a_subagent_to_ignore_it():
         assert HOOK.build_note(CATALOGUE, ids, "main") == note
 
 
-def test_the_session_start_key_names_are_logged_once_and_never_a_value(tmp_path):
+def test_the_session_start_key_names_are_logged_and_never_a_value(tmp_path):
     config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "essentials"\n')
     log = config_dir / HOOK.PAYLOAD_KEYS_FILE
     payload = _start(
@@ -366,9 +366,17 @@ def test_the_session_start_key_names_are_logged_once_and_never_a_value(tmp_path)
     }
     text = log.read_text(encoding="utf-8")
     assert not any(leak in text for leak in ("secret-project", "/work/app", "claude-x", "s1", "with a path", "kkkk"))
-    # Once: a later SessionStart of the same kind adds nothing, whatever it carries.
+    # The same names again change nothing, and the file is not even rewritten.
+    stamp = log.stat().st_mtime_ns
+    _note(config_dir, payload)
+    assert log.read_text(encoding="utf-8") == text and log.stat().st_mtime_ns == stamp
+    # A key Claude Code starts sending later joins the list, which is what the
+    # file is for; the names already there stay.
     _note(config_dir, {**payload, "extra_key": 1})
-    assert log.read_text(encoding="utf-8") == text
+    assert json.loads(log.read_text(encoding="utf-8"))["startup"] == [
+        "cwd", "extra_key", "hook_event_name", "model", "session_id", "source", "transcript_path"
+    ]
+    assert "secret-project" not in log.read_text(encoding="utf-8")
     # Each source and scope is logged on its own.
     _note(config_dir, {**payload, "source": "compact"})
     _note(config_dir, {**payload, "source": "compact", "agent_id": "a1"})
@@ -376,6 +384,27 @@ def test_the_session_start_key_names_are_logged_once_and_never_a_value(tmp_path)
     seen = json.loads(log.read_text(encoding="utf-8"))
     assert set(seen) == {"startup", "compact", "compact:subagent", "other"}
     assert "agent_id" in seen["compact:subagent"] and "agent_id" not in seen["compact"]
+
+
+def test_a_label_never_logs_more_than_forty_names_nor_drops_one_it_has(tmp_path):
+    config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "essentials"\n')
+    log = config_dir / HOOK.PAYLOAD_KEYS_FILE
+    _note(config_dir, _start())
+    first = json.loads(log.read_text(encoding="utf-8"))["startup"]
+    _note(config_dir, _start(**{f"key_{n:03d}": n for n in range(60)}))
+    names = json.loads(log.read_text(encoding="utf-8"))["startup"]
+    assert len(names) == HOOK._MAX_LOGGED_KEYS == 40 and set(first) <= set(names)
+    # Full: a new name is turned away, and the file stays as it was.
+    text = log.read_text(encoding="utf-8")
+    _note(config_dir, _start(brand_new_key=1))
+    assert log.read_text(encoding="utf-8") == text
+
+
+def test_a_resume_is_not_a_session_start_source_the_hook_labels(tmp_path):
+    # The entry's matcher leaves ``resume`` out, so its key names are not a label of their own.
+    assert "resume" not in HOOK._SESSION_SOURCES
+    assert set(HOOK._SESSION_SOURCES) == {"startup", "clear", "compact"}
+    assert "resume" not in cat.SESSION_START_MATCHER.split("|")
 
 
 def test_the_key_names_of_a_subagents_compaction_are_logged_under_its_own_scope(tmp_path):
@@ -403,7 +432,7 @@ def test_no_key_names_are_logged_where_capture_adds_nothing(tmp_path):
     assert not (config_dir / HOOK.PAYLOAD_KEYS_FILE).exists()
 
 
-def test_a_subagent_stops_key_names_are_logged_once_under_their_own_label(tmp_path):
+def test_a_subagent_stops_key_names_are_logged_under_their_own_label(tmp_path):
     config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "essentials"\n')
     log = config_dir / HOOK.PAYLOAD_KEYS_FILE
     stop = {"session_id": "s1", "hook_event_name": "SubagentStop", "cwd": "/work/app", "agent_id": "a1",
@@ -414,8 +443,12 @@ def test_a_subagent_stops_key_names_are_logged_once_under_their_own_label(tmp_pa
     }
     text = log.read_text(encoding="utf-8")
     assert "secret-agent-type" not in text and "/work/app" not in text
-    _run(config_dir, {**stop, "extra_key": 1})
+    _run(config_dir, stop)
     assert log.read_text(encoding="utf-8") == text
+    _run(config_dir, {**stop, "extra_key": 1})
+    assert json.loads(log.read_text(encoding="utf-8"))["subagent_stop"] == [
+        "agent_id", "agent_type", "cwd", "extra_key", "hook_event_name", "session_id", "stop_hook_active"
+    ]
     # Past capture's end, nothing is logged.
     ended = _config(tmp_path / "ended", '[capture]\nlevel = "essentials"\nuntil = "2020-01-01T00:00:00Z"\n')
     _run(ended, stop)
@@ -1578,3 +1611,80 @@ def test_a_broken_transcript_gives_no_note_and_no_error(tmp_path):
         assert out == "" or json.loads(out)["hookSpecificOutput"]["additionalContext"].startswith(FB_MARKER)
     missing = {**payload, "transcript_path": str(tmp_path / "nothing.jsonl"), "prompt": "/cg-feedback"}
     assert _run(config_dir, missing)[0] == 0
+
+
+# -- the mod shows the rating reminder itself -----------------------------------------------
+
+
+_MOD_WRITES = [0]
+
+
+def _mod_here(tmp_path: Path, sessions=None, *, text: str | None = None) -> Path:
+    """``mod/present/<session id>.json`` for each of ``sessions`` (a session id to the seconds before
+    :data:`FB_NOW` the mod last saw it; default: session ``s1``, just now), or ``text`` as session ``s1``'s file.
+    Returns the first file."""
+    folder = tmp_path / "claudeglass" / cat.MOD_DIR / cat.MOD_PRESENT_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for sid, ago in (sessions or {"s1": 0}).items():
+        seen = (FB_NOW - timedelta(seconds=ago)).timestamp()
+        path = folder / f"{sid}.json"
+        path.write_text(
+            text if text is not None else json.dumps({"schema": 1, "session_id": sid, "seen": seen}), encoding="utf-8"
+        )
+        # The hook remembers the file by its time and size: give each write its own time (see test_coaching).
+        _MOD_WRITES[0] += 1
+        os.utime(path, (1_700_000_000 + _MOD_WRITES[0], 1_700_000_000 + _MOD_WRITES[0]))
+        paths.append(path)
+    return paths[0]
+
+
+def _reminded(tmp_path: Path) -> bool:
+    """Whether the coach state holds a stamp for a reminder (the time it went out, or a piece it covered)."""
+    path = tmp_path / "claudeglass" / CATALOGUE["coaching"]["state_file"]
+    if not path.exists():
+        return False
+    gate = json.loads(path.read_text(encoding="utf-8")).get("feedback", {})
+    return "reminded_at" in gate or bool(gate.get("pieces"))
+
+
+def test_the_rating_reminder_is_the_hooks_whether_or_not_the_mod_runs(tmp_path):
+    # The mod no longer shows end-of-reply notes, so the reminder is the hook's again: the mod's presence changes nothing.
+    _mod_here(tmp_path)
+    assert _hint(_fb(tmp_path, _big(1_300_000), NEXT)) == "rating_reminder"
+    assert _reminded(tmp_path)
+
+
+@pytest.mark.parametrize("how", ["stale", "another session", "corrupt", "unknown schema", "empty"])
+def test_the_rating_reminder_comes_unchanged_without_the_sessions_own_fresh_heartbeat(tmp_path, how):
+    if how == "stale":
+        _mod_here(tmp_path, {"s1": cat.MOD_PRESENT_WINDOW_S + 1})
+    elif how == "another session":
+        _mod_here(tmp_path, {"s2": 0})
+    elif how == "corrupt":
+        _mod_here(tmp_path, text='{"schema": 1, "session_id": "s1", "seen"')
+    elif how == "unknown schema":
+        _mod_here(tmp_path, text=json.dumps({"schema": 9, "session_id": "s1", "seen": FB_NOW.timestamp()}))
+    else:
+        _mod_here(tmp_path, text="")
+    assert _hint(_fb(tmp_path, _big(1_300_000), NEXT)) == "rating_reminder"
+
+
+def test_the_plan_check_and_the_facts_line_come_while_the_mod_runs(tmp_path):
+    _mod_here(tmp_path)
+    assert _hint(_fb(tmp_path, _timeline(*WORK), FIX)) == "plan_check"
+    assert _facts(_fb(tmp_path, _big(1_300_000), "/cg-feedback"))["tokens"] > 0
+    # The reminder still rests: nothing was stamped for it.
+    assert not _reminded(tmp_path)
+
+
+def test_the_hook_adds_the_reminder_note_while_the_mod_runs(tmp_path):
+    config_dir = _config(tmp_path / "claudeglass", '[capture]\nlevel = "off"\nfeedback = ["feedback_reminder"]\n')
+    # The hook runs on the real clock, so the transcript and the heartbeat are dated on it.
+    now = datetime.now(timezone.utc)
+    payload = _prompt_for(tmp_path, _timeline(_types("Add the importer"), _says("done", tokens=1_300_000), now=now), NEXT)
+    (config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR).mkdir(parents=True)
+    heartbeat = config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR / "s1.json"
+    heartbeat.write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now.timestamp()}), encoding="utf-8")
+    rc, out, err = _run(config_dir, payload)
+    assert rc == 0 and err == "" and _hint(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "rating_reminder"

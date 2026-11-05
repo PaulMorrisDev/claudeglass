@@ -357,12 +357,15 @@ class ContextFileStats:
         """Files read with the Read tool. A read's result is in context
         from the next reply on, until a conversation summary drops it, so
         it is priced as the same carry as an instructions file. A read
-        that failed (0 characters) put nothing in context and is left out."""
+        that failed (0 characters) put nothing in context and is left out.
+        A summary ahead of the file's first reply (``detail["inherited"]``)
+        is the one of the session this one was continued from: it dropped
+        nothing this transcript read."""
         turns = carry.turns
         boundaries = sorted(
             carry.index_at(event.ts)
             for event in result.events
-            if event.kind == EventKind.COMPACT_BOUNDARY and event.ts
+            if event.kind == EventKind.COMPACT_BOUNDARY and event.ts and not event.detail.get("inherited")
         )
         seen_here: set[str] = set()
         for index, turn in enumerate(turns):

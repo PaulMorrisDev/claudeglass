@@ -873,3 +873,146 @@ def test_build_section_row_order_matches_string_tiebreak_for_tied_primaries():
     primary_cause = _table(section, "recache_primary_cause")
     tied_labels = [row[0] for row in primary_cause.rows if row[0] in {p.value for p in primaries}]
     assert tied_labels == sorted((p.value for p in primaries), reverse=True)
+
+
+# --------------------------------------------------------------------
+# Accounting audit: the API's own cache-miss reason, and the very-large bar
+# --------------------------------------------------------------------
+
+
+def _subagent_pair(reason: str | None, **second) -> list[Turn]:
+    """A subagent's first call (it read the 48,000-token tool prefix) and
+    a second one 3.4 seconds later that read the same prefix again but
+    wrote 201,987 tokens: the session part was not read. Judged on the
+    clock and the read alone, that is a full expiry."""
+    first = _turn(message_id="m1", turn_index=1, ctx=50_000, cache_creation_tokens=2_000, cache_read_tokens=48_000,
+                  cc_5m=2_000)
+    fields = dict(
+        message_id="m2", turn_index=2, gap_s=3.4, ctx=250_773, cache_creation_tokens=201_987,
+        cache_read_tokens=48_786, cc_5m=201_987, cache_miss_reason=reason,
+    )
+    fields.update(second)
+    return [first, _turn(**fields)]
+
+
+def test_a_tools_changed_miss_is_prefix_invalidated_not_full_expiry():
+    detected = recache.detect(_subagent_pair("tools_changed"), recache.RecacheThresholds())
+
+    assert [t.recache_signature for t in detected] == ["prefix-invalidated"]
+
+
+@pytest.mark.parametrize("reason", ["messages_changed", "system_changed", "tools_changed", "model_changed"])
+def test_every_changed_reason_means_the_prefix_was_invalidated(reason):
+    detected = recache.detect(_subagent_pair(reason), recache.RecacheThresholds())
+
+    assert detected[0].recache_signature == "prefix-invalidated"
+
+
+@pytest.mark.parametrize("reason", ["previous_message_not_found", "unavailable", "other", None])
+def test_a_miss_that_is_not_a_change_keeps_the_current_rules(reason):
+    detected = recache.detect(_subagent_pair(reason), recache.RecacheThresholds())
+
+    assert detected[0].recache_signature == "full-expiry"
+
+
+def test_the_api_reason_does_not_override_a_post_compaction_or_limit_label():
+    th = recache.RecacheThresholds()
+    compaction = _subagent_pair("tools_changed", preceding_event_kinds=(EventKind.COMPACT_BOUNDARY,))
+    limit = _subagent_pair("tools_changed", gap_cause="limit")
+
+    assert recache.detect(compaction, th)[0].recache_signature == "post-compaction"
+    assert recache.detect(limit, th)[0].recache_signature == "limit-expiry"
+
+
+def test_a_clock_expiry_the_api_blames_on_the_prefix_is_prefix_invalidated():
+    # 4,000 seconds after a call that wrote at the 5-minute rate.
+    pair = _subagent_pair("system_changed", gap_s=4_000.0)
+
+    detected = recache.detect(pair, recache.RecacheThresholds())
+
+    assert detected[0].recache_signature == "prefix-invalidated"
+
+
+def test_the_signature_table_shows_the_api_cause_with_counts():
+    turns = _subagent_pair("tools_changed")
+    more = _subagent_pair("tools_changed", message_id="m3", turn_index=3)[1]
+    stats = _stats_for([*turns, more])
+
+    section = recache.build_section(stats, PRICING, recache.RecacheThresholds())
+    table = _table(section, "recache_signature_split")
+    rows = {row[0]: dict(zip([c.key for c in table.columns], row)) for row in table.rows}
+
+    assert rows["prefix-invalidated"]["api_cause"] == "tools_changed 2"
+    assert rows["full-expiry"]["api_cause"] == ""
+    assert any("API" in note for note in table.notes)
+
+
+@pytest.mark.parametrize(
+    ("model_window", "compact_window", "expected"),
+    [
+        # 80% of the point where summarising starts: the window less 33,000.
+        (1_000_000, 400_000, 293_600),
+        (1_000_000, None, 773_600),
+        (None, 400_000, 293_600),
+        # A setting above the model's own window can't be reached.
+        (200_000, 1_000_000, 133_600),
+        (200_000, None, 133_600),
+        # Neither known: the configured fallback.
+        (None, None, 200_000),
+    ],
+)
+def test_the_very_large_bar_is_a_share_of_where_the_session_summarises(model_window, compact_window, expected):
+    assert recache.very_large_context_bar(model_window, compact_window, 200_000) == expected
+
+
+def _huge_row(compact_window):
+    turns = [
+        _turn(message_id="m1", turn_index=1, model="claude-sonnet-5", ctx=330_000, cache_read_tokens=300_000),
+        _turn(message_id="m2", turn_index=2, model="claude-sonnet-5", ctx=100_000, cache_read_tokens=90_000),
+    ]
+    stats = recache.RecacheStats(recache.RecacheThresholds())
+    stats.add(_result(turns), lambda model: PRICING.resolve_model(model), compact_window=compact_window)
+    section = recache.build_section(stats, PRICING, recache.RecacheThresholds())
+    return dict(zip([c.key for c in _table(section, "recache_huge_context").columns],
+                    _table(section, "recache_huge_context").rows[0]))
+
+
+def test_a_400k_session_reaches_the_very_large_bar_at_330k_tokens():
+    row = _huge_row(compact_window=400_000)
+
+    assert row["huge_ctx_turns"] == 1
+    assert row["huge_ctx_cache_read_tokens"] == 300_000
+
+
+def test_the_same_context_is_not_very_large_when_the_session_summarises_at_the_model_window():
+    row = _huge_row(compact_window=None)
+
+    assert row["huge_ctx_turns"] == 0
+
+
+def test_the_very_large_note_says_what_the_bar_is_measured_against():
+    stats = _stats_for([_turn(message_id="m1", turn_index=1)])
+
+    note = " ".join(_table(recache.build_section(stats, PRICING, recache.RecacheThresholds()),
+                           "recache_huge_context").notes)
+
+    assert "auto-compact window setting" in note
+    assert "autoCompactWindow" not in note  # plain words: a setting's key is not help copy
+    assert "33,000" in note
+    assert all(len(sentence.split()) <= 25 for sentence in re.split(r"(?<=[.?!])\s+", note))
+
+
+def test_every_note_of_the_re_cache_section_keeps_to_short_plain_sentences():
+    """The dashboard shows the section's notes (the thresholds' sentences
+    included) as written: 25 words at most to a sentence, and no camelCase
+    setting key, which belongs in a fix's command and not in help."""
+    stats = _stats_for([_turn(message_id="m1", turn_index=1)])
+    section = recache.build_section(stats, PRICING, recache.RecacheThresholds())
+
+    notes = [*section.notes, *(note for table in section.tables for note in table.notes)]
+
+    assert any("API cause" in note for note in notes) and any("very large" in note for note in notes)
+    for note in notes:
+        for sentence in re.split(r"(?<=[.?!])[\"')]*\s+", note):
+            assert len(sentence.split()) <= 25, sentence
+        assert not re.search(r"[a-z]+[A-Z][A-Za-z]*", note), note

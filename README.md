@@ -488,6 +488,22 @@ For example, `python -m claudeglass capture enable coaching_notes`
 turns on coaching notes. See
 [`docs/coaching.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/coaching.md).
 
+### Inside Claude Code: the mod
+
+The ClaudeGlass mod is a plugin that runs inside Claude Code. A one-line band
+above the prompt says how full the context is. Every conversation summary
+(compaction) is told what to keep. The Checkpoint pane shows what a summary
+dropped and puts it back in one press. The mod also warns you before a costly
+send. It works in the terminal and in the desktop app's Code tab, and needs
+Claude Code 2.1.286 or later. Type this once at a Claude Code terminal prompt:
+
+```
+/plugin install claudeglass --marketplace PaulMorrisDev/claudeglass
+```
+
+It acts only on a press: it changes no setting and sends nothing for you.
+See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/mod.md).
+
 ## Privacy
 
 - **What it reads.** The transcripts in `~/.claude/projects`. Through
@@ -593,6 +609,7 @@ has the detail.
 | try or apply a profile | [`docs/profiles.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/profiles.md) |
 | turn on metrics capture | [`docs/capture.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/capture.md) |
 | get hints during a session in the desktop app | [`docs/coaching.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/coaching.md) |
+| keep what I said through conversation summaries, live inside Claude Code | [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/mod.md) |
 | check whether my hooks work, and what they cost | [`docs/hooks.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/hooks.md) |
 | compare two setups, or check against an Admin API export | [`docs/compare.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/compare.md) |
 | export numbers, or compare a team | [`docs/exports.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/exports.md), [`docs/team.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/team.md) |

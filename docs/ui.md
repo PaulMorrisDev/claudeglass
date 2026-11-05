@@ -897,6 +897,13 @@ is the day of the chart's column. A line above the list says what it is
 narrowed to, with **Show all sessions**. A row and its dot light up
 together. The report's `sessions` section follows.
 
+`#/spend/sessions?session=<id>` opens that session's drawer once the list
+has loaded (`openLinkedSession`). It is how the ClaudeGlass mod's **Open in
+dashboard** reaches a session. An id the list does not hold, such as a
+session outside the window, leaves the page as it is. `links.js` is the one
+place that knows the parameter (`sessionParams`, `sessionId`,
+`sessionLink`).
+
 The list, the override menus and the chart name a mode, a purpose and an
 app in words ("Overnight (unattended)", "One-shot", "Docs or light
 edits", "Terminal") from one map, `SESSION_WORDS` in `charts-types.js`.
@@ -1081,10 +1088,22 @@ going, stopping Claude again and again, big tasks without a plan, vague
 corrections, huge pastes, context carried into new pieces) with what it cost over the
 window ("over the last 30 days", or "Not priced" for a vague correction), what to try instead, how often it happened
 per 100 messages and a by-week line; then, once there are coaching
-notes, **Tips Claude showed**, with how often Claude passed each tip on
+notes, **Coaching tips shown**, with how often Claude passed each tip on
 ("relayed N of M" for a hint Claude is told to show every time, "judged
 relevant N of M" for one it decides on) and how often it called the tip a
-misfire. Nothing here changes a setting.
+misfire. Once the ClaudeGlass mod has run in a session of the window, two
+more tables follow: **Sessions with ClaudeGlass running** and **Sessions with
+and without ClaudeGlass**, a compact comparison of the two groups on cost per
+reply, the context when the session ended, cold-cache sends per 100 replies
+to your messages, sessions with two or more conversation summaries and tips
+per Desktop session. Agent SDK runs are left out of both groups. Each row
+shows both groups' values and session counts. It says there are too few
+sessions to compare until each group has 10, and then states the gap in words
+("about 12% lower") with "Measurable" (a 99% interval clear of zero) or "No
+measurable difference yet"; a note says the groups may differ in other ways,
+and that most sessions without the mod are from before it was added, so the
+table does not claim the mod caused the gap. Nothing here changes a
+setting.
 
 **Rework after delivery** answers "How often did Claude have to change
 work it had already delivered, and why?" It opens with two tiles (the
@@ -1537,6 +1556,7 @@ repaints what stays on screen:
 | Model tier | Opus (and Fable) `--chart-1`, Sonnet `--chart-2`, Haiku `--chart-3` |
 | Work mode | interactive `--chart-1`, long autonomous run `--chart-2`, overnight `--chart-3`, one-shot `--chart-4`; mixed and not classified are Other |
 | Startup part | system prompt, tool definitions, CLAUDE.md, skills listing, tool lists, task prompt and hook context take `--chart-1` to `--chart-7` |
+| Context part | conversation `--chart-2`, tool output kept in context `--chart-4`, startup context `--chart-8`, room left and other `--chart-other`. Startup context takes the one slot no startup part uses, and none takes the agent colours |
 
 Anything else is `--chart-other`. A chart never picks colours by rank.
 Chart 7 shows a sign, not an entity: an agent type that saves with a

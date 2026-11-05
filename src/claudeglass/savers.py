@@ -118,9 +118,9 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Sequence
 
-from . import carry, recache
+from . import carry, compaction, recache
 from . import snapshots as snapshots_mod
-from .model import Column, EventKind, Recommendation, ReportModel, Section, SessionRecord, Table, TranscriptResult, Turn
+from .model import Column, Recommendation, ReportModel, Section, SessionRecord, Table, TranscriptResult, Turn
 from .pricing import Pricing, price_turn
 from .snapshots import Snapshot, managed_keys
 
@@ -428,7 +428,7 @@ def _build_session_aggs(
                     if _SHELL_SEARCH_RE.search(turn.cmd_prefix):
                         agg.shell_search_turns += 1
 
-        agg.compactions = sum(1 for e in record.top.events if e.kind == EventKind.COMPACT_BOUNDARY)
+        agg.compactions = compaction.compactions_in(record.top)[0]
         agg.present = frozenset(present)
         aggs.append(agg)
     return aggs

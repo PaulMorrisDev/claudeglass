@@ -238,7 +238,11 @@ def _simulated_window(change: dict, after, pricing: Pricing) -> KeyResult | None
         return None
     results = _mains(after)
     paid = _cost(results, pricing)
-    without = compaction_sim.replay_cost(results, pricing.resolve_model, old)
+    # The replayed sessions ran under the new window, so the gap their real
+    # automatic summaries left below it is the trigger reserve (else Claude
+    # Code's own 33,000-token buffer): the old window fires that far under it.
+    ran_under = {r.meta.session_id: new for r in results} if isinstance(new, int) and not isinstance(new, bool) else None
+    without = compaction_sim.replay_cost(results, pricing.resolve_model, old, snapshot_windows=ran_under)
     return KeyResult(
         change["key"], None, "simulated", paid, without, f"Main sessions replayed with a {old:,}-token compaction window."
     )

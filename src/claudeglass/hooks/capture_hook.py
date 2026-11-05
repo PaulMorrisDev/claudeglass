@@ -47,7 +47,7 @@ connect``):
   (:func:`prepare_agent_job`). The agent's report is left exactly as it
   was. With coaching notes on, the entry also records, with no output,
   whether the run ended too big (:func:`keep_run`).
-- ``PostToolUse``: a one-line note after a large read, search or web
+- ``PostToolUse``: a one-line note after a large read or web
   result, for the Deep level, in the main session while Claude writes
   the tags. How large is measured on what Claude reads of the result
   (:func:`result_chars`), not on the payload: a picture counts for at
@@ -112,7 +112,14 @@ connect``):
   level and in every session, but not in a project ``[capture]
   projects`` leaves out. A capture note and a coaching note for the same
   call go out as one note, the capture note first, so a tip is the last
-  line.
+  line. While the ClaudeGlass mod is running for the session (its file
+  ``<config-dir>/mod/present/<session id>.json`` is under 10 minutes old:
+  :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
+  own UI, so this hook neither works them out nor stamps them as shown
+  (a run that ended too big is still recorded, :func:`keep_run`, and a
+  tip to start fresh the mod showed rests ``plan_fresh_early`` for the
+  cooldown, :func:`_mod_showed_fresh_start`); without the mod, nothing
+  changes.
 - ``UserPromptSubmit``, for the ``/cg-feedback`` survey's items (``[capture]
   feedback``: :func:`feedback_note_for`), at any capture level and in every
   session ``[capture] projects`` leaves in. A message that starts
@@ -582,8 +589,11 @@ def _scheduled_session(path, prefix: str) -> bool:
     return False
 
 
-#: The ``source`` values a SessionStart payload carries.
-_SESSION_SOURCES = ("startup", "resume", "clear", "compact")
+#: The ``source`` values a SessionStart payload this hook is called for
+#: carries. ``resume`` is not one: a resumed session already carries the
+#: note, so the entry's matcher (``capture_catalogue.SESSION_START_MATCHER``)
+#: leaves it out and the hook never sees that source.
+_SESSION_SOURCES = ("startup", "clear", "compact")
 #: Where :func:`log_payload_keys` writes, in the data folder.
 PAYLOAD_KEYS_FILE = "payload-keys.json"
 _KEY_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
@@ -592,12 +602,18 @@ _MAX_LOGGED_KEYS = 40
 
 def log_payload_keys(config_dir: Path, payload: dict, scope: str) -> None:
     """Write the key names of this SessionStart payload to
-    ``payload-keys.json``, once for each source and scope (``startup``,
+    ``payload-keys.json``, under each source and scope (``startup``,
     ``compact``, ``compact:subagent`` ...), to see whether Claude Code
     ever sends an agent field there; a SubagentStop's go under
-    ``subagent_stop``, once. Names only, in a closed shape: never a value,
+    ``subagent_stop``. Names only, in a closed shape: never a value,
     and a name that isn't plain letters, digits and underscores is left
-    out."""
+    out.
+
+    A label's names grow: a key Claude Code adds to a payload later joins
+    the ones already logged (up to :data:`_MAX_LOGGED_KEYS`, never pushing
+    one out), and the file is written only when a name is new. The file's
+    purpose is to show a key appear, which a list kept from the first call
+    could not."""
     source = payload.get("source")
     label = source if source in _SESSION_SOURCES else "other"
     if payload.get("hook_event_name") == "SubagentStop":
@@ -606,9 +622,13 @@ def log_payload_keys(config_dir: Path, payload: dict, scope: str) -> None:
         label = f"{label}:{scope}"
     path = config_dir / PAYLOAD_KEYS_FILE
     seen = _read_json(path)
-    if label in seen:
+    before = seen.get(label)
+    logged = [k for k in before if isinstance(k, str) and _KEY_NAME_RE.fullmatch(k)] if isinstance(before, list) else []
+    fresh = sorted({k for k in payload if isinstance(k, str) and _KEY_NAME_RE.fullmatch(k)} - set(logged))
+    fresh = fresh[: max(0, _MAX_LOGGED_KEYS - len(logged))]
+    if not fresh and label in seen:
         return
-    seen[label] = sorted(k for k in payload if isinstance(k, str) and _KEY_NAME_RE.fullmatch(k))[:_MAX_LOGGED_KEYS]
+    seen[label] = sorted({*logged, *fresh})
     _write_json(path, seen)
 
 
@@ -873,6 +893,61 @@ def _hint_names(value) -> frozenset:
     return frozenset(item for item in value if isinstance(item, str)) if isinstance(value, list) else frozenset()
 
 
+#: A session id that is safe to name a file by: letters, digits and ``-``
+#: only, so an id from a payload can't reach another folder.
+_PLAIN_SESSION_ID = re.compile(r"[A-Za-z0-9-]+")
+
+#: The mod's heartbeat file of this call, as ``{(path, mtime_ns, size):
+#: seconds it was last refreshed, or None for a file that says nothing}``:
+#: a hook call may ask about the mod more than once (the coaching hints,
+#: then the rating reminder), and the file is read and parsed once for all
+#: of them. It holds one entry at most.
+_MOD_PRESENT: dict = {}
+
+
+def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> bool:
+    """Whether the ClaudeGlass mod is running for this session: its file
+    ``<config-dir>/mod/present/<session id>.json`` (``{"schema": 1,
+    "session_id": <the id>, "seen": <epoch seconds>}``) was refreshed within
+    ``mod.present_window_s`` (10 minutes) of now, either side. The mod
+    refreshes it every minute while the session is open and, at the
+    session's end, writes it once more with ``seen`` at 0 (the engine
+    cannot delete a file; the dashboard's watcher removes files a day old).
+    A missing, unreadable or half-written file, an unknown schema, a
+    ``session_id`` that isn't the file's own name, a ``seen`` of 0 and a
+    stale ``seen`` all read as absent, and so does a session id that is
+    not a plain word of letters, digits and ``-``. The mod names its file
+    by Claude Code's session id, the ``session_id`` of a hook payload
+    (Assumption: they are the same id; a mismatch reads as absent, which
+    leaves every note as it was). Never raises."""
+    try:
+        if not isinstance(session_id, str) or not _PLAIN_SESSION_ID.fullmatch(session_id):
+            return False
+        mod = catalogue["mod"]
+        path = config_dir / mod["dir"] / mod["present_dir"] / f"{session_id}.json"
+        stat = path.stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        if key not in _MOD_PRESENT:
+            _MOD_PRESENT.clear()
+            data = _read_json(path)
+            ok = data.get("schema") == 1 and data.get("session_id") == session_id
+            _MOD_PRESENT[key] = _number(data.get("seen")) if ok else None
+        seen = _MOD_PRESENT[key]
+        return seen is not None and abs(now_ts - seen) <= mod["present_window_s"]
+    except Exception:  # noqa: BLE001 - a presence fault must leave every note as it was
+        return False
+
+
+def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> frozenset:
+    """The hints the mod delivers itself for this session
+    (``capture_catalogue.MOVED_TO_MOD``, as the catalogue exports them),
+    which the hook leaves out and does not stamp as shown; none when the
+    mod is not running for it."""
+    if not _mod_present(config_dir, catalogue, session_id, now_ts):
+        return frozenset()
+    return frozenset(catalogue["mod"]["moved"])
+
+
 def _session_key(session_id: str, config_dir: Path) -> str:
     """The session id as ``coach-state.json`` keeps it: salted as a signal
     line keeps it (:func:`session_hash`), or plainly hashed before there's
@@ -895,6 +970,49 @@ def _prune(rows: dict, now_ts: float) -> None:
 #: showed rests the others for the cooldown, never the other way: a rest
 #: that already runs longer is kept.
 _FRESH_START_HINTS = ("plan_fresh", "plan_fresh_early", "cold_return")
+
+#: The most bytes of a mod sensor file the hook reads (``mod_sensor``'s
+#: own limit): a bigger one is not read.
+_MOD_SENSOR_MAX_BYTES = 1_000_000
+
+#: The times of the fresh-start notes in the mod's sensor file of this
+#: call, as ``{(path, mtime_ns, size): [epoch seconds]}``; one entry at
+#: most, like :data:`_MOD_PRESENT`.
+_MOD_SENSOR_FRESH: dict = {}
+
+
+def _mod_showed_fresh_start(config_dir: Path, catalogue: dict, session_id: str, now_ts: float, rest_s: float) -> bool:
+    """Whether the mod showed a tip of :data:`_FRESH_START_HINTS` in this
+    session within ``rest_s`` of now, either side, by a ``note`` event in
+    its sensor file (``<config-dir>/mod/sensor/<session id>.json``, written
+    at the end of each turn). The hook doesn't stamp what the mod shows, so
+    this is how a tip to start fresh the mod showed rests the others
+    (:func:`_rest_beside`). A missing, unreadable, oversize or half-written
+    file, an unknown schema, a ``session_id`` that isn't the file's own name
+    and an odd event all read as nothing shown. Never raises."""
+    try:
+        if not isinstance(session_id, str) or not _PLAIN_SESSION_ID.fullmatch(session_id):
+            return False
+        mod = catalogue["mod"]
+        path = config_dir / mod["dir"] / mod["sensor_dir"] / f"{session_id}.json"
+        stat = path.stat()
+        if stat.st_size > _MOD_SENSOR_MAX_BYTES:
+            return False
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        if key not in _MOD_SENSOR_FRESH:
+            _MOD_SENSOR_FRESH.clear()
+            data = _read_json(path)
+            events = data.get("events") if data.get("schema") == 1 and data.get("session_id") == session_id else None
+            times = []
+            for event in events if isinstance(events, list) else ():
+                if isinstance(event, dict) and event.get("event") == "note" and event.get("kind") in _FRESH_START_HINTS:
+                    when = _number(event.get("ts"))
+                    if when is not None:
+                        times.append(when)
+            _MOD_SENSOR_FRESH[key] = times
+        return any(abs(now_ts - when) <= rest_s for when in _MOD_SENSOR_FRESH[key])
+    except Exception:  # noqa: BLE001 - a sensor fault must leave every note as it was
+        return False
 
 
 def _session_row(state: dict, session: str, now_ts: float) -> dict:
@@ -2228,7 +2346,10 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     when Claude Code summarised its context part-way through, or when it
     began from a brief of ``split_brief_chars`` characters or more. Only
     counts by those two words are kept, under the session: nothing of the
-    run's type, brief or words. Returns whether the state changed."""
+    run's type, brief or words. They are kept while the mod runs too: it
+    tells the run on the agent's row, so only :func:`coaching_for` leaves
+    it out then, and a run that ended too big before the mod stopped is
+    still there to be told. Returns whether the state changed."""
     if not _coaching_applies(payload, config):
         return False
     session_id = payload.get("session_id")
@@ -2240,6 +2361,7 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     personal = _read_json(config_dir / coaching["file"])
     if "split_run" in _hint_names(personal.get("muted")):
         return False
+    now = now or datetime.now(timezone.utc)
     path = _stopped_run(payload)
     if path is None:
         return False
@@ -2250,7 +2372,6 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     }
     if not any(found.values()):
         return False
-    now = now or datetime.now(timezone.utc)
     state_path = config_dir / coaching["state_file"]
     state = _read_json(state_path)
     state.pop("agents", None)
@@ -2362,6 +2483,10 @@ def coaching_for(
     state_path = config_dir / coaching["state_file"]
     state = _read_json(state_path)
     session = _session_key(session_id, config_dir)
+    # While the mod runs for this session it shows these itself: they are
+    # neither worked out nor stamped here, so the rest the mod keeps is
+    # the only one, and they are all there when the mod stops.
+    moved = _moved(config_dir, catalogue, session_id, now_ts)
     # A run's counts used to be kept by agent id here; they are by session now.
     dirty = state.pop("agents", None) is not None
     candidates: list = []
@@ -2373,7 +2498,7 @@ def coaching_for(
         if not in_agent and isinstance(prompt, str) and prompt.lstrip().startswith(coaching["task_notification_prefix"]):
             # A background task finished: the next main-session hook after an
             # agent or workflow run that ended too big (``keep_run``).
-            candidates = [_split_hint(state, session, coaching, th)]
+            candidates = [None if "split_run" in moved else _split_hint(state, session, coaching, th)]
         elif not in_agent and typed and isinstance(path, str) and path:
             records, replayed = (tail if tail is not None and tail.path == path else _TailReader(path)).get()
             if not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
@@ -2382,16 +2507,21 @@ def coaching_for(
                 known = _stored_reply(state, session) is not None
                 ctx = last["ctx"] if last else next((_reply_ctx(r) for r in reversed(records) if _is_reply(r)), 0)
                 candidates = [
-                    *([_typed_plan_hint(payload, records, coaching, th), _planning_hint(payload, records, coaching, th, now)] if fresh else []),
-                    _drip_hint(prompt, records, coaching, th, now, ctx),
-                    _paste_hint(prompt, th),
-                    _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
-                    _cold_hint(path, records, replayed, last, known, th, now_ts, tuple(coaching["limit_line_prefixes"])),
+                    *([
+                        None if "plan_fresh" in moved else _typed_plan_hint(payload, records, coaching, th),
+                        _planning_hint(payload, records, coaching, th, now),
+                    ] if fresh else []),
+                    None if "drip_feed" in moved else _drip_hint(prompt, records, coaching, th, now, ctx),
+                    None if "big_paste" in moved else _paste_hint(prompt, th),
+                    None if "status_poll" in moved else _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
+                    None if "cold_return" in moved else _cold_hint(
+                        path, records, replayed, last, known, th, now_ts, tuple(coaching["limit_line_prefixes"])
+                    ),
                 ]
     elif tool == "ExitPlanMode":
         if not in_agent:
             dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
-            if personal.get("plan_fresh", True) is not False:
+            if personal.get("plan_fresh", True) is not False and "plan_fresh" not in moved:
                 candidates = [_plan_hint(payload, th)]
     else:
         if not in_agent:
@@ -2403,8 +2533,10 @@ def coaching_for(
             # big is told here (``split_run``) when the main session
             # called it in the foreground, as it has ended by now.
             if not in_agent:
-                candidates.append(_report_hint(payload, state, session, coaching, th))
-                candidates.append(_split_hint(state, session, coaching, th))
+                if "report_reread" not in moved:
+                    candidates.append(_report_hint(payload, state, session, coaching, th))
+                if "split_run" not in moved:
+                    candidates.append(_split_hint(state, session, coaching, th))
         else:
             if result_len is None:
                 result_len = result_chars(payload, catalogue)
@@ -2416,7 +2548,13 @@ def coaching_for(
             continue
         kind, stake, fields = found
         hint = kind.split(":", 1)[0]
-        if hint in muted or not _gate(state, session, kind, stake, now_ts, th):
+        if hint in moved or hint in muted or not _gate(state, session, kind, stake, now_ts, th):
+            continue
+        if hint in _FRESH_START_HINTS and _mod_showed_fresh_start(
+            config_dir, catalogue, session_id, now_ts, th["cooldown_minutes"] * 60
+        ):
+            # The mod showed one of these and the hook doesn't stamp what it
+            # shows: rest this one for the cooldown, as a hook-shown one would.
             continue
         if hint == "cold_return":
             # A receipt for one break: it rests half a day, however the context grows.
@@ -2931,6 +3069,8 @@ def feedback_note_for(
             _note_made(state, "plans", session, plan_id)
             note = _feedback_note(coaching, "plan_check", feedback["text"]["plan_check"])
         elif "feedback_reminder" in ids:
+            # The reminder is the hook's alone: the mod shows no end-of-reply
+            # notes, so whether it runs changes nothing here.
             note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
         dirty = dirty or bool(note)
     if dirty:
@@ -2993,6 +3133,33 @@ def _dashboard_rated_at(config_dir: Path, session_id: str) -> datetime | None:
     finally:
         conn.close()
     return _parse_time(row[0].replace("Z", "+00:00")) if row and isinstance(row[0], str) else None
+
+
+def dashboard_ratings(config_dir: Path, since: float, limit: int = 100) -> dict[str, float]:
+    """``{session id: epoch seconds}`` of the ratings you gave sessions on the
+    dashboard at or after ``since``, newest first, at most ``limit``; read
+    like :func:`_dashboard_rated_at` and ``{}`` on any trouble. The ClaudeGlass
+    mod's settings file carries it so the mod can tell, as this hook does, that
+    a piece of work was rated."""
+    path = config_dir / _STORE_FILE
+    try:
+        if not path.is_file():
+            return {}
+        import sqlite3
+
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.2)
+        try:
+            rows = conn.execute("SELECT session_id, set_at FROM session_feedback ORDER BY set_at DESC LIMIT ?", (int(limit),)).fetchall()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - no store, an old one or a locked one: no ratings
+        return {}
+    out: dict[str, float] = {}
+    for sid, set_at in rows:
+        when = _parse_time(set_at.replace("Z", "+00:00")) if isinstance(set_at, str) else None
+        if isinstance(sid, str) and when is not None and when.timestamp() >= since:
+            out[sid] = when.timestamp()
+    return out
 
 
 # -- Haiku writes the tags ------------------------------------------------------

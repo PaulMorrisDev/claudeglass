@@ -399,6 +399,24 @@ export function goToHabit(item) {
   goTo("habits", { params: habitParams(item) });
 }
 
+// A session on Spend > Sessions, by id: #/spend/sessions?session=<id>. The
+// page opens that session's drawer once its list has loaded; an id the list
+// doesn't hold leaves the page as it is. This is the one place in the
+// dashboard that knows the parameter (the mod's "Open in dashboard" link
+// writes the same address): the page reads it back with sessionId.
+export function sessionParams(id) {
+  return { session: id };
+}
+
+export function sessionId(params) {
+  return params && params.session ? String(params.session) : "";
+}
+
+// Without text it reads "Spend › Sessions".
+export function sessionLink(id, text) {
+  return pageLink("spend/sessions", text, sessionParams(id));
+}
+
 // Say in the address what the view on screen has open (the selected
 // recommendation), without a new history entry: Back leaves the view,
 // not each item looked at.

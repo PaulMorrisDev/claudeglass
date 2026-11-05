@@ -257,6 +257,95 @@ def test_scorecard_context_hygiene_threshold_scales_for_1m_window_model(tmp_path
     assert row[1] == 4  # level: level 1 under the unscaled 200k-tuned default
 
 
+def _window_snapshot(slug: str, window: int, ts: str = "2020-01-01T00:00:00.000Z") -> Snapshot:
+    """The settings snapshot the config hook files for ``slug``: it sets
+    ``autoCompactWindow`` to ``window``."""
+    return Snapshot(
+        path="cfg",
+        ts=ts,
+        data={"project_slug": snapshot_project_keys(slug)[0], "effective": {"autoCompactWindow": window}},
+    )
+
+
+def test_scorecard_context_bands_scale_to_the_window_the_sessions_ran_under(tmp_path):
+    """The same 300,000-token p90 is "good" against the model's own
+    1,000,000-token window (level 4) but near the top of a 400,000 window
+    the sessions were set to summarise at: Claude Code would have
+    summarised them well before the model's limit. The bands scale to the
+    window the sessions ran under, so the p90 lands at level 3."""
+    project_dir = tmp_path / "proj-w400"
+    project_dir.mkdir()
+    _write_session_with_ctx_values(
+        project_dir, "session-w400", top_ctx_values=[50_000, 100_000, 250_000, 300_000], sub_ctx_values=[]
+    )
+    corpus = load_corpus([project_dir])
+
+    def level(snapshots):
+        report = build_report(corpus, PRICING, Config(), projects=("proj-w400",), window="w", snapshots=snapshots)
+        scorecard_section = next(s for s in report.sections if s.key == "scorecard")
+        dim_table = next(t for t in scorecard_section.tables if t.name == "dimensions")
+        return next(r for r in dim_table.rows if r[0] == "context_hygiene")[1]
+
+    assert level(None) == 4
+    assert level([_window_snapshot("proj-w400", 400_000)]) == 3
+    # A window a snapshot sets above the model's own changes nothing: the
+    # model's 1,000,000 stands in when no snapshot names a smaller one.
+    assert level([_window_snapshot("proj-w400", 1_000_000)]) == 4
+
+
+def test_the_scorecard_scales_to_the_window_most_sessions_ran_under(tmp_path):
+    """Two projects, one set to 400,000 and one to 200,000: the bands follow
+    the window that covers more main-session replies. A caller's own
+    ``[thresholds.scorecard] context_p90_ctx`` still wins (covered by the
+    explicit-override test beside it)."""
+    base = tmp_path / "corpus"
+    for slug, replies in (("proj-big", 6), ("proj-small", 3)):
+        d = base / slug
+        d.mkdir(parents=True)
+        _write_session_with_ctx_values(d, f"s-{slug}", top_ctx_values=[300_000] * replies, sub_ctx_values=[])
+    corpus = load_corpus([base / "proj-big", base / "proj-small"])
+    snaps = [_window_snapshot("proj-big", 400_000), _window_snapshot("proj-small", 200_000)]
+
+    report = build_report(
+        corpus, PRICING, Config(), projects=("proj-big", "proj-small"), window="w", snapshots=snaps
+    )
+    scorecard_section = next(s for s in report.sections if s.key == "scorecard")
+    row = next(r for r in next(t for t in scorecard_section.tables if t.name == "dimensions").rows if r[0] == "context_hygiene")
+    # The 400,000 window covers 5 of the 8 recorded replies: bands double to
+    # 100k/200k/300k/400k, and a 300,000 p90 is level 3. Scaled to the
+    # 200,000 window instead it would sit past the top band.
+    assert row[1] == 3
+
+
+def test_each_session_hands_the_recache_table_the_window_it_ran_under(tmp_path, monkeypatch):
+    """``build_report`` knows each session's window as it classifies the
+    session, so the re-cache table's "very large" bar is that session's own
+    (the compaction sweep reads the same windows). A session in a project
+    with no snapshot carries none."""
+    from claudeglass import report as report_mod
+
+    base = tmp_path / "corpus"
+    for slug in ("proj-a", "proj-b", "proj-c"):
+        d = base / slug
+        d.mkdir(parents=True)
+        _write_session_with_ctx_values(d, f"s-{slug}", top_ctx_values=[10_000, 20_000], sub_ctx_values=[])
+    corpus = load_corpus([base / "proj-a", base / "proj-b", base / "proj-c"])
+    snaps = [_window_snapshot("proj-a", 300_000), _window_snapshot("proj-b", 400_000)]
+
+    seen: dict[str, set] = {}
+    original = report_mod._build_scorecard_section
+
+    def _capture(rs, *args, **kwargs):
+        seen["windows"] = {r.compact_window for r in rs.records}
+        return original(rs, *args, **kwargs)
+
+    monkeypatch.setattr(report_mod, "_build_scorecard_section", _capture)
+    build_report(
+        corpus, PRICING, Config(), projects=("proj-a", "proj-b", "proj-c"), window="w", snapshots=snaps
+    )
+    assert seen["windows"] == {300_000, 400_000, None}
+
+
 def test_overview_long_context_share_is_top_level_turn_count_basis(tmp_path):
     """Coordinator follow-up to R7: the overview's "long-context share of
     recent top-level turns" verification anchor needs a turn-count-basis,
@@ -1591,3 +1680,23 @@ def test_the_prompting_section_gets_your_dashboard_ratings_and_card_answers(tmp_
     seen.clear()
     build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w")
     assert seen["ratings"] is None and seen["cards"] == {}
+
+
+def test_the_prompting_section_gets_what_the_mod_showed(tmp_path, monkeypatch):
+    from claudeglass import prompting
+
+    corpus = _corpus_of(tmp_path, "proj-a")
+    seen = {}
+    real_build = prompting.build_section
+
+    def build_section(sessions, card_answers=None, **kwargs):
+        seen["mod_events"] = kwargs.get("mod_events")
+        return real_build(sessions, card_answers, **kwargs)
+
+    monkeypatch.setattr(prompting, "build_section", build_section)
+    events = [{"session_id": "session-001", "ts": "2026-09-21T10:00:00Z", "event": "present", "surface": "desktop"}]
+    build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w", mod_events=events)
+    assert seen["mod_events"] == events
+    # Without them, none: the section reads as it always did.
+    build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w")
+    assert seen["mod_events"] is None

@@ -19,6 +19,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # The JavaScript logic tests (the dashboard's figures, the mod's shared
+      # vectors) skip without Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install
         run: pip install -e .[test]
 

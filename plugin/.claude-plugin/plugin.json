@@ -1,0 +1,7 @@
+{
+  "name": "claudeglass",
+  "version": "0.16.0",
+  "description": "ClaudeGlass inside Claude Code (2.1.286 or later): how full the context is, what this session costs, and one well-timed suggestion when a token-saving action is available.",
+  "author": { "name": "PaulMorrisDev" },
+  "types": "./types/index.d.ts"
+}

@@ -17,6 +17,7 @@ from claudeglass import capture_catalogue as cat
 from claudeglass import capture_tags
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
+from claudeglass.pricing import load_pricing
 
 from helpers import attachment_line, turn_line, user_str_line, write_jsonl
 
@@ -213,6 +214,102 @@ def test_hook_entries_follow_the_metrics():
     )
     assert cat.hook_specs(["web"]) == ()
     assert cat.hook_specs(["result"]) == (("capture-hook.py", "SubagentStop", "", False),)
+
+
+def test_the_judge_is_pinned_to_haiku_4_5_by_its_exact_name_with_no_thinking():
+    # J20: the ``haiku`` alias is whichever Haiku the installed ``claude``
+    # knows. Desktop's 2.1.309 answers Haiku 5.5 to it, which still thinks
+    # at MAX_THINKING_TOKENS=0 and so costs more than JUDGE_USD_PER_CALL.
+    assert cat.JUDGE_MODEL == "claude-haiku-4-5" and cat.JUDGE_THINKING_TOKENS == 0
+    judge = cat.export_json()["judge"]
+    assert judge["model"] == "claude-haiku-4-5" and judge["thinking_tokens"] == 0
+    assert json.loads(cat.catalogue_json_text())["judge"]["model"] == "claude-haiku-4-5"
+    assert cat.JUDGE_USD_PER_CALL == 0.002
+    # An exact id, never an alias, and one the rate card prices.
+    assert cat.JUDGE_MODEL not in {"haiku", "sonnet", "opus"} and cat.JUDGE_MODEL.startswith("claude-")
+    assert load_pricing().resolve_model(cat.JUDGE_MODEL) is not None
+    # The documents say the same.
+    docs = Path(__file__).resolve().parent.parent / "docs"
+    assert f"claude -p --model {cat.JUDGE_MODEL}" in (docs / "capture.md").read_text(encoding="utf-8")
+
+
+def test_signal_codes_count_toward_the_metric_their_hook_event_belongs_to():
+    # J18: the dashboard counted a metric's answers by the short code a
+    # signal line carries, and had no code for the ``turn`` and ``fail``
+    # lines, so turn_signals showed 0 answers however many it held.
+    import importlib.util
+
+    hook_path = Path(str(resources.files("claudeglass") / "hooks" / cat.HOOK_MODULE))
+    spec = importlib.util.spec_from_file_location("_catalogue_hook_under_test", hook_path)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    assert set(hook._SIGNAL_CODES) == set(cat.SIGNAL_EVENTS)
+    for event, metric in cat.SIGNAL_EVENTS.items():
+        assert cat.SIGNAL_CODE_METRICS[hook._SIGNAL_CODES[event]] == metric, event
+    assert set(cat.SIGNAL_CODE_METRICS) == set(hook._SIGNAL_CODES.values())
+    assert cat.SIGNAL_CODE_METRICS["turn"] == cat.SIGNAL_CODE_METRICS["fail"] == "turn_signals"
+    # The hook never reads the map, so the packaged catalogue file is unchanged by it.
+    assert "SIGNAL_CODE_METRICS" not in cat.catalogue_json_text()
+    assert not any(code in cat.export_json() for code in ("signal_code_metrics", "signal_codes"))
+
+
+STOP = ("capture-hook.py", "Stop", "", True)
+
+
+def test_a_custom_set_of_tag_metrics_alone_still_registers_the_stop_hook_that_fills_a_missed_tag():
+    # J22: the fallback for a tag Claude left out runs from the Stop hook,
+    # which only turn_signals, the Haiku tagger and coaching notes brought.
+    for ids in (("task", "brief", "level"), ("task",), ("brief",), ("size", "shift")):
+        specs = cat.hook_specs(ids)
+        assert STOP in specs, ids
+        assert [spec[1] for spec in specs].count("Stop") == 1, ids
+    assert cat.hook_specs(("task",)) == (
+        ("capture-hook.py", "SessionStart", "startup|clear|compact", False), STOP,
+    )
+    # Nothing is added where there is no tag to fill in: the free signals, the
+    # agent-only metrics, a set with no Claude-written tags, or no metrics.
+    for ids in ((), ("waits",), ("result",), ("agent_brief",), ("session_end", "permissions")):
+        assert not any(spec[1] == "Stop" for spec in cat.hook_specs(ids)), ids
+
+
+def test_the_docs_name_the_hooks_that_run_in_the_background_and_say_what_headless_runs_get():
+    # J37: SECURITY.md named two of the four background entries, and
+    # capture.md gave ``claude -p`` as the reason for a foreground Stop.
+    root = Path(__file__).resolve().parent.parent
+    background = {spec[1] for spec in cat.hook_specs(cat.level_metrics("deep")) if spec[3]}
+    assert background == {"Notification", "PermissionRequest", "Stop", "StopFailure"}
+    haiku_background = {spec[1] for spec in cat.hook_specs(("task", cat.HAIKU_TAGGER_HOOK, "waits")) if spec[3]}
+    assert "Stop" not in haiku_background and "Notification" in haiku_background
+    security = " ".join((root / "SECURITY.md").read_text(encoding="utf-8").split())
+    paragraph = security[security.index("Four of the entries run asynchronously"):]
+    paragraph = paragraph[: paragraph.index("**Files.**")]
+    for event in ("Notification", "PermissionRequest", "StopFailure", "Stop (unless Haiku writes the tags)"):
+        assert event in paragraph, event
+    assert "claude -p" in paragraph and "no capture note, no tags and no agent judging" in paragraph
+    markdown = " ".join(cat.render_markdown().split())
+    assert "A `claude -p` or Agent SDK run, with nobody at the screen, gets no capture note, no tags and no agent judging" in markdown
+    assert "fills in a tag Claude left out" in markdown or "only fills in a tag Claude left out" in markdown
+
+
+def test_the_docs_say_that_capture_which_ended_starts_again_with_a_new_span():
+    # J19.
+    markdown = " ".join(cat.render_markdown().split())
+    assert "Capture whose end time has passed counts as off here" in markdown
+    assert "starts a new span, 14 days unless you say otherwise" in markdown
+    assert cat.DEFAULT_CAPTURE_TIMEBOX_DAYS == 14
+
+
+def test_the_stop_entry_is_never_doubled_and_every_presets_entries_are_as_they_were():
+    for level in ("free", "essentials", "standard", "deep"):
+        specs = cat.hook_specs(cat.level_metrics(level))
+        assert [spec[1] for spec in specs].count("Stop") == 1, level
+        # Background, as turn_signals has always registered it.
+        assert next(spec for spec in specs if spec[1] == "Stop") == STOP, level
+    # Beside turn_signals, coaching notes or the Haiku tagger the entry is the one they already had.
+    assert cat.hook_specs(("task", "turn_signals")).count(STOP) == 1
+    assert [spec[1] for spec in cat.hook_specs(("task", "coaching_notes"))].count("Stop") == 1
+    haiku = cat.hook_specs(("task", cat.HAIKU_TAGGER_HOOK))
+    assert [spec for spec in haiku if spec[1] == "Stop"] == [("capture-hook.py", "Stop", "", False)]
 
 
 def test_the_post_tool_use_matcher_leaves_out_the_shell_mcp_and_search_tools():

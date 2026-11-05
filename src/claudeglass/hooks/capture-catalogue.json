@@ -338,6 +338,19 @@
   "Agent",
   "Workflow"
  ],
+ "mod": {
+  "moved": [
+   "big_paste",
+   "cold_return",
+   "drip_feed",
+   "plan_fresh",
+   "status_poll"
+  ],
+  "dir": "mod",
+  "present_dir": "present",
+  "present_window_s": 600,
+  "sensor_dir": "sensor"
+ },
  "result_image_max_tokens": 1600,
  "result_image_patch_px": 28,
  "result_persist_chars": {
@@ -390,7 +403,7 @@
  ],
  "signals_dir": "signals",
  "judge": {
-  "model": "haiku",
+  "model": "claude-haiku-4-5",
   "dir": "tags",
   "env": "CLAUDEGLASS_JUDGE",
   "timeout_s": 60,

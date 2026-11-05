@@ -100,7 +100,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Iterable
 
-from . import capture_catalogue
+from . import capture_catalogue, compaction
 from . import events as events_mod
 from .fixes import _model_family
 from .model import Column, EventKind, Section, Table, TranscriptResult, Turn, scheduled_main_session
@@ -379,7 +379,7 @@ def run_facts(
     run.interrupts = sum(1 for event in result.events if events_mod.is_stop(event))
     run.api_errors = kinds[EventKind.API_ERROR]
     run.fallbacks = kinds[EventKind.MODEL_FALLBACK]
-    run.compactions = kinds[EventKind.COMPACT_BOUNDARY]
+    run.compactions = compaction.compactions_in(result)[0]
     run.scheduled = scheduled_main_session(result)
     if run.is_agent:
         # Cut off: stopped, never replied, or the last reply asked for a

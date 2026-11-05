@@ -689,6 +689,39 @@ def test_a_session_start_hook_counts_the_sessions_and_summaries_since():
     assert row.stopped()
 
 
+def test_a_session_start_hook_does_not_count_the_summary_a_continued_session_inherits():
+    failing = [
+        _result([_turn(1, ts=f"2026-09-20T0{i}:00:05Z")], [_failed(ts=f"2026-09-20T0{i}:00:00Z", hook="SessionStart")],
+                f"old{i}")
+        for i in range(1, 4)
+    ]
+    inherited = model.Event(kind=EventKind.COMPACT_BOUNDARY, ts="2026-09-21T09:30:00Z", detail={"inherited": True})
+    later = [_result([_turn(1, ts=f"2026-09-21T0{i}:00:05Z")], [inherited] if i == 1 else [], f"new{i}")
+             for i in range(1, 5)]
+    row = compute_hook_costs(failing + later, PRICING).hooks["guard.ps1"]
+    # 3 starts, each failing; since, 4 starts ran clean. The summary the
+    # first of them carries started the session it came from.
+    assert (row.chances_before, row.chances_since) == (3, 4)
+    # At the old rate of a failure a start, 4 are expected: the 5 that made
+    # the hook read as stopped counted a start that never ran here.
+    assert row.expected_since == pytest.approx(4) and not row.stopped()
+
+
+def test_the_start_of_a_continued_session_is_its_first_reply_not_its_inherited_summary():
+    failing = [
+        _result([_turn(1, ts=f"2026-09-20T0{i}:00:05Z")], [_failed(ts=f"2026-09-20T0{i}:00:00Z", hook="SessionStart")],
+                f"old{i}")
+        for i in range(1, 4)
+    ]
+    # The inherited boundary is stamped before the last failure; the session's
+    # own first reply, and so its own start, is after it.
+    inherited = model.Event(kind=EventKind.COMPACT_BOUNDARY, ts="2026-09-20T02:00:00Z", detail={"inherited": True})
+    own = model.Event(kind=EventKind.COMPACT_BOUNDARY, ts="2026-09-21T09:30:00Z")
+    later = [_result([_turn(1, ts="2026-09-21T01:00:05Z")], [inherited, own], "new1")]
+    row = compute_hook_costs(failing + later, PRICING).hooks["guard.ps1"]
+    assert (row.chances_before, row.chances_since) == (3, 2)
+
+
 def test_a_subagent_counts_in_its_sessions_project_and_other_projects_do_not():
     turns, events = _bash_failures(20)
     results = [

@@ -18,6 +18,13 @@ the right facts, not more thought, so the hook runs Haiku without thinking.
 measured live on 0.15.0, on 2026-10-09. The sections before them record
 how the hook got there, with the figures of their time.
 
+Every figure here is Claude Haiku 4.5's, and the hook asks for it by name
+(`claude -p --model claude-haiku-4-5`) so that it stays so. The `haiku`
+alias follows whichever `claude` command runs: the desktop app's 2.1.309
+resolves it to Haiku 5.5, which thought on a real excerpt even with
+thinking switched off (356 of 401 output tokens), so its accuracy and cost
+are not the ones measured here.
+
 ## How it's measured
 
 - **Sessions.** 38 scripted sessions were recorded as real Claude Code

@@ -290,6 +290,7 @@ def _run_locked(options: ServeOptions, store_path: Path, lock: StoreLock, *, onc
             window=f"last {days} days",
             ratings=store.all_feedback(),
             tip_feedback=store.tip_feedback(),
+            mod_events=store.read_mod_events(),
             config_dir=options.config_dir,
         )
 

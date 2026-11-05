@@ -321,8 +321,20 @@ can still include a session whose transcript file Claude Code's own
 `cleanupPeriodDays` retention has already removed — see "Store rebuild"
 below.
 
-`schema_version` is the store's schema: 9 since the /cg-feedback
-redesign, which added the rating's `why`, `missed_in`, `tip` and
+`schema_version` is the store's schema: 11 since the ClaudeGlass mod's
+tweaks. Version 10 added the `mod_events` table: one row per event the mod
+wrote to `mod/sensor/<session id>.json` (the session's id, the time, the
+event word, the closed words `kind`, `surface` and `outcome` that event
+takes, and for a compaction review the counts `kept`, `missing` and
+`added`; no text). Version 11 adds four nullable counts: `instructed` and
+`referenced` on a compaction review, and `before` and `after` on the new
+`tweak` event (a button pressed in the mod). The watcher reads a file when
+it changes and replaces that session's rows from the file's first event
+on, so reading it again changes nothing, and rows older than
+`retention_days` (180 by default) are removed with their files. A store at
+9 gains the table in place, and one at 10 gains the columns. Version 9,
+from the /cg-feedback
+redesign, added the rating's `why`, `missed_in`, `tip` and
 `tip_hint` columns and the `session_plan_feedback` and `tip_feedback`
 tables. A store at 8 gains them in place and nothing is read again.
 Version 8, from 0.13.0, added `turns_agg.bucket`, the UTC quarter hour
@@ -380,7 +392,8 @@ rather than a 30-day default. A `window_days` window is local calendar
 days (see "Report-backed routes: windowing query params"). An explicit
 `since`/`until` is rounded down to the minute the same way a named
 window's own resolved `since` already is, so two requests for "the same"
-bound issued a few seconds apart agree on exactly the same window.
+bound issued a few seconds apart agree on exactly the same window. A
+`since` that is not before the `until` is `400`.
 Additive: `previous` (`0`, the default, or `1`; anything else is `400`),
 below.
 
@@ -691,7 +704,11 @@ status line, at the foot of the sidebar.
   `report --since ... --until ...` does rather than being silently
   additionally clamped to the last 30 days. A `since` wins over
   `window_days`, which is then `null` in the response. A malformed
-  `since`/`until` is a `400 bad_request`. `report.meta.window` in the
+  `since`/`until`, or a `since` that is not before the `until` (a
+  window that ends before it starts, or is empty), is a `400 bad_request`
+  (`'since' must be before 'until'`) on every route that takes them,
+  `/api/summary` and `/api/sessions` included, rather than a `200` with
+  nothing in it. `report.meta.window` in the
   response is rendered identically to the CLI's own
   `_window_description` (`"last <N> days"` for a `window_days` window,
   `"since <since> until <until>"`, `"since the beginning until <until>"`,
@@ -1901,7 +1918,7 @@ adds a line (`kind`, `item`, the state `trying` and a time, no text) to
 `habit-log.jsonl` in the config folder each time you pick it when it was
 not already your answer, which puts a change point on the Changes page
 from that day so the habit's effect can be measured. Your answer on the
-card of a tip hint also counts in the "Tips Claude showed" table of the
+card of a tip hint also counts in the "Coaching tips shown" table of the
 report (`trying` counts as `useful`).
 
 `data`: `{"kind", "item", "answer", "set_at"}` (`set_at` is `null` when
@@ -2126,6 +2143,18 @@ session-id hash reads/writes its salt file inside this service's own
 `_default_waste_config_dir()` OS-temp-directory default — the fallback
 exists only for callers (tests, `baseline.py`, `team.py`) that never
 had a `config_dir` of their own to give it.
+
+For a one-project view `_build_report_model` also passes `calibration=`:
+the characters per token measured on every project in the window. The
+ratio follows the model, and a small project rarely has ten first calls of
+its own. The figure comes from the all-projects report kept for the same
+window when there is one, however old that report is. Otherwise it is
+measured with `report.measure_calibration` on an every-project
+`corpus_from_store` load, a second corpus rebuild on top of the project's
+own. With no project picked nothing is passed, and `build_report()`
+measures its own sessions. A CLI report always measures its own sessions,
+so a project's "Characters per token" table and token figures can differ
+between the dashboard and the CLI.
 
 **Memoization key: `Store.change_token()`.** Rebuilding a full report on
 every request would make every page switch in the UI (`docs/ui.md`)

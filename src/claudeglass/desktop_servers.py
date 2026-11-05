@@ -1,9 +1,10 @@
 """The MCP servers the Claude desktop app brings itself.
 
 A desktop session is offered servers nobody added: computer use, the
-visualiser, the built-in browser and preview, the app's own session,
-window and settings servers, the scheduler, the terminal and the
-connector registry. They show up in the transcripts under their own
+visualiser, the built-in browser and preview, Claude in Chrome (Claude
+Code's Chrome integration, which the app offers without anyone adding
+it), the app's own session, window and settings servers, the scheduler,
+the terminal and the connector registry. They show up in the transcripts under their own
 names, and what they cost every reply is real, but there is no
 connector to disconnect and no config entry to delete, so
 ``tool_search`` shows them with that cost and never marks one for
@@ -30,6 +31,7 @@ BUILT_IN: frozenset[str] = frozenset({
     "visualize",
     "Claude_Browser",
     "Claude_Preview",
+    "claude-in-chrome",
     "terminal",
     "scheduled-tasks",
     "mcp-registry",
@@ -45,6 +47,12 @@ SWITCHES: dict[str, str] = {
     "computer-use": (
         "the desktop app's settings have a computer use switch, which may stop this server being offered "
         "(not verified)"
+    ),
+    # code.claude.com/docs/en/chrome documents "Enabled by default" and says
+    # it keeps the browser tools loaded. Not tried in the desktop app.
+    "claude-in-chrome": (
+        "run /chrome and turn off Enabled by default; Claude Code then loads the browser tools only when "
+        "asked (not verified in the desktop app)"
     ),
 }
 

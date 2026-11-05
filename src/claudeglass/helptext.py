@@ -178,6 +178,9 @@ PLACEMENT: dict[str, str] = {
     "habits_digest": "keep",
     "prompting_habits": "keep",
     "prompting_tips": "keep",
+    "prompting_glass": "advanced",
+    "prompting_effect": "keep",
+    "prompting_tweaks": "keep",
     "habits_playbook": "keep",
     "habits_by_task": "keep",
     "habits_briefs": "advanced",
@@ -220,6 +223,7 @@ PLACEMENT: dict[str, str] = {
     "env-levers": "keep",
     # context budget
     "context_budget_baseline": "keep",
+    "context_budget_tools": "keep",
     "context_budget_calibration": "report",
     "context_budget_autocompact": "advanced",
     "context_budget_statusline": "advanced",
@@ -799,6 +803,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "",
                 "The average number of replies a spawn made after its first. A saving counts each of them.",
             ),
+            "largest_tools": (
+                "",
+                "The three biggest tools or MCP servers in this agent type's tool definitions, on the model "
+                "measured. Each size is the average, in tokens, per spawn that recorded its tools.",
+            ),
         },
         lead_columns=[
             "agent_type", "spawns", "startup_tokens", "claude_md", "skills_listing", "tool_lists", "task_prompt",
@@ -969,11 +978,12 @@ TABLE_COPY: dict[str, TableCopy] = {
         lead_columns=["habit", "times", "per_100", "cost", "trend", "try"],
     ),
     "prompting_tips": TableCopy(
-        title="Tips Claude showed",
+        title="Coaching tips shown",
         help=Help(
-            shows="For each coaching hint that asks Claude to pass on a tip, how often it did and how often "
-            "it called the tip a misfire. Your own answers about each tip sit beside them. They come from /cg-feedback, "
-            "a session rating, or the rating buttons on a card.",
+            shows="For each coaching hint that asks for a tip, how many tips were shown. Some were passed on by "
+            "Claude in its reply. Others were shown by ClaudeGlass itself inside Claude Code. It also shows how often "
+            "Claude called a tip a misfire. Your own answers about each tip sit beside them. They come from "
+            "/cg-feedback, a session rating, or the rating buttons on a card.",
             read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
             "when your message calls for it, so fewer of those show and that's no miss. A tip you called wrong, "
             "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session.",
@@ -982,13 +992,19 @@ TABLE_COPY: dict[str, TableCopy] = {
         columns={
             "hint": ("Hint", "The coaching hint."),
             "notes": ("Notes", "How many times the hint's note was added."),
-            "shown": ("Tip shown", "How many of those replies ended with a ClaudeGlass tip."),
-            "shown_pct": ("Shown", "The share of notes that ended with a tip."),
+            "shown": ("Passed on by Claude", "How many of those replies ended with a ClaudeGlass tip."),
+            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip."),
             "relay": (
-                "Passed on",
+                "Passed on, of notes",
                 "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "
-                "whether your message called for it.",
+                "whether your message called for it. Empty where ClaudeGlass showed the tip itself.",
             ),
+            "glass": (
+                "Shown by Glass",
+                "How many times ClaudeGlass showed the tip itself, in the sessions where it was running.",
+            ),
+            "where": ("Where Glass showed it", "The places ClaudeGlass showed it, with how many times each."),
+            "total": ("Tips shown", "The tips Claude passed on plus the ones ClaudeGlass showed itself."),
             "misfires": ("Called a misfire", "How many times Claude said in its reply that the tip didn't apply."),
             "useful": ("You said useful", "Answers saying the tip was right and you acted on it. Trying it on a card counts here."),
             "known": ("You knew it", "Answers saying the tip was right but you already knew it."),
@@ -1007,6 +1023,65 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cold_return": "Back after a break",
             "report_reread": "Background agents in a long session",
             "split_run": "Agent runs that ended too big",
+        },
+    ),
+    "prompting_glass": TableCopy(
+        title="Sessions with ClaudeGlass running",
+        help=Help(
+            shows="How many of your sessions ran with the ClaudeGlass mod inside Claude Code, where they ran, and "
+            "how many tips it showed itself. Those tips are counted in the tips table beside the ones Claude "
+            "passed on.",
+            read="A session counts when the mod wrote that it was there. The coaching hints it shows itself "
+            "aren't added to Claude's context, so Claude can't pass them on.",
+            act="",
+        ),
+        columns={
+            "sessions": ("Sessions", "Your sessions in the window that had a message of yours."),
+            "with_glass": ("With ClaudeGlass", "How many of them ran with the mod."),
+            "with_glass_pct": ("Share", "The share of sessions that ran with the mod."),
+            "where": ("Where it ran", "The part of Claude Code each session used, with how many sessions."),
+            "tips": ("Tips it showed", "How many tips the mod showed itself in those sessions."),
+        },
+    ),
+    "prompting_effect": TableCopy(
+        title="Sessions with and without ClaudeGlass",
+        help=Help(
+            shows="Your sessions that ran with the ClaudeGlass mod, set beside the ones that did not, on the "
+            "same figures. Both groups' values and session counts are shown, so you can judge the gap yourself.",
+            read="Each difference is against the sessions without the mod. A row says there are too few sessions "
+            "to compare until each group has 10. Measurable means the gap is unlikely to be chance alone, checked "
+            "across the five figures together. Most sessions without the mod are from before you added it. "
+            "Sessions with ClaudeGlass may differ in other ways, so a gap does not show the mod caused it. "
+            "Effects of tools like this are usually small.",
+            act="",
+        ),
+        columns={
+            "figure": ("Figure", "What is compared."),
+            "with_glass": ("With ClaudeGlass", "The figure for sessions that ran with the mod."),
+            "without_glass": ("Without", "The figure for sessions that ran without it."),
+            "with_sessions": ("Sessions with", "How many sessions with the mod the figure covers."),
+            "without_sessions": ("Sessions without", "How many sessions without the mod the figure covers."),
+            "difference": ("Difference", "How the figure with the mod compares with the one without it."),
+            "verdict": ("Measurable?", "Whether the gap is unlikely to be chance alone, or there is no measurable difference yet."),
+        },
+    ),
+    "prompting_tweaks": TableCopy(
+        title="Tweaks",
+        help=Help(
+            shows="The buttons ClaudeGlass offers and how often you pressed each one. It also shows how much of your "
+            "keep list the conversation summaries held, with and without the list given to the summariser.",
+            read="Kept is the share of keep-list items a summary still held. A higher rate with the keep list suggests "
+            "telling the summariser what to keep helps. Re-added items used later counts the ones a later "
+            "reply referred to. Kept is found by matching words, so a reworded item may count as missing. These are "
+            "counts from your own sessions, so a gap does not show that a tweak caused it.",
+            act="",
+        ),
+        columns={
+            "tweak": ("Tweak", "The button."),
+            "pressed": ("Pressed", "How many times you pressed it."),
+            "kept_with": ("Kept with the keep list", "The share of keep-list items the summaries held when ClaudeGlass told the summariser what to keep."),
+            "kept_without": ("Kept without it", "The same share for the summaries where it did not."),
+            "referenced": ("Re-added items used later", "How many re-added items a later reply referred to."),
         },
     ),
     "habits_playbook": TableCopy(
@@ -3189,6 +3264,12 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "median_ctx": ("Typical context size", "The middle context size of these replies, in tokens."),
             "median_gap_s": ("Typical wait before", "The middle wait since the previous reply."),
+            "api_cause": (
+                "API cause",
+                "The API's own reason for the miss, with how many rebuilds it gave it for. It can say the "
+                "messages, system prompt, tools or model changed, or that it couldn't find the earlier message. "
+                "Blank when Claude Code logged none.",
+            ),
         },
         value_labels={
             "full-expiry": "Cache expired",
@@ -3431,6 +3512,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "": "Note with no type",
             # hooks
             "hook_success": "Hook output",
+            "async_hook_response": "Background hook response",
             "hook_non_blocking_error": "Hook error (did not block)",
             "hook_blocking_error": "Hook blocked an action",
             "hook_system_message": "Hook message",
@@ -3504,8 +3586,10 @@ TABLE_COPY: dict[str, TableCopy] = {
     "recache_huge_context": TableCopy(
         title="Cache reads from very large contexts",
         help=Help(
-            shows="How much of your cache reading comes from replies with a very large context (200,000 tokens "
-            "or more by default).",
+            shows="How much of your cache reading comes from replies with a very large context. "
+            "That is 80% of the point where the session summarises: its window less 33,000 tokens. "
+            "The window is your auto-compact window setting, else the model's own. "
+            "A reply counts at 200,000 tokens when neither is known.",
             read="Every reply reads its whole context from the cache. A huge context makes each reply cost more, "
             "even when the cache works. It is not a price surcharge.",
             act="If the share is high, start new sessions for new tasks, or summarise the conversation sooner.",
@@ -3514,7 +3598,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "metric": ("", "This row covers every reply in the window."),
             "huge_ctx_turns": (
                 "Replies with a huge context",
-                "Replies at or over the size limit, in tokens of context.",
+                "Replies whose context reached 80% of the point where their session summarises.",
             ),
             "total_priced_turns": ("All replies", "Model replies with token counts."),
             "huge_ctx_cache_read_tokens": (
@@ -4314,7 +4398,9 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="What started each summary",
         help=Help(
             shows="Whether each summary ran automatically or because you asked for it.",
-            read="Automatic summaries run when the context is nearly full.",
+            read="Automatic summaries run when the context is nearly full. Claude Code can also make one in the "
+            "background beforehand and apply it later, so it lands wherever the session happened to be. Those "
+            "are counted as summaries but say nothing about the size Claude Code summarises at.",
             act="",
         ),
         columns={
@@ -4324,6 +4410,7 @@ TABLE_COPY: dict[str, TableCopy] = {
         },
         value_labels={
             "auto": "Automatic (context nearly full)",
+            "auto (precomputed)": "Automatic (made in the background)",
             "manual": "You ran /compact",
             "unknown": "Not recorded",
         },
@@ -4502,6 +4589,12 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "delta_usd": ("Change in cost", "Simulated cost minus real cost, at list price. Negative means cheaper."),
             "delta_pct": ("Change (%)", "The change as a share of your real cost. Negative means cheaper."),
+            "within_limit": (
+                "Within the limit",
+                "Whether this window summarises no more often than the limit on summaries per session "
+                "(2 by default). The suggestions, the Overview's saving and the chart never offer a window "
+                "beyond it, however cheap.",
+            ),
         },
         value_labels={"none": "As now (no extra summaries)"},
     ),
@@ -5021,7 +5114,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "most_deferred_mcp": ("Of them MCP tools", "How many of those came from MCP servers."),
             "definitions_measured": (
                 "Definitions measured",
-                "Tools whose full definition was loaded in this window, so its size is known.",
+                "Tools whose full definition was loaded or sent in full in this window, so its size is known.",
             ),
             "definition_tokens": ("Average definition", "The average size of those definitions, in tokens."),
             "kept_per_reply": ("Kept out of each reply", "Tokens of definitions left out of each request, on average."),
@@ -5072,6 +5165,17 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "The difference once stopped replies and unlogged requests are taken out, as a % of Claude Code's.",
             ),
             "worst_unexplained_pct": ("Most in one session", "The largest share left unexplained in one session."),
+            "partial_usd": (
+                "Output of replies logged mid-stream (estimated)",
+                "Claude Code logs about half of a subagent's replies while they are still being written, with "
+                "only the first few tokens of output counted. ClaudeGlass estimates the rest from how much the "
+                "next request's context grew. This is that estimated share, already in \"ClaudeGlass, same span\".",
+            ),
+            "safeguards_usd": (
+                "A response stopped by safeguards (billed, not logged)",
+                "Claude Code bills a response its safeguards stopped, but the log keeps only a placeholder with "
+                "no usage. This is that part of the requests no log shows.",
+            ),
         },
         value_labels={"all": "All sessions with a record"},
         lead_columns=["cc_usd", "local_usd", "difference_pct", "unexplained_pct"],
@@ -5100,16 +5204,23 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Each MCP server whose tools were deferred, and Claude Code's own tools, with what keeping their "
             "definitions out saved.",
-            read="A server with no loaded tool is sized at the average of every server. The searches aren't split "
-            "by server. Each server's share of the name list is in \"Each MCP server\".",
+            read="A server with no tool measured of its own is sized at the average of the MCP tools loaded in this "
+            "window. With fewer than ten loaded, it is sized at a typical 550 tokens. The searches aren't split by server. Each server's share of the name list is in \"Each MCP server\".",
             act="",
         ),
         columns={
             "server": ("MCP server", "The server the tools come from, or Claude Code's own tools."),
             "most_deferred": ("Most tools deferred", "The most of its tools listed by name only in one request."),
-            "measured": ("Definitions measured", "Its tools whose full definition was loaded in this window."),
+            "measured": (
+                "Definitions measured",
+                "Its tools whose full definition was loaded or sent in full in this window.",
+            ),
             "definition_tokens": ("Average definition", "The size each of its deferred tools was counted at, in tokens."),
-            "sized_from": ("Sized from", "Whether that size comes from its own loaded tools or from every server's."),
+            "sized_from": (
+                "Sized from",
+                "Whether that size comes from its own tools, the MCP tools loaded in this window, or a typical MCP "
+                "tool. Claude Code's own tools with none measured use every tool.",
+            ),
             "replies": ("Replies", "Replies requested while some of its tools were deferred."),
             "kept_per_reply": (
                 "Kept out of each reply",
@@ -5124,6 +5235,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         value_labels={
             "built-in": "Claude Code's own tools",
             "its own tools": "Its own tools",
+            "MCP tools loaded in this window": "MCP tools loaded in this window",
+            "typical MCP tool": "Typical MCP tool",
             "all servers": "All servers",
         },
         lead_columns=["server", "most_deferred", "definition_tokens", "kept_per_reply", "saving_usd"],
@@ -5133,10 +5246,10 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Every MCP server your sessions were offered or your config names, whether Claude used it, and "
             "what keeping it cost.",
-            read="A server you never use still costs every reply its tool names, instructions and any tools sent in "
-            "full. Amounts are at the cache read rate, so they are the least it cost.",
-            act="Turn off the servers marked \"Never used: turn it off\". The card on the Actions page says how for "
-            "each kind.",
+            read="A server Claude doesn't use still costs every reply its tool names, instructions and any tools sent "
+            "in full. Amounts are at the cache read rate, so they are the least it cost.",
+            act="Turn off the servers marked \"Not used in this window: turn it off\". The card on the Actions page "
+            "says how for each kind.",
         ),
         columns={
             "server": ("MCP server", "The server's name in your sessions."),
@@ -5147,13 +5260,17 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "status": (
                 "Status",
-                "Whether Claude used it. An unused server is flagged once many main sessions over a week or more "
-                "were offered it, recently, and it cost enough to matter.",
+                "Whether Claude used it in this window. An unused server is flagged once many main sessions over a "
+                "week or more were offered it, recently, and it cost enough to matter.",
             ),
             "main_sessions": ("Main sessions offered it", "Main sessions that were offered its tools."),
             "subagent_runs": ("Subagent runs offered it", "Subagent runs that were offered its tools."),
             "uses": ("Uses", "Calls to its tools, reads of its resources, and its commands, in all of them."),
-            "first_seen_days": ("First offered", "How many days before the end of this window it was first offered."),
+            "first_seen_days": (
+                "First offered",
+                "How many days before the end of this window it was first offered. "
+                "It goes back no further than the days in which every session's replies were read.",
+            ),
             "last_seen_days": ("Last offered", "How many days before the end of this window it was last offered."),
             "also_named": ("Also named", "Other names the same server went by, such as its ID in the desktop app."),
             "sample_tools": ("Some of its tools", "Up to three of its tools, to help you recognise it."),
@@ -5170,8 +5287,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
         },
         value_labels={
-            "remove": "Never used: turn it off",
-            "unused": "Never used, below the bar",
+            "remove": "Not used in this window: turn it off",
+            "unused": "Not used in this window, below the bar",
             "used": "Used",
             "subagents only": "Only subagents were offered it",
             "needs sign-in": "Needs sign-in",
@@ -5502,7 +5619,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "an estimate of what it is made of, in tokens.",
             read="The first call is measured: everything the first reply read. About 43,000 tokens of it are "
             "Claude Code's own tool definitions and system prompt, which no setting removes. The parts to the "
-            "right are estimates. \"System prompt and tools\" is whatever the other parts don't explain, so "
+            "right are estimates. \"Everything else\" is whatever the other parts don't explain, so "
             "it also holds anything that could not be estimated.",
             act="Look at \"What you can change\" first. If one project's is much larger than the rest, run /context "
             "in that project to see the exact breakdown. Then trim the biggest part.",
@@ -5534,12 +5651,13 @@ TABLE_COPY: dict[str, TableCopy] = {
             "skills_listing_est": ("Skills list (est.)", "The list of skills Claude Code sent, estimated from its length."),
             "memory_files_est": (
                 "CLAUDE.md and rules (est.)",
-                "Your CLAUDE.md files and project rules, estimated from file size. Blank without a settings snapshot.",
+                "Your CLAUDE.md files and project rules, estimated from file size, and the auto memory "
+                "(MEMORY.md) the first replies carried. Blank without a settings snapshot.",
             ),
             "custom_agents_est": (
-                "Agent list (est.)",
-                "Your custom agents' share of the agent list, by how many agents it names. Blank without a "
-                "settings snapshot.",
+                "Your own agents (est.)",
+                "Your custom agents' share of the agent list, by how many agents it names. Agents from "
+                "plugins are in the list but not counted here. Blank without a settings snapshot.",
             ),
             "mcp_tools_est": (
                 "MCP servers offered",
@@ -5566,8 +5684,17 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "The skills list, CLAUDE.md and rules, and the MCP tools of servers you can turn off, together. "
                 "The part of the first call a setting can shrink. Servers built into the desktop app are left out.",
             ),
+            "system_prompt_est": (
+                "System prompt (est.)",
+                "Claude Code's system prompt, from what the first call recorded. Blank when no session recorded it.",
+            ),
+            "builtin_tools_est": (
+                "Built-in tools (est.)",
+                "Claude Code's own tool definitions sent in full, from what the first call recorded. "
+                "Blank when none were recorded.",
+            ),
             "system_prompt_and_tools_est": (
-                "System prompt and tools (rest)",
+                "Everything else (rest)",
                 "Average first call minus every estimate to its left. Blank when the estimates add up "
                 "to more than the measurement.",
             ),
@@ -5578,39 +5705,69 @@ TABLE_COPY: dict[str, TableCopy] = {
             "system_prompt_and_tools_est",
         ],
     ),
+    "context_budget_tools": TableCopy(
+        title="Tools every session starts with",
+        help=Help(
+            shows="One row per built-in tool and MCP server your main sessions started with. Each size is "
+            "averaged over the sessions that started with it, in tokens.",
+            read="Claude Code sends the tool definitions, deferred tool names and server instructions at the "
+            "start of each session. You pay to read them again on every reply. A server's size counts all "
+            "three. A low share in \"Sessions that used it\" means you rarely call it.",
+            act="Remove a built-in tool you never use by adding its bare name to permissions.deny in your "
+            "settings. Turn off an MCP server you don't need in /mcp. Servers marked Desktop app come with the app.",
+        ),
+        columns={
+            "tool": ("", "The built-in tool's name, or the MCP server's name."),
+            "kind": ("", "Built-in is a Claude Code tool. Desktop app is a server the app brings. MCP server is any other server, which you can turn off."),
+            "offered_sessions": ("", "Main sessions that started with it."),
+            "used_share": ("", "The share of those sessions that called it at least once."),
+            "tokens": ("", "Its definition at the start of a session, averaged over the sessions that started with it."),
+        },
+        lead_columns=["tool", "kind", "offered_sessions", "used_share", "tokens"],
+    ),
     "context_budget_autocompact": TableCopy(
         title="When conversations get summarised",
         help=Help(
             shows="For each project: your auto-compact setting, the model's context window, and the context "
             "size at which Claude Code actually summarised the main session.",
-            read="\"Summarised at\" is the typical context size right before an automatic summary. \"Room left\" is "
-            "the context window minus that. The window is assumed unless your status line logged it.",
-            act="If \"Differs from setting\" is yes, summaries start more than 10% away from your auto-compact window "
-            "setting. Check whether another settings file or an environment variable overrides it.",
+            read="\"Summarised at\" is the typical context size right before an automatic summary. Claude Code "
+            "summarises 33,000 tokens below your auto-compact window, so \"Room left\" is the window setting minus "
+            "that, about 33,000. The context window comes from the rate card unless your status line logged it.",
+            act="If \"Differs from setting\" is yes, summaries start more than 10% away from where your setting "
+            "should fire it (the window minus 33,000). Check whether another settings file or an environment "
+            "variable overrides it.",
         ),
         columns={
             "project": ("", "The project folder."),
             "configured_window": ("Auto-compact setting", "Your auto-compact window setting, in tokens. Blank if not "
-            "set."),
+            "set. Only summaries from sessions that started under it are compared with it."),
             "context_window_size": ("Context window", "The model's context window, in tokens."),
             "context_window_source": (
                 "Window from",
-                "Measured by your status line, or assumed: 1,000,000 tokens for a model set with [1m], "
-                "otherwise 200,000.",
+                "Measured by your status line, or the rate card's window for your model setting.",
             ),
             "observed_threshold": (
                 "Summarised at",
-                "Typical context size right before an automatic summary, in tokens. Blank if none happened.",
+                "Typical context size right before an automatic summary, in tokens. Blank if none happened. "
+                "A summary Claude Code made in the background beforehand fires wherever the session was, so "
+                "it is left out.",
             ),
-            "implied_buffer": ("Room left", "Context window minus \"Summarised at\", in tokens."),
-            "auto_compactions": ("Automatic summaries", "Automatic summaries in this project's main sessions."),
+            "implied_buffer": (
+                "Room left",
+                "Your auto-compact setting minus \"Summarised at\", in tokens: about 33,000. With no setting, "
+                "the context window minus \"Summarised at\".",
+            ),
+            "auto_compactions": (
+                "Automatic summaries",
+                "Automatic summaries \"Summarised at\" is drawn from, in this project's main sessions.",
+            ),
             "drift": (
                 "Differs from setting",
-                "Yes when \"Summarised at\" is more than 10% away from your auto-compact setting. "
-                "Blank when either is missing.",
+                "Yes when \"Summarised at\" is more than 10% away from where your auto-compact setting should "
+                "fire it (the window minus 33,000). Blank when either is missing.",
             ),
         },
-        value_labels={"statusline": "Status line", "assumed": "Assumed"},
+        value_labels={"statusline": "Status line", "assumed": "Rate card"},
         lead_columns=[
             "project", "configured_window", "observed_threshold", "context_window_size", "implied_buffer",
             "auto_compactions", "drift",
@@ -5671,7 +5828,9 @@ DIAGNOSTIC_LABELS: dict[str, tuple[str, str]] = {
     "oversized_lines": ("Lines too large to read", "Lines over the size limit, skipped without reading."),
     "trailing_events": ("Events after the last reply", "Events logged after a session's last reply, so attached to none."),
     "replayed_lines": ("Lines copied from an earlier session", "Lines a resumed session repeated. Counted once."),
-    "copied_lines": ("Lines copied from another session", "Lines another session's log also holds, as after /clear in a web or mobile session. Counted once, in their own session."),
+    "copied_lines": ("Lines copied from another session", "Lines another session's log also holds, as after /clear in a web or mobile session or in a fork in another folder. Agent files copied into a fork count too. Counted once, in their own session."),
+    "partial_output_turns": ("Replies logged mid-stream (output estimated)", "Replies Claude Code logged while they were still being written, with only the first few tokens of output counted. About half of a subagent's replies look like this."),
+    "partial_output_est_tokens": ("Output tokens estimated for those replies", "Output tokens estimated for those replies, beyond what the log counts. The estimate comes from how much the next request's context grew."),
     "compaction_calls": ("Summaries estimated", "Conversation summaries whose own request was estimated and counted in spend. Claude Code bills that request but does not log it."),
     "compaction_calls_unsized": ("Summaries left out", "Conversation summaries with no reply before them or no summary size, so their own request could not be estimated and is not in spend."),
     "timestamp_parse_failures": ("Unreadable timestamps", "Replies whose time could not be read. They are left out of time-based tables."),
@@ -5706,7 +5865,22 @@ _PARSER_NOTE_LABELS: dict[str, tuple[str, str]] = {
 }
 
 
-def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, parser_notes: dict | None = None) -> Table:
+#: The Data quality row for models the rate card has no price for, which
+#: is not a ``Diagnostics`` field: its figures come from the report's
+#: ``pricing_unknown_models`` table.
+UNPRICED_MODELS_LABEL = (
+    "Models with no price",
+    "Replies on a model the rate card has no price for are counted as $0.",
+)
+
+
+def diagnostics_table(
+    diagnostics: Diagnostics,
+    hook=None,
+    statusline=None,
+    parser_notes: dict | None = None,
+    unpriced: dict | None = None,
+) -> Table:
     """The parse-quality counters as a plain-English table (the Data
     quality page, ``GET /api/diagnostics``). Rows keep the raw field name
     as their key, shown through ``value_labels``. ``hook``, a
@@ -5716,7 +5890,11 @@ def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, pars
     ``parser_notes`` (``ReportModel.parser_notes``) adds one row per key
     it carries, labelled via ``_PARSER_NOTE_LABELS`` -- a side channel
     for counters that don't fit the ``Diagnostics`` dataclass, see that
-    module's docstring.
+    module's docstring. ``unpriced`` maps each model id the rate card has
+    no price for to its ``turns`` and ``tokens`` (the report's
+    ``pricing_unknown_models`` table); when it is not empty one more row
+    lists them, since those replies cost $0 in every figure and nothing
+    else on this page says so.
 
     With a hook or statusline row, ``row_groups`` splits the table in two:
     those rows describe your setup and every session in every project
@@ -5749,6 +5927,12 @@ def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, pars
         counts = (parser_notes or {}).get(note_key) or {}
         value = ", ".join(f"{k}: {v:,}" for k, v in sorted(counts.items())) if counts else "none"
         rows.append([note_key, value, label_pair[1]])
+    if unpriced:
+        value = "; ".join(
+            f"{model_id}: {counts['turns']:,} replies, {counts['tokens']:,} tokens"
+            for model_id, counts in sorted(unpriced.items())
+        )
+        rows.append(["pricing_unknown_models", value, UNPRICED_MODELS_LABEL[1]])
     return Table(
         name="data_quality",
         title="What could be read",
@@ -5766,7 +5950,8 @@ def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, pars
         ),
         value_labels={"snapshot_hook": "Config snapshot hook", "statusline": "Statusline (usage limits)"}
         | {key: label for key, (label, _) in DIAGNOSTIC_LABELS.items()}
-        | {key: label for key, (label, _) in _PARSER_NOTE_LABELS.items()},
+        | {key: label for key, (label, _) in _PARSER_NOTE_LABELS.items()}
+        | {"pricing_unknown_models": UNPRICED_MODELS_LABEL[0]},
     )
 
 

@@ -10,11 +10,12 @@ import io
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
-from claudeglass import __version__, capture_catalogue, cli, footprint, hook_health, installer, upgrade
+from claudeglass import __version__, calibration, capture_catalogue, cli, footprint, hook_health, installer, mod_settings, upgrade
 
 _writable = cli._writable
 
@@ -668,3 +669,94 @@ def test_update_help_names_finish_for_old_versions(capsys):
     except SystemExit:
         pass
     assert "0.6.0 or older" in " ".join(capsys.readouterr().out.split())
+
+
+# -- update --finish writes the mod's settings file --------------------------------
+
+
+def _settings(tmp_path) -> dict:
+    return json.loads(mod_settings.settings_path(tmp_path / "cfg").read_text(encoding="utf-8"))
+
+
+def _write_config(tmp_path, text: str) -> None:
+    (tmp_path / "cfg").mkdir(exist_ok=True)
+    (tmp_path / "cfg" / "config.toml").write_text(text, encoding="utf-8")
+
+
+def _as_the_service_wrote_it(tmp_path) -> dict:
+    """The fuller file the dashboard's service writes after a report."""
+    units = {"share_per_usd": 0.0125, "basis": "Amounts are shares of your weekly usage limit."}
+    measured = {"tool": {"opus": 3.2}, "text": {"opus": 3.9}, "default_family": "opus"}
+    report = types.SimpleNamespace(meta=types.SimpleNamespace(units=units, calibration=measured))
+    data = mod_settings.build(tmp_path / "cfg", report=report, dashboard_url="http://127.0.0.1:8787/")
+    assert mod_settings.write(tmp_path / "cfg", data)
+    return data
+
+
+def test_finish_writes_the_mod_settings_with_the_fallbacks_when_there_is_no_file_yet(tmp_path):
+    _write_config(tmp_path, 'billing = "subscription"\n')
+    rc, _ = _Finish(tmp_path).run()
+    assert rc == 0
+    data = _settings(tmp_path)
+    assert data["billing"]["mode"] == "subscription" and data["billing"]["share_per_usd"] is None
+    assert data["calibration"] == calibration.DEFAULT.to_dict()
+    assert data["dashboard_url"] == "http://127.0.0.1:8765/"
+    assert data["cache"] == {"ttl_seconds": 300, "source": "default"}
+
+
+def test_finish_keeps_what_the_service_wrote_that_only_a_report_knows(tmp_path):
+    _write_config(tmp_path, 'billing = "subscription"\n')
+    written = _as_the_service_wrote_it(tmp_path)
+    rc, _ = _Finish(tmp_path).run()
+    assert rc == 0
+    data = _settings(tmp_path)
+    assert data["billing"] == written["billing"] and data["billing"]["share_per_usd"] == 0.0125
+    assert data["calibration"] == written["calibration"]
+    # The address update has just registered the service at wins over the
+    # one the previous file held; the --no-service case is in
+    # test_update_dashboard_url.py.
+    assert data["dashboard_url"] == "http://127.0.0.1:8765/"
+
+
+def test_finish_drops_the_share_and_basis_when_the_billing_mode_has_changed(tmp_path):
+    _write_config(tmp_path, 'billing = "subscription"\n')
+    written = _as_the_service_wrote_it(tmp_path)
+    _write_config(tmp_path, 'billing = "api"\n')
+    rc, _ = _Finish(tmp_path).run()
+    assert rc == 0
+    data = _settings(tmp_path)
+    assert data["billing"]["mode"] == "api" and data["billing"]["share_per_usd"] is None
+    assert data["billing"]["basis"] != written["billing"]["basis"]
+    assert data["calibration"] == written["calibration"]
+
+
+def test_finish_replaces_a_settings_file_it_cannot_read(tmp_path):
+    _write_config(tmp_path, 'billing = "api"\n')
+    path = mod_settings.settings_path(tmp_path / "cfg")
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+    rc, _ = _Finish(tmp_path).run()
+    assert rc == 0 and _settings(tmp_path)["billing"]["mode"] == "api"
+
+
+def test_finish_dry_run_writes_no_settings_file(tmp_path):
+    _write_config(tmp_path, 'billing = "api"\n')
+    _Finish(tmp_path).run("--dry-run")
+    assert not mod_settings.settings_path(tmp_path / "cfg").exists()
+
+
+def test_finish_says_how_to_add_the_mod_when_it_has_not_run(tmp_path):
+    rc, out = _Finish(tmp_path).run()
+    assert rc == 0
+    assert cli.MOD_INSTALL in out
+    assert "claude plugin update" not in out
+
+
+def test_finish_says_how_to_update_a_mod_that_ran_lately(tmp_path):
+    present = tmp_path / "cfg" / "mod" / "present"
+    present.mkdir(parents=True)
+    (present / "abc-123.json").write_text('{"schema": 1, "session_id": "abc-123", "seen": 0}', encoding="utf-8")
+    rc, out = _Finish(tmp_path).run()
+    assert rc == 0
+    assert "claude plugin update claudeglass" in out
+    assert cli.MOD_INSTALL not in out

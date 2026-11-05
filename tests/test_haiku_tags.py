@@ -844,17 +844,50 @@ def test_estimates_add_a_haiku_call_per_agent_run():
     assert with_agents.note_tokens == main_only.note_tokens and with_agents.tag_tokens == main_only.tag_tokens
 
 
-@pytest.mark.skipif(os.name == "nt", reason="a fake claude command is a shell script")
+#: The body of the fake ``claude`` the end-to-end tests put first on PATH: a
+#: Python script, not a shell script, so the same fake runs on Windows. It
+#: notes (when ``SEEN`` is set) what it was called with, then answers as
+#: ``claude -p --output-format json`` does.
+_FAKE_CLAUDE = r"""import json, os, sys
+
+SEEN, JUDGE_ENV, ANSWER = %r, %r, %r
+args = sys.argv[1:]
+stdin = sys.stdin.buffer.read()
+if SEEN:
+    with open(SEEN + ".args", "w", encoding="utf-8") as out:
+        out.write(" ".join(args) + "\n")
+    with open(SEEN + ".stdin", "wb") as out:
+        out.write(stdin)
+    if "--system-prompt-file" in args:
+        with open(args[args.index("--system-prompt-file") + 1], "rb") as src, open(SEEN + ".prompt", "wb") as out:
+            out.write(src.read())
+    with open(SEEN + ".env", "w", encoding="utf-8") as out:
+        out.write("1" if os.environ.get(JUDGE_ENV) == "1" else "0")
+print(json.dumps(ANSWER))
+"""
+
+
+def _fake_claude(bin_dir: Path, answer: dict, seen: Path | None = None) -> None:
+    """Put a fake ``claude`` command in ``bin_dir`` that answers ``answer``
+    and, given ``seen``, writes what it was run with to ``<seen>.args``
+    (its arguments), ``.stdin``, ``.prompt`` (the file its
+    ``--system-prompt-file`` named) and ``.env`` (``1`` when the judge's
+    marker variable was set). Where ``claude`` is npm's ``claude.cmd``, so
+    is the fake: a ``.cmd`` that hands its arguments to Python."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "fake_claude.py"
+    script.write_text(_FAKE_CLAUDE % (str(seen) if seen else "", cat.JUDGE_ENV, answer), encoding="utf-8")
+    if os.name == "nt":
+        (bin_dir / "claude.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+    else:
+        launcher = bin_dir / "claude"
+        launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+
+
 def test_the_subagent_stop_hook_hands_the_run_to_a_worker(tmp_path):
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "claude"
-    fake.write_text(
-        "#!/bin/sh\ncat > /dev/null\n"
-        "echo '{\"result\": \"[cg: result=done brief=clear missing=none]\", \"total_cost_usd\": 0.002}'\n",
-        encoding="utf-8",
-    )
-    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    _fake_claude(bin_dir, {"result": "[cg: result=done brief=clear missing=none]", "total_cost_usd": 0.002})
     config_dir = tmp_path / "cg"
     config_dir.mkdir()
     (config_dir / "config.toml").write_text('[capture]\nlevel = "standard"\n', encoding="utf-8")
@@ -1267,7 +1300,7 @@ def test_the_worker_logs_the_words_and_the_cost_never_the_excerpt(tmp_path):
         return _answer("[cg: task=bugfix brief=clear plan=made skill=helped]")
 
     record = HOOK.run_judge(tmp_path / "cg", CATALOGUE, job, ask=ask)
-    assert asked[0][1] == "haiku" and asked[0][2] == tmp_path / "cg"
+    assert asked[0][1] == "claude-haiku-4-5" and asked[0][2] == tmp_path / "cg"
     # What grounding put right is noted as closed words, never the excerpt.
     assert record == {
         "ts": job["ts"], "reply": job["reply"], "tl": "task=bugfix brief=clear plan=made skill=none",
@@ -1362,27 +1395,18 @@ def test_a_claude_command_with_no_login_is_told_apart(tmp_path, monkeypatch, res
         HOOK.ask_haiku(job, CATALOGUE["judge"], tmp_path)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="a fake claude command is a shell script")
 def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
     """The whole path, as Claude Code runs it: the hook returns at once,
     and its worker runs ``claude -p`` (a fake one here) with the excerpt
     on stdin and writes the tag."""
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
     seen = tmp_path / "seen"
-    fake = bin_dir / "claude"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" > "{seen}.args"\n'
-        f'for a in "$@"; do [ -n "$want" ] && cp "$a" "{seen}.prompt"; want=""; '
-        '[ "$a" = "--system-prompt-file" ] && want=1; done\n'
-        f'cat > "{seen}.stdin"\n'
-        f'env | grep -c "^{cat.JUDGE_ENV}=1" > "{seen}.env"\n'
-        "echo '{\"result\": \"[cg: task=bugfix brief=clear]\", \"total_cost_usd\": 0.0013, "
-        "\"usage\": {\"input_tokens\": 900, \"output_tokens\": 12}}'\n",
-        encoding="utf-8",
+    _fake_claude(
+        bin_dir,
+        {"result": "[cg: task=bugfix brief=clear]", "total_cost_usd": 0.0013,
+         "usage": {"input_tokens": 900, "output_tokens": 12}},
+        seen,
     )
-    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     config_dir = tmp_path / "cg"
     config_dir.mkdir()
     (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\ntagger = "haiku"\n', encoding="utf-8")
@@ -1404,7 +1428,11 @@ def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
     line = json.loads(next(tags.iterdir()).read_text(encoding="utf-8"))
     assert line["tl"] == "task=bugfix brief=clear" and line["usd"] == 0.0013
     args = Path(f"{seen}.args").read_text(encoding="utf-8")
-    assert "-p --model haiku --tools  --setting-sources  --strict-mcp-config --no-session-persistence" in args
+    # Haiku 4.5 by its exact name, not the "haiku" alias (which Claude Code moves
+    # to whichever Haiku is newest, a model that may think and would cost more
+    # than the budget the note and the estimates promise).
+    assert "-p --model claude-haiku-4-5 --tools  --setting-sources  --strict-mcp-config --no-session-persistence" in args
+    assert CATALOGUE["judge"]["model"] == cat.JUDGE_MODEL == "claude-haiku-4-5"
     # The excerpt went in on stdin, never on the command line.
     assert "wrong sum" in Path(f"{seen}.stdin").read_text(encoding="utf-8") and "wrong sum" not in args
     # Nor the instructions, whose | and line breaks cmd.exe would take for

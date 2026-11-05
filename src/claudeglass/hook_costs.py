@@ -350,7 +350,8 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
     leave no record, so its chances are the calls to the tools it failed
     on. Neither does a SessionStart hook's, so its chances are the
     sessions that start and the summaries (each starts the session
-    again). Any other hook's are its own recorded runs."""
+    again; the summary a continued session inherits started the session it
+    came from, not this one). Any other hook's are its own recorded runs."""
     rows = [
         h for h in stats.hooks.values()
         if h.failed and h.last_failed_ts and project in h.failed_projects
@@ -373,11 +374,18 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
                 row.chances_before += calls
     starts = [h for h in rows if h.tool_less and h.failed_events == {"SessionStart"}]
     if starts:
-        times = [e.ts for e in tr.events if e.kind == EventKind.COMPACT_BOUNDARY and e.ts]
+        times = [
+            e.ts for e in tr.events
+            if e.kind == EventKind.COMPACT_BOUNDARY and e.ts and not e.detail.get("inherited")
+        ]
         if tr.meta.kind == "top-level":
             # Its earliest record: the start, as its own SessionStart
-            # hooks ran, comes before the first reply.
-            times.append(min([t.ts for t in tr.turns if t.ts] + [e.ts for e in tr.events if e.ts], default=""))
+            # hooks ran, comes before the first reply. The inherited
+            # compaction of a continued session is the other session's.
+            times.append(min(
+                [t.ts for t in tr.turns if t.ts] + [e.ts for e in tr.events if e.ts and not e.detail.get("inherited")],
+                default="",
+            ))
         for row in starts:
             for ts in times:
                 if not ts:

@@ -130,6 +130,20 @@ def test_inventory_lists_every_part_with_an_undo(tmp_path):
         assert item.token_cost and item.what_it_does and item.undo
 
 
+def test_the_mods_settings_folder_is_listed_once_it_exists_and_goes_with_the_data_folder(tmp_path):
+    config_dir = _claude(tmp_path)
+    assert "mod_settings" not in {item.key for item in footprint.inventory(config_dir, service_registered=None)}
+    (config_dir / "mod").mkdir()
+    (config_dir / "mod" / "settings.json").write_text("{}", encoding="utf-8")
+    items = {item.key: item for item in footprint.inventory(config_dir, service_registered=None)}
+    item = items["mod_settings"]
+    assert item.status == "installed"
+    assert item.where.endswith("mod")
+    assert item.token_cost and item.what_it_does and item.undo
+    assert footprint.delete_data(config_dir) == []
+    assert not (config_dir / "mod").exists()
+
+
 def test_list_backups_reads_the_reverted_marker(tmp_path):
     config_dir = _claude(tmp_path)
     _fake_backup(config_dir, "20260921T000000Z", reverted=True)
@@ -500,7 +514,7 @@ def test_the_expectation_for_capture_follows_the_tagger():
 
 
 def test_the_expectation_for_capture_names_the_tool_note_at_deep_only():
-    assert "after a large read, search or web result" in _expect_text(level="deep")
+    assert "after a large read or web result" in _expect_text(level="deep")
     assert "after a large read" not in _expect_text(level="essentials")
 
 
@@ -518,3 +532,20 @@ def test_the_capture_hooks_item_says_what_the_start_note_and_the_agents_get(tmp_
     assert "Subagents and the agents a workflow starts are asked for nothing" in text
     assert "Claude Haiku judges each agent run in the background" in text
     assert "session or subagent starts" not in text
+
+
+def test_the_mods_files_are_described_with_what_the_mod_writes_back(tmp_path):
+    config_dir = _claude(tmp_path)
+    sensor = config_dir / "mod" / "sensor"
+    sensor.mkdir(parents=True)
+    present = config_dir / "mod" / "present"
+    present.mkdir()
+    (present / "s1.json").write_text('{"schema": 1, "session_id": "s1", "seen": 1}', encoding="utf-8")
+    (sensor / "s1.json").write_text("{}", encoding="utf-8")
+    item = {i.key: i for i in footprint.inventory(config_dir, service_registered=None)}["mod_settings"]
+    # What it says it holds is what is in the folder: the settings, a heartbeat file and a sensor file per session.
+    assert "a small file per session it is running in" in item.what_it_does and "another per session" in item.what_it_does
+    assert "never a prompt or a path" in item.what_it_does
+    # All of it goes with the data folder.
+    assert footprint.delete_data(config_dir) == []
+    assert not (config_dir / "mod").exists()

@@ -638,9 +638,14 @@ reaches `Event.detail` — never kept, never shown — so `capture status`'s
 "this hook keeps failing" prompt can never leak which MCP servers or
 tools you have configured. It is a prompt only: nothing here ever
 writes to `settings.json`.
-The two free signal hooks, Notification and PermissionRequest, run
-asynchronously (in the background) since nothing needs to read what
-they print.
+Four of the entries run asynchronously (in the background) since
+nothing needs to read what they print: the free signal hooks
+Notification, PermissionRequest and StopFailure, and Stop (unless Haiku
+writes the tags), which logs a turn's signal and fills in a tag Claude
+left out. With Haiku writing the tags Stop runs in the foreground, only
+to hand the turn to a worker of its own and return. A `claude -p` or Agent SDK run (nobody at
+the screen) gets no capture note, no tags and no agent judging, though
+its free signals are still logged.
 
 **Files.** See "What is written, and where" above for
 `hooks/capture-hook.py`, `hooks/capture_hook.py`,

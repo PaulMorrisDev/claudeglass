@@ -33,7 +33,11 @@ Claude Code writes these notes into each transcript:
   `removedNames`).
 - `prompt_snapshot` (in the Claude Code versions that write its `tools`)
   lists the tools sent with their full definition: surfaced ones, and
-  those of a server loaded up front.
+  those of a server loaded up front. Its entries run about 1.6 times the
+  definitions Claude Code sends.
+- `api-request-shape` (Claude Code 2.1.304 on) lists the definitions of
+  the request itself (name, description, input schema), with
+  `defer_loading` on a tool that is not sent in full.
 
 `parse.py` keeps, per reply, how many listed tools had no definition
 loaded when the reply was requested, by MCP server
@@ -46,9 +50,19 @@ whose resources Claude read (`Turn.mcp_resource_servers`, from the
 Per transcript it keeps each loaded definition's size by tool name
 (`TranscriptResult.tool_definition_chars`), each server's tool names
 after `mcp__<server>__` (`mcp_tool_suffixes_by_server`, each cut to 64
-characters), the size of the tools a `prompt_snapshot` shows sent in
-full (`upfront_definition_chars_by_server`), and each server's last
-connection problem (`mcp_connection_status`).
+characters), the size of the tools sent in full, by server
+(`upfront_definition_chars_by_server`) and by tool name
+(`upfront_tool_chars`), and each server's last connection problem
+(`mcp_connection_status`). A tool's size is its definition in the
+`api-request-shape` line where the transcript has one (the largest across
+lines, measured on the keys a loaded definition is), else its entry in a
+`prompt_snapshot`. A server with a tool sized from the request is its
+tools' sizes added up, so its total and theirs agree. A loaded definition
+is measured on the request's scale too. The tools sized from the request
+are named in `upfront_request_tools`, because a window holds sessions from
+before the request was logged. Across transcripts a tool takes its
+largest size from the request where any transcript has one, and its
+largest snapshot size only when none does.
 
 A server's raw name ("claude.ai Claude Docs", "plugin:playwright:playwright")
 is keyed the way its tools carry it (`parse.mcp_name`: every character
@@ -62,13 +76,25 @@ For each reply requested with tools deferred:
 
 - **Kept out.** Each deferred tool whose definition wasn't loaded is
   counted at the average definition size of its own MCP server, measured
-  from the definitions loaded anywhere in the window. A server none of
-  whose tools was loaded takes the average of every server. Sizes are
-  characters divided by the characters per token measured on your own
-  first calls for that reply's model (`calibration.py`; 4.0 until a
-  model has ten first calls). A definition uses the tool-definition
-  figure and the name list the text figure. The report's "Characters
-  per token" table shows both.
+  from its tools that were loaded, or sent in full at the start,
+  anywhere in the window (a loaded size wins for a tool that was both).
+  A server none of whose tools was measured takes the average of the
+  MCP tools loaded through tool search in the window, when at least ten
+  were measured. Tools sent in full don't feed it: they are a server's
+  small always-load tools (terminal 270, Claude Docs 137 tokens), so they
+  size only their own server. With fewer than ten loaded MCP tools it
+  takes 550 tokens, the mean over 219 MCP tool definitions that Claude
+  Code counted exactly (`get_context_usage`, Claude Code 2.1.309). That
+  figure is already in tokens, so no calibration applies. Claude Code's
+  own tools are a different kind of definition and never join the
+  average. They take their own average, else the average of every tool.
+  Sizes are characters
+  divided by the characters per token measured on your own first calls
+  for that reply's model (`calibration.py`; 4.0 until a model has ten
+  first calls). A definition uses the tool-definition figure and the
+  name list the text figure. The report's "Characters per token" table
+  shows both. A dashboard view of one project uses the figures measured
+  on every project in its window; a CLI report measures its own sessions.
 - **Priced** at that reply's own rate for the front of the prompt: its
   cache read rate when it read the cache, its cache write rate when it
   wrote the cache from the start, its input rate when it cached nothing.
@@ -85,13 +111,17 @@ nothing to the saving and nothing to the cost.
 ## Reading it
 
 - **Net saving** is the headline. It is an estimate: most deferred tools
-  are never loaded, so their size comes from the ones that were.
-- **Sized from** says whether a server's size came from its own loaded
-  tools or from every server's. A server whose tools you never use is
-  always sized from every server's.
-- When no definition was loaded in the window, nothing can be sized:
-  the token and money columns stay blank and the check reports "no
-  data".
+  are never loaded, so their size comes from the ones that were loaded
+  or sent in full.
+- **Sized from** says whether a server's size came from its own tools,
+  from the MCP tools loaded in this window, from a typical MCP tool (550
+  tokens), or (Claude Code's own tools with none measured) from every
+  tool. A server none of whose tools was loaded or sent in full is sized
+  from the loaded MCP tools, or from the typical tool when fewer than ten
+  were loaded.
+- When no definition was loaded or sent in full in the window, nothing
+  can be sized: the token and money columns stay blank and the check
+  reports "no data".
 
 On one real set of cloud sessions (Claude Code 2.1.283, five MCP servers
 with up to 154 deferred tools), tool search kept about 57,500 tokens out
@@ -129,21 +159,22 @@ list of the servers the desktop app brings itself
   unknown kind.
 - **Built into the desktop app.** A desktop session is offered servers
   nobody added: computer use, the visualiser, the built-in browser and
-  preview, the app's own session, window and settings servers (`ccd_...`),
-  the scheduler, the terminal and the connector registry. A name from
+  preview, Claude in Chrome, the app's own session, window and settings
+  servers (`ccd_...`), the scheduler, the terminal and the connector
+  registry. A name from
   that closed list counts as built in when a desktop-app session
   offered it and your config doesn't list it. It is shown with its cost
   and the status `built in`, and is never marked `remove`: there is no
   connector to disconnect and no config entry to delete. The table's
   "How to turn it off" cell is filled only where a switch is known (the
-  computer use setting, marked as not verified).
+  computer use setting and `/chrome`, each marked as not verified).
 - **Priced** per reply at the front-of-prompt rate: its share of the
   name list by length, its instructions, and its tools sent in full.
   That is a lower bound: a reply that rebuilt the cache paid its write
   rate.
 
-Its status is one of: `remove` (the card below), `unused` (never used,
-below one of the bars), `all-projects view only` (a server every
+Its status is one of: `remove` (the card below), `unused` (not used in
+the window, below one of the bars), `all-projects view only` (a server every
 project loads, or one the desktop app names by ID, whose claude.ai
 name may only show up in another project's sessions: judged only in
 the all-projects view), `kind unknown`,
@@ -158,8 +189,8 @@ One card (severity `advice`, category `workflow`) lists every server
 whose status is `remove`: offered in at least 10 main sessions
 (`tool_search_unused_min_sessions`), first at least 7 days
 (`tool_search_unused_min_age_days`) and last at most 3 days
-(`tool_search_unused_max_idle_days`) before the window's end, never
-used, of a kind you can turn off, and costing at least $0.50
+(`tool_search_unused_max_idle_days`) before the window's end, not used
+in the window, of a kind you can turn off, and costing at least $0.50
 (`tool_search_unused_min_server_usd`). The card needs $1.00 in all
 (`tool_search_unused_min_total_usd`). Each server gets the fix for its
 kind; servers whose fix doesn't name them (connectors, plugins) share
@@ -193,6 +224,12 @@ since a server loaded up front isn't deferred.
   recommendation covers that case. The servers table still sizes a
   server loaded up front, where the Claude Code version writes a
   `prompt_snapshot` with its tools.
+- Uses before the window don't count, so a server you used last month
+  can still get the card. The card says how many days it looked back.
+  That is no further than every reply was seen. A session is in the window
+  when its last reply is, and one that began earlier brings its earlier
+  turns. Sessions that ended in those earlier days are not read at all, so
+  the count stops at the earliest last reply of a main session.
 - A server's `@` resource mentions leave no mark in a transcript, so a
   server you use only that way looks unused.
 - In the desktop app, a connector is recognised by an ID when it has also

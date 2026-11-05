@@ -47,47 +47,57 @@ def _build_session(
     baseline_cache_creation: int = 40_000,
     model: str = "claude-sonnet-5",
     with_compaction: bool = False,
+    pre_tokens: int = 180_000,
+    precomputed: bool | None = None,
+    day: str = "2026-09-18",
+    auto_memory_chars: int = 0,
 ):
     """One top-level transcript: an optional ``skill_listing`` attachment,
     a human-text prompt, then one priced first turn carrying
     ``baseline_cache_creation`` -- optionally followed by an
-    auto-triggered ``compact_boundary`` and a second turn, for the
-    autocompact table's tests.
+    auto-triggered ``compact_boundary`` (at ``pre_tokens``, marked
+    ``precomputed`` when that is given) and a second turn, for the
+    autocompact table's tests. ``day`` is the date it ran on, and
+    ``auto_memory_chars`` the size of an auto memory file its first call
+    carried.
     """
     lines = []
+    if auto_memory_chars:
+        memory_line = attachment_line(
+            "instructions", files=[{"type": "AutoMem", "path": "memory/MEMORY.md", "content": "m" * auto_memory_chars}]
+        )
+        memory_line["timestamp"] = f"{day}T11:58:00.000Z"
+        lines.append(memory_line)
     if with_skill_listing:
         # attachment_line's **overrides merge into the nested "attachment"
         # dict, not the top-level line -- set "timestamp" directly on the
         # returned dict to backdate it ahead of the first turn.
         skill_line = attachment_line("skill_listing", rendered="x" * skill_listing_chars)
-        skill_line["timestamp"] = "2026-09-18T11:59:00.000Z"
+        skill_line["timestamp"] = f"{day}T11:59:00.000Z"
         lines.append(skill_line)
-    lines.append(user_str_line(human_text, timestamp="2026-09-18T11:59:30.000Z"))
+    lines.append(user_str_line(human_text, timestamp=f"{day}T11:59:30.000Z"))
     lines.append(
         turn_line(
             model=model,
-            timestamp="2026-09-18T12:00:00.000Z",
+            timestamp=f"{day}T12:00:00.000Z",
             cache_creation_input_tokens=baseline_cache_creation,
         )
     )
     if with_compaction:
-        lines.append(
-            system_line(
-                "compact_boundary",
-                timestamp="2026-09-18T12:05:00.000Z",
-                compactMetadata={"trigger": "auto", "preTokens": 180_000, "postTokens": 20_000},
-            )
-        )
-        lines.append(turn_line(model=model, timestamp="2026-09-18T12:05:30.000Z"))
+        metadata = {"trigger": "auto", "preTokens": pre_tokens, "postTokens": 20_000}
+        if precomputed is not None:
+            metadata["precomputed"] = precomputed
+        lines.append(system_line("compact_boundary", timestamp=f"{day}T12:05:00.000Z", compactMetadata=metadata))
+        lines.append(turn_line(model=model, timestamp=f"{day}T12:05:30.000Z"))
     path = tmp_path / f"{name}.jsonl"
     write_jsonl(path, lines)
     return parse_transcript(path, TranscriptMeta(path=str(path), session_id=session_id))
 
 
-def _snapshot(project_slug: str, **data) -> Snapshot:
+def _snapshot(project_slug: str, ts: str = "2026-09-18T00:00:00.000Z", **data) -> Snapshot:
     payload = {"project_slug": project_slug}
     payload.update(data)
-    return Snapshot(path=Path("snap.json"), ts="2026-09-18T00:00:00.000Z", data=payload)
+    return Snapshot(path=Path("snap.json"), ts=ts, data=payload)
 
 
 # -- skip path --------------------------------------------------------------
@@ -159,6 +169,77 @@ def test_baseline_table_human_prompt_and_skills_listing_estimates(tmp_path):
     # Every note documents the characters/4 approximation.
     assert any("characters" in n and "4" in n for n in table.notes)
     assert_privacy(section)
+
+
+def _baseline_by_project(stats) -> dict[str, dict]:
+    table = next(t for t in context_budget.build_section(stats).tables if t.name == "context_budget_baseline")
+    keys = [c.key for c in table.columns]
+    return {row[0]: dict(zip(keys, row)) for row in table.rows}
+
+
+def test_the_baseline_measures_the_system_prompt_and_built_in_tools(tmp_path):
+    top = _main(tmp_path, "sys", _sub_lines())
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    sizes = context_budget.startup_sizes(top, calibration.Calibration())
+    rows = _baseline_by_project(stats)
+
+    row = rows["proj-a"]
+    assert sizes.system == pytest.approx(500.0) and sizes.builtin_tools
+    assert row["system_prompt_est"] == pytest.approx(sizes.system)
+    assert row["builtin_tools_est"] == pytest.approx(sum(sizes.builtin_tools.values()))
+    # The residual keeps its key but is what the other parts leave over.
+    other = [
+        row[key]
+        for key in (
+            "human_prompt_est", "skills_listing_est", "memory_files_est", "custom_agents_est", "mcp_tools_tokens",
+            "system_prompt_est", "builtin_tools_est",
+        )
+        if isinstance(row[key], (int, float))
+    ]
+    assert row["system_prompt_and_tools_est"] == pytest.approx(row["mean_baseline"] - sum(other))
+    # The two new parts are in that sum, so the residual is smaller than it was.
+    assert row["system_prompt_and_tools_est"] < row["mean_baseline"] - row["human_prompt_est"] - row["mcp_tools_tokens"]
+    assert rows["all"]["system_prompt_est"] == pytest.approx(row["system_prompt_est"])
+    assert rows["all"]["builtin_tools_est"] == pytest.approx(row["builtin_tools_est"])
+
+
+def test_the_new_baseline_columns_sit_before_the_residual_and_it_is_labelled_everything_else(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "sys", _sub_lines()))
+    table = next(t for t in context_budget.build_section(stats).tables if t.name == "context_budget_baseline")
+    keys = [c.key for c in table.columns]
+    assert keys[-4:] == ["controllable_est", "system_prompt_est", "builtin_tools_est", "system_prompt_and_tools_est"]
+    labels = {c.key: c.label for c in table.columns}
+    assert labels["system_prompt_est"] == "System prompt (est)"
+    assert labels["builtin_tools_est"] == "Built-in tools (est)"
+    assert labels["system_prompt_and_tools_est"] == "Everything else (est)"
+    notes = " ".join(table.notes)
+    assert "System prompt and Built-in tools (est) size Claude Code's own parts" in notes
+    assert "\"Everything else (est)\" is what is left over" in notes
+    assert "System prompt and tools (est)" not in notes
+
+
+def test_a_session_that_recorded_no_tools_has_a_system_prompt_but_no_built_in_tools(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "no-tools", _sub_lines(tools=[])))
+    row = _baseline_by_project(stats)["proj-a"]
+    assert row["system_prompt_est"] == pytest.approx(500.0)
+    assert row["builtin_tools_est"] is None
+    assert row["system_prompt_and_tools_est"] == pytest.approx(
+        row["mean_baseline"] - row["human_prompt_est"] - row["skills_listing_est"] - row["system_prompt_est"]
+        - (row["mcp_tools_tokens"] or 0.0)
+    )
+
+
+def test_each_part_is_averaged_over_the_sessions_that_recorded_it(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(tools=[_tool("Read", 300)])))
+    stats.add_session("proj-a", _main(tmp_path, "s2", _sub_lines(tools=[])))
+    row = _baseline_by_project(stats)["proj-a"]
+    # The tools of the first only; the system prompt of both.
+    assert row["builtin_tools_est"] == pytest.approx(_tool_chars(_tool("Read", 300)) / 4.0)
+    assert row["system_prompt_est"] == pytest.approx(500.0)
 
 
 def test_the_mcp_part_you_can_change_leaves_out_the_desktop_apps_own_servers():
@@ -254,7 +335,7 @@ def test_baseline_table_residual_is_none_when_est_exceeds_baseline(tmp_path):
     col = {c.key: i for i, c in enumerate(table.columns)}
     proj_row = next(row for row in table.rows if row[col["project"]] == "proj-a")
     assert proj_row[col["system_prompt_and_tools_est"]] is None
-    assert any("estimates overshot" in n for n in table.notes)
+    assert any("empty when the other parts alone exceed the measured first call" in n for n in table.notes)
 
 
 def test_baseline_table_residual_is_the_gap_when_baseline_exceeds_est(tmp_path):
@@ -301,6 +382,55 @@ def test_baseline_table_uses_snapshot_for_memory_agents_mcp(tmp_path):
     assert proj_row[col["custom_agents_est"]] == pytest.approx(3 * 60)
     assert proj_row[col["mcp_tools_est"]] == "present, size unknown"
     assert_privacy(section)
+
+
+def test_memory_files_adds_the_auto_memory_the_first_call_carried(tmp_path):
+    """MEMORY.md is loaded in every session and is part of Claude Code's
+    Memory files category; the snapshot's CLAUDE.md and rules figures leave
+    it out. 3,088 characters are 772 tokens at four characters per token."""
+    layers = {
+        "claude_md": {"project_root_bytes": 4000, "user_bytes": 0, "project_local_bytes": 0, "nested_bytes": 0},
+        "rules": {"count": 2, "bytes": 800},
+    }
+    snapshot = _snapshot("proj-a", content_layers=layers)
+
+    without = context_budget.ContextBudgetStats()
+    without.add_session("proj-a", _build_session(tmp_path, "plain", session_id="plain"))
+    _, col, rows = _baseline_rows(without, snapshots=[snapshot])
+    assert rows["proj-a"][col["memory_files_est"]] == pytest.approx((4000 + 800) / 4)
+
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "mem", session_id="mem", auto_memory_chars=3_088))
+    _, col, rows = _baseline_rows(stats, snapshots=[snapshot])
+    assert rows["proj-a"][col["memory_files_est"]] == pytest.approx((4000 + 800) / 4 + 3_088 / 4)
+    # It is a memory file you can change, so it counts in what you can change.
+    assert rows["proj-a"][col["controllable_est"]] == pytest.approx(
+        rows["proj-a"][col["skills_listing_est"]] + rows["proj-a"][col["memory_files_est"]]
+    )
+
+
+def test_the_auto_memory_figure_is_the_median_over_the_main_sessions(tmp_path):
+    layers = {"claude_md": {"project_root_bytes": 0}, "rules": {"bytes": 0}}
+    snapshot = _snapshot("proj-a", content_layers=layers)
+    stats = context_budget.ContextBudgetStats()
+    for name, chars in (("a", 0), ("b", 4_000), ("c", 40_000)):
+        stats.add_session("proj-a", _build_session(tmp_path, name, session_id=name, auto_memory_chars=chars))
+    _, col, rows = _baseline_rows(stats, snapshots=[snapshot])
+    assert rows["proj-a"][col["memory_files_est"]] == pytest.approx(4_000 / 4)
+
+
+def test_the_custom_agents_column_says_it_counts_only_your_own_agents(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1"))
+    section = context_budget.build_section(stats)
+    table = next(t for t in section.tables if t.name == "context_budget_baseline")
+    column = next(c for c in table.columns if c.key == "custom_agents_est")
+    assert column.label == "Your own agents (est)"
+    assert any(
+        "Agents from plugins are part of the agent roster but not counted here" in note
+        and "Custom agents category includes them" in note
+        for note in table.notes
+    )
 
 
 def test_baseline_table_snapshot_absent_leaves_nulls(tmp_path):
@@ -429,7 +559,8 @@ def test_autocompact_table_drift_false_when_close_to_configured(tmp_path):
     top = _build_session(tmp_path, "s1", session_id="sess_1", with_compaction=True)
     stats = context_budget.ContextBudgetStats()
     stats.add_session("proj-a", top)
-    snapshot = _snapshot("proj-a", effective={"autoCompactWindow": 180_000})
+    # Claude Code summarises 33,000 tokens below the window it is given.
+    snapshot = _snapshot("proj-a", effective={"autoCompactWindow": 213_000})
     section = context_budget.build_section(stats, snapshots=[snapshot])
     table = next(t for t in section.tables if t.name == "context_budget_autocompact")
     col = {c.key: i for i, c in enumerate(table.columns)}
@@ -527,6 +658,115 @@ def test_autocompact_table_no_alias_uses_default_window_even_with_1m_transcript_
     col = {c.key: i for i, c in enumerate(table.columns)}
     row = table.rows[0]
     assert row[col["context_window_size"]] == 200_000
+
+
+def _autocompact_row(stats, snapshots, project="proj-a", **kwargs):
+    section = context_budget.build_section(stats, snapshots=snapshots, **kwargs)
+    table = next(t for t in section.tables if t.name == "context_budget_autocompact")
+    col = {c.key: i for i, c in enumerate(table.columns)}
+    row = next(r for r in table.rows if r[col["project"]] == project)
+    return {key: row[i] for key, i in col.items()}, table
+
+
+def test_a_400k_window_that_summarises_at_367k_has_a_33000_buffer_and_no_drift(tmp_path):
+    """Claude Code summarises a constant 33,000 tokens below its window. The
+    model's 1,000,000 window used to be subtracted, which read as a 632,000
+    buffer and flagged every window under 330,000 as drifting."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1", with_compaction=True, pre_tokens=367_000))
+    snapshot = _snapshot("proj-a", effective={"autoCompactWindow": 400_000, "model": "opus"})
+    row, table = _autocompact_row(stats, [snapshot], pricing=PRICING)
+    assert row["configured_window"] == 400_000
+    assert row["context_window_size"] == 1_000_000  # the model's own window stays as the native one
+    assert row["observed_threshold"] == pytest.approx(367_000)
+    assert row["implied_buffer"] == pytest.approx(33_000)
+    assert row["drift"] is False
+    assert any("33,000" in note for note in table.notes)
+
+
+def test_a_300k_window_that_summarises_at_267k_is_not_drift(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1", with_compaction=True, pre_tokens=267_000))
+    row, _ = _autocompact_row(stats, [_snapshot("proj-a", effective={"autoCompactWindow": 300_000})])
+    assert row["implied_buffer"] == pytest.approx(33_000)
+    assert row["drift"] is False
+
+
+def test_a_summary_far_from_window_minus_the_buffer_is_still_drift(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1", with_compaction=True, pre_tokens=250_000))
+    row, _ = _autocompact_row(stats, [_snapshot("proj-a", effective={"autoCompactWindow": 400_000})])
+    assert row["drift"] is True
+    assert row["implied_buffer"] == pytest.approx(150_000)
+
+
+def test_a_worktree_project_with_no_snapshot_takes_the_newest_window_any_snapshot_sets(tmp_path):
+    """The window comes from a user-level file, which covers every project.
+    The worktree used to get no window and an assumed 200,000."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-main", _build_session(tmp_path, "m", session_id="m"))
+    stats.add_session(
+        "proj-worktree", _build_session(tmp_path, "w", session_id="w", with_compaction=True, pre_tokens=367_797)
+    )
+    snapshots = [
+        _snapshot("proj-main", ts="2026-09-01T00:00:00.000Z", effective={"autoCompactWindow": 300_000}),
+        _snapshot("proj-main", ts="2026-10-10T00:00:00.000Z", effective={"autoCompactWindow": 400_000}),
+    ]
+    row, _ = _autocompact_row(stats, snapshots, project="proj-worktree")
+    assert row["configured_window"] == 400_000
+    assert row["implied_buffer"] == pytest.approx(32_203)
+    assert row["drift"] is False
+
+
+def test_summaries_from_sessions_under_an_older_window_are_not_held_against_the_new_one(tmp_path):
+    """The window went from 300k to 400k on 10 October. The 267,000 summary
+    of a session that started under 300k says nothing about the 400k setting:
+    mixed in, the median would read 317,000 and flag drift."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session(
+        "proj-a",
+        _build_session(tmp_path, "old", session_id="old", with_compaction=True, pre_tokens=267_000, day="2026-09-18"),
+    )
+    stats.add_session(
+        "proj-a",
+        _build_session(tmp_path, "new", session_id="new", with_compaction=True, pre_tokens=367_000, day="2026-10-12"),
+    )
+    snapshots = [
+        _snapshot("proj-a", ts="2026-09-01T00:00:00.000Z", effective={"autoCompactWindow": 300_000}),
+        _snapshot("proj-a", ts="2026-10-10T00:00:00.000Z", effective={"autoCompactWindow": 400_000}),
+    ]
+    row, table = _autocompact_row(stats, snapshots)
+    assert row["configured_window"] == 400_000
+    assert row["observed_threshold"] == pytest.approx(367_000)
+    assert row["auto_compactions"] == 1
+    assert row["implied_buffer"] == pytest.approx(33_000)
+    assert row["drift"] is False
+    assert any("started under the setting" in note for note in table.notes)
+
+
+def test_a_precomputed_summary_is_not_a_sample_of_the_threshold(tmp_path):
+    """Claude Code 2.1.309 applies a summary it made in the background, so
+    the boundary lands wherever the session was (205,495 under a 400,000
+    window), not where the window fires."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "a", session_id="a", with_compaction=True, pre_tokens=367_000))
+    stats.add_session(
+        "proj-a",
+        _build_session(tmp_path, "b", session_id="b", with_compaction=True, pre_tokens=205_495, precomputed=True),
+    )
+    row, _ = _autocompact_row(stats, [_snapshot("proj-a", effective={"autoCompactWindow": 400_000})])
+    assert row["observed_threshold"] == pytest.approx(367_000)
+    assert row["auto_compactions"] == 1
+    assert row["drift"] is False
+
+
+def test_the_autocompact_notes_no_longer_assume_a_1m_alias_or_200k(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1"))
+    _, table = _autocompact_row(stats, None)
+    text = " ".join(table.notes)
+    assert "[1m]" not in text and "200,000" not in text
+    assert "rate card" in text
 
 
 # -- statusline table -----------------------------------------------------
@@ -684,7 +924,7 @@ def test_real_fixture_renders_without_error():
     section = context_budget.build_section(stats)
 
     assert section.key == "context_budget"
-    assert len(section.tables) == 4
+    assert len(section.tables) == 5
     assert_privacy(section)
 
 
@@ -1398,3 +1638,331 @@ def test_the_controllable_part_of_the_first_call_is_not_the_whole_of_it(tmp_path
     row = _row(table, "project", "proj-a")
     assert row["mean_baseline"] == pytest.approx(90_100)
     assert row["controllable_est"] == pytest.approx(1_000)
+
+
+# -- the tools every main session starts with --------------------------------
+
+
+def _main(tmp_path, name, lines, *, session_id=None):
+    path = tmp_path / f"{name}.jsonl"
+    write_jsonl(path, lines)
+    return parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id=session_id or name))
+
+
+def _main_tools_table(stats):
+    return next(t for t in context_budget.build_section(stats).tables if t.name == "context_budget_tools")
+
+
+DESKTOP_TOOLS = [_tool("mcp__terminal__run", 200)]
+
+
+def test_the_main_tools_table_sizes_each_tool_and_server_and_counts_who_used_it(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    # Read is called in the first session only; the figma server in neither.
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(used="Read")))
+    stats.add_session("proj-b", _main(tmp_path, "s2", _sub_lines(used="Bash")))
+    table = _main_tools_table(stats)
+    assert [c.key for c in table.columns] == ["tool", "kind", "offered_sessions", "used_share", "tokens"]
+    rows = {r[0]: dict(zip([c.key for c in table.columns], r)) for r in table.rows}
+
+    assert set(rows) == {"Read", "Grep", "Bash", "figma"}
+    assert rows["Read"]["kind"] == "Built-in" and rows["figma"]["kind"] == "MCP server"
+    assert rows["Read"]["offered_sessions"] == 2
+    assert rows["Read"]["used_share"] == pytest.approx(50.0)
+    assert rows["Bash"]["used_share"] == pytest.approx(50.0)
+    assert rows["Grep"]["used_share"] == 0 and rows["figma"]["used_share"] == 0
+    assert rows["Bash"]["tokens"] == pytest.approx(_tool_chars(TOOLS[2]) / 4.0)
+    assert rows["figma"]["tokens"] == pytest.approx((_tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0)
+    # Largest first, across built-in tools and servers.
+    sizes = [r[4] for r in table.rows]
+    assert sizes == sorted(sizes, reverse=True)
+    assert [r[0] for r in table.rows][:2] == ["Bash", "figma"]
+    # No description reaches the table.
+    assert "ddd" not in repr(table)
+    assert_privacy(table)
+
+
+def test_the_main_tools_table_sizes_tools_by_the_request_claude_code_logged(tmp_path):
+    """Claude Code 2.1.30x logs the definitions it sent (``api-request-shape``);
+    the tools snapshot it also writes runs about 1.6 times that. The sizes
+    at the start follow the request, and the note says so."""
+    from helpers import ignorable_line
+
+    snapshot_tools = [_tool("Read", 480), _tool("Bash", 1_440)]
+    wire = [_tool("Read", 300), _tool("Bash", 900)]
+    lines = [ignorable_line("api-request-shape", shape={"tools": wire}), *_sub_lines(tools=snapshot_tools)]
+    top = _main(tmp_path, "wire", lines)
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+
+    sizes = context_budget.startup_sizes(top, calibration.Calibration())
+    assert sizes.builtin_tools["Read"] == pytest.approx(_tool_chars(wire[0]) / 4.0)
+    assert sizes.builtin_tools["Bash"] == pytest.approx(_tool_chars(wire[1]) / 4.0)
+    assert _tool_chars(snapshot_tools[0]) > 1.4 * _tool_chars(wire[0])
+
+    table = _main_tools_table(stats)
+    rows = {r[0]: dict(zip([c.key for c in table.columns], r)) for r in table.rows}
+    assert rows["Read"]["tokens"] == pytest.approx(_tool_chars(wire[0]) / 4.0)
+    assert rows["Bash"]["tokens"] == pytest.approx(_tool_chars(wire[1]) / 4.0)
+    assert "measured from the request Claude Code logs (the snapshot it records on older versions)" in table.notes[0]
+
+
+def test_without_a_request_line_the_main_tools_table_uses_the_snapshot_sizes(tmp_path):
+    snapshot_tools = [_tool("Read", 480)]
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "old", _sub_lines(tools=snapshot_tools)))
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    assert rows["Read"][4] == pytest.approx(_tool_chars(snapshot_tools[0]) / 4.0)
+
+
+def test_the_mcp_tools_in_the_baseline_follow_the_request_not_the_larger_snapshot(tmp_path):
+    """The built-in tools are sized from the request Claude Code logged, so
+    the MCP tools sent beside them must be too: sized from the snapshot, which
+    runs about 1.6 times the request, they pushed the known parts of a small
+    first call past the call itself and blanked "Everything else (est)"."""
+    from helpers import ignorable_line
+
+    wire_read = _tool("Read", 300)
+    wire_mcp = {"name": "mcp__figma__a", "description": "d" * 4_000, "input_schema": {"type": "object"}}
+    snapshot_read = _tool("Read", 300)
+    snapshot_mcp = {"name": "mcp__figma__a", "description": "d" * 6_400, "schema": {"type": "object"}}
+    lines = [
+        ignorable_line("api-request-shape", shape={"tools": [wire_read, wire_mcp]}),
+        *_sub_lines(shared_prefix=1_500, written=500, uncached=100, tools=[snapshot_read, snapshot_mcp]),
+    ]
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "wire-mcp", lines))
+
+    row = _baseline_by_project(stats)["proj-a"]
+
+    def chars(tool: dict, schema_key: str) -> int:
+        shown = {key: tool.get(key) for key in ("name", "description", schema_key)}
+        return len(json.dumps(shown, separators=(",", ":"), ensure_ascii=False))
+
+    request_tokens = chars(wire_mcp, "input_schema") / 4.0
+    snapshot_tokens = chars(snapshot_mcp, "schema") / 4.0
+    assert snapshot_tokens > 1.5 * request_tokens
+    assert row["mcp_tools_tokens"] == pytest.approx(request_tokens)
+    # The part left over is a number again, and smaller than what the
+    # snapshot's sizes would have overshot the call by.
+    assert row["system_prompt_and_tools_est"] is not None
+    assert row["system_prompt_and_tools_est"] < snapshot_tokens - request_tokens
+
+
+def test_without_a_request_line_the_mcp_tools_in_the_baseline_use_the_snapshot_sizes(tmp_path):
+    snapshot_mcp = {"name": "mcp__figma__a", "description": "d" * 6_400, "schema": {"type": "object"}}
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "old-mcp", _sub_lines(tools=[_tool("Read", 300), snapshot_mcp])))
+
+    row = _baseline_by_project(stats)["proj-a"]
+
+    shown = {key: snapshot_mcp.get(key) for key in ("name", "description", "schema")}
+    assert row["mcp_tools_tokens"] == pytest.approx(len(json.dumps(shown, separators=(",", ":"))) / 4.0)
+
+
+def test_the_main_tools_table_averages_a_size_over_the_sessions_offered_the_tool(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(tools=[_tool("Read", 300), _tool("Bash", 900)])))
+    stats.add_session("proj-a", _main(tmp_path, "s2", _sub_lines(tools=[_tool("Read", 700)])))
+    table = _main_tools_table(stats)
+    rows = {r[0]: dict(zip([c.key for c in table.columns], r)) for r in table.rows}
+    assert rows["Read"]["offered_sessions"] == 2
+    assert rows["Read"]["tokens"] == pytest.approx((_tool_chars(_tool("Read", 300)) + _tool_chars(_tool("Read", 700))) / 8.0)
+    # Bash was offered to one session: its size is that session's, not halved.
+    assert rows["Bash"]["offered_sessions"] == 1
+    assert rows["Bash"]["tokens"] == pytest.approx(_tool_chars(_tool("Bash", 900)) / 4.0)
+
+
+def test_the_main_tools_table_sizes_a_server_by_its_definitions_deferred_names_and_instructions(tmp_path):
+    top = _main(tmp_path, "s1", _sub_lines(tools=[_tool("Read")] + TOOLS[3:]))
+    first = next(turn for turn in top.turns if turn.turn_index == 1)
+    first.deferred_list_chars_by_server = {"figma": 400, "extra": 800}
+    first.mcp_instruction_chars_by_server = {"figma": 200}
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    definitions = (_tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
+    assert rows["figma"][4] == pytest.approx(definitions + 400 / 4.0 + 200 / 4.0)
+    # A server known only by its deferred names is a row too.
+    assert rows["extra"][4] == pytest.approx(800 / 4.0)
+
+
+def _main_in(tmp_path, name, entrypoint, tools, **kwargs):
+    top = _main(tmp_path, name, _sub_lines(tools=tools, **kwargs))
+    top.meta.entrypoint = entrypoint
+    return top
+
+
+def _kinds(table):
+    return {r[0]: r[1] for r in table.rows}
+
+
+def test_the_main_tools_table_calls_a_desktop_apps_server_by_its_kind(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session(
+        "proj-a", _main_in(tmp_path, "s1", "claude-desktop", [_tool("Read")] + DESKTOP_TOOLS + TOOLS[3:])
+    )
+    assert _kinds(_main_tools_table(stats)) == {"Read": "Built-in", "terminal": "Desktop app", "figma": "MCP server"}
+
+
+def test_a_server_named_like_a_desktop_one_is_the_apps_only_when_a_session_in_the_app_offered_it(tmp_path):
+    """The name alone does not make a server the desktop app's."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main_in(tmp_path, "s1", "cli", DESKTOP_TOOLS))
+    assert _kinds(_main_tools_table(stats)) == {"terminal": "MCP server"}
+    stats.add_session("proj-b", _main_in(tmp_path, "s2", "claude-desktop", DESKTOP_TOOLS))
+    assert _kinds(_main_tools_table(stats)) == {"terminal": "Desktop app"}
+
+
+def test_the_tool_search_rows_decide_which_servers_the_main_tools_table_calls_the_desktop_apps(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main_in(tmp_path, "s1", "cli", DESKTOP_TOOLS + TOOLS[3:]))
+    stats.add_session("proj-b", _main_in(tmp_path, "s2", "claude-desktop", DESKTOP_TOOLS + TOOLS[3:]))
+
+    def kinds(rows):
+        table = next(t for t in context_budget.build_section(stats, mcp_servers=rows).tables if t.name == "context_budget_tools")
+        return _kinds(table)
+
+    yours = [tool_search.McpServerRow(server="terminal", kind=tool_search.KIND_USER)]
+    assert kinds(yours) == {"terminal": "MCP server", "figma": "MCP server"}
+    theirs = [tool_search.McpServerRow(server="terminal", kind=tool_search.KIND_DESKTOP_BUILTIN)]
+    assert kinds(theirs) == {"terminal": "Desktop app", "figma": "MCP server"}
+    # A server the rows call built in under another name, by an alias.
+    aliased = [tool_search.McpServerRow(server="id-1", aliases=("figma",), kind=tool_search.KIND_DESKTOP_BUILTIN)]
+    assert kinds(aliased) == {"terminal": "MCP server", "figma": "Desktop app"}
+
+
+def test_the_main_tools_table_counts_a_session_that_called_a_servers_tool(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(used="mcp__figma__a")))
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    assert rows["figma"][3] == pytest.approx(100.0)
+    assert rows["Read"][3] == 0
+    stats.add_session("proj-a", _main(tmp_path, "s2", _sub_lines(used="Read")))
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    assert rows["figma"][2] == 2 and rows["figma"][3] == pytest.approx(50.0)
+
+
+def test_the_main_tools_table_counts_a_call_to_a_server_known_only_by_its_deferred_names(tmp_path):
+    top = _main(tmp_path, "s1", _sub_lines(tools=[_tool("Read")], used="mcp__extra__lookup"))
+    next(turn for turn in top.turns if turn.turn_index == 1).deferred_list_chars_by_server = {"extra": 800}
+    quiet = _main(tmp_path, "s2", _sub_lines(tools=[_tool("Read")], used="Read"))
+    next(turn for turn in quiet.turns if turn.turn_index == 1).deferred_list_chars_by_server = {"extra": 800}
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    stats.add_session("proj-a", quiet)
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    assert rows["extra"][2] == 2 and rows["extra"][3] == pytest.approx(50.0)
+    assert rows["extra"][4] == pytest.approx(800 / 4.0)
+
+
+CONNECTOR = "1a59c906-04da-521d-bda7-7f71b9f9e01c"
+
+
+def test_a_server_is_named_as_the_tool_search_table_names_it(tmp_path):
+    tools = [_tool("Read"), _tool(f"mcp__{CONNECTOR}__a"), _tool("mcp__claude_ai_Team_Notes__b"), _tool("mcp__figma__c")]
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(tools=tools)))
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=tools)))
+    assert set(_kinds(_main_tools_table(stats))) == {"Read", "Connector 1a59c906", "Team Notes", "figma"}
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    assert "mcp__" not in row["largest_tools"]
+    assert set(part.rsplit(" ", 1)[0] for part in row["largest_tools"].split(", ")) <= {
+        "Read", "Connector 1a59c906", "Team Notes", "figma",
+    }
+
+
+def test_the_main_tools_table_leaves_out_a_session_with_no_tools_snapshot_and_counts_it(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines()))
+    stats.add_session("proj-a", _main(tmp_path, "s2", _sub_lines(tools=[])))
+    stats.add_session("proj-b", _main(tmp_path, "s3", _sub_lines(tools=[])))
+    table = _main_tools_table(stats)
+    # Only the one session that recorded its tools is offered anything.
+    assert {r[2] for r in table.rows} == {1}
+    assert "1 of 3 main sessions recorded their tools" in " ".join(table.notes)
+    assert "permissions.deny" in " ".join(table.notes)
+
+
+def test_the_main_tools_table_is_empty_when_no_session_recorded_its_tools(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(tools=[])))
+    table = _main_tools_table(stats)
+    assert table.rows == []
+    assert "0 of 1 main sessions recorded their tools" in " ".join(table.notes)
+
+
+def test_the_main_tools_table_carries_help_and_is_drawn(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines()))
+    section = context_budget.build_section(stats)
+    helptext.annotate_section(section, "api")
+    table = next(t for t in section.tables if t.name == "context_budget_tools")
+    assert table.dashboard == "keep"
+    assert table.title == "Tools every session starts with"
+    assert table.help is not None and table.help.shows and table.help.act
+    assert [c.key for c in table.columns if not c.help] == []
+
+
+def test_the_breakdown_names_the_three_largest_tool_definitions_per_spawn(tmp_path):
+    from claudeglass.ratings import tokens_text
+
+    stats = context_budget.ContextBudgetStats()
+    for n in range(2):
+        stats.add_subagent(_sub(tmp_path, f"agent-{n}", _sub_lines()))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # Bash leads the server (two tools); Grep and Read tie for third, Grep by name; Read is left off.
+    def size(*tools):
+        return tokens_text(round(sum(_tool_chars(tool) for tool in tools) / 4.0))
+
+    assert row["largest_tools"] == (
+        f"Bash {size(TOOLS[2])}, figma {size(TOOLS[3], TOOLS[4])}, Grep {size(TOOLS[1])}"
+    )
+    assert "ddd" not in row["largest_tools"]
+
+
+def test_the_largest_tools_are_an_average_per_spawn_offered_them(tmp_path):
+    from claudeglass.ratings import tokens_text
+
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=[_tool("Bash", 900)])))
+    stats.add_subagent(_sub(tmp_path, "agent-2", _sub_lines(tools=[_tool("Bash", 1500)])))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    mean = (_tool_chars(_tool("Bash", 900)) + _tool_chars(_tool("Bash", 1500))) / 2 / 4.0
+    assert row["largest_tools"] == f"Bash {tokens_text(round(mean))}"
+
+
+def test_the_largest_tools_are_empty_when_no_spawn_recorded_its_tools(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=[])))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    assert row["largest_tools"] is None
+    columns = [c.key for c in _startup_tables(stats)["agent_startup_breakdown"].columns]
+    assert "largest_tools" in columns
+
+
+def test_the_largest_tools_are_read_on_the_agent_types_measured_model(tmp_path):
+    """A mixed-model agent type is measured on the model most of its spawns ran on
+    (not on the model the tools columns fall back to), so a model that recorded
+    tools but ran fewer spawns does not fill the column."""
+    from claudeglass.ratings import tokens_text
+
+    stats = context_budget.ContextBudgetStats()
+    for n in range(3):
+        stats.add_subagent(_sub(tmp_path, f"haiku-{n}", _sub_lines(model="claude-haiku-4-5", tools=[])))
+    for n in range(2):
+        stats.add_subagent(
+            _sub(tmp_path, f"sonnet-{n}", _sub_lines(model="claude-sonnet-5", tools=[_tool("Bash", 5_000)]))
+        )
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # The tools columns read the model that recorded some; the largest tools stay on the measured one.
+    assert row["model"] == "claude-haiku-4-5" and row["removable_tools"] is not None
+    assert row["largest_tools"] is None
+    # With tools recorded on the measured model, they are that model's.
+    for n in range(3):
+        stats.add_subagent(
+            _sub(tmp_path, f"more-{n}", _sub_lines(model="claude-haiku-4-5", tools=[_tool("Read", 300)]))
+        )
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    assert row["model"] == "claude-haiku-4-5"
+    assert row["largest_tools"] == f"Read {tokens_text(round(_tool_chars(_tool('Read', 300)) / 4.0))}"

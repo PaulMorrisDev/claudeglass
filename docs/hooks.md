@@ -97,24 +97,76 @@ module to skip compiling it on every call. Uninstalling removes all
 three, and the compiled copy, with the data folder.
 
 Claude Code waits for a hook each time it runs one. This one is
-registered on UserPromptSubmit and on PostToolUse for `Read`, `Grep`,
-`Glob`, `WebFetch`, `WebSearch` and an approved plan, and never for the
+registered on UserPromptSubmit and on PostToolUse for `Read`,
+`WebFetch`, `WebSearch` and an approved plan, and never for the
 shell or MCP tools: they were about two thirds of the calls, and a size
-note after them was wrong too often to pay for the wait. With coaching
+note after them was wrong too often to pay for the wait. `Grep` and
+`Glob` are left out as well. Claude Code keeps a `Grep` result whole only
+up to about 20,000 characters (about 5,000 tokens), and in 30 days of
+sessions no `Glob` result passed 18,200, so neither could reach the size a
+note applies to, yet `Grep` was the call the hook most often made Claude
+wait on. With coaching
 notes on, it is also registered for the `Agent` and `Workflow` tools, so
 it can tell you what each report from background work will cost to
 answer when you start it in a long session. It reads no size from their
 results and never says a large result is large. It is also registered
 for SubagentStop, where it prints nothing: it only notes that an agent
 run ended too big for one task, so the main session's next hook can say
-so. A call takes
-about 44 milliseconds on the author's Windows machine, python's own
-start being about 12, and returns before anything else when a result is
-under the size a note could apply to. A `settings.json` written before
-the shell and MCP tools were dropped keeps starting it after them until
-`claudeglass update --finish` or `capture connect` rewrites the entry;
-it returns at once. The wait and the size measure are on the
+so. How long a call takes depends on the machine, and Python's own start
+is part of it. Setup > Capture and `claudeglass capture status` show the
+measured figure from your own sessions, which Claude Code times (about 124
+milliseconds a run on the author's Windows machine). The hook returns
+before anything else when a result is under the size a note could apply to. A `settings.json` written before
+the shell and MCP tools, or `Grep` and `Glob`, were dropped keeps
+starting it after them until `claudeglass update --finish` or
+`capture connect` rewrites the entry; it returns at once. The wait and
+the size measure are on the
 [coaching notes page](coaching.md#what-it-costs).
+
+### With the ClaudeGlass mod
+
+The ClaudeGlass mod, a separate plugin that runs inside Claude Code, shows
+some of the hints itself, in its own panes, so they cost no context. It
+tells the hook which sessions it is running in with one small file per
+session, `mod/present/<session id>.json` in ClaudeGlass's data folder:
+`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>, "active": <seconds since 1970>}`.
+`active` is when the session last sent a request (0 before its first); the mod uses it to
+tell another session that is working from one that is only open, and the hook ignores it.
+The mod refreshes it every minute on a timer while the session is open, so
+an idle session stays fresh, and writes it once more with `seen` at 0 when
+the session ends (the engine cannot delete a file, and `0` reads as not
+running); the dashboard's watcher removes any not written for 24 hours. A file per session
+because two sessions writing one shared file would drop each other's entry.
+The hook reads the session's own file on a call that could draw a note
+(remembered by its time and size, so a repeat call reads it once). A
+session counts as having the mod when the file's `session_id` is its own
+name, its schema is 1 and `seen` is within the last 10 minutes; a session
+id that isn't letters, digits and `-` never counts. Then the hook leaves
+out the hints the mod shows, and doesn't note that it did: `cold_return`,
+`status_poll`, `drip_feed`, `big_paste` and `plan_fresh`. It doesn't work
+them out either, so
+a call with the mod present is a little quicker (about 39 milliseconds
+against 43 on the author's machine, with a hint due). A hint the hook
+leaves out is not marked as shown, so it is there again as soon as the mod
+isn't: it was closed, the file went stale, or it is missing, unreadable or
+of another schema. The hook also reads the
+mod's sensor file for the session (`mod/sensor/<session id>.json`): a tip to
+start fresh that the mod showed within the cooldown rests `plan_fresh_early`,
+as one the hook showed itself would.
+
+The hook keeps what steers Claude or feeds a skill: `plan_fresh_early`,
+`quiet_output`, the plan check, the facts line and the capture note.
+
+The mod writes the other way too. Once a turn, it rewrites
+`mod/sensor/<session id>.json` with what it showed in that session: the
+newest 500 events, each only a time and closed words or counts, with no
+message, path or summary. The dashboard's watcher reads a file when it
+changes, drops any event with a word outside the lists in
+`capture_catalogue.SENSOR_VOCAB`, and keeps the rest in the store's
+`mod_events` table (see [the API page](api.md)), where the Tips table counts
+the tips the mod showed beside the ones Claude passed on. Sensor files and
+their rows are removed after `retention_days` (180 by default), as the other
+telemetry is.
 
 ## The report section
 

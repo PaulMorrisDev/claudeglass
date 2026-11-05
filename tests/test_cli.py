@@ -2476,3 +2476,20 @@ def test_a_project_slug_may_start_with_a_dash():
     # A missing value is still an error, not the next flag taken as one.
     with pytest.raises(SystemExit):
         cli._make_parser().parse_args(["report", "--project", "--all-projects"])
+
+
+def test_cli_reports_read_what_the_mod_showed_without_writing(tmp_path):
+    from claudeglass.service.store import Store
+
+    assert cli._dashboard_mod_events(tmp_path) == []
+    store = Store(str(tmp_path / "service.db"))
+    store.open()
+    store.replace_mod_events("s1", [{
+        "ts": "2026-09-21T10:00:00Z", "event": "cold_send", "kind": None, "surface": None, "outcome": "warned",
+        "kept": None, "missing": None, "added": None,
+    }])
+    expected = store.read_mod_events()
+    store.close()
+    before = (tmp_path / "service.db").read_bytes()
+    assert cli._dashboard_mod_events(tmp_path) == expected and expected[0]["outcome"] == "warned"
+    assert (tmp_path / "service.db").read_bytes() == before

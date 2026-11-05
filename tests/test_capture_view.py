@@ -100,11 +100,42 @@ def test_on_notes_low_coverage_enough_data_and_expiry():
     use.answers = {m: 1000 for m in catalogue.level_metrics("essentials")}
     capture_config = _on(until="2026-09-21T00:00:00+00:00")
     data = capture_view.view(capture_config, units=API, use=use, now=datetime(2026, 9, 22, tzinfo=timezone.utc))
-    notes = data["banner"]["notes"]
+    banner = data["banner"]
+    notes = banner["notes"]
     assert data["config"]["expired"] is True and data["config"]["effective"] is False
-    assert any(note.startswith("Its end time (2026-09-21 00:00) has passed") for note in notes)
+    # J19: ended capture is reported as off, and says how to start it again.
+    assert banner["on"] is False and "ended 2026-09-21" in banner["headline"]
+    assert any(
+        note.startswith("Its end time (2026-09-21 00:00) has passed") and "'claudeglass capture on'" in note
+        for note in notes
+    )
     assert any("tagged only 20.0% of your messages" in note for note in notes)
-    assert any(note.startswith("Enough collected for every metric on") for note in notes)
+    # Nothing is being captured, so the notes that assume it is are left out.
+    assert not any(note.startswith("Enough collected") for note in notes)
+
+
+def test_ended_capture_leaves_out_the_hook_cost_and_step_down_notes():
+    spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
+    health = CaptureHookHealth(
+        settings_path=Path("settings.json"), needed=(spec,), problems=["The command runs a file that is missing."],
+    )
+    use = _use(cycles=30, tagged_cycles=30)
+    use.answers = {m: capture.enough_target(m) for m in catalogue.level_metrics("essentials")}
+    ended = _on(until="2026-09-21T00:00:00+00:00")
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    notes = capture_view.view(
+        ended, units=API, use=use, hooks=health, weekly_cost=2.0, dependent_value=5.0, now=now,
+    )["banner"]["notes"]
+    assert [note for note in notes if note.startswith("Its end time")]
+    assert not any(
+        word in note for note in notes for word in ("hook entry", "No capture note", "Capture cost", "Enough collected")
+    )
+    # The same capture, still running, says them.
+    running = capture_view.view(
+        _on(), units=API, use=use, hooks=health, weekly_cost=2.0, dependent_value=5.0, now=now,
+    )["banner"]
+    assert running["on"] is True and any("hook entry" in note for note in running["notes"])
+    assert any(note.startswith("Capture cost") for note in running["notes"])
 
 
 # -- CAP-7: a specific step-down command once its evidence is ready ---------
@@ -175,6 +206,17 @@ def test_worth_table_prices_each_asked_metric_a_week_against_what_it_feeds():
     # A metric that's on but never measured a dollar (or off, or derived,
     # like "found") doesn't show up.
     assert "session_end" not in worth
+
+
+def test_worth_table_stops_its_weeks_at_the_end_of_capture():
+    """J19: a week's cost is spread over the weeks capture ran, not over the
+    weeks since it began, which went on growing after it ended and made
+    the figure shrink for as long as the dashboard was open."""
+    ended = _on(until="2026-10-04T10:00:00+00:00")  # two weeks after enabled_at
+    later = datetime(2026, 12, 4, 10, tzinfo=timezone.utc)
+    data = capture_view.view(ended, units=API, use=_use(sessions=habits.MIN_GROUP), now=later)
+    worth = {row["id"]: row for row in data["worth"]}
+    assert worth["task"]["usd"] == 0.012 / 2 and worth["result"]["usd"] == 0.004 / 2
 
 
 def test_worth_table_is_empty_without_a_start_time_or_before_capture_is_on():
@@ -600,7 +642,7 @@ def test_warning_for_a_claude_tagger_level_names_the_note_and_the_tag_and_the_ju
 
 
 def test_warning_names_the_tool_note_at_deep_only():
-    assert "after a large read, search or web result" in _warning("deep")
+    assert "after a large read or web result" in _warning("deep")
     assert "after a large read" not in _warning("essentials")
     assert "after a large read" not in _warning("standard")
 

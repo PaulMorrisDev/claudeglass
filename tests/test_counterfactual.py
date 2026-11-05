@@ -14,37 +14,45 @@ from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing, price_turn
 from claudeglass.units import Units
 
-from helpers import turn_line, write_jsonl
+from helpers import system_line, turn_line, write_jsonl
 
 CHANGE = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
 UNITS = Units(billing_mode="api", currency="USD")
 PRICING = load_pricing()
 
 
-def _write(project_dir, name, day, *, model="claude-sonnet-5", turns=8, gap_s=120, step=20_000):
+def _write(project_dir, name, day, *, model="claude-sonnet-5", turns=8, gap_s=120, step=20_000, summarised_at=None):
+    """One session of ``turns`` replies growing by ``step``. With ``summarised_at``
+    it ends with an automatic summary that fired at that many tokens."""
     start = CHANGE + timedelta(days=day)
-    write_jsonl(
-        project_dir / f"{name}.jsonl",
-        [
-            turn_line(
-                timestamp=(start + timedelta(seconds=gap_s * i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                model=model,
-                cache_read_input_tokens=step * i,
-                cache_creation_input_tokens=5_000,
-                ephemeral_5m_input_tokens=5_000,
+    lines = [
+        turn_line(
+            timestamp=(start + timedelta(seconds=gap_s * i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            model=model,
+            cache_read_input_tokens=step * i,
+            cache_creation_input_tokens=5_000,
+            ephemeral_5m_input_tokens=5_000,
+        )
+        for i in range(turns)
+    ]
+    if summarised_at:
+        lines.append(
+            system_line(
+                "compact_boundary",
+                timestamp=(start + timedelta(seconds=gap_s * turns)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                compactMetadata={"trigger": "auto", "preTokens": summarised_at, "postTokens": 20_000},
             )
-            for i in range(turns)
-        ],
-    )
+        )
+    write_jsonl(project_dir / f"{name}.jsonl", lines)
 
 
-def _setup(tmp_path, *, before_model="claude-sonnet-5", after_model="claude-sonnet-5", **kw):
+def _setup(tmp_path, *, before_model="claude-sonnet-5", after_model="claude-sonnet-5", after_summarised_at=None, **kw):
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     for n, day in enumerate((-3, -2, -1)):
         _write(project_dir, f"b{n}", day, model=before_model, **kw)
     for n, day in enumerate((0.1, 0.2, 0.3)):
-        _write(project_dir, f"a{n}", day, model=after_model, **kw)
+        _write(project_dir, f"a{n}", day, model=after_model, summarised_at=after_summarised_at, **kw)
     corpus = load_corpus([project_dir])
     facts = impact.session_facts(corpus, PRICING)
     point = ChangePoint(CHANGE, "apply", "x")
@@ -115,6 +123,26 @@ def test_a_raised_compaction_window_replays_the_old_one(tmp_path):
     assert result.fidelity == "simulated"
     assert result.without_usd == pytest.approx(compaction_sim.replay_cost(tops, PRICING.resolve_model, 100_000))
     assert compaction_sim.replay_cost(tops, PRICING.resolve_model, None) == pytest.approx(result.paid_usd)
+
+
+def test_the_old_window_fires_below_it_by_the_gap_the_sessions_left_under_the_new_one(tmp_path):
+    """The sessions since the change ran under a 400,000 window and summarised
+    at 390,000, a gap of 10,000. Replayed under the old 300,000 window that
+    gap puts the summary at 290,000, not the 267,000 the 33,000 default would.
+    The counterfactual hands the replay the window the sessions ran under, so
+    it measures the first."""
+    before, after, bundles = _setup(tmp_path, step=40_000, after_summarised_at=390_000)
+    result = counterfactual.without_change(
+        _point("autoCompactWindow", 300_000, 400_000), before, after, bundles, PRICING
+    )
+    tops = [bundles[s.session_id].top for s in after]
+    ran_under = {top.meta.session_id: 400_000 for top in tops}
+    lookup = PRICING.resolve_model
+
+    assert result.fidelity == "simulated"
+    assert result.without_usd == pytest.approx(compaction_sim.replay_cost(tops, lookup, 300_000, snapshot_windows=ran_under))
+    # The gap is measured, not the 33,000 default: the two replays differ.
+    assert compaction_sim.replay_cost(tops, lookup, 300_000) != pytest.approx(result.without_usd)
 
 
 def test_a_lowered_compaction_window_falls_back_to_the_sessions_before(tmp_path):

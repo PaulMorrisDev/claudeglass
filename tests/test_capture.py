@@ -2026,6 +2026,19 @@ def test_weekly_cost_spreads_what_was_measured_over_the_weeks_since_it_began():
     assert capture.weekly_cost(use, now=now) == pytest.approx(1.4 / 2)
 
 
+def test_weekly_cost_stops_counting_weeks_when_capture_ends():
+    use = _priced_use("2026-09-01T00:00:00+00:00", note_cost=1.0, tag_cost=0.4)
+    later = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    ended = "2026-09-15T00:00:00+00:00"
+    assert capture.weekly_cost(use, now=later, until=ended) == pytest.approx(1.4 / 2)
+    # An end still in the future, or none, changes nothing.
+    assert capture.weekly_cost(use, now=datetime(2026, 9, 15, tzinfo=timezone.utc), until="2027-01-01T00:00:00+00:00") == (
+        pytest.approx(1.4 / 2)
+    )
+    assert capture.weekly_cost(use, now=later, until="") == capture.weekly_cost(use, now=later)
+    assert capture.weeks_since("2026-09-01T00:00:00+00:00", later, ended) == pytest.approx(2.0)
+
+
 def test_weekly_cost_is_none_without_a_start_time():
     assert capture.weekly_cost(capture.CaptureUsage(since="")) is None
 

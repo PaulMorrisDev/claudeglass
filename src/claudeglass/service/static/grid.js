@@ -1230,9 +1230,11 @@ var TOTAL_KEY = /^(all|total)$/i;
 // A table can name a reason of its own (Table.empty_variant): its text is
 // keyed "table:reason".
 var EMPTY_TEXT = {
+  context_budget_tools: ["No session recorded its tools in this window.", "Older Claude Code versions don't record them. Sessions that record their tools will fill this table."],
   context_budget_statusline: ["No status line readings in this window.", "This table fills once the status line logger is installed and has logged a session."],
   "context_budget_statusline:desktop": ["No status line readings in this window.", "The desktop app doesn't run status lines; first-call sizes come from transcripts instead."],
   habits_outcomes: ["No feedback on your work in this window.", "Answer /cg-feedback, or rate a session on {{page:spend/sessions}}, to fill this table."],
+  prompting_tweaks: ["No tweaks pressed yet.", "Press a button in ClaudeGlass, such as Summarise now, and it is counted here."],
   habits_by_shape: ["No main sessions with a message of yours in this window.", "A longer window may include some."],
 };
 

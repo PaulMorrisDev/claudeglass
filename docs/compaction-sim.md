@@ -36,10 +36,18 @@ this module never re-simulates or removes it. A **simulated** compaction
 is shaped like this corpus's real ones:
 
 - **When it fires**: once the running context passes the candidate
-  window less a trigger reserve. Claude Code summarises below the
-  window (a 300,000 window fires near 267,000); the reserve is the
+  window less a trigger reserve. Claude Code summarises a constant
+  33,000 tokens below the window (a 250,000 window fires at 217,000, a
+  300,000 one at 267,000, a 400,000 one at 367,000). The reserve is the
   median `window − preTokens` across real auto compactions in sessions
-  whose configured window is known (0 when there are none).
+  whose configured window is known; when there are none it is 33,000
+  (`CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS`), not 0. A *precomputed*
+  boundary (`compactMetadata.precomputed`, Claude Code 2.1.309: the
+  summary is made in the background and the boundary applies it later) is
+  left out of the median, since it lands wherever the session happened
+  to be rather than at the window's trigger. The counterfactual (what
+  an earlier window would have cost) replays the sessions since a change
+  and measures the gap against the window they ran under.
 - **What it leaves**: the session's own starting context (its first
   reply's context: system prompt, tools, CLAUDE.md, skills listing,
   about 80,000 tokens on a typical corpus) plus a summary of this
@@ -67,12 +75,14 @@ added after the summary is kept whole. A real compaction resets this.
 The files a session re-reads after a summary can't be seen in the
 transcript being replayed, so the sweep doesn't charge them; the
 `compaction-window` rule corrects for them instead. Candidate windows swept:
-`100k, 150k, 200k, 250k, 300k, 400k, 500k, none` (`none` = never
-auto-compact; a real compaction already in the transcript is still kept
-under this row — see the "no candidate window" identity below). Because
-real compactions are kept, a window above the one a session ran at costs
-what the session did: the sweep can only test smaller windows, and the
-compaction quick action and the section notes say so. Main sessions a
+`100k, 150k, 200k, 250k, 300k, 400k, 500k, 600k, 700k, 800k, 900k, 967k, none`
+(`CANDIDATE_WINDOWS`; the windows above 500k are for the natively
+1M-context models; `none` = never auto-compact; a real compaction already
+in the transcript is still kept under this row — see the "no candidate
+window" identity below). Because real compactions are kept, a window above
+the one a session ran at costs what the session did, so the rows above the
+observed window all equal `none`: the sweep can only test smaller windows,
+and the compaction quick action and the section notes say so. Main sessions a
 scheduled or looped task started, with no message of yours
 (`model.scheduled_main_session`), are not replayed: they never compact,
 so they would only lower the compactions per session the rule gates on.
@@ -81,7 +91,7 @@ so they would only lower the compactions per session the rule gates on.
 
 | Table | Scope | What it shows |
 |---|---|---|
-| `compaction_sim_by_window` | Top-level sessions only | One row per candidate window: simulated compactions per session, mean ctx, total cost, and delta vs. the observed (`none`) cost, in USD and percent. |
+| `compaction_sim_by_window` | Top-level sessions only | One row per candidate window: simulated compactions per session, mean ctx, total cost, delta vs. the observed (`none`) cost in USD and percent, and `within_limit`: whether that window summarises no more often than `max_compactions_per_session` (2). The rule, the what-if, the Overview's saving lever and the summary-size chart all offer only a window within the limit. |
 | `compaction_sim_by_agent_type` | `"top-level"` and every subagent type | Each key's own cheapest candidate window, its cost, the saving vs. observed (0 floor), and a recommendation string naming the window (only the `"top-level"` row says to set it). |
 | `compaction_sim_by_task` | Main sessions only, grouped by the kind of task metrics capture reported (`task=`) | Same shape as `compaction_sim_by_agent_type`, keyed by task instead of agent type. A task appears only once at least `MIN_TASK_SESSIONS` (5) main sessions reported it. |
 | `compaction_sim_fidelity` | Top-level sessions with a known configured window | Simulating at the session's own snapshot-configured `autoCompactWindow` against its true observed cost — a trust check on the simulation itself. |
@@ -202,7 +212,8 @@ Printed verbatim in the report section's own notes (`ASSUMPTIONS`):
   starting context every reply carries, which overstated savings at
   small windows several times over.)
 - A candidate window fires at the window less this corpus's median
-  trigger reserve (0 default).
+  trigger reserve (33,000 by default, Claude Code's own buffer below its
+  window). Precomputed boundaries do not count toward the median.
 - A simulated compaction charges the summary request (the median real
   summary request's output, or the summary size when there is none) and
   the reply after it re-caching its whole context, reading the corpus's median cached
@@ -220,10 +231,13 @@ Printed verbatim in the report section's own notes (`ASSUMPTIONS`):
 
 ## Wiring into the report and CLI
 
-`report.build_report` builds a per-session `snapshot_windows` map (the
-window in the config snapshot each session's own project had when it
-started, via `snapshots.snapshot_for`: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-when it's set, else the effective `autoCompactWindow`), calls
+`report.build_report` builds a per-session `snapshot_windows` map as it
+classifies each session (the window in the config snapshot the session's
+own project had when it started, via `snapshots.snapshot_for`:
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` when it's set, else the effective
+`autoCompactWindow`, less any `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`). The same
+map feeds the re-cache table's "very large context" bar and the
+scorecard's context-hygiene bands, and the sweep, which calls
 `compaction_sim.simulate_compaction_windows(all_results, rates, snapshot_windows, thresholds)`
 and appends `compaction_sim.build_section(...)` after the `carry`
 section. `recommend.recommend()` then runs

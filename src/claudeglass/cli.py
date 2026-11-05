@@ -34,8 +34,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import available_timezones
 
-from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, discovery, installer as installer_mod
+from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, compaction, discovery, installer as installer_mod
 from . import invocation, onboarding, setup_flow
+from . import mod_settings as mod_settings_mod
 from . import pages
 from . import haiku_tags, helptext, hook_health, probe as probe_mod, recache, signals as signals_mod, snapshots
 from . import statusline as statusline_mod
@@ -59,7 +60,7 @@ from .config import (
 )
 from .corpus import Corpus, load_corpus
 from .parse import load_or_create_salt
-from .model import Diagnostics, EventKind, PricingMeta, ReportMeta, ReportModel, Section, TranscriptResult
+from .model import Diagnostics, PricingMeta, ReportMeta, ReportModel, Section, TranscriptResult
 from .pricing import Pricing, PricingCoverage, PricingError, load_pricing, price_turn
 from .render.csv_out import write_csv_dir
 from .render.html import render_html
@@ -1471,6 +1472,15 @@ def _dashboard_tip_feedback(config_dir: Path) -> dict:
     return read_tip_feedback(config_dir / STORE_FILENAME)
 
 
+def _dashboard_mod_events(config_dir: Path) -> list[dict]:
+    """What the ClaudeGlass mod's sensor files said, by event, read from
+    ``<config-dir>/service.db`` without writing to it."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import read_mod_events
+
+    return read_mod_events(config_dir / STORE_FILENAME)
+
+
 def _merge_dashboard_marks(config_dir: Path, overrides: dict) -> tuple[dict, dict]:
     """``(overrides, ratings)``: ``overrides`` with the dashboard's
     session tags merged over it, and the dashboard's session ratings,
@@ -1779,6 +1789,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             config_dir=config_dir,
             ratings=ratings,
             tip_feedback=_dashboard_tip_feedback(config_dir),
+            mod_events=_dashboard_mod_events(config_dir),
             all_projects=bool(getattr(args, "all_projects", False)),
         )
     except ScorecardError as exc:
@@ -1927,7 +1938,7 @@ def _build_session_metrics(
                 cc_total += turn.cache_creation_tokens
                 turns += 1
 
-        compactions = sum(1 for e in bundle.top.events if e.kind == EventKind.COMPACT_BOUNDARY)
+        compactions = compaction.compactions_in(bundle.top)[0]
 
         metrics.append(
             {
@@ -3107,6 +3118,27 @@ OLD_DASHBOARD_HELP = (
 
 #: Where a ``.pyz`` user downloads the newest copy.
 _RELEASES_URL = "https://github.com/PaulMorrisDev/claudeglass/releases/latest"
+MOD_HELP = "https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/mod.md"
+#: How the Claude Code mod is added: typed once at a Claude Code terminal prompt.
+MOD_INSTALL = "/plugin install claudeglass --marketplace PaulMorrisDev/claudeglass"
+
+
+def _mod_seen(config_dir: Path, now: float, within_s: int = 86_400) -> bool:
+    """Whether the Claude Code mod ran in the last day: a heartbeat file
+    under ``mod/present/`` it refreshed recently (``seen: 0`` is the
+    tombstone it leaves at a session's end, which still counts as run)."""
+    folder = config_dir / capture_catalogue.MOD_DIR / capture_catalogue.MOD_PRESENT_DIR
+    try:
+        files = list(folder.glob("*.json"))
+    except OSError:
+        return False
+    for path in files:
+        try:
+            if now - path.stat().st_mtime <= within_s:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
@@ -3246,6 +3278,43 @@ def _update_finish_args(args: argparse.Namespace) -> list[str]:
     return out
 
 
+def _write_mod_settings(config_dir: Path, dashboard_url: str | None, *, address_known: bool = True) -> None:
+    """Write the mod's settings file (``mod_settings``) so it exists
+    without the dashboard running. "Your usual" comes from the dashboard's
+    store when there is one, read without writing to it; the measured
+    figures wait for the dashboard's next report, so the file as the
+    service wrote it is carried forward (see ``mod_settings.build``). A
+    config or rate card that can't be read leaves the file as it was:
+    ``update`` reports those elsewhere.
+
+    ``dashboard_url`` is where the dashboard answers and wins over the
+    address in the file (a dashboard that moved to another port must be
+    found at its new one). ``address_known`` is false when ``update`` left
+    the dashboard alone (``--no-service``): the address its ``--port`` names
+    is then only a default, not where the dashboard really is, so an address
+    the service wrote to the file is kept."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import Store
+
+    try:
+        previous = json.loads(mod_settings_mod.settings_path(config_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = None
+    if not address_known and isinstance(previous, dict) and previous.get("dashboard_url"):
+        dashboard_url = None
+    store = Store.open_read_only(config_dir / STORE_FILENAME)
+    try:
+        mod_settings_mod.write(
+            config_dir,
+            mod_settings_mod.build(config_dir, store=store, dashboard_url=dashboard_url, previous=previous),
+        )
+    except (ConfigError, PricingError, OSError):
+        pass
+    finally:
+        if store is not None:
+            store.close()
+
+
 def _cmd_update_finish(
     args: argparse.Namespace,
     *,
@@ -3325,6 +3394,9 @@ def _cmd_update_finish(
             refreshed = []
         if refreshed:
             stdout.write(f"Refreshed {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''} this version changed.\n")
+        _write_mod_settings(
+            config_dir, mod_settings_mod.dashboard_url(args.bind, args.port), address_known=not args.no_service
+        )
 
     # -- the dashboard ---------------------------------------------------
     status = 0
@@ -3434,6 +3506,19 @@ def _cmd_update_finish(
             )
     if not changed_any:
         stdout.write("Up to date: the hooks, statusline and skills this tool added run as they should.\n")
+
+    # -- the Claude Code mod -------------------------------------------------------
+    # update never installs the mod: it says how, or that the one in use
+    # updates through Claude Code.
+    stdout.write("\nThe Claude Code mod:\n")
+    if _mod_seen(config_dir, (now or datetime.now(timezone.utc)).timestamp()):
+        stdout.write("It ran in the last day. Bring it to this version with 'claude plugin update claudeglass'.\n")
+    else:
+        stdout.write(
+            "It shows how full the context is and what each reply costs, inside Claude Code. "
+            f"To add it, type this once at a Claude Code terminal prompt:\n   {MOD_INSTALL}\n"
+            f"More: {MOD_HELP}\n"
+        )
 
     # -- copies for other Pythons ----------------------------------------------
     copies = copies_fn([ran_from])
@@ -3804,6 +3889,7 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
         # Your dashboard ratings and card answers, as the daily run reads them.
         ratings=ratings,
         tip_feedback=_dashboard_tip_feedback(config_dir),
+        mod_events=_dashboard_mod_events(config_dir),
     )
     data = coaching.from_report(
         report, config_dir, config.thresholds, now=now, typical=coaching.typical_piece_tokens(corpus)
@@ -4150,7 +4236,10 @@ def _capture_status(
     ids = capture.active_metrics()
     if capture.is_on:
         if capture.expired():
-            stdout.write("Its end time has passed, so the hook adds nothing now. Turn it back on with 'claudeglass capture on'.\n")
+            stdout.write(
+                "Its end time has passed, so capture's notes, tags and signals have stopped; coaching notes and the "
+                "feedback facts line, if you have them on, still run. 'claudeglass capture on' starts capture again.\n"
+            )
         if capture.projects:
             only = [p for p in capture.projects if not p.startswith("!")]
             skip = [p[1:] for p in capture.projects if p.startswith("!")]
@@ -4399,6 +4488,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 )
         return 0
     if preview != current:
+        if current.is_on and current.expired(now) and preview.is_on and not preview.expired(now):
+            stdout.write("Its end time had passed, so this starts capture again for a new span.\n")
         if capture_view.describe(current) != capture_view.describe(preview):
             stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":

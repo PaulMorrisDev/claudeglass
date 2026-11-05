@@ -743,10 +743,76 @@ _TREND_LABELS = {
 }
 
 
-def relay_text(hint: str, notes: int, shown: int) -> str:
+#: How the places the ClaudeGlass mod shows a note read in the
+#: ``prompting_tips`` table's "Where Glass showed it" cell, by the sensor
+#: file's ``surface`` word (``capture_catalogue.SENSOR_NOTE_SURFACES``).
+GLASS_SURFACES = {
+    "note": "the note",
+    "hint": "the hint line",
+    "log": "a note in the conversation",
+    "status": "the status line",
+    "band": "the band",
+    "agent": "the agent row",
+}
+
+
+@dataclass
+class GlassTips:
+    """What the mod's sensor files say about the sessions of a report: the
+    tips it showed itself, and the sessions it ran in."""
+
+    #: Notes of a tip hint the mod showed, by hint and by ``(hint, surface)``.
+    shown: Counter = field(default_factory=Counter)
+    surfaces: Counter = field(default_factory=Counter)
+    #: Sessions with a ``present`` event, in all and by the surface of Claude
+    #: Code the event names (a session on two surfaces counts on both).
+    present: set = field(default_factory=set)
+    present_surfaces: Counter = field(default_factory=Counter)
+
+
+def glass_tips(mod_events: list[dict] | None, session_ids: set[str]) -> GlassTips:
+    """:class:`GlassTips` from the stored sensor events
+    (``Store.read_mod_events``) of the sessions in ``session_ids`` only, so a
+    report's window decides which count. A ``note`` event counts when its
+    kind is a hint that asks Claude for a tip (:data:`TIP_HINTS`) and its
+    surface a known one. The mod and the hook never deliver the same hint
+    in a session (``capture_catalogue.MOVED_TO_MOD``), so a tip is counted
+    once, by whichever showed it."""
+    out = GlassTips()
+    seen: set[tuple] = set()
+    for event in mod_events or ():
+        sid = event.get("session_id")
+        if sid not in session_ids:
+            continue
+        kind = event.get("event")
+        if kind == "present" and event.get("surface") in catalogue.SENSOR_PRESENT_SURFACES:
+            out.present.add(sid)
+            if (sid, event["surface"]) not in seen:
+                seen.add((sid, event["surface"]))
+                out.present_surfaces[event["surface"]] += 1
+        elif kind == "note" and event.get("kind") in TIP_HINTS and event.get("surface") in GLASS_SURFACES:
+            out.shown[event["kind"]] += 1
+            out.surfaces[(event["kind"], event["surface"])] += 1
+    return out
+
+
+def glass_where(hint: str, surfaces: Counter) -> str | None:
+    """Where the mod showed ``hint``, as "the hint line 3, the note 2", the
+    most used first; ``None`` when it didn't."""
+    parts = sorted(
+        ((count, surface) for (h, surface), count in surfaces.items() if h == hint),
+        key=lambda pair: (-pair[0], list(GLASS_SURFACES).index(pair[1])),
+    )
+    return ", ".join(f"{GLASS_SURFACES[surface]} {count}" for count, surface in parts) or None
+
+
+def relay_text(hint: str, notes: int, shown: int) -> str | None:
     """How often Claude passed a tip on: "relayed 4 of 5" for a hint whose
     note asks for it every time, "judged relevant 2 of 6" for one Claude
-    decides on, as the message may not call for it."""
+    decides on, as the message may not call for it. ``None`` for a hint the
+    hook wrote no note for (the mod showed it, :func:`glass_tips`)."""
+    if not notes:
+        return None
     return f"{'judged relevant' if hint in catalogue.CONDITIONAL_TIP_HINTS else 'relayed'} {shown} of {notes}"
 
 
@@ -797,6 +863,7 @@ def build_section(
     *,
     window: str = "",
     tz: str | tzinfo | None = None,
+    mod_events: list[dict] | None = None,
 ) -> Section:
     """The ``prompting`` section: a row per habit seen, most costly first
     (a habit with no figure, a big task without a plan or a vague
@@ -809,7 +876,11 @@ def build_section(
     is the period every cost is a total over, in the ``period`` column
     ("over the last 30 days"; ``""`` when the caller didn't say), and ``tz``
     the zone weeks start on the Monday of. A habit with no priced cost has
-    none: ``None``, never a zero."""
+    none: ``None``, never a zero. ``mod_events`` (``Store.read_mod_events``)
+    is what the ClaudeGlass mod's sensor files said: a tip it showed counts
+    with the ones Claude passed on (the ``total`` column, the two apart in
+    ``shown`` and ``glass``), and a second table counts the sessions it ran
+    in."""
     messages = sum(m.asks for s in sessions for m in s.messages)
     counts: Counter = Counter()
     costs: dict[str, float] = {}
@@ -858,15 +929,19 @@ def build_section(
         misfires.update(s.misfires)
         answers.update(s.tip_answers)
     answers.update(card_answers or {})
+    glass = glass_tips(mod_events, {s.session_id for s in sessions})
     tips_table = Table(
         name="prompting_tips",
-        title="Tips Claude showed",
+        title="Coaching tips shown",
         columns=[
             Column(key="hint", label="Hint", kind="str"),
             Column(key="notes", label="Notes", kind="int"),
-            Column(key="shown", label="Tip shown", kind="int"),
-            Column(key="shown_pct", label="Shown", kind="pct"),
-            Column(key="relay", label="Passed on", kind="str"),
+            Column(key="shown", label="Passed on by Claude", kind="int"),
+            Column(key="shown_pct", label="Passed on (share)", kind="pct"),
+            Column(key="relay", label="Passed on, of notes", kind="str"),
+            Column(key="glass", label="Shown by Glass", kind="int"),
+            Column(key="where", label="Where Glass showed it", kind="str"),
+            Column(key="total", label="Tips shown", kind="int"),
             Column(key="misfires", label="Called a misfire", kind="int"),
             Column(key="useful", label="You said useful", kind="int"),
             Column(key="known", label="You knew it", kind="int"),
@@ -875,14 +950,17 @@ def build_section(
         ],
         rows=[
             [
-                hint, notes[hint], tips[hint], 100.0 * tips[hint] / notes[hint],
-                relay_text(hint, notes[hint], tips[hint]), misfires[hint],
+                hint, notes[hint], tips[hint], 100.0 * tips[hint] / notes[hint] if notes[hint] else None,
+                relay_text(hint, notes[hint], tips[hint]), glass.shown[hint], glass_where(hint, glass.surfaces),
+                tips[hint] + glass.shown[hint], misfires[hint],
                 answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")],
                 trust_pct(answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")], misfires[hint]),
             ]
-            for hint in TIP_HINTS if notes[hint]
+            for hint in TIP_HINTS if notes[hint] or glass.shown[hint]
         ],
         notes=[
+            "Tips shown: the tips Claude passed on in its reply plus the ones ClaudeGlass showed itself, "
+            "inside Claude Code.",
             "Relayed: Claude is told to show this tip every time, so a tip it left out was missed.",
             "Judged relevant: Claude shows the tip only when your message calls for it, so a tip it left out "
             "was not a miss.",
@@ -890,6 +968,31 @@ def build_section(
         ],
     )
     tables = [habits_table] + ([tips_table] if tips_table.rows else [])
+    if glass.present or glass.shown:
+        # Left out without any sensor file, so a report on a machine without
+        # the mod reads as it always did.
+        known = len(sessions)
+        tables.append(Table(
+            name="prompting_glass",
+            title="Sessions with ClaudeGlass running",
+            columns=[
+                Column(key="sessions", label="Sessions", kind="int"),
+                Column(key="with_glass", label="With ClaudeGlass", kind="int"),
+                Column(key="with_glass_pct", label="Share", kind="pct"),
+                Column(key="where", label="Where it ran", kind="str"),
+                Column(key="tips", label="Tips it showed", kind="int"),
+            ],
+            rows=[[
+                known, len(glass.present), 100.0 * len(glass.present) / known if known else None,
+                ", ".join(f"{surface} {glass.present_surfaces[surface]}"
+                          for surface in catalogue.SENSOR_PRESENT_SURFACES if glass.present_surfaces[surface]) or None,
+                sum(glass.shown.values()),
+            ]],
+            notes=[
+                "A session counts as running ClaudeGlass when the mod wrote that it was present. Where it ran "
+                "is the part of Claude Code the session used.",
+            ],
+        ))
     return Section(key="prompting", title="How you prompt", tables=tables)
 
 

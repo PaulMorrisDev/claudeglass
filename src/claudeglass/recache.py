@@ -68,6 +68,16 @@ order, the first that applies winning:
    changed (a notification, an attachment, a model switch, ...) and broke
    it anyway.
 
+The API's own account of a miss (``Turn.cache_miss_reason``, from
+``message.diagnostics.cache_miss_reason``) outranks the read test: when
+rule 3 or 4 would give ``full-expiry`` and the API says the prefix
+changed (``messages_changed``, ``system_changed``, ``tools_changed`` or
+``model_changed``), the turn is ``prefix-invalidated``. An expiry that
+the API calls a change came seconds after the previous call, and a TTL
+tip would steer away from the real cause. ``previous_message_not_found``
+and ``unavailable`` leave the label as the rules gave it. The signature
+table's ``API cause`` column counts the reasons per signature.
+
 When ``cr0`` or the previous call is not known (a list that does not
 start at the transcript's first turn), only the original test and the
 ``full_expiry_cr`` floor apply, as before.
@@ -145,6 +155,15 @@ GAP_BUCKETS: tuple[str, ...] = ("<1m", "1-5m", "5-15m", "15-60m", ">60m", "unkno
 #: addition, see module docstring) is checked first in detect() and takes
 #: priority over the others; "post-compaction" comes next.
 SIGNATURES: tuple[str, ...] = ("full-expiry", "prefix-invalidated", "post-compaction", "limit-expiry")
+
+#: Share of the point where Claude Code summarises the conversation at
+#: which a context counts as very large (``recache_huge_context``).
+HUGE_CONTEXT_SHARE: float = 0.8
+
+#: Tokens Claude Code keeps free below the window when it summarises: a
+#: session summarises at its window less this (a 400,000 window at about
+#: 367,000; the 1,000,000 default at about 967,000).
+COMPACTION_RESERVE_TOKENS: int = 33_000
 
 #: How far past the shared start (the first call's cache read, ``cr0``) a
 #: read may go and still be an expiry of the session part. A warm call
@@ -248,16 +267,21 @@ class RecacheThresholds:
         (and this module's table notes)."""
         return [
             f"A reply only counts as a cache rebuild when its context is over {self.ctx_floor:,} tokens.",
-            f"It counts when it read less than {self.cr_ratio:.0%} of that context's own part from the cache, "
-            "or when it read only the start every session shares although the previous reply had left more "
-            "than that cached. Compactions and /clear, which shrink the context, are not counted this way.",
+            f"It counts when it read less than {self.cr_ratio:.0%} of that context's own part from the cache. "
+            "It also counts when it read only the start every session shares, although the previous reply "
+            "had left more cached than that. "
+            "Compactions and /clear, which shrink the context, are not counted this way.",
             "A rebuild is \"Cache expired\" when the wait since the previous reply reached the time its cache "
-            f"lasts (5 minutes, or 1 hour for an hour-long write), or when it read no more than "
-            f"{SESSION_READ_MARGIN:,} tokens beyond the shared start (or under {self.full_expiry_cr:,} tokens "
-            "in all). Any other rebuild is \"Cache broken by a change\". The first reply after a "
+            "lasts. That time is 5 minutes, or 1 hour for an hour-long write. "
+            f"It is also \"Cache expired\" when it read no more than {SESSION_READ_MARGIN:,} tokens beyond the "
+            f"shared start, or under {self.full_expiry_cr:,} tokens in all. "
+            "Any other rebuild is \"Cache broken by a change\". The first reply after a "
             "conversation summary is \"Rewritten after a summary\" instead, whatever the wait.",
-            f"A context counts as very large at {self.huge_ctx:,} tokens when its model's own context "
-            "window isn't known.",
+            f"A context counts as very large at {HUGE_CONTEXT_SHARE:.0%} of the point where Claude Code "
+            "summarises the conversation. "
+            f"That point is the session's window less {COMPACTION_RESERVE_TOKENS:,} tokens. The window is "
+            "your auto-compact window setting, or else the model's own context window. "
+            f"A context counts at {self.huge_ctx:,} tokens when neither is known.",
         ]
 
 
@@ -324,8 +348,11 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
     ``full-expiry`` when the gap reached the TTL the previous call wrote
     at; ``full-expiry`` when it read no more than ``cr0`` +
     :data:`SESSION_READ_MARGIN` (or under ``th.full_expiry_cr``);
-    otherwise ``prefix-invalidated``. ``cr0`` is the cache read of the
-    transcript's first priced turn when ``turns`` includes it.
+    otherwise ``prefix-invalidated``. Either ``full-expiry`` rule gives
+    way to ``prefix-invalidated`` when the API itself reported the prefix
+    changed (``Turn.cache_miss_reason`` ends in ``_changed``). ``cr0`` is
+    the cache read of the transcript's first priced turn when ``turns``
+    includes it.
 
     The returned list contains only the qualifying turns (as new objects,
     via ``dataclasses.replace``), in the same relative order as ``turns``
@@ -374,6 +401,11 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
         ):
             signature = "full-expiry"
         else:
+            signature = "prefix-invalidated"
+        if signature == "full-expiry" and (turn.cache_miss_reason or "").endswith("_changed"):
+            # The API says the prefix changed, whatever the wait or the
+            # read looked like: not an expiry, and no cache lifetime
+            # would have kept it.
             signature = "prefix-invalidated"
         detected.append(dataclasses.replace(turn, is_recache=True, recache_signature=signature))
     return detected
@@ -470,6 +502,9 @@ class _Record:
     avoidable_cost: float
     agent_type: str
     group: str
+    #: The auto-compact window the session ran under, when the caller knew
+    #: it (see :meth:`RecacheStats.add`); ``None`` otherwise.
+    compact_window: int | None = None
 
 
 class RecacheStats:
@@ -501,6 +536,7 @@ class RecacheStats:
         self,
         result: TranscriptResult,
         rates_lookup: Callable[[str], ResolvedRates | ModelRates | None],
+        compact_window: int | None = None,
     ) -> None:
         """Fold one transcript's priced, non-synthetic turns into the
         accumulator, running :func:`detect` internally against
@@ -508,6 +544,12 @@ class RecacheStats:
         detected re-cache ones, so :func:`build_section` can compute
         both the re-cache tables and their all-priced-turns control
         columns from the same population.
+
+        ``compact_window`` is the auto-compact window the transcript's
+        session started under (``report._window_at_start``: the
+        ``autoCompactWindow`` the snapshot in force when it began sets), or
+        ``None`` when unknown. The huge-context table measures "very large"
+        against the point where that window summarises the conversation.
         """
         self.transcripts += 1
         group = self.group_key(result) if self.group_key is not None else "all"
@@ -523,7 +565,15 @@ class RecacheStats:
             if effective.is_recache:
                 rates = rates_lookup(effective.model)
                 avoidable = _avoidable_cost(effective, rates)
-            self.records.append(_Record(turn=effective, avoidable_cost=avoidable, agent_type=agent_type, group=group))
+            self.records.append(
+                _Record(
+                    turn=effective,
+                    avoidable_cost=avoidable,
+                    agent_type=agent_type,
+                    group=group,
+                    compact_window=compact_window,
+                )
+            )
 
     def groups(self) -> tuple[str, ...]:
         """Every distinct group label seen so far, sorted."""
@@ -595,7 +645,7 @@ def build_section(stats: RecacheStats, pricing: Pricing, th: RecacheThresholds, 
         _cooccurrence_table(all_turns, behavioural_turns, total_behavioural, total_priced),
         _attachment_subsplit_table(recache_turns),
         _by_agent_type_table(records),
-        _huge_context_table(all_turns, th, pricing),
+        _huge_context_table(records, th, pricing),
     ]
 
     notes = [f"Thresholds: {' '.join(th.describe())}"]
@@ -660,6 +710,17 @@ def _summary_table(
     )
 
 
+def _api_causes(turns: list[Turn]) -> str:
+    """The API's own reasons for these turns' cache misses, with counts,
+    most common first (``"tools_changed 3, messages_changed 1"``); empty
+    when none of them carries one."""
+    counts: dict[str, int] = {}
+    for turn in turns:
+        if turn.cache_miss_reason:
+            counts[turn.cache_miss_reason] = counts.get(turn.cache_miss_reason, 0) + 1
+    return ", ".join(f"{reason} {n}" for reason, n in sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
 def _signature_table(recache_turns: list[Turn], recache_records: list[_Record]) -> Table:
     rows = []
     for sig in SIGNATURES:
@@ -668,7 +729,7 @@ def _signature_table(recache_turns: list[Turn], recache_records: list[_Record]) 
         cost = sum(r.avoidable_cost for r in recache_records if r.turn.recache_signature == sig)
         ctx_med = _median([float(t.ctx) for t in sub])
         gap_med = _median([t.gap_s for t in sub if t.gap_s is not None])
-        rows.append([sig, len(sub), cc, round(cost, 6), ctx_med, gap_med])
+        rows.append([sig, len(sub), cc, round(cost, 6), ctx_med, gap_med, _api_causes(sub)])
     return Table(
         name="recache_signature_split",
         title="Re-cache signature split",
@@ -679,16 +740,21 @@ def _signature_table(recache_turns: list[Turn], recache_records: list[_Record]) 
             Column(key="cost_delta_usd", label="Avoidable cost", kind="money"),
             Column(key="median_ctx", label="Median ctx", kind="tokens"),
             Column(key="median_gap_s", label="Median gap", kind="secs"),
+            Column(key="api_cause", label="API cause", kind="str"),
         ],
         rows=rows,
         notes=[
             "Cache expired: the wait reached the time the cache lasts, or the reply read only the start "
-            "every session shares and none of its own part. Cache broken by a change: it read part of "
+            "every session shares, none of its own part. Cache broken by a change: it read part of "
             "its own part, so the cache hadn't expired, but something earlier in the context "
             "changed. Rewritten after a summary: the first reply after a conversation summary, which "
             "replaced what the cache held. Expired during a usage-limit pause: the wait before the reply "
             "spanned a pause for a usage limit. That last row is shown here but left out of every other "
             "table's causes.",
+            "API cause is the reason the API itself gave for the miss, where Claude Code logged one. "
+            "It names what changed: the messages, the system prompt, the tools or the model. "
+            "It can also say the earlier message wasn't found, or that it couldn't say. "
+            "A rebuild the API calls a change is \"Cache broken by a change\", however short or long the wait was.",
         ],
     )
 
@@ -1099,19 +1165,44 @@ def _by_agent_type_table(records: list[_Record]) -> Table:
     )
 
 
-def _huge_context_table(all_turns: list[Turn], th: RecacheThresholds, pricing: Pricing) -> Table:
+def very_large_context_bar(model_window: int | None, compact_window: int | None, fallback: int) -> int:
+    """The context size at which a turn counts as very large: the share
+    :data:`HUGE_CONTEXT_SHARE` of the point where its session summarises
+    the conversation, which is its window less
+    :data:`COMPACTION_RESERVE_TOKENS`. The window is the session's
+    ``autoCompactWindow`` (``compact_window``, never above the model's own
+    window) when the config snapshot sets one, else the model's own
+    context window (``model_window``). ``fallback`` stands in when neither
+    is known."""
+    if compact_window is not None and model_window is not None:
+        window = min(compact_window, model_window)
+    elif compact_window is not None:
+        window = compact_window
+    elif model_window is not None:
+        window = model_window
+    else:
+        return fallback
+    return max(int(HUGE_CONTEXT_SHARE * (window - COMPACTION_RESERVE_TOKENS)), 1)
+
+
+def _huge_context_table(records: list[_Record], th: RecacheThresholds, pricing: Pricing) -> Table:
     # D2/D4/COV-12: "huge" used to mean a flat 200k tokens for every
     # turn, whatever model it ran on -- on a natively 1M-context Claude 5
     # model (V24) that is only a fifth of the window, not the
-    # near-the-limit signal the metric means to flag. Each turn is now
-    # compared to its own resolved model's context_window_tokens; a turn
-    # whose model doesn't resolve (or no ``pricing``) falls back to
-    # th.huge_ctx, same as every turn got before this fix.
-    def _threshold_for(turn: Turn) -> int:
-        resolved = pricing.resolve_model(turn.model) if pricing is not None else None
-        return resolved.rates.context_window_tokens if resolved is not None else th.huge_ctx
+    # near-the-limit signal the metric means to flag. It then became the
+    # model's whole context window, which a session that summarises at
+    # 367k (autoCompactWindow 400k) can never reach: the metric read near
+    # zero by construction. Each turn is now compared to the point where
+    # its own session summarises (very_large_context_bar); a turn whose
+    # model doesn't resolve (or no ``pricing``) and whose session's window
+    # is unknown falls back to th.huge_ctx, same as every turn got before.
+    def _bar_for(record: _Record) -> int:
+        resolved = pricing.resolve_model(record.turn.model) if pricing is not None else None
+        model_window = resolved.rates.context_window_tokens if resolved is not None else None
+        return very_large_context_bar(model_window, record.compact_window, th.huge_ctx)
 
-    huge_turns = [t for t in all_turns if t.ctx >= _threshold_for(t)]
+    all_turns = [r.turn for r in records]
+    huge_turns = [r.turn for r in records if r.turn.ctx >= _bar_for(r)]
     total_cache_read = sum(t.cache_read_tokens for t in all_turns)
     huge_cache_read = sum(t.cache_read_tokens for t in huge_turns)
     return Table(
@@ -1136,10 +1227,15 @@ def _huge_context_table(all_turns: list[Turn], th: RecacheThresholds, pricing: P
             ]
         ],
         notes=[
-            "A context is very large when it reaches its model's own context window. That is 1,000,000 "
-            "tokens for a Claude 5 model with a 1M-token window, and 200,000 otherwise. It is "
-            f"{th.huge_ctx:,} tokens when the model isn't in pricing.toml. This is about keeping context "
-            "small, not a price rise: models from 4.6 on bill the whole 1M-token window at standard rates.",
+            f"A context is very large when it reaches {HUGE_CONTEXT_SHARE:.0%} of the point where Claude Code "
+            "summarises the conversation. "
+            f"That point is the session's window less {COMPACTION_RESERVE_TOKENS:,} tokens. "
+            "The window is your auto-compact window setting when the session's config snapshot sets one. "
+            "Otherwise it is the model's own context window. "
+            "That is 1,000,000 tokens for a Claude 5 model with a 1M-token window, and 200,000 otherwise. "
+            f"A context counts at {th.huge_ctx:,} tokens when neither is known. "
+            "This is about keeping context small, not a price rise. "
+            "Models from 4.6 on bill the whole 1M-token window at standard rates.",
         ],
     )
 
@@ -1156,4 +1252,7 @@ __all__ = [
     "gap_bucket",
     "RecacheStats",
     "build_section",
+    "very_large_context_bar",
+    "HUGE_CONTEXT_SHARE",
+    "COMPACTION_RESERVE_TOKENS",
 ]

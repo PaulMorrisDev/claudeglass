@@ -17,7 +17,7 @@ statusline payload's own ``context_window`` object, once
 :mod:`statusline` has logged it -- see that module's docstring), this
 module surfaces it as a separate, unlabelled-as-"est" table instead.
 
-Four tables (:func:`build_section`, section key ``"context_budget"``):
+Five tables (:func:`build_section`, section key ``"context_budget"``):
 
 - ``context_budget_baseline`` -- per project, plus one "all" row summing
   every project: the measured mean/median top-level first call (P0 =
@@ -28,23 +28,43 @@ Four tables (:func:`build_section`, section key ``"context_budget"``):
   small per-module accumulators), split into the shared prefix the call
   read from cache, what the session wrote itself and the first prompt
   that went in uncached, next to estimated buckets in tokens for human
-  prompt, skills listing, memory files, custom agents and MCP tools, then
-  a residual "system prompt and tools" bucket (P0 minus every other known
-  bucket, floored at 0). The part you can change (skills list, memory
-  files, MCP tools of servers you can turn off) is summed in its own
-  column, since most of P0 is Claude Code's own tool JSON and the desktop
-  app's own servers, which no setting removes.
+  prompt, skills listing, memory files (the CLAUDE.md family and rules from
+  the config snapshot, plus the auto memory the sessions' first calls
+  carried), your own custom agents and MCP tools, then Claude Code's own
+  system prompt and built-in tools (:func:`startup_sizes`, measured from
+  the first call's record) and a residual "everything else" bucket (P0
+  minus every other known bucket, floored at 0; its column keeps the key
+  ``system_prompt_and_tools_est`` for the consumers of the report's JSON
+  and CSV). The part you can change (skills list, memory files, MCP tools
+  of servers you can turn off) is summed in its own column, since most of
+  P0 is Claude Code's own tool JSON and the desktop app's own servers,
+  which no setting removes.
+- ``context_budget_tools`` -- one row per built-in tool and MCP server the
+  main sessions started with, across every project, largest first: the
+  sessions offered it, the share of them that called it and its size at the
+  start (the average over the sessions offered it). Read from the request
+  Claude Code logs, or the tools snapshot it records on older versions
+  (:func:`startup_sizes`), so a session from before either is left out and
+  counted in the note. A built-in tool you
+  never use leaves the start by name in ``permissions.deny``. The sizes
+  are those of the definitions sent in the request Claude Code logs
+  (``tools_source == "request"``), not the larger snapshot entries.
 - ``context_budget_autocompact`` -- per project: the configured
   ``autoCompactWindow`` from the latest schema-2 snapshot (or
-  ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which overrides it), the model's
-  context window size (from a statusline ground-truth row when one is
-  available, else an assumed 1,000,000/200,000 split on a ``"[1m]"``
-  model alias), the *observed* effective autocompact threshold (median
+  ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which overrides it; a project with
+  no snapshot of its own takes the newest window any snapshot sets), the
+  model's context window size (from a statusline ground-truth row when one
+  is available, else the rate card's window for the model setting), the
+  *observed* effective autocompact threshold (median
   ``compactMetadata.preTokens`` over ``trigger == "auto"`` compactions --
   :func:`compaction.effective_autocompact_threshold`), the implied
   buffer, how many auto compactions were observed, and whether the
-  observed threshold has drifted more than 10% from the configured
-  window.
+  observed threshold has drifted more than 10% from where the configured
+  window should fire. Claude Code summarises a constant 33,000 tokens
+  below its window (:data:`CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS`), so the
+  buffer is read against the configured window, never the model's, and
+  only the compactions of sessions that started under that window count:
+  an older setting's summaries say nothing about the current one.
 - ``context_budget_statusline`` -- one real, non-estimated line per
   session, present only once at least one usage-log row carries
   ``context_window`` fields (see :mod:`statusline`'s module docstring for
@@ -122,9 +142,11 @@ from . import snapshots as snapshots_mod
 from . import tool_search
 from .calibration import Calibration, FirstCall, model_family
 from .capture_catalogue import AGENT_ANSWER_TOOLS
+from .compaction_sim import CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS
 from .events import BUILT_IN_TOOLS, tool_server
 from .model import Column, Event, EventKind, Section, Table, TranscriptResult, Turn
 from .pricing import Pricing
+from .ratings import tokens_text
 from .snapshots import Snapshot
 from .tools import log_usage
 
@@ -197,6 +219,14 @@ def _parse_ts(ts: str | None) -> datetime | None:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _session_start(top: TranscriptResult) -> str | None:
+    """When the session began: its first turn's timestamp, else its first
+    event's. ``None`` for a transcript with no timestamp at all."""
+    return next((turn.ts for turn in top.turns if turn.ts), None) or next(
+        (event.ts for event in top.events if event.ts), None
+    )
 
 
 def _mean(values: Sequence[float]) -> float | None:
@@ -287,10 +317,17 @@ def _skills_listing_est_tokens(
     return (calibration or Calibration()).text_tokens(total_chars, model)
 
 
-def _memory_files_est_tokens(snapshot: Snapshot | None, calibration: Calibration | None = None) -> float | None:
+def _memory_files_est_tokens(
+    snapshot: Snapshot | None, calibration: Calibration | None = None, auto_memory_tokens: float = 0.0
+) -> float | None:
     """CLAUDE.md family bytes + rules bytes, as tokens on the corpus's
     most common model (bytes treated the same as chars for this
-    approximation -- see the module docstring). ``None`` when there is no
+    approximation -- see the module docstring), plus ``auto_memory_tokens``:
+    the project's auto memory (``MEMORY.md``), which Claude Code loads in
+    every session and counts in the same Memory files category. The
+    snapshot's ``content_layers.memory.bytes`` is the whole memory
+    directory, not what is loaded, so the sessions' own first calls
+    (:func:`startup_sizes`) measure it. ``None`` when there is no
     snapshot, or the snapshot predates schema 2's ``content_layers``
     field."""
     if snapshot is None:
@@ -312,7 +349,7 @@ def _memory_files_est_tokens(snapshot: Snapshot | None, calibration: Calibration
     rules = content.get("rules") or {}
     rules_bytes = rules.get("bytes")
     total_bytes = claude_md_bytes + (rules_bytes if isinstance(rules_bytes, (int, float)) else 0)
-    return (calibration or Calibration()).text_tokens(total_bytes)
+    return (calibration or Calibration()).text_tokens(total_bytes) + auto_memory_tokens
 
 
 def _custom_agents_est_tokens(snapshot: Snapshot | None, roster: tuple[float, float] | None = None) -> float | None:
@@ -342,7 +379,13 @@ def _custom_agents_est_tokens(snapshot: Snapshot | None, roster: tuple[float, fl
 def _mcp_tokens_by_server(top: TranscriptResult, first: Turn | None, calibration: Calibration) -> dict[str, float]:
     """Tokens of each MCP server's tool definitions sent in full, the
     deferred-tool names listed for it and its instructions in ``top``'s
-    first call. Empty when no MCP server shows up in it at all."""
+    first call. Empty when no MCP server shows up in it at all. The
+    definitions are sized as :func:`startup_sizes` sizes the built-in tools
+    sent beside them: from the request Claude Code logged where the
+    transcript has one (``upfront_definition_chars_by_server``, which
+    ``parse.py`` takes from it), else from the snapshot. A snapshot's
+    entries run about 1.6 times the definitions sent, so mixing the two
+    scales put the known parts of the first call past the measured call."""
     if first is None:
         return {}
     model = first.model
@@ -473,8 +516,20 @@ class _ProjectAcc:
     #: (tokens) and how many agent types it listed.
     roster_tokens: list[float] = field(default_factory=list)
     roster_types: list[int] = field(default_factory=list)
+    #: Per session, the tokens of the auto memory (``MEMORY.md``) its first
+    #: call carried; 0 for a session that loaded none.
+    auto_memory_tokens: list[float] = field(default_factory=list)
+    #: Per session, the tokens of Claude Code's own system prompt (for a
+    #: session that recorded one) and of its built-in tool definitions (for
+    #: one whose tools were recorded), as :func:`startup_sizes` measures
+    #: them.
+    system_prompt_tokens: list[float] = field(default_factory=list)
+    builtin_tools_tokens: list[float] = field(default_factory=list)
     compaction_records: list[compaction.CompactionRecord] = field(default_factory=list)
     session_ids: list[str] = field(default_factory=list)
+    #: Session id -> its first timestamp (``None`` when it has none), to
+    #: find the auto-compact window each session started under.
+    session_starts: dict[str, str | None] = field(default_factory=dict)
     #: The keys this project's config snapshots can be stored under (see
     #: ``snapshots.snapshot_project_keys``); empty when unknown.
     snapshot_keys: tuple[str, ...] = ()
@@ -596,6 +651,22 @@ class _ServerOffer:
     definitions: float = 0.0
     deferred: float = 0.0
     instructions: float = 0.0
+
+
+@dataclass(slots=True)
+class _SessionToolOffer:
+    """One built-in tool, or one MCP server, offered to main sessions: the
+    sessions that started with it, the sessions that called it (or one of
+    the server's tools) and its size at the start summed over the sessions
+    offered it, in tokens. An MCP server's size is its tool definitions,
+    deferred names and instructions. ``desktop`` counts the sessions offered
+    it that ran in the desktop app: the fallback for telling the app's own
+    servers from yours when the tool search rows are not at hand."""
+
+    offered: int = 0
+    used: int = 0
+    tokens: float = 0.0
+    desktop: int = 0
 
 
 @dataclass(slots=True)
@@ -1003,6 +1074,12 @@ class ContextBudgetStats:
     #: Where each main session ran (its transcript's ``entrypoint``, ``""``
     #: when none was recorded) -> sessions, for :attr:`desktop_only`.
     entrypoints: dict[str, int] = field(default_factory=dict)
+    #: Main sessions whose transcript recorded the tools it started with,
+    #: and -> each built-in tool (by name) and each MCP server (by name)
+    #: those sessions were offered, for ``context_budget_tools``.
+    tool_sessions: int = 0
+    session_tools: dict[str, _SessionToolOffer] = field(default_factory=dict)
+    session_servers: dict[str, _SessionToolOffer] = field(default_factory=dict)
 
     #: Epoch seconds of the oldest and newest first call seen, for
     #: :attr:`window_days`.
@@ -1171,6 +1248,7 @@ class ContextBudgetStats:
         self.entrypoints[entrypoint] = self.entrypoints.get(entrypoint, 0) + 1
         if top.meta.session_id:
             acc.session_ids.append(top.meta.session_id)
+            acc.session_starts[top.meta.session_id] = _session_start(top)
 
         first = _first_priced_turn(top)
         if first is not None:
@@ -1209,6 +1287,33 @@ class ContextBudgetStats:
             if roster is not None and (roster.size_chars or 0) > 0:
                 acc.roster_tokens.append(self.calibration.text_tokens(roster.size_chars or 0, model))
                 acc.roster_types.append(int(roster.detail.get("added") or 0))
+
+        sizes = startup_sizes(top, self.calibration) if first is not None else None
+        if sizes is not None:
+            acc.auto_memory_tokens.append(sizes.memory)
+            if sizes.system > 0:
+                acc.system_prompt_tokens.append(sizes.system)
+        if sizes is not None and sizes.saw_tools:
+            acc.builtin_tools_tokens.append(sum(sizes.builtin_tools.values()))
+            self.tool_sessions += 1
+            tool_names = {name for turn in top.turns for name in turn.tool_names}
+            for name, tokens in sizes.builtin_tools.items():
+                offer = self.session_tools.setdefault(name, _SessionToolOffer())
+                offer.offered += 1
+                offer.tokens += tokens
+                offer.used += name in tool_names
+            for server in (
+                set(sizes.server_definitions) | set(sizes.server_deferred) | set(sizes.server_instructions)
+            ) - {BUILT_IN_TOOLS}:
+                offer = self.session_servers.setdefault(server, _SessionToolOffer())
+                offer.offered += 1
+                offer.tokens += (
+                    sizes.server_definitions.get(server, 0.0)
+                    + sizes.server_deferred.get(server, 0.0)
+                    + sizes.server_instructions.get(server, 0.0)
+                )
+                offer.used += any(tool_server(name) == server for name in tool_names)
+                offer.desktop += entrypoint == DESKTOP_ENTRYPOINT
 
         # rates=None: only trigger/pre_tokens/dropped_tokens are read by
         # this module (all come straight from the COMPACT_BOUNDARY event,
@@ -1334,7 +1439,7 @@ def _baseline_row(
     median_baseline = _median(acc.first_call_tokens)
     human_est = _mean(acc.human_prompt_est_tokens) or 0.0
     skills_est = _mean(acc.skills_listing_est_tokens) or 0.0
-    memory_est = _memory_files_est_tokens(snapshot, calibration)
+    memory_est = _memory_files_est_tokens(snapshot, calibration, _median(acc.auto_memory_tokens) or 0.0)
     roster = (_mean(acc.roster_tokens) or 0.0, _mean(acc.roster_types) or 0.0) if acc.roster_tokens else None
     agents_est = _custom_agents_est_tokens(snapshot, roster)
     # The servers the sessions were offered, priced as tool search prices
@@ -1345,6 +1450,10 @@ def _baseline_row(
     mcp_tokens = _mean(acc.mcp_tools_tokens)
     mcp_removable = _mcp_removable_tokens(acc, servers)
 
+    # Claude Code's own parts, measured from what the first call recorded.
+    system_est = _mean(acc.system_prompt_tokens)
+    builtin_est = _mean(acc.builtin_tools_tokens)
+
     known_total = human_est + skills_est
     if isinstance(memory_est, (int, float)):
         known_total += memory_est
@@ -1352,11 +1461,16 @@ def _baseline_row(
         known_total += agents_est
     if mcp_tokens is not None:
         known_total += mcp_tokens
+    if system_est is not None:
+        known_total += system_est
+    if builtin_est is not None:
+        known_total += builtin_est
 
     # What you can change: the skills list, the memory files and the MCP
     # tools of servers you can turn off. The rest of the first call is
     # Claude Code's own tool JSON and system prompt and the desktop app's
-    # own servers, which no setting removes.
+    # own servers, which no setting removes. The system prompt and the
+    # built-in tools are sized apart; what is left is "everything else".
     controllable = skills_est + (memory_est or 0.0) + (mcp_removable or 0.0) if acc.first_call_tokens else None
 
     # Floored at 0, but the floor is not silently absorbed: when the
@@ -1388,6 +1502,8 @@ def _baseline_row(
         mcp_removable,
         mcp_usd,
         controllable,
+        system_est,
+        builtin_est,
         residual,
     ]
 
@@ -1418,13 +1534,17 @@ def _build_baseline_table(
         Column(key="human_prompt_est", label="Human prompt (est)", kind="tokens"),
         Column(key="skills_listing_est", label="Skills listing (est)", kind="tokens"),
         Column(key="memory_files_est", label="Memory files (est)", kind="tokens"),
-        Column(key="custom_agents_est", label="Custom agents (est)", kind="tokens"),
+        Column(key="custom_agents_est", label="Your own agents (est)", kind="tokens"),
         Column(key="mcp_tools_est", label="MCP tools (est)", kind="str"),
         Column(key="mcp_tools_tokens", label="MCP tools in the first call (est)", kind="tokens"),
         Column(key="mcp_removable_tokens", label="MCP tools you can turn off (est)", kind="tokens"),
         Column(key="mcp_servers_usd", label="Cost of keeping the MCP servers offered (est)", kind="money"),
         Column(key="controllable_est", label="What you can change (est)", kind="tokens"),
-        Column(key="system_prompt_and_tools_est", label="System prompt and tools (est)", kind="tokens"),
+        Column(key="system_prompt_est", label="System prompt (est)", kind="tokens"),
+        Column(key="builtin_tools_est", label="Built-in tools (est)", kind="tokens"),
+        # The key is the residual's from before the two columns above split
+        # Claude Code's own parts out of it: report JSON and CSV read it.
+        Column(key="system_prompt_and_tools_est", label="Everything else (est)", kind="tokens"),
     ]
 
     everything = _ProjectAcc(project="all")
@@ -1443,6 +1563,8 @@ def _build_baseline_table(
             "mcp_tools_tokens",
             "mcp_removable_tokens",
             "mcp_listed_tokens",
+            "system_prompt_tokens",
+            "builtin_tools_tokens",
         ):
             getattr(everything, name).extend(getattr(acc, name))
 
@@ -1464,8 +1586,14 @@ def _build_baseline_table(
             "Human prompt, skills listing, memory files and MCP tools (est) count characters (or bytes) "
             f"and divide them by a ratio of characters per token. {calibration.sentence()} "
             "No tokenizer reads your transcripts. "
-            "Custom agents (est) is your custom agents' share of the agent list the first calls carried. "
+            "System prompt and Built-in tools (est) size Claude Code's own parts from what the first call "
+            "recorded. No setting removes them. "
+            "Your own agents (est) is your custom agents' share of the agent list the first calls carried. "
             f"With no list recorded, it is {_AGENT_LISTING_TOKENS_PER_AGENT} tokens per agent. "
+            "Agents from plugins are part of the agent roster but not counted here; Claude Code's "
+            "Custom agents category includes them. "
+            "Memory files (est) adds the auto memory (MEMORY.md) the first calls carried to the "
+            "CLAUDE.md files and rules in your config snapshot. "
             "\"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
             "about them. It adds what keeping them cost, from the same per-server prices as the tool search "
             "section. A server built into the desktop app is shown with its cost and has nothing to remove. "
@@ -1476,22 +1604,105 @@ def _build_baseline_table(
             "window. Treat every (est) figure here as a rough guide, never as "
             "exact.",
             "The \"all\" row sums every project's own sessions into one "
-            "mean and median. Its memory files and custom agents "
+            "mean and median. Its memory files and your own agents "
             "are left blank. Those figures come from each project's "
             "own config snapshot, which can't be combined across projects.",
             "\"What you can change\" adds the skills listing, memory files and the MCP tools of servers you can turn off. "
             "The rest is mostly Claude Code's own tool definitions and system prompt and the desktop app's own servers, "
             "which no setting removes.",
-            "\"System prompt and tools (est)\" is what is left over: the "
-            "mean first call minus every other known (est) part, and never "
-            "below 0. It also takes in any part that couldn't be estimated "
-            "at all (for example, no config snapshot for that project). So a "
-            "large figure here does not always mean a large system prompt. "
-            "It is left empty rather than 0 when the (est) parts alone "
-            "already exceed the measured first call. That means the estimates "
-            "overshot, not that the system prompt is free.",
+            "\"Everything else (est)\" is what is left over: the mean first call minus every other part, "
+            "never below 0. It holds Claude Code's deferred tool names and notes, and any part that couldn't be "
+            "estimated. It is empty when the other parts alone exceed the measured first call.",
         ],
     )
+
+
+def _build_main_tools_table(
+    stats: ContextBudgetStats, servers: Sequence[tool_search.McpServerRow] | None = None
+) -> Table:
+    """``context_budget_tools``: every built-in tool and MCP server the main
+    sessions started with, largest first, with how many sessions were
+    offered it and how many called it. A server is the desktop app's own
+    only as :mod:`desktop_servers` says: when the tool search rows
+    (``servers``) call it built in, else when its name is on the app's list
+    and a session that ran in the app offered it. A server is named as the
+    tool search table names it (:func:`tool_search.server_label`)."""
+    columns = [
+        Column(key="tool", label="Tool", kind="str"),
+        Column(key="kind", label="Kind", kind="str"),
+        Column(key="offered_sessions", label="Sessions that started with it", kind="int"),
+        Column(key="used_share", label="Sessions that used it", kind="pct"),
+        Column(key="tokens", label="Size at the start", kind="tokens"),
+    ]
+    found: list[tuple[str, str, _SessionToolOffer]] = [
+        (name, "Built-in", offer) for name, offer in stats.session_tools.items()
+    ]
+    built_in = tool_search.built_in_names(servers) if servers else None
+
+    def own(server: str, offer: _SessionToolOffer) -> bool:
+        if built_in is not None:
+            return server in built_in
+        return desktop_servers.is_built_in(server) and offer.desktop > 0
+
+    found += [
+        (tool_search.server_label(server), "Desktop app" if own(server, offer) else "MCP server", offer)
+        for server, offer in stats.session_servers.items()
+    ]
+    rows = [
+        [name, kind, offer.offered, offer.used / offer.offered * 100, offer.tokens / offer.offered]
+        for name, kind, offer in sorted(found, key=lambda item: (-item[2].tokens / item[2].offered, item[0]))
+        if offer.offered
+    ]
+    total = sum(acc.sessions for acc in stats.projects.values())
+    return Table(
+        name="context_budget_tools",
+        title="Tools every session starts with",
+        columns=columns,
+        rows=rows,
+        notes=[
+            "These are the tool definitions, deferred tool names and server instructions Claude Code sent "
+            "at the start of each main session. They are measured from the request Claude Code logs "
+            "(the snapshot it records on older versions). "
+            f"{stats.calibration.sentence()}",
+            "A built-in tool you never use leaves the start when its bare name is in permissions.deny in your settings. "
+            "Turn an MCP server off in /mcp. "
+            "Servers marked Desktop app come with the app.",
+            f"{stats.tool_sessions} of {total} main sessions recorded their tools. "
+            "Sessions with no record of their tools, mostly from older Claude Code versions, are left out.",
+        ],
+    )
+
+
+def _window_of(snapshot: Snapshot | None) -> int | None:
+    """The auto-compact window a session under ``snapshot`` runs at (the
+    setting, or ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` when that overrides it)."""
+    return snapshots_mod.auto_compact_window(snapshot)
+
+
+def _newest_window(snapshots: Sequence[Snapshot]) -> int | None:
+    """The window the newest snapshot that sets one sets. Settings in a
+    user-level file cover every project, so a project with no snapshot of
+    its own (a git worktree's, say) takes this, as
+    ``report._current_window_of`` does."""
+    return next((w for w in (_window_of(snap) for snap in reversed(snapshots)) if w is not None), None)
+
+
+def _sessions_under_window(
+    acc: _ProjectAcc, own_snapshots: Sequence[Snapshot], window: int | None
+) -> set[str] | None:
+    """The sessions of ``acc`` that started under ``window``: the project's
+    snapshot in force at each session's first timestamp
+    (``snapshots.snapshot_for``, as the compaction sweep joins a session to
+    its setting) sets that window. ``None`` when nothing narrows them down:
+    no window is known, or the project has no snapshot of its own to read a
+    session's setting from."""
+    if window is None or not own_snapshots:
+        return None
+    return {
+        session_id
+        for session_id, started in acc.session_starts.items()
+        if started and _window_of(snapshots_mod.snapshot_for(started, list(own_snapshots))) == window
+    }
 
 
 def _build_autocompact_table(
@@ -1499,7 +1710,17 @@ def _build_autocompact_table(
     latest_snapshots: dict[str, Snapshot],
     usage_log_rows: list[dict] | None,
     pricing: Pricing | None,
+    all_snapshots: Sequence[Snapshot] | None = None,
 ) -> Table:
+    """``context_budget_autocompact``. Claude Code summarises a constant
+    :data:`CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS` below its auto-compact
+    window, so with a window configured the implied buffer is that window
+    less the observed threshold (about 33,000), and the drift is how far the
+    observed threshold sits from the window less 33,000. Only the compactions
+    of sessions that started under the configured window are compared with it
+    (``all_snapshots``, every snapshot, says which): the summaries of a
+    session that ran under an older setting are not evidence about the
+    current one. Without ``all_snapshots`` every session counts."""
     columns = [
         Column(key="project", label="Project", kind="str"),
         Column(key="configured_window", label="Configured auto-compact window", kind="tokens"),
@@ -1515,6 +1736,7 @@ def _build_autocompact_table(
         session_id: project for project, acc in stats.projects.items() for session_id in acc.session_ids
     }
     statusline_window_by_project = _latest_statusline_window_by_project(usage_log_rows, session_to_project)
+    everywhere = list(all_snapshots) if all_snapshots is not None else []
 
     rows: list[list] = []
     for project in sorted(stats.projects):
@@ -1522,7 +1744,9 @@ def _build_autocompact_table(
         snapshot = _snapshot_for_project(latest_snapshots, acc)
 
         # CLAUDE_CODE_AUTO_COMPACT_WINDOW, when set, beats the setting.
-        configured_window = snapshots_mod.auto_compact_window(snapshot)
+        configured_window = _window_of(snapshot)
+        if snapshot is None and everywhere:
+            configured_window = _newest_window(everywhere)
 
         window_size = statusline_window_by_project.get(project)
         source = "statusline"
@@ -1545,36 +1769,44 @@ def _build_autocompact_table(
             )
             source = "assumed"
 
-        observed_threshold = compaction.effective_autocompact_threshold(acc.compaction_records)
-        implied_buffer = window_size - observed_threshold if observed_threshold is not None else None
-        if (
-            implied_buffer is not None
-            and implied_buffer < 0
-            and source == "assumed"
-        ):
-            # An assumed window size is a guess; a negative buffer here
-            # means the guess was wrong (e.g. a real 1M-context session
-            # whose "[1m]" alias this project's snapshot didn't carry),
-            # not that Claude Code is actually compacting past its own
-            # window -- suppress rather than publish a nonsensical
-            # negative buffer.
-            implied_buffer = None
-        # Counts the same sample effective_autocompact_threshold's median
-        # is drawn from (trigger == "auto" AND a usable pre_tokens) --
-        # fix #23: this used to count every trigger="auto" boundary
-        # regardless of pre_tokens, so it could read non-zero next to a
-        # null observed threshold.
-        auto_compactions = sum(
-            1 for record in acc.compaction_records if record.trigger == "auto" and record.pre_tokens is not None
+        keys = {*acc.snapshot_keys, acc.project}
+        own_snapshots = [snap for snap in everywhere if snap.data.get("project_slug") in keys]
+        under = _sessions_under_window(acc, own_snapshots, configured_window)
+        records = [r for r in acc.compaction_records if under is None or r.session_id in under]
+
+        observed_threshold = compaction.effective_autocompact_threshold(records)
+        # Where the configured window should fire: Claude Code keeps a
+        # constant buffer below it. The model's own window is no part of it.
+        expected_threshold = (
+            configured_window - CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS
+            if isinstance(configured_window, (int, float))
+            and configured_window > CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS
+            else None
         )
+        if observed_threshold is None:
+            implied_buffer = None
+        elif isinstance(configured_window, (int, float)) and configured_window:
+            implied_buffer = configured_window - observed_threshold
+        else:
+            implied_buffer = window_size - observed_threshold
+            if implied_buffer < 0 and source == "assumed":
+                # An assumed window size is a guess; a negative buffer here
+                # means the guess was wrong (e.g. a real 1M-context session
+                # whose "[1m]" alias this project's snapshot didn't carry),
+                # not that Claude Code is actually compacting past its own
+                # window -- suppress rather than publish a nonsensical
+                # negative buffer.
+                implied_buffer = None
+        # Counts the same sample effective_autocompact_threshold's median
+        # is drawn from (an automatic compaction with a usable pre_tokens
+        # that was not precomputed) -- fix #23: this used to count every
+        # trigger="auto" boundary regardless of pre_tokens, so it could
+        # read non-zero next to a null observed threshold.
+        auto_compactions = sum(1 for record in records if compaction.counts_toward_threshold(record))
 
         drift = None
-        if (
-            isinstance(configured_window, (int, float))
-            and configured_window
-            and observed_threshold is not None
-        ):
-            drift = abs(observed_threshold - configured_window) / configured_window > _DRIFT_RATIO
+        if expected_threshold is not None and observed_threshold is not None:
+            drift = abs(observed_threshold - expected_threshold) / expected_threshold > _DRIFT_RATIO
 
         rows.append(
             [
@@ -1599,13 +1831,20 @@ def _build_autocompact_table(
             "project's own automatic summaries; empty when none recorded "
             "a size. \"Automatic summaries\" counts that same sample, not "
             "every automatic summary, so it is never above zero next to an "
-            "empty \"Summarised at\".",
+            "empty \"Summarised at\". A summary Claude Code made in the "
+            "background beforehand fires wherever the session happened to "
+            "be, so it is left out of both.",
             "\"Context window\" comes from the status line's log when it "
-            "has one for a session in this project. Otherwise it is taken "
-            "as 1,000,000 tokens for a \"[1m]\" model alias, or 200,000. "
-            "\"Window from\" says which.",
+            "has one for a session in this project. Otherwise it comes from "
+            "the rate card, for the model setting. \"Window from\" says which.",
+            f"Claude Code summarises {CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS:,} tokens below your auto-compact "
+            "window. So \"Room left\" is your window setting minus \"Summarised at\", "
+            f"about {CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS:,}. It is the model's window minus "
+            "\"Summarised at\" only when no window setting is known. Only summaries from sessions that "
+            "started under the setting shown are compared with it.",
             "\"Differs from setting\" is yes when \"Summarised at\" is more "
-            "than 10% away from your auto-compact window setting. It is "
+            "than 10% away from where your auto-compact window setting should "
+            f"summarise: the window minus {CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS:,}. It is "
             "empty when either figure is missing.",
         ],
     )
@@ -1727,7 +1966,8 @@ def build_section(
 
     tables = [
         _build_baseline_table(stats, latest_snapshots, servers=mcp_servers),
-        _build_autocompact_table(stats, latest_snapshots, usage_log_rows, pricing),
+        _build_main_tools_table(stats, mcp_servers),
+        _build_autocompact_table(stats, latest_snapshots, usage_log_rows, pricing, snapshots),
         _build_statusline_table(usage_log_rows, stats.desktop_only),
         _build_calibration_table(stats.calibration),
     ]
@@ -1834,6 +2074,29 @@ def _price_inputs(acc: _AgentStartupAcc, family: str, positions: list[int]) -> t
     return (fmean(writes) if writes else None, fmean(reads) if reads else None, later, written_share)
 
 
+def _tool_label(key: str) -> str:
+    """A key of ``_AgentStartupAcc.tools`` as a sentence names it: a
+    built-in tool as it is, an MCP server (:func:`mcp_tool_key`) by its label."""
+    if key.startswith("mcp__") and key.endswith("__*"):
+        return tool_search.server_label(key[len("mcp__") : -len("__*")])
+    return key
+
+
+def _largest_tools(acc: _AgentStartupAcc, family: str, calibration: Calibration) -> str | None:
+    """The three largest built-in tools or MCP servers in this agent type's
+    start on ``family``, with their average size per spawn offered them:
+    ``Artifact 13k, PowerShell 4.6k, Workflow 2.3k``. A server is named as
+    the tool search table names it (:func:`tool_search.server_label`).
+    ``None`` when no spawn on ``family`` recorded its tools."""
+    sized = [
+        (_tool_label(key), calibration.tool_tokens(offer.chars / offer.offered, family or None))
+        for key, offer in acc.tools.get(family, {}).items()
+        if offer.offered
+    ]
+    sized.sort(key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{key} {tokens_text(round(tokens))}" for key, tokens in sized[:3]) or None
+
+
 def _build_startup_table(stats: ContextBudgetStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
@@ -1864,6 +2127,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             kind="tokens",
         ),
         Column(key="removable_tools", label="Tools never used (can be left out)", kind="tokens"),
+        Column(key="largest_tools", label="Largest tool definitions", kind="str"),
         # A part left out of a start is also not read back on the calls
         # after the first, so a saving is priced with these two (the
         # recommendation rules read them; see ``diet_usd``).
@@ -1892,6 +2156,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             [agent_type, acc.spawns, acc.fork_spawns, family or None, count - len(positions), startup]
             + [parts[part] for part in STARTUP_PARTS]
             + [not_recorded, measured_pct, fmean(prices) if prices else None, managed_claude_md, removable]
+            + [_largest_tools(acc, family, stats.calibration)]
             + [read_price, later_calls if acc.later_calls else None]
         )
     return Table(

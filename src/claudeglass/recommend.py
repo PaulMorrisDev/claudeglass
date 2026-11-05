@@ -1076,10 +1076,11 @@ def _rule_baseline_bloat(
         )
     ]
     biggest_bucket_label: str | None = None
-    # The residual ("system prompt and tools") is a remainder -- mean first
-    # call minus every other known bucket -- not a sized bucket in its own
-    # right, so it is excluded from the "biggest bucket" contest entirely.
-    # It is still shown as evidence, as is the measured first call.
+    # The residual ("everything else") is a remainder -- mean first call
+    # minus every other known bucket, Claude Code's own system prompt and
+    # built-in tools included -- not a sized bucket in its own right, so it
+    # is excluded from the "biggest bucket" contest entirely. It is still
+    # shown as evidence, as is the measured first call.
     bucket_columns = (
         ("human_prompt_est", "human prompt"),
         ("skills_listing_est", "skills listing"),
@@ -1109,7 +1110,7 @@ def _rule_baseline_bloat(
     if isinstance(residual, (int, float)):
         evidence.append(
             _evidence(
-                "Estimated system prompt and tools (est)",
+                "Estimated everything else (est)",
                 residual,
                 "context_budget",
                 "context_budget_baseline",
@@ -1915,7 +1916,7 @@ def _tools_list_card(
     if _is_number(kept_instructions) and kept_instructions >= 1:
         basis += (
             f" A tools list leaves MCP server instructions in (about {kept_instructions:,.0f} tokens per spawn). "
-            "Switching the server off drops them. A list of the servers an agent may use might too, but that isn't verified."
+            "Switching the server off drops them. Withholding the server with disallowedTools might too, but that isn't verified."
         )
     changes: list[SettingChange] = []
     if not workflow:
@@ -2183,6 +2184,11 @@ def _rule_spawn_parts(
                 continue
             if server_offered < th.spawn_parts_min_spawns:
                 continue
+            if "__" in str(values.get("server")):
+                # disallowedTools names a server as mcp__<server>, and Claude
+                # Code reads that as a prefix, so a name with "__" in it would
+                # also withhold every server whose name starts the same way.
+                continue
             if server_used * 100 > th.spawn_unused_mcp_use_share_pct * server_offered + 1e-9:
                 continue
             month = _per_30_days(values.get("saving_usd"), values.get("window_days"))
@@ -2191,6 +2197,10 @@ def _rule_spawn_parts(
             unused_servers.append((str(values.get("server")), server_offered, server_used, values["saving_usd"], month))
         if unused_servers and isinstance(offered, int) and isinstance(mcp_used, int):
             names = [f"{name} (used in {n_used} of {n_offered} spawns)" for name, n_offered, n_used, _u, _m in unused_servers]
+            # Claude Code's subagent docs: mcpServers only adds servers, and a
+            # subagent inherits every MCP tool; disallowedTools withholds a
+            # server's tools whatever its kind, as mcp__<server>.
+            entries = [f"mcp__{name}" for name, *_rest in unused_servers]
             total_usd = sum(window_usd for _n, _o, _u, window_usd, _m in unused_servers)
             costs = ""
             if units is not None:
@@ -2216,8 +2226,8 @@ def _rule_spawn_parts(
                     archetypes=_ALL_ARCHETYPES,
                     title=f"{agent_type} is offered MCP servers it hardly ever uses",
                     action=(
-                        f"Give {agent_type} an mcpServers list naming only the servers it needs, so these "
-                        f"aren't loaded for it: {_name_list(names)}."
+                        f"Add {_name_list(entries)} to the disallowedTools of {agent_type}, so its spawns no "
+                        f"longer get these servers: {_name_list(names)}."
                     ),
                     lever=None,
                     scope=scope,
@@ -2226,16 +2236,15 @@ def _rule_spawn_parts(
                     changes=[
                         SettingChange(
                             target="agent",
-                            key="mcpServers",
+                            key="disallowedTools",
                             agent=agent_type,
-                            suggested="only the servers this agent needs",
-                            current=_agent_current(agent_type, "mcpServers", snapshot),
+                            # A new file has nothing to keep; an existing one may
+                            # already list tools, which a plain --set would drop.
+                            value=None if has_file else entries,
+                            suggested="add " + ", ".join(entries) + " to the list, keeping anything already there",
+                            current=_agent_current(agent_type, "disallowedTools", snapshot),
                             new_agent_file=not has_file,
                             unconfirmed=True,
-                            note=(
-                                "ClaudeGlass doesn't record which servers an agent's mcpServers lists, so check "
-                                "the agent file for one before you change it."
-                            ),
                         )
                     ],
                     estimated_saving=_startup_saving(units, total_usd, prefix="about "),

@@ -171,9 +171,13 @@ def corpus_from_store(
         ):
             continue
 
+        # A present row ahead of a missing one, then oldest first: a session
+        # Claude Code moved to another project folder holds the transcript
+        # twice (the old path's row, missing, and the new path's), and the
+        # present one is the live file.
         transcript_rows = conn.execute(
-            "SELECT kind, digest_blob, mtime_ns, size_bytes FROM transcripts "
-            "WHERE session_id = ? ORDER BY id",
+            "SELECT id, kind, agent_id, digest_blob, mtime_ns, size_bytes FROM transcripts "
+            "WHERE session_id = ? ORDER BY (missing_since IS NOT NULL), id",
             (session_id,),
         ).fetchall()
         if not transcript_rows:
@@ -182,6 +186,19 @@ def corpus_from_store(
         top_row = next((row for row in transcript_rows if row["kind"] == "top-level"), None)
         if top_row is None:
             continue
+        # One row for each agent, the present one when it moved; the order
+        # the rows were stored in is kept.
+        agents_seen: set = set()
+        sub_rows = []
+        for row in transcript_rows:
+            if row["kind"] == "top-level":
+                continue
+            if row["agent_id"] is not None:
+                if (row["kind"], row["agent_id"]) in agents_seen:
+                    continue
+                agents_seen.add((row["kind"], row["agent_id"]))
+            sub_rows.append(row)
+        sub_rows.sort(key=lambda row: row["id"])
 
         if has_window_filter and window_by not in ("last-reply", "first-reply"):
             window_ts = _window_ts(top_row, window_by)
@@ -193,11 +210,7 @@ def corpus_from_store(
                 continue
 
         top = result_from_jsonable(json.loads(decode_digest_blob(top_row["digest_blob"])))
-        subs = [
-            result_from_jsonable(json.loads(decode_digest_blob(row["digest_blob"])))
-            for row in transcript_rows
-            if row["kind"] != "top-level"
-        ]
+        subs = [result_from_jsonable(json.loads(decode_digest_blob(row["digest_blob"]))) for row in sub_rows]
 
         for row in transcript_rows:
             total_files += 1

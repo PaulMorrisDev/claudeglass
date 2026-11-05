@@ -2,3 +2,5 @@
 # service/static/THIRD_PARTY.sha256: git must not rewrite their bytes.
 src/claudeglass/service/static/vendor/** -text
 src/claudeglass/service/static/fonts/** binary
+# The mod's generated assets are LF in every checkout, as scripts/export-mod-assets.py writes them.
+plugin/hooks/generated/*.js text eol=lf

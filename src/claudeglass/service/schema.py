@@ -173,12 +173,39 @@ habit or recommendation card (``kind`` and ``item`` name the card from a
 closed list, ``answer`` is a word from ``capture_catalogue.TIP_CARD_VOCAB``),
 one row per card. Still words and ids only, never free text. A v8 store
 gains the columns and tables in place (``store.MIGRATIONS[8]``).
+
+Version 10 (the ClaudeGlass mod's sensor): a new ``mod_events`` table holds
+what the mod saw and showed in a session, ingested from
+``<config_dir>/mod/sensor/<session id>.json`` by the watcher
+(``watcher._scan_mod_sensor``). One row per event: its ``session_id``
+(the raw id, as ``sessions.id`` has it, with no foreign key: the mod can
+write its first event before the first transcript line is stored), its
+``ts``, the ``event`` and the closed words ``kind``, ``surface`` and
+``outcome`` that event takes (``capture_catalogue.SENSOR_VOCAB``; a row
+with any other word is dropped before it gets here, ``mod_sensor.clean``),
+and, for a ``compaction`` event, the counts ``kept``, ``missing`` and
+``added``. ``updated_at`` is when the watcher ingested the row. Counts and
+closed words only: no summary, message or path. A file is re-read when it
+changes and its events from the first one it holds on are replaced, so
+re-ingesting is idempotent and an event the mod's newest-500 file has
+since dropped stays. A v9 store gains the table in place
+(``store.MIGRATIONS[9]``).
+
+Version 11 (the mod's receipts): four nullable integer columns on
+``mod_events``. ``instructed`` (1 when the summariser was told the keep
+list, 0 when not) and ``referenced`` (how many re-added items a later reply
+referenced) are carried by a ``compaction`` event; ``before`` and ``after``
+(the counts a tweak acted on and came out with) by the new ``tweak`` event,
+whose ``kind`` is one of ``capture_catalogue.SENSOR_TWEAK_KINDS``. All
+four are NULL on a row that doesn't take them and on one the mod left them
+off (``after`` until it is known). A v10 store gains the columns in place
+(``store.MIGRATIONS[10]``).
 """
 
 from __future__ import annotations
 
 #: Bump when a table or index below changes shape. See module docstring.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 CREATE_META = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -532,6 +559,33 @@ CREATE TABLE IF NOT EXISTS predictions (
 CREATE INDEX IF NOT EXISTS idx_predictions_judged_at ON predictions(judged_at);
 """
 
+#: What the ClaudeGlass mod's sensor file says happened in a session (v10):
+#: notes it showed and what followed, cache rebuilds, cold sends,
+#: compaction reviews, tweaks pressed, and that it ran at all. Closed words
+#: and counts only (see the module docstring's "Version 10" and "Version 11"). ``ts`` is UTC
+#: (``%Y-%m-%dT%H:%M:%SZ``) like every other time in this store.
+CREATE_MOD_EVENTS = """
+CREATE TABLE IF NOT EXISTS mod_events (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    ts          TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    kind        TEXT,
+    surface     TEXT,
+    outcome     TEXT,
+    kept        INTEGER,
+    missing     INTEGER,
+    added       INTEGER,
+    instructed  INTEGER,
+    referenced  INTEGER,
+    before      INTEGER,
+    after       INTEGER,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mod_events_session_ts ON mod_events(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_mod_events_event ON mod_events(event, kind);
+"""
+
 #: Every ``CREATE TABLE``/``CREATE INDEX`` statement, in dependency
 #: order (a table referencing another via ``REFERENCES`` is listed
 #: after it) — ``Store.migrate`` executes these in this order.
@@ -554,6 +608,7 @@ ALL_STATEMENTS: tuple[str, ...] = (
     CREATE_WORKFLOW_RUNS,
     CREATE_USAGE_LOG,
     CREATE_PREDICTIONS,
+    CREATE_MOD_EVENTS,
 )
 
 __all__ = [
@@ -576,5 +631,6 @@ __all__ = [
     "CREATE_WORKFLOW_RUNS",
     "CREATE_USAGE_LOG",
     "CREATE_PREDICTIONS",
+    "CREATE_MOD_EVENTS",
     "ALL_STATEMENTS",
 ]

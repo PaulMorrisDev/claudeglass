@@ -381,13 +381,23 @@ var CARD_NUMBERS = {
     var windowIdx = colIndex(table, "window");
     var costIdx = colIndex(table, "cost");
     var deltaIdx = colIndex(table, "delta_usd");
+    var limitIdx = colIndex(table, "within_limit");
     var current =
       rows.filter(function (row) {
         return Math.abs(Number(row[deltaIdx])) < 0.005;
       })[0] || rows[0];
-    var best = rows.reduce(function (min, row) {
+    // Only the sizes the advice may offer: one that would summarise more
+    // often than the summaries-per-session limit is refused by the
+    // compaction-window rule, the savings lever and the summary-point chart
+    // alike (charts-types.js's withinLimit, the same rule). A table from
+    // before the column existed offers every size.
+    var offered = rows.filter(function (row) {
+      var value = limitIdx < 0 ? true : row[limitIdx];
+      return !(value === false || value === "False" || value === "false");
+    });
+    var best = offered.reduce(function (min, row) {
       return Number(row[costIdx]) < Number(min[costIdx]) ? row : min;
-    }, rows[0]);
+    }, offered[0] || current);
     var saving = Number(current[costIdx]) - Number(best[costIdx]);
     if (!(saving > 0.005)) {
       return "Your current summary window already looks like the cheapest one this data suggests.";

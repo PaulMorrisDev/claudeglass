@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 from claudeglass import compaction
-from claudeglass.model import TranscriptMeta
+from claudeglass.model import EventKind, TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 
@@ -816,3 +816,98 @@ def test_the_compaction_cost_row_labels_are_in_the_help_copy():
         "Share of main-session cost in sessions with 3+ compactions",
     ):
         assert key in copy.value_labels and copy.row_kinds[key]
+
+
+# -- precomputed and inherited boundaries ----------------------------------
+
+
+def _boundaries_transcript(tmp_path: Path, name: str, session_id: str, boundaries: list[dict], *, before_reply: bool = False):
+    """A transcript with one reply, then a boundary per entry of ``boundaries``
+    (its ``compactMetadata``), each followed by a reply. With ``before_reply``
+    the first boundary sits ahead of the file's first reply."""
+    lines = []
+    if before_reply:
+        lines.append(
+            system_line("compact_boundary", timestamp="2026-09-18T11:59:00.000Z", compactMetadata=boundaries[0])
+        )
+        boundaries = boundaries[1:]
+    lines.append(turn_line(model="claude-sonnet-5", timestamp="2026-09-18T12:00:00.000Z", ephemeral_5m_input_tokens=1000))
+    for i, metadata in enumerate(boundaries):
+        lines.append(system_line("compact_boundary", timestamp=f"2026-09-18T12:0{i + 1}:00.000Z", compactMetadata=metadata))
+        lines.append(
+            turn_line(model="claude-sonnet-5", timestamp=f"2026-09-18T12:0{i + 1}:30.000Z", ephemeral_5m_input_tokens=500)
+        )
+    path = tmp_path / name
+    write_jsonl(path, lines)
+    return parse_transcript(path, TranscriptMeta(path=str(path), session_id=session_id))
+
+
+def _auto(pre_tokens, **extra):
+    return {"trigger": "auto", "preTokens": pre_tokens, "postTokens": 20000, "durationMs": 1000, **extra}
+
+
+def test_a_precomputed_boundary_is_not_a_sample_of_the_threshold(tmp_path):
+    """Claude Code 2.1.309 applies a summary made in the background, so the
+    boundary falls wherever the session was: 205,495 here, 162,000 under the
+    367,000 the window fires at. It stays a compaction, counted and priced."""
+    result = _boundaries_transcript(
+        tmp_path, "pre.jsonl", "s1", [_auto(367_000), _auto(205_495, precomputed=True), _auto(366_000, precomputed=False)]
+    )
+    records = compaction.compaction_records_for_transcript(result, None)
+
+    assert [r.pre_tokens for r in records] == [367_000, 205_495, 366_000]
+    assert [r.precomputed for r in records] == [False, True, False]
+    assert compaction.effective_autocompact_threshold(records) == pytest.approx(366_500)
+    assert [compaction.counts_toward_threshold(r) for r in records] == [True, False, True]
+    assert compaction.compactions_in(result) == (3, 3)
+
+
+def test_a_manual_or_pre_tokenless_record_still_does_not_count_toward_the_threshold(tmp_path):
+    result = _boundaries_transcript(
+        tmp_path, "mixed.jsonl", "s1", [{"trigger": "manual", "preTokens": 50_000}, {"trigger": "auto"}, _auto(300_000)]
+    )
+    records = compaction.compaction_records_for_transcript(result, None)
+    assert [compaction.counts_toward_threshold(r) for r in records] == [False, False, True]
+    assert compaction.effective_autocompact_threshold(records) == 300_000
+
+
+def test_only_precomputed_boundaries_leave_no_observed_threshold(tmp_path):
+    result = _boundaries_transcript(tmp_path, "only.jsonl", "s1", [_auto(205_495, precomputed=True)])
+    assert compaction.effective_autocompact_threshold(compaction.compaction_records_for_transcript(result, None)) is None
+
+
+def test_the_trigger_mix_names_a_precomputed_automatic_summary_apart(tmp_path, sonnet_rates):
+    result = _boundaries_transcript(
+        tmp_path,
+        "mix.jsonl",
+        "s1",
+        [_auto(367_000), _auto(205_495, precomputed=True), {"trigger": "manual", "preTokens": 90_000}],
+    )
+    stats = compaction.CompactionStats.build([(result, sonnet_rates)])
+    assert stats.trigger_mix == {"auto": 1, "auto (precomputed)": 1, "manual": 1}
+    assert compaction.PRECOMPUTED_AUTO_TRIGGER == "auto (precomputed)"
+
+    section = compaction.build_section(stats)
+    mix = next(t for t in section.tables if t.name == "compactions_trigger_mix")
+    assert {row[0]: row[1] for row in mix.rows} == {"auto": 1, "auto (precomputed)": 1, "manual": 1}
+    assert sum(row[2] for row in mix.rows) == pytest.approx(100.0)
+    # Still counted in the totals: three summaries in one session.
+    metrics = {row[0]: row[1] for row in section.tables[0].rows}
+    assert metrics["Compactions per session (mean)"] == 3
+
+
+def test_a_boundary_inherited_from_the_session_continued_is_not_this_sessions_compaction(tmp_path, sonnet_rates):
+    """A boundary ahead of the file's first reply belongs to the session this
+    one was continued from, which counts it already."""
+    result = _boundaries_transcript(
+        tmp_path, "cont.jsonl", "s2", [_auto(300_000), _auto(310_000)], before_reply=True
+    )
+    inherited = [e for e in result.events if e.kind == EventKind.COMPACT_BOUNDARY]
+    assert [e.detail.get("inherited") for e in inherited] == [True, None]
+
+    records = compaction.compaction_records_for_transcript(result, None)
+    assert [r.pre_tokens for r in records] == [310_000]
+    assert compaction.compactions_in(result) == (1, 1)
+    assert [w.compaction_ts for w in compaction.rediscovery(result)] == ["2026-09-18T12:01:00.000Z"]
+    stats = compaction.CompactionStats.build([(result, sonnet_rates)])
+    assert stats.trigger_mix == {"auto": 1}

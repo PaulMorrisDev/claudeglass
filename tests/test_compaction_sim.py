@@ -22,14 +22,17 @@ from claudeglass import model
 from claudeglass.compaction_sim import (
     ASSUMPTIONS,
     CANDIDATE_WINDOWS,
+    CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS,
     RULES,
     CompactionSimThresholds,
+    _corpus_trigger_reserve,
     _rediscovery_allowance_usd_used,
     _replay_transcript,
     _shrunk_cost,
     _summary_request_cost,
     _Shape,
     build_section,
+    replay_cost,
     simulate_compaction_windows,
 )
 from claudeglass.model import Event, EventKind, ReportModel, ReportMeta, TranscriptMeta, TranscriptResult
@@ -40,6 +43,11 @@ from helpers import assert_privacy, elasticity_with_slope
 
 PRICING = load_pricing()
 SONNET_RATES = PRICING.resolve_model("claude-sonnet-5")
+
+#: The replay arithmetic below is worked by hand with a window firing at the
+#: window itself. Claude Code's own buffer (33,000 tokens below it, the
+#: default) is tested apart, so these tests take no reserve.
+NO_RESERVE = CompactionSimThresholds(default_trigger_reserve_tokens=0)
 
 
 def _turn(**overrides) -> model.Turn:
@@ -191,9 +199,9 @@ def test_shrunk_turns_price_the_same_as_a_replaced_turn(model_id, dropped):
     ctx = max(0, int(round(turn.ctx - dropped)))
     read = max(0, int(round(turn.cache_read_tokens - dropped)))
     keep = max(0.0, (turn.cache_creation_tokens - max(0.0, dropped - turn.cache_read_tokens)) / turn.cache_creation_tokens)
-    shrunk = replace(
-        turn, ctx=ctx, cache_read_tokens=read, cc_5m=int(round(turn.cc_5m * keep)), cc_1h=int(round(turn.cc_1h * keep))
-    )
+    cc_5m, cc_1h = int(round(turn.cc_5m * keep)), int(round(turn.cc_1h * keep))
+    # The flat count follows the split: what no split accounts for is priced at the 5-minute rate.
+    shrunk = replace(turn, ctx=ctx, cache_read_tokens=read, cc_5m=cc_5m, cc_1h=cc_1h, cache_creation_tokens=cc_5m + cc_1h)
 
     assert _shrunk_cost(turn, rates, dropped) == price_turn(shrunk, rates).total
     assert _summary_request_cost(turn, rates, dropped, 20_000.4) == price_turn(
@@ -226,8 +234,9 @@ def test_small_window_hand_computed_compaction_count_and_cost():
     ctx = i*20,000: a 20,000-token write plus the rest read) triggers
     four synthetic compactions. With no real compact_boundary event
     anywhere in this corpus, every measured shape falls back to its
-    default: a 20,000-token summary, no trigger reserve, nothing of the
-    starting context still cached. Each summary resets the context to
+    default: a 20,000-token summary, no trigger reserve (taken as 0 here,
+    so the arithmetic is the window's own), nothing of the starting
+    context still cached. Each summary resets the context to
     the starting context (turn 1's 20,000) plus the summary: 40,000.
 
     A compaction charges the summary request (the triggering turn as it
@@ -249,7 +258,7 @@ def test_small_window_hand_computed_compaction_count_and_cost():
     """
     turns = _synthetic_20_turn_transcript()
     tr = _top_level_transcript("sess-synthetic", turns)
-    stats = simulate_compaction_windows([tr], SONNET_RATES, {})
+    stats = simulate_compaction_windows([tr], SONNET_RATES, {}, NO_RESERVE)
     rows = {r.window: r for r in stats.by_window("top-level")}
 
     row = rows[100_000]
@@ -273,7 +282,7 @@ def test_a_summary_keeps_the_starting_context():
     window, so no second summary fires.
     """
     tr = _top_level_transcript("sess-plateau", _plateau_transcript())
-    stats = simulate_compaction_windows([tr], SONNET_RATES, {})
+    stats = simulate_compaction_windows([tr], SONNET_RATES, {}, NO_RESERVE)
     rows = {r.window: r for r in stats.by_window("top-level")}
 
     assert rows[None].cost == pytest.approx(2.956)
@@ -299,26 +308,173 @@ def test_a_summary_that_would_not_shrink_the_context_is_skipped():
 
 
 def test_the_trigger_reserve_is_measured_from_real_auto_compactions():
-    """A real auto compaction at 267,000 in a session configured for
-    300,000 puts the trigger 33,000 below each window, so the plateau
-    session (280,000) summarises under a 300,000 window."""
+    """A real auto compaction at 290,000 in a session configured for
+    300,000 puts the trigger 10,000 below each window, so the plateau
+    session (280,000) stays under a 300,000 window. With no known window
+    the reserve is Claude Code's own 33,000, which fires at 267,000."""
     measured = _top_level_transcript(
         "sess-measured",
         [_turn(turn_index=1, ts=_ts(0), ctx=10_000, cache_creation_tokens=10_000, cc_5m=10_000)],
         # After its only turn: measured, but not a compaction this replay prices.
-        [Event(kind=EventKind.COMPACT_BOUNDARY, ts=_ts(30), pre_tokens=267_000, post_tokens=20_000, trigger="auto")],
+        [Event(kind=EventKind.COMPACT_BOUNDARY, ts=_ts(30), pre_tokens=290_000, post_tokens=20_000, trigger="auto")],
     )
     plateau = _top_level_transcript("sess-plateau", _plateau_transcript())
     stats = simulate_compaction_windows([measured, plateau], SONNET_RATES, {"sess-measured": 300_000})
-    assert stats.shape.trigger_reserve == 33_000
+    assert stats.shape.trigger_reserve == 10_000
     assert "trigger_reserve" not in stats.defaults
     rows = {r.window: r for r in stats.by_window("top-level")}
-    assert rows[300_000].compactions == 1
-    assert rows[400_000].compactions == 0
+    assert rows[300_000].compactions == 0
+    assert rows[250_000].compactions == 1
 
     no_window = simulate_compaction_windows([measured, plateau], SONNET_RATES, {})
     assert "trigger_reserve" in no_window.defaults
-    assert {r.window: r for r in no_window.by_window("top-level")}[300_000].compactions == 0
+    assert no_window.shape.trigger_reserve == CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS == 33_000
+    assert {r.window: r for r in no_window.by_window("top-level")}[300_000].compactions == 1
+
+
+def test_the_default_trigger_reserve_is_claude_codes_own_33000_token_buffer():
+    assert CompactionSimThresholds().default_trigger_reserve_tokens == 33_000
+    assert CompactionSimThresholds.from_config({"default_trigger_reserve_tokens": 12_000}).default_trigger_reserve_tokens == 12_000
+    assert any("33,000 tokens" in line and "trigger reserve" in line for line in CompactionSimThresholds().describe())
+    assert any("33,000 (Claude Code's own buffer)" in note for note in ASSUMPTIONS)
+    assert not any("0 when there are none" in note for note in ASSUMPTIONS)
+
+
+def _auto_boundary(ts, pre_tokens, **detail):
+    return Event(
+        kind=EventKind.COMPACT_BOUNDARY, ts=ts, pre_tokens=pre_tokens, post_tokens=20_000, trigger="auto", detail=detail
+    )
+
+
+def test_a_precomputed_boundary_is_left_out_of_the_trigger_reserve():
+    """Claude Code 2.1.309 applies a summary it made in the background, so
+    the boundary lands wherever the session was. With the real ones at
+    367,000 under a 400,000 window the reserve is 33,000; the precomputed
+    205,495 (a reserve of 194,505) would have pulled the median up."""
+    transcripts = [
+        _top_level_transcript(
+            f"sess-{i}",
+            [_turn(turn_index=1, ts=_ts(0), ctx=10_000, cache_creation_tokens=10_000, cc_5m=10_000)],
+            [_auto_boundary(_ts(30), 367_000), _auto_boundary(_ts(40), 205_495, precomputed=True)],
+        )
+        for i in range(2)
+    ]
+    windows = {"sess-0": 400_000, "sess-1": 400_000}
+    th = CompactionSimThresholds(default_trigger_reserve_tokens=7)
+    assert _corpus_trigger_reserve(transcripts, windows, th) == (33_000, False)
+    # With the precomputed ones alone there is nothing to measure.
+    only_precomputed = [
+        _top_level_transcript("sess-p", [_turn()], [_auto_boundary(_ts(40), 205_495, precomputed=True)])
+    ]
+    assert _corpus_trigger_reserve(only_precomputed, {"sess-p": 400_000}, th) == (7, True)
+
+
+def test_a_boundary_inherited_from_the_session_continued_is_not_counted():
+    """A boundary before the file's first reply belongs to the session this
+    one continued from: no reserve, no summary size, no real compaction to
+    keep under every window."""
+    inherited = _top_level_transcript(
+        "sess-cont",
+        [_turn(turn_index=1, ts=_ts(5), ctx=10_000, cache_creation_tokens=10_000, cc_5m=10_000)],
+        [_auto_boundary(_ts(0), 100_000, inherited=True)],
+    )
+    th = CompactionSimThresholds(default_trigger_reserve_tokens=7)
+    assert _corpus_trigger_reserve([inherited], {"sess-cont": 400_000}, th) == (7, True)
+    stats = simulate_compaction_windows([inherited], SONNET_RATES, {"sess-cont": 400_000})
+    assert "summary_tokens" in stats.defaults
+    assert {r.window: r for r in stats.by_window("top-level")}[None].compactions == 0
+
+
+def _plateau_at(session_id, ctx, turns=42):
+    """A session that writes 80,000 tokens, jumps to ``ctx`` and stays."""
+    rows = [
+        _turn(message_id="m1", turn_index=1, ts=_ts(0), ctx=80_000, cache_creation_tokens=80_000, cc_5m=80_000),
+        _turn(
+            message_id="m2", turn_index=2, ts=_ts(1), ctx=ctx, cache_creation_tokens=ctx - 80_000,
+            cache_read_tokens=80_000, cc_5m=ctx - 80_000,
+        ),
+    ]
+    rows += [
+        _turn(message_id=f"m{i}", turn_index=i, ts=_ts(i), ctx=ctx, cache_read_tokens=ctx) for i in range(3, turns + 1)
+    ]
+    return _top_level_transcript(session_id, rows)
+
+
+def _measured_at(pre_tokens):
+    """A session whose real automatic summary fired at ``pre_tokens``, after its only reply."""
+    return _top_level_transcript(
+        "sess-measured",
+        [_turn(turn_index=1, ts=_ts(0), ctx=10_000, cache_creation_tokens=10_000, cc_5m=10_000)],
+        [_auto_boundary(_ts(30), pre_tokens)],
+    )
+
+
+def test_replay_cost_fires_the_old_window_33000_below_it():
+    """Sessions that ran under a 400,000 window and summarised at 367,000
+    left a 33,000 gap: replayed under the old 300,000 window they summarise
+    at 267,000. A session at 270,000 summarises; one at 260,000 does not."""
+    ran_under = {"sess-measured": 400_000}
+    high, low = _plateau_at("sess-high", 270_000), _plateau_at("sess-low", 260_000)
+    results = [_measured_at(367_000), high, low]
+    as_ran = replay_cost(results, SONNET_RATES, None, snapshot_windows=ran_under)
+    at_300k = replay_cost(results, SONNET_RATES, 300_000, snapshot_windows=ran_under)
+
+    # Only the 270,000 session changes, and it gets cheaper: it carries 100,000 instead of 270,000.
+    alone_high = replay_cost([high], SONNET_RATES, None)
+    assert replay_cost([low], SONNET_RATES, 300_000, snapshot_windows=ran_under) == pytest.approx(
+        replay_cost([low], SONNET_RATES, None)
+    )
+    assert replay_cost([high], SONNET_RATES, 300_000, snapshot_windows=ran_under) < alone_high
+    assert at_300k < as_ran
+
+
+def test_replay_cost_measures_the_reserve_from_the_windows_it_is_given():
+    """Real summaries at 390,000 under a 400,000 window left a 10,000 gap, so
+    the 300,000 window fires at 290,000, above a 280,000 session. With no
+    window known the gap is Claude Code's 33,000 and it fires at 267,000."""
+    plateau = _plateau_at("sess-plateau", 280_000)
+    results = [_measured_at(390_000), plateau]
+    observed = replay_cost(results, SONNET_RATES, None)
+
+    measured = replay_cost(results, SONNET_RATES, 300_000, snapshot_windows={"sess-measured": 400_000})
+    assert measured == pytest.approx(observed)
+    unknown = replay_cost(results, SONNET_RATES, 300_000)
+    assert unknown < observed
+    # Left to its own default, as the report's sweep does when no window is known.
+    assert unknown == pytest.approx(
+        replay_cost(results, SONNET_RATES, 300_000, CompactionSimThresholds(default_trigger_reserve_tokens=33_000))
+    )
+    assert replay_cost(results, SONNET_RATES, 300_000, NO_RESERVE) == pytest.approx(observed)
+
+
+def test_a_mid_stream_replys_output_estimate_is_what_the_replay_prices():
+    """A reply Claude Code logged mid-stream keeps a few output tokens;
+    ``output_tokens_est`` stands in for them. A replayed copy of it, with
+    or without tokens taken out, prices that estimate and not the count."""
+    partial = _turn(
+        input_tokens=500, output_tokens=12, output_partial=True, output_tokens_est=3_000,
+        ctx=100_000, cache_read_tokens=60_000, cache_creation_tokens=39_500, cc_5m=39_500,
+    )
+    plain = replace(partial, output_tokens=3_000, output_partial=False, output_tokens_est=None)
+    for dropped in (0.0, 30_000.0):
+        assert _shrunk_cost(partial, SONNET_RATES, dropped) == pytest.approx(_shrunk_cost(plain, SONNET_RATES, dropped))
+    assert _shrunk_cost(partial, SONNET_RATES, 30_000.0) > _shrunk_cost(replace(partial, output_tokens_est=None), SONNET_RATES, 30_000.0)
+
+
+def test_a_turn_with_unsplit_cache_writes_is_priced_alike_changed_or_not():
+    """``price_turn`` prices cache writes no split accounts for at the
+    5-minute rate. A replayed copy must too, or it would look cheaper
+    for dropping them."""
+    turn = _turn(ctx=100_000, input_tokens=100, output_tokens=200, cache_read_tokens=60_000, cache_creation_tokens=39_900)
+    assert (turn.cc_5m, turn.cc_1h) == (0, 0)
+    reference = price_turn(turn, SONNET_RATES).total
+    assert reference > 0
+    # Rewriting the same request with its output restated changes nothing.
+    assert _shrunk_cost(turn, SONNET_RATES, 0.0, output_tokens=200) == pytest.approx(reference)
+    # Dropping part of the cached reads shrinks the reads only; the writes stay.
+    assert _shrunk_cost(turn, SONNET_RATES, 10_000.0) == pytest.approx(
+        reference - 10_000 * SONNET_RATES.rates.cache_read / 1e6
+    )
 
 
 def test_the_cached_share_of_the_starting_context_is_measured_from_real_compactions():
@@ -458,6 +614,31 @@ def test_build_section_tables_and_notes():
     assert_privacy(section)
 
 
+def test_the_by_window_table_says_which_windows_summarise_no_more_than_the_limit_allows():
+    """The dashboard's savings lever and its summary-point chart read this
+    column: a window that simulates more summaries per session than the
+    ``compaction-window`` rule trusts must never be offered."""
+    th = CompactionSimThresholds(default_trigger_reserve_tokens=0)
+    stats = simulate_compaction_windows(
+        [_top_level_transcript("sess-synthetic", _synthetic_20_turn_transcript())], SONNET_RATES, {}, th
+    )
+    table = next(t for t in build_section(stats, th).tables if t.name == "compaction_sim_by_window")
+    keys = [c.key for c in table.columns]
+    assert keys[-1] == "within_limit"
+    assert table.columns[-1].label == "Within the summaries-per-session limit"
+    per_session = keys.index("compactions_per_session")
+    rows = {row[0]: row for row in table.rows}
+    assert rows["100,000"][per_session] == 4
+    assert rows["100,000"][-1] is False  # four summaries a session, over the limit of 2
+    assert rows["none"][-1] is True
+    for row in table.rows:
+        assert row[-1] is (row[per_session] <= th.max_compactions_per_session)
+
+    loose = CompactionSimThresholds(default_trigger_reserve_tokens=0, max_compactions_per_session=5.0)
+    table = next(t for t in build_section(stats, loose).tables if t.name == "compaction_sim_by_window")
+    assert {row[0]: row for row in table.rows}["100,000"][-1] is True
+
+
 def test_only_the_main_session_row_says_to_set_the_window(monkeypatch):
     """The window is one setting for the whole session: a subagent type
     whose own replay is cheapest at a smaller window says so without
@@ -506,7 +687,7 @@ def test_build_section_notes_flag_every_default():
     section = build_section(stats)
     joined = " ".join(section.notes)
     assert "Summary size used: 20,000 tokens (default, as no real conversation summary was found)" in joined
-    assert "Trigger reserve used: 0 tokens below the window (default" in joined
+    assert "Trigger reserve used: 33,000 tokens below the window (default" in joined
     assert "Starting context still cached after a summary: 0% (default" in joined
     assert "no real cache rebuild after a summary was found" in joined
 

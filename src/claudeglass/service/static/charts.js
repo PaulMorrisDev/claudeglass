@@ -59,7 +59,7 @@ export var CHART_SPECS = {
     form: "line",
     title: "Would summarising conversations at a different size cost less?",
     summary: "Summarising at {best} tokens would cost {saving} less than now.",
-    alt: { cheapest: "None of the sizes tried would cost less than now." },
+    alt: { cheapest: "No size within the summaries-per-session limit would cost less than now." },
   },
   "session-outliers": {
     n: 4,
@@ -146,6 +146,22 @@ export var ENTITY_COLOURS = {
     tool_lists: "var(--chart-5)",
     task_prompt: "var(--chart-6)",
     hook_context: "var(--chart-7)",
+    other: "var(--chart-other)",
+  },
+  // What the context is made of, on the mod's "What's filling it" bar and
+  // the dashboard's links to it. It shows beside the agent kind (chart-1,
+  // chart-3), so it takes neither of those. Startup context is the one part
+  // with a breakdown of its own (the startup kind above, chart-1 to
+  // chart-7), so it takes chart-8, which no startup piece uses: the slice
+  // never matches one of its own pieces. Conversation and tool output take
+  // chart-2 and chart-4, which stay apart from each other and from the
+  // startup slice. Room left is drawn as an empty track, so it shares the
+  // grey that Other has.
+  part: {
+    conversation: "var(--chart-2)",
+    output: "var(--chart-4)",
+    startup: "var(--chart-8)",
+    free: "var(--chart-other)",
     other: "var(--chart-other)",
   },
 };

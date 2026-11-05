@@ -95,7 +95,7 @@ from .. import PARSER_VERSION
 from ..cache import result_from_jsonable
 from ..discovery import _resolve_window, _zone, local_day, redact_slug, source_label, ts_in_window, utc_stamp
 from ..limits import limit_markers as _limit_markers
-from ..model import EventKind
+from ..model import EventKind, TranscriptResult
 
 #: ``meta`` key recording the schema version the store's tables were
 #: created under. Compared against ``schema.SCHEMA_VERSION`` by callers
@@ -300,6 +300,28 @@ def _migrate_8_to_9(conn: sqlite3.Connection) -> None:
     conn.execute(schema.CREATE_TIP_FEEDBACK)
 
 
+def _migrate_9_to_10(conn: sqlite3.Connection) -> None:
+    """v9 -> v10 (``schema.py``'s "Version 10" paragraph): the ``mod_events``
+    table and its two indexes. Like ``predictions`` it is re-ingestible (from
+    the mod's sensor files, on the watcher's next tick, while the files
+    last), so it is not one of the protected tables. ``CREATE_MOD_EVENTS`` is
+    three statements, run one at a time as in :func:`_migrate_6_to_7`."""
+    for statement in schema.CREATE_MOD_EVENTS.strip().split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
+
+
+def _migrate_10_to_11(conn: sqlite3.Connection) -> None:
+    """v10 -> v11 (``schema.py``'s "Version 11" paragraph): the
+    ``instructed``, ``referenced``, ``before`` and ``after`` columns on
+    ``mod_events``, NULL on every row already there. Each ``ALTER`` goes
+    through :func:`_add_column_if_missing`, so a half-applied upgrade is
+    retried in full."""
+    for column in ("instructed", "referenced", "before", "after"):
+        _add_column_if_missing(conn, "mod_events", column, "INTEGER")
+
+
 #: Additive migration ladder for :meth:`Store.migrate`, keyed by the
 #: *recorded* version being migrated away from -- ``MIGRATIONS[4]`` takes
 #: a v4 store to v5. Each step may only add columns/indexes/tables, never
@@ -314,6 +336,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: _migrate_6_to_7,
     7: _migrate_7_to_8,
     8: _migrate_8_to_9,
+    9: _migrate_9_to_10,
+    10: _migrate_10_to_11,
 }
 
 
@@ -459,6 +483,25 @@ class Store:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+    @classmethod
+    def open_read_only(cls, path: str | Path) -> "Store | None":
+        """A store over the file at ``path`` that only reads, for the CLI's
+        own use beside a running dashboard: nothing is created, migrated or
+        written, so it never waits on the dashboard's writes. ``None``
+        when there is no store file or it can't be opened. Only the read
+        methods work on it."""
+        path = Path(path)
+        if not path.is_file():
+            return None
+        try:
+            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+        except sqlite3.Error:
+            return None
+        conn.row_factory = sqlite3.Row
+        store = cls(path)
+        store._local.conn = conn
+        return store
 
     def _connection(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -1229,6 +1272,59 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
+    #: The pairs a missing transcript row and a present one are the same
+    #: transcript for: the same session, the same kind and the same agent
+    #: (``IS`` reads two NULLs as equal, which is the top-level case). One
+    #: file Claude Code moved to another project folder leaves such a pair:
+    #: the row of the path it left, now missing, and the row of the path it
+    #: arrived at.
+    _SUPERSEDED_SQL = (
+        "m.missing_since IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM transcripts p WHERE p.session_id = m.session_id AND p.missing_since IS NULL "
+        "AND p.kind = m.kind AND p.agent_id IS m.agent_id)"
+    )
+
+    def sessions_with_superseded_transcripts(self) -> list[str]:
+        """The sessions that hold a missing transcript row and a present one
+        of the same kind and agent (see :meth:`drop_superseded_transcripts`),
+        oldest first."""
+        rows = self._connection().execute(
+            f"SELECT DISTINCT m.session_id FROM transcripts m WHERE {self._SUPERSEDED_SQL} ORDER BY m.session_id"
+        ).fetchall()
+        return [row["session_id"] for row in rows]
+
+    def drop_superseded_transcripts(self, session_id: str) -> int:
+        """Delete the missing transcript rows of ``session_id`` that a present
+        row stands in for, with their ``turns_agg``/``recache_turns``/
+        ``events_agg``/``compactions`` rows, in one transaction. Returns how
+        many transcript rows went.
+
+        :meth:`remove_missing` keeps a missing transcript's rows on purpose,
+        for a file Claude Code has cleaned up. But a session Claude Code
+        *moved* to another project folder leaves them beside the rows of the
+        file at its new path, which read the same turns: every daily total
+        and summary sum added both, and a report read the old, stale main
+        transcript. A row goes only when the present row is the same kind
+        and the same agent (a session's one main transcript, or the agent
+        of that id), so a transcript whose file is gone and has no
+        successor is kept."""
+        conn = self._connection()
+        with _transaction(conn):
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    f"SELECT m.id FROM transcripts m WHERE m.session_id = ? AND {self._SUPERSEDED_SQL}",
+                    (session_id,),
+                ).fetchall()
+            ]
+            for transcript_id in ids:
+                conn.execute("DELETE FROM turns_agg WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM recache_turns WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM events_agg WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM compactions WHERE transcript_id = ?", (transcript_id,))
+                conn.execute("DELETE FROM transcripts WHERE id = ?", (transcript_id,))
+        return len(ids)
+
     def retention_prune(self, retention_days: int) -> int:
         """Delete every session (and its transcripts/workflow runs/tags/
         child rows) last active more than ``retention_days`` ago. Returns
@@ -1275,8 +1371,84 @@ class Store:
                 conn.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM session_feedback WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM session_plan_feedback WHERE session_id = ?", (session_id,))
+                conn.execute("DELETE FROM mod_events WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return len(session_ids)
+
+    # -- the mod's sensor events (``mod_events``) --------------------------
+
+    def replace_mod_events(self, session_id: str, events: list[dict]) -> int:
+        """Store a session's cleaned sensor events (``mod_sensor.clean``) in
+        place of the rows it already has from the first of them on. The mod
+        rewrites its whole newest-500 file each turn, so the same events
+        arrive again and again: deleting the rows at or after the file's
+        first ``ts`` and inserting the file's events leaves the same rows
+        however often a file is read, while an older event the file has
+        since dropped stays. One transaction, so a failure keeps the old
+        rows. Returns the number of events written (none for an empty list,
+        which changes nothing)."""
+        if not events:
+            return 0
+        conn = self._connection()
+        now = _now()
+        first = min(event["ts"] for event in events)
+        with _transaction(conn):
+            conn.execute("DELETE FROM mod_events WHERE session_id = ? AND ts >= ?", (session_id, first))
+            conn.executemany(
+                "INSERT INTO mod_events (session_id, ts, event, kind, surface, outcome, kept, missing, added, "
+                "instructed, referenced, before, after, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        session_id,
+                        event["ts"],
+                        event["event"],
+                        event.get("kind"),
+                        event.get("surface"),
+                        event.get("outcome"),
+                        event.get("kept"),
+                        event.get("missing"),
+                        event.get("added"),
+                        event.get("instructed"),
+                        event.get("referenced"),
+                        event.get("before"),
+                        event.get("after"),
+                        now,
+                    )
+                    for event in events
+                ],
+            )
+        return len(events)
+
+    def prune_mod_events(self, retention_days: int) -> int:
+        """Delete the sensor events older than ``retention_days`` days, with
+        the sensor files that held them (``mod_sensor.prune``). Returns the
+        number of rows removed."""
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - retention_days * 86400))
+        conn = self._connection()
+        with _transaction(conn):
+            cursor = conn.execute("DELETE FROM mod_events WHERE ts < ?", (cutoff,))
+        return cursor.rowcount
+
+    def read_mod_events(self, *, event: str | None = None, since: str | None = None) -> list[dict]:
+        """The stored sensor events, oldest first, as dicts of the table's
+        columns without ``id`` and ``updated_at``; only those of one
+        ``event``, or from ``since`` (a UTC time) on, when given."""
+        clauses, params = [], []
+        if event is not None:
+            clauses.append("event = ?")
+            params.append(event)
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(since)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection().execute(
+            "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added, instructed, referenced, "
+            "before, after FROM mod_events"
+            f"{where} ORDER BY ts, id",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def log_usage(self, *, ts: str, window_start: str | None, window_end: str | None,
                   utilization_pct: float | None, raw: dict) -> None:
@@ -1425,13 +1597,68 @@ class Store:
         mid = len(costs) // 2
         return costs[mid] if len(costs) % 2 else (costs[mid - 1] + costs[mid]) / 2
 
+    @staticmethod
+    def _decode_digest(row) -> TranscriptResult | None:
+        """The ``TranscriptResult`` in a ``transcripts`` row's
+        ``digest_blob`` (the lossless ``cache.result_from_jsonable``
+        decode ``service/rebuild.py`` uses), or ``None`` for no row or a
+        blob that does not decode."""
+        if row is None:
+            return None
+        try:
+            return result_from_jsonable(json.loads(decode_digest_blob(row["digest_blob"])))
+        except (KeyError, TypeError, ValueError, zlib.error):
+            return None
+
+    def median_end_context(self, limit: int = 200) -> int | None:
+        """The median, over the ``limit`` most recent sessions (by
+        ``last_ts``) that have a stored top-level transcript, of the
+        context (``ctx``) of each one's last priced turn
+        (``turn_index > 0``), decoded as :meth:`turns_for_session` does.
+        ``None`` when no session qualifies."""
+        rows = self._connection().execute(
+            "SELECT t.digest_blob FROM sessions s JOIN transcripts t "
+            "ON t.session_id = s.id AND t.kind = 'top-level' "
+            "ORDER BY s.last_ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        ends: list[int] = []
+        for row in rows:
+            result = self._decode_digest(row)
+            if result is None:
+                continue
+            last = [turn.ctx for turn in result.turns if turn.turn_index > 0]
+            if last:
+                ends.append(last[-1])
+        if not ends:
+            return None
+        ends.sort()
+        mid = len(ends) // 2
+        return ends[mid] if len(ends) % 2 else round((ends[mid - 1] + ends[mid]) / 2)
+
+    def cache_write_split(self, days: int, now: datetime) -> tuple[int, int]:
+        """``(cc_5m, cc_1h)``: the cache-write tokens of top-level
+        transcripts written in the ``days`` days up to ``now`` (UTC
+        dates, both ends included), split by the lifetime they were
+        written at. ``(0, 0)`` when there are none."""
+        today = now.astimezone(timezone.utc).date()
+        row = self._connection().execute(
+            "SELECT COALESCE(SUM(a.cc_5m), 0), COALESCE(SUM(a.cc_1h), 0) "
+            "FROM turns_agg a JOIN transcripts t ON t.id = a.transcript_id "
+            "WHERE t.kind = 'top-level' AND a.day BETWEEN ? AND ?",
+            ((today - timedelta(days=days)).isoformat(), today.isoformat()),
+        ).fetchone()
+        return int(row[0]), int(row[1])
+
     def turns_for_session(self, session_id: str) -> dict | None:
         """Per-turn ``ctx``/cache/marker series for one session's
         top-level transcript, decoded from its stored ``digest_blob``
         (the same lossless ``cache.result_from_jsonable`` decode
         ``service/rebuild.py`` uses) -- never re-parses a file, never
         exposes ``path`` or any other store-internal column. ``None``
-        when the session has no stored top-level transcript.
+        when the session has no stored top-level transcript. A session
+        Claude Code moved to another folder can hold two (the old path's,
+        missing, and the new one's): the present one is read.
 
         ``turn_series``: one ``[turn_index, ctx, cache_creation_tokens,
         is_recache, preceding_primary]`` row per priced turn
@@ -1464,14 +1691,12 @@ class Store:
         ``turn_series``'s volume).
         """
         row = self._connection().execute(
-            "SELECT digest_blob FROM transcripts WHERE session_id = ? AND kind = 'top-level'",
+            "SELECT digest_blob FROM transcripts WHERE session_id = ? AND kind = 'top-level' "
+            "ORDER BY (missing_since IS NOT NULL), id",
             (session_id,),
         ).fetchone()
-        if row is None:
-            return None
-        try:
-            result = result_from_jsonable(json.loads(decode_digest_blob(row["digest_blob"])))
-        except (KeyError, TypeError, ValueError, zlib.error):
+        result = self._decode_digest(row)
+        if result is None:
             return None
 
         turn_series: list[list] = []
@@ -2417,6 +2642,37 @@ def read_tip_feedback(path: str | Path) -> dict[tuple[str, str], dict]:
         return {}
 
 
+def read_mod_events(path: str | Path) -> list[dict]:
+    """:meth:`Store.read_mod_events`, read from the store at ``path``
+    without writing to it, for the CLI's own reports. Empty when there is
+    no store, it predates the table, or it can't be read."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    conn.row_factory = sqlite3.Row
+    try:
+        with contextlib.closing(conn):
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if "mod_events" not in tables:
+                return []
+            # A store from before v11 has no receipt columns: read them as NULL.
+            have = {row[1] for row in conn.execute("PRAGMA table_info(mod_events)")}
+            receipt = ", ".join(c if c in have else f"NULL AS {c}" for c in ("instructed", "referenced", "before", "after"))
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added, "
+                    f"{receipt} FROM mod_events ORDER BY ts, id"
+                )
+            ]
+    except sqlite3.Error:
+        return []
+
+
 def read_predictions(path: str | Path) -> list[dict]:
     """Every row in the ``predictions`` table, newest first, read from
     the store at ``path`` without writing to it (EST-P5/P4) -- the
@@ -2474,6 +2730,7 @@ __all__ = [
     "decode_digest_blob",
     "read_session_marks",
     "read_tip_feedback",
+    "read_mod_events",
     "read_predictions",
     "read_entrypoint_counts",
 ]

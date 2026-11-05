@@ -688,7 +688,10 @@ class TopologyStats:
             self.composition_attachment_tokens.setdefault(kind, []).append(
                 self.calibration.text_tokens(attachment_chars, model)
             )
-            compaction_count = sum(1 for e in result.events if e.kind == EventKind.COMPACT_SUMMARY)
+            # The summary a continued session inherits is the other session's.
+            compaction_count = sum(
+                1 for e in result.events if e.kind == EventKind.COMPACT_SUMMARY and not e.detail.get("inherited")
+            )
             self.composition_compactions.setdefault(kind, []).append(compaction_count)
 
     # -- (i) redundant work ---------------------------------------------------

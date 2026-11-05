@@ -20,6 +20,12 @@ machine. These are `~/.claude/projects/<slug>/<session>.jsonl`, plus
 `<session>/workflows/wf_*.json`. It groups the lines Claude wrote into
 priced replies and turns them into token, cache and cost figures.
 
+A fork or a continued session starts its file with lines copied from the
+session it came from (its replies, its subagents' files and its
+compaction boundaries). The source can sit in another project folder. The
+copies are left out, so the same reply is not priced twice, and a copy
+whose usage was zeroed is not priced at all.
+
 It never sends your data anywhere: no telemetry, no update check. The
 one command that goes online is `update`, which runs pip to download the
 new version from GitHub. The dashboard's server makes no outbound

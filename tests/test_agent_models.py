@@ -151,8 +151,8 @@ def test_fixture_flags_exactly_three_groups(fixture_stats):
     # Verdicts in order, then the biggest saving first. The row key is the
     # type and the verdict: general-purpose has a row for two verdicts.
     assert [row[0] for row in table.rows] == [
-        "general-purpose:inherited",
         "workflow-subagent:inherited",
+        "general-purpose:inherited",
         "general-purpose:decide-apply",
     ]
     assert table.value_labels == {
@@ -168,9 +168,12 @@ def test_fixture_workflow_row_is_the_four_implementers_and_a_fixer(fixture_stats
     assert row["roles"] == "implement 4, fix 1"
     assert row["model"] == OPUS
     assert round(row["cost_usd"], 2) == 15.43
-    assert round(row["cost_on_sonnet_usd"], 2) == 12.52
-    assert round(row["saving_usd"], 2) == 2.91
+    # Sonnet 5.5 is half of Opus 5.5 on every rate, cache reads included,
+    # so moving the reply to Sonnet saves exactly half of what it cost.
+    assert round(row["cost_on_sonnet_usd"], 2) == 7.71
+    assert round(row["saving_usd"], 2) == 7.71
     assert row["saving_pct"] == pytest.approx(100 * row["saving_usd"] / row["cost_usd"])
+    assert round(row["saving_pct"]) == 50
     assert row["workflow_runs"] == 1
     assert row["later_compliant"] == 25
     assert row["env_var_set"] == "no"
@@ -181,8 +184,9 @@ def test_fixture_general_purpose_writers_are_inherited(fixture_stats):
     assert row["runs"] == 3
     assert row["roles"] == "fix 2, other 1"
     assert round(row["cost_usd"], 2) == 13.31
-    assert round(row["cost_on_sonnet_usd"], 2) == 9.68
-    assert round(row["saving_usd"], 2) == 3.63
+    assert round(row["cost_on_sonnet_usd"], 2) == 6.66
+    assert round(row["saving_usd"], 2) == 6.66
+    assert round(row["saving_pct"]) == 50
     assert row["workflow_runs"] == 0
     assert row["later_compliant"] == 0
 
