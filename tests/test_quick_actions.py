@@ -398,6 +398,19 @@ def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
     assert "Main session on sonnet" in result["summary"]
 
 
+def test_an_ignored_main_session_card_leaves_opusplan_leading(tmp_path):
+    """Ignoring the sonnet change drops only that value: the opusplan offer,
+    a different value for the same setting, still leads."""
+    model = _full_model()
+    model.sections.append(NS(key="plan_handoff", tables=[_table("plan_handoff_summary", [
+        {"scope": "main sessions", "build_usd": 100.0, "build_usd_sonnet": 60.0},
+    ])]))
+    model.recommendations = [_main_sonnet_card(value="sonnet")]
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert "Main session on opusplan" in result["summary"]
+    assert "Main session on sonnet" not in result["summary"]
+
+
 def test_models_check_claims_the_three_agent_model_rule_ids(tmp_path):
     result = qa.run("models", _ctx(tmp_path))
     assert set(_AGENT_MODEL_IDS) <= set(result["rule_ids"])
