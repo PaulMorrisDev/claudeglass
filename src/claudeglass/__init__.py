@@ -461,7 +461,9 @@ __version__ = "0.16.0"
 #: code (not documents, reports, ledgers or scratch files), which
 #: ``agent-decide-apply`` counts instead of every write. A pre-47 digest has
 #: none, so every transcript is re-read.
-PARSER_VERSION = 47
+#: Bumped to 48: ``Turn.coach_tips``, the hints whose own tip words the
+#: reply holds. A pre-48 digest has none, so every transcript is re-read.
+PARSER_VERSION = 48
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

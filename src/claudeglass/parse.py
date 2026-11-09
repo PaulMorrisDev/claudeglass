@@ -314,7 +314,7 @@ from . import prompt_shape
 from . import shell_reads
 from . import shell_writes
 from . import testrun
-from .capture_catalogue import DOC_SUFFIXES, ERROR_BLOCKED_PATTERN, REPORT_THRESHOLDS, TIP_TEXT_MARKER
+from .capture_catalogue import DOC_SUFFIXES, ERROR_BLOCKED_PATTERN, REPORT_THRESHOLDS, TIP_TEXT_MARKER, tips_in
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -976,6 +976,8 @@ class _PendingTurn:
     #: Prompting-habits addition: the reply's last text block holds a
     #: ClaudeGlass tip (``Turn.coach_tip``).
     last_text_tip: bool = False
+    #: The hints whose own tip words it holds (``Turn.coach_tips``).
+    last_text_tips: tuple[str, ...] = ()
     #: Parser-signals addition (see model.py's ``Turn.reply_asked``/
     #: ``admit_candidate``/``admit_caught``/``tip_disowned``): what the
     #: reply's text blocks said, as yes/no only. The reply's last text
@@ -1302,6 +1304,7 @@ def _merge_content_blocks(
             text = block["text"]
             pending.last_text_tail = text[-_TAG_TAIL_CHARS:]
             pending.last_text_tip = _TIP_TEXT in text
+            pending.last_text_tips = tips_in(text)
             pending.last_text_reminder = capture_tags.carries_reminder(text)
             # Parser-signals addition: what the block says, kept as yes/no.
             pending.last_text_asked = prompt_shape.ends_on_question(text)
@@ -1496,6 +1499,7 @@ def _merge_content_blocks(
                     # The tip a ``plan_fresh_early`` note asked to end the
                     # plan with: the plan is the reply that shows it.
                     pending.last_text_tip = pending.tip_carried = True
+                    pending.last_text_tips = tips_in(plan)
         elif name == "AskUserQuestion" and isinstance(tool_use_id, str) and tool_use_id:
             if capture_tags.asks_for_feedback(tool_input):
                 pending.feedback_asks.append(tool_use_id)
@@ -2661,6 +2665,7 @@ def _finalize_turn(
         preceding_denials=preceding_denials,
         reply_asked=pending.last_text_asked and not pending.is_synthetic,
         coach_tip=pending.last_text_tip,
+        coach_tips=pending.last_text_tips,
         admit_candidate=pending.admit_found,
         admit_caught=("user" if pending.after_challenge else "self") if pending.admit_found else "",
         tip_disowned=pending.tip_carried and pending.tip_disown_found,

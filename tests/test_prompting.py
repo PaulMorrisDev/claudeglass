@@ -5,6 +5,7 @@ rules, what each cost, and the section built from them.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 
@@ -958,10 +959,16 @@ def _note_line(kind, minute):
 _TIP = "> **ClaudeGlass tip:** Plan it."
 
 
+def _own_tip(hint: str) -> str:
+    """The hint's tip as Claude copies it: the template with its blanks filled."""
+    text = cat.COACHING_TIP[hint]
+    return f"{cat.TIP_LABEL} " + re.sub(r"\{[a-z_]+\}", "12k", text)
+
+
 def test_the_tips_table_counts_the_notes_claude_passed_on(tmp_path):
     session = _session(tmp_path, [
         *_START,
-        _said("how is it going?", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_TIP}"),
+        _said("how is it going?", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_own_tip('drip_feed')}"),
         _said("and now?", 4), _note_line("drip_feed", 4), _reply(5, edit=True),
         _said("next", 6), _note_line("quiet_output", 6), _reply(7),
         # A note of a retired hint in an old transcript is recognised, but not counted: no tip is asked for.
@@ -978,16 +985,28 @@ def test_the_tips_table_counts_the_notes_claude_passed_on(tmp_path):
     assert tips.rows == [["drip_feed", 2, 1, 50.0, "relayed 1 of 2", 0, None, 1, 0, 0, 0, 0, None]]
 
 
+def test_a_note_counts_as_relayed_only_when_its_own_tip_text_is_in_the_reply(tmp_path):
+    # report_reread's tip is written under a plan_fresh note: a tip, but not the one that note asked for.
+    session = _session(tmp_path, [
+        *_START,
+        _said("go", 2), _note_line("report_reread", 2), _note_line("plan_fresh", 2),
+        _reply(3, edit=True, say=f"Done.\n\n{_own_tip('report_reread')}"),
+        _said("again", 4), _note_line("drip_feed", 4), _reply(5, edit=True, say=f"Done.\n\n{_TIP}"),
+    ])
+    assert session.notes == {"report_reread": 1, "plan_fresh": 1, "drip_feed": 1}
+    assert session.tips == {"report_reread": 1}
+
+
 def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_path):
     # drip_feed asks for its tip every time: shown twice in three (one of them
     # called a misfire). big_paste leaves it to Claude's judgement; cold_return asks for its tip every time.
-    disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_TIP}"
+    disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_own_tip('drip_feed')}"
     session = _session(tmp_path, [
         *_START,
-        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_TIP}"),
+        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_own_tip('drip_feed')}"),
         _said("two", 4), _note_line("drip_feed", 4), _reply(5, edit=True, say=disowned),
         _said("three", 6), _note_line("drip_feed", 6), _reply(7, edit=True),
-        _said("four", 8), _note_line("big_paste", 8), _reply(9, say=f"Done.\n\n{_TIP}"),
+        _said("four", 8), _note_line("big_paste", 8), _reply(9, say=f"Done.\n\n{_own_tip('big_paste')}"),
         _said("five", 10), _note_line("big_paste", 10), _reply(11),
         _said("six", 12), _note_line("cold_return", 12), _reply(13),
     ])
@@ -1005,7 +1024,7 @@ def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_p
 
 
 def test_a_misfire_belongs_to_the_message_the_note_came_with(tmp_path):
-    disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_TIP}"
+    disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_own_tip('drip_feed')}"
     session = _session(tmp_path, [
         *_START,
         _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True),
@@ -1348,7 +1367,7 @@ def _glass_present(session_id, surface="desktop", minute=0):
 def test_tips_shown_adds_the_ones_glass_showed_to_the_ones_claude_passed_on(tmp_path):
     session = _session(tmp_path, [
         *_START,
-        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_TIP}"),
+        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_own_tip('drip_feed')}"),
         _said("two", 4), _reply(5, edit=True),
     ])
     events = [

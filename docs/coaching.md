@@ -95,7 +95,9 @@ in it. Two kinds of note differ only in the first sentence:
   `drip_feed`, `status_poll`, `cold_return`, `split_run`,
   `plan_fresh` and `plan_fresh_early`. For `plan_fresh` Claude writes it before it starts building; for
   `plan_fresh_early`, as the last line of the plan it submits. A plan that
-  ends with the tip counts as having relayed it.
+  ends with the tip counts as having relayed it. A tip counts as relayed
+  only when the reply holds that note's own words, so a different tip in the
+  same reply doesn't count for it.
 - **Judged.** The note tells Claude to write the tip only if it judges
   your message calls for it, and to say nothing otherwise: `big_paste`
   (is most of it a log or a file?).
@@ -596,8 +598,12 @@ in its own panes instead of through Claude, so they cost no context and
 Claude never has to remember to pass them on. For a session the mod is
 running in (it says so in `mod/present/<session id>.json`; see
 [Your hooks](hooks.md#with-the-claudeglass-mod)), the hook leaves out
-`cold_return`, `status_poll`, `drip_feed`, `big_paste`,
-`split_run`, `plan_fresh` and the rating reminder. It keeps `plan_fresh_early`,
+`cold_return`, `status_poll`, `drip_feed`, `big_paste` and `plan_fresh`,
+but only while that file lists `"hint"` under `shows`: the mod writes it
+once the hint line has been drawn, and the desktop app never draws it. A file
+with no `shows` (an older mod) keeps today's rule, and one with an empty
+`shows` leaves all of them with the hook. `report_reread`, `split_run` and the
+rating reminder stay with the hook, as do `plan_fresh_early`,
 `quiet_output`, the plan check, the facts line and the capture note, since
 those steer Claude or feed a skill.
 
@@ -614,6 +620,11 @@ shows on the status line when you approve the plan, until the next reply or a
 summary. The rating reminder is not the mod's: the capture hook gives it as a
 note on your next message, at most once every `coaching_rating_rest_days`
 days, whether or not the mod runs.
+
+When several messages are sent at once, the hook calls run side by side:
+the one that takes `coach-state.json.claim` (made next to the state file, and
+taken over once it is more than 5 seconds old) picks the hint, and the others
+skip only the hint, so one message draws one note per hint.
 
 A hint left out is not marked as shown, so it comes back at once if the mod
 stops. A mod that is missing, closed, or whose file is unreadable or stale

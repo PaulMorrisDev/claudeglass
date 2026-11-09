@@ -24,6 +24,7 @@ hook script needs (:func:`export_json`).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
@@ -1589,6 +1590,32 @@ COACHING_TIP = {
         "more than the work needs. Giving the next agent a smaller piece of the work keeps each run short."
     ),
 }
+
+
+def tip_words(text: str) -> str:
+    """``text`` as a tip is compared: the quote mark, bold, italics and
+    backticks Claude may add or drop taken out, spaces collapsed."""
+    return " ".join(text.replace(">", " ").replace("*", "").replace("_", " ").replace("`", "").split())
+
+
+def _tip_fragment(template: str) -> str:
+    """The fixed words of a tip that identify it: its longest stretch
+    between the ``{placeholders}`` that are filled in per session."""
+    parts = re.split(r"\{[a-z_]+\}", template)
+    return tip_words(max(parts, key=lambda part: len(tip_words(part))))
+
+
+#: Each tip's own words, by hint (:func:`_tip_fragment` of
+#: :data:`COACHING_TIP`). A reply passes a note's tip on when it holds these
+#: words, not when it holds any tip (``Turn.coach_tips``).
+TIP_FRAGMENTS = {hint: _tip_fragment(tip) for hint, tip in COACHING_TIP.items()}
+
+
+def tips_in(text: str) -> tuple[str, ...]:
+    """The hints whose own tip words (:data:`TIP_FRAGMENTS`) ``text`` holds."""
+    words = tip_words(text)
+    return tuple(hint for hint, fragment in TIP_FRAGMENTS.items() if fragment in words)
+
 
 #: ``split_run``'s ``{why}``, by what was noted since the last time it was
 #: told: ``compaction`` (an agent run summarised its own context part-way

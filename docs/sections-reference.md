@@ -1674,8 +1674,8 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   tokens of earlier work were in context.
 - `prompting_tips` — only once there are coaching notes: one row per hint
   whose note asks Claude to pass a tip on, hints told to pass it on every
-  time first, with `notes`, `shown` (replies to that message that ended
-  with a ClaudeGlass tip: those Claude passed on), `shown_pct`, `relay`
+  time first, with `notes`, `shown` (replies to that message that hold
+  that note's own tip words, `Turn.coach_tips`: those Claude passed on), `shown_pct`, `relay`
   (`relayed N of M` for a hint
   whose note orders the tip every time, so a tip left out was missed;
   `judged relevant N of M` for

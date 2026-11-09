@@ -1423,6 +1423,9 @@ class Turn:
     #: whether it showed a ClaudeGlass tip.
     reply_asked: bool = False
     coach_tip: bool = False
+    #: The hints whose own tip words (``capture_catalogue.TIP_FRAGMENTS``)
+    #: that reply's last text block, or the plan it submitted, holds.
+    coach_tips: tuple[str, ...] = ()
     #: Parser-signals addition (see module docstring): how the preceding
     #: message you typed reads, and the messages you typed while Claude
     #: was working since the previous reply.

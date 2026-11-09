@@ -3445,7 +3445,7 @@ def _heartbeat_path(base: Path, session: str = "s1") -> Path:
     return _config_dir(base) / cat.MOD_DIR / cat.MOD_PRESENT_DIR / f"{session}.json"
 
 
-def _heartbeat(base: Path, entries=None, *, schema: int = 1) -> Path:
+def _heartbeat(base: Path, entries=None, *, schema: int = 1, shows=None) -> Path:
     """One ``<config dir>/mod/present/<session id>.json`` per entry of ``entries`` (a session id to the
     seconds before :data:`NOW` the mod last saw it; default: session ``s1``, just now). Returns the first."""
     paths = []
@@ -3453,7 +3453,10 @@ def _heartbeat(base: Path, entries=None, *, schema: int = 1) -> Path:
         path = _heartbeat_path(base, sid)
         path.parent.mkdir(parents=True, exist_ok=True)
         seen = (NOW - timedelta(seconds=ago)).timestamp()
-        path.write_text(json.dumps({"schema": schema, "session_id": sid, "seen": seen}), encoding="utf-8")
+        body = {"schema": schema, "session_id": sid, "seen": seen}
+        if shows is not None:
+            body["shows"] = shows
+        path.write_text(json.dumps(body), encoding="utf-8")
         # The hook remembers the file by its time and size, and a rewrite of the same length in the same clock
         # tick can keep both: give each write its own time, as the mod's writes a minute apart have.
         _HEARTBEAT_WRITES[0] += 1
@@ -3578,6 +3581,75 @@ def test_a_moved_hint_is_left_out_while_the_mod_runs_for_the_session(tmp_path, s
     assert _hint_of(scene) not in _rested(tmp_path)
     _heartbeat_path(tmp_path).unlink()
     assert _kind(_coach(tmp_path, payload)) == _hint_of(scene)
+
+
+@pytest.mark.parametrize("scene", list(_MOVED_SCENES))
+def test_a_mod_that_shows_no_hint_leaves_the_moved_hints_with_the_hook(tmp_path, scene):
+    # Desktop never renders the hint line: the mod writes ``shows: []`` and the hook keeps the hints.
+    payload = _MOVED_SCENES[scene](tmp_path)
+    _heartbeat(tmp_path, shows=[])
+    assert _kind(_coach(tmp_path, payload)) == _hint_of(scene)
+
+
+@pytest.mark.parametrize("scene", list(_MOVED_SCENES))
+def test_a_mod_that_lists_hint_takes_the_moved_hints(tmp_path, scene):
+    payload = _MOVED_SCENES[scene](tmp_path)
+    _heartbeat(tmp_path, shows=["hint"])
+    assert _coach(tmp_path, payload) == ""
+    assert _hint_of(scene) not in _rested(tmp_path)
+
+
+def test_a_present_file_from_an_older_mod_without_shows_keeps_the_whole_set_moved(tmp_path):
+    _heartbeat(tmp_path)
+    assert "shows" not in json.loads(_heartbeat_path(tmp_path).read_text(encoding="utf-8"))
+    assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset(cat.MOVED_TO_MOD)
+    _heartbeat(tmp_path, shows=["status"])
+    assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset()
+
+
+def _claim_path(base: Path) -> Path:
+    return _config_dir(base) / (cat.COACH_STATE_FILE + ".claim")
+
+
+def test_a_call_that_finds_the_claim_held_draws_no_hint_and_leaves_the_state_alone(tmp_path):
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    assert _coach(tmp_path, payload) == ""
+    assert _rested(tmp_path) == {} and claim.exists()
+    # The holder's own claim is released at the end of its call: the next call draws the note, once.
+    claim.unlink()
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+    assert not claim.exists()
+    assert _coach(tmp_path, payload) == ""
+
+
+def test_a_claim_older_than_five_seconds_is_taken_over(tmp_path):
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    old = datetime.now(timezone.utc).timestamp() - 10
+    os.utime(claim, (old, old))
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+    assert not claim.exists()
+
+
+def test_two_calls_racing_in_one_message_draw_one_note(tmp_path, monkeypatch):
+    # The second call starts while the first still holds the claim (between its read and its write).
+    payload = _scene_big_paste(tmp_path)
+    inner = []
+    real = HOOK._gate
+
+    def gate(*args, **kwargs):
+        if not inner:
+            inner.append(_coach(tmp_path, payload))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(HOOK, "_gate", gate)
+    outer = _coach(tmp_path, payload)
+    assert inner == [""] and _kind(outer) == "big_paste"
 
 
 def _stale(base):

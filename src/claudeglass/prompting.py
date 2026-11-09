@@ -606,6 +606,15 @@ def _stops(top, prices: _Prices) -> list[tuple[datetime, float]]:
     return out
 
 
+def _relayed(kind: str, turn) -> bool:
+    """Whether the reply passes on the tip of a ``kind`` note: its own
+    words are in it. A hint with no tip words of its own (an older format)
+    counts on the tip label alone."""
+    if kind in catalogue.TIP_FRAGMENTS:
+        return kind in turn.coach_tips
+    return turn.coach_tip
+
+
 def _tips(top) -> tuple[Counter, Counter, Counter]:
     """Coaching notes that asked for a tip, by hint, and of those, the ones
     whose message Claude answered with a tip, and the ones where it said
@@ -631,7 +640,7 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
             if n and turn.human_prompt_chars is not None:
                 break
             cycle.append(turn)
-        if any(turn.coach_tip for turn in cycle):
+        if any(_relayed(kind, turn) for turn in cycle):
             tips[kind] += 1
         if any(turn.tip_disowned for turn in cycle):
             misfires[kind] += 1
