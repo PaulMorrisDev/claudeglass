@@ -6484,16 +6484,19 @@ def test_recommendations_prompt_bundles_the_open_fixes_and_leaves_out_ignored_on
         resp, body = handle.get_json("/api/recommendations/prompt")
         assert resp.status == 200 and body["ok"] is True
         data = body["data"]
-        assert set(data) == {"prompt", "files", "cards", "left_out"}
+        assert set(data) == {"prompt", "files", "other", "cards", "left_out"}
         _resp, rows = handle.get_json("/api/recommendations")
         [card] = [row for row in rows["data"] if row["id"] == "agent-model-inherited"]
         prompt = card["fixes"][0]["prompt"]
-        assert data["cards"] >= 1 and prompt in data["prompt"]
-        assert data["prompt"].startswith("## ")
+        from claudeglass.fixes import _bundle_body
+
+        body_text = _bundle_body(prompt)[0]
+        assert data["cards"] >= 1 and body_text in data["prompt"]
+        assert "\n## " in data["prompt"]
 
         handle.post_json("/api/recommendations/ignore", {"keys": [card["key"]], "ignored": True})
         _resp, body = handle.get_json("/api/recommendations/prompt")
-        assert prompt not in body["data"]["prompt"]
+        assert body_text not in body["data"]["prompt"]
     finally:
         handle.close()
         handle.store.close()

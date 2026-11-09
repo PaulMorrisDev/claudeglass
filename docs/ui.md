@@ -825,7 +825,10 @@ detail scrolls) and the one picked.
   copies every to-do card's prompt for that project in one go, under a
   header line per file (`/api/recommendations/prompt`). It leaves out
   ignored cards, cards whose fix has landed (the "fixed" variant),
-  unconfirmed changes and managed settings. With no project picked there
+  information-only cards, unconfirmed changes and managed settings. The
+  prompt states its closing (show me the diff, restart) once, and the
+  note beside the button counts files and prompts that touch no file
+  apart. With no project picked there
   is no button.
 - A notice above the inbox says the figures are provisional while a
   baseline capture window is open. An id the window doesn't have opens

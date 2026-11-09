@@ -71,6 +71,13 @@ CRITIQUE_PLAN_LINE = "Before you show me a plan, critique it for gaps and doubts
 #: unlike a setting, it only lasts as long as Claude is told to keep it,
 #: so this asks Claude to check with you where it should live before
 #: acting on it.
+#: The closing every setting-change prompt ends with. A project's bundle
+#: strips it from each prompt and states it once (:func:`_bundle_body`).
+_SETTING_TAIL = (
+    "Before saving, restate the change in one sentence and show me the diff. Claude Code will ask my "
+    "permission to edit files under .claude; that is expected. Change nothing else. " + PROMPT_RESTART
+)
+
 PROMPT_SCOPE = (
     "Before you start, use AskUserQuestion to ask me where this should apply: this session only, this "
     "project (one line in its CLAUDE.md), or all my projects (one line in ~/.claude/CLAUDE.md). For a "
@@ -1110,10 +1117,7 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
     lines += [text for text in (caveat, change.note) if text]
     if change.unconfirmed:
         lines.append("Its effect on startup size isn't documented, so it's an experiment.")
-    lines.append(
-        "Before saving, restate the change in one sentence and show me the diff. Claude Code will ask "
-        "my permission to edit files under .claude; that is expected. Change nothing else. " + PROMPT_RESTART
-    )
+    lines.append(_SETTING_TAIL)
     return "\n".join(lines)
 
 
@@ -1329,23 +1333,56 @@ def fix_file(rec: Recommendation, change: SettingChange | None) -> str | None:
     return label.format(agent=rec.agent_type or "this agent")
 
 
+#: Groups that are not a file: they are listed last and not counted as files.
+_NO_FILE = frozenset({"No file", "Other"})
+
+_BUNDLE_OPEN = (
+    "ClaudeGlass, which tracks my token use, found these open fixes for this project. "
+    "Work through them file by file, in the order below."
+)
+_BUNDLE_CLOSE = (
+    "For each file, restate its changes in one sentence each and show me one diff before saving; where an "
+    "item says to show me the diff, that one diff covers it. Claude Code will ask my permission to edit "
+    "files under .claude; that is expected. Change nothing beyond the fixes listed here. Once everything "
+    "is saved, remind me once to restart Claude Code so it picks up the changes."
+)
+
+
+def _bundle_body(prompt: str) -> tuple[str, bool]:
+    """A fix prompt without its own closing (the setting tail, the scope
+    question, the restart reminder), which :func:`project_prompt` states
+    once; also whether it ended with the scope question."""
+    body = prompt.removesuffix("\n" + _SETTING_TAIL)
+    scoped = body.endswith(" " + PROMPT_SCOPE)
+    body = body.removesuffix(" " + PROMPT_SCOPE).removesuffix(" " + PROMPT_RESTART)
+    return body, scoped
+
+
 def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()) -> dict:
     """One prompt for every open fix in ``recs`` (a project's, in service
-    order), each fix's own prompt verbatim under a ``## file`` header.
-    Leaves out cards in ``skip_keys`` (ignored), cards whose fix has
-    landed (the ``fixed`` variant), unconfirmed changes and managed
-    settings; ``left_out`` counts each of those cards once."""
+    order): an opening line, each fix's own prompt minus its closing under
+    a ``## file`` header, then one shared closing. Leaves out cards in
+    ``skip_keys`` (ignored), cards whose fix has landed (the ``fixed``
+    variant), information-only cards, unconfirmed changes and managed
+    settings; ``left_out`` counts the cards with at least one fix left
+    out for each reason (a card can count in both ``cards`` and
+    ``left_out``). ``other`` counts the prompts under a group that is not
+    a file."""
     groups: dict[str, list[str]] = {}
-    left_out = {"fixed": 0, "unconfirmed": 0, "managed": 0}
+    left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0}
     cards = 0
+    scoped = False
     for rec in recs:
         if rec.key in skip_keys:
             continue
         if rec.variant == "fixed":
             left_out["fixed"] += 1
             continue
+        if rec.severity == "info":
+            left_out["info"] += 1
+            continue
         used = False
-        reason = None
+        reasons: set[str] = set()
         for fix in rec.fixes:
             change = next(
                 (c for c in rec.changes if fix["key"] == c.key and (fix["agent"] or "") == (c.agent or "")),
@@ -1356,24 +1393,53 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             if not fix["prompt"]:
                 continue
             if change is not None and change.unconfirmed:
-                reason = reason or "unconfirmed"
+                reasons.add("unconfirmed")
                 continue
             file = fix_file(rec, change)
             if file is None:
-                reason = reason or "managed"
+                reasons.add("managed")
                 continue
+            body, stripped_scope = _bundle_body(fix["prompt"])
+            scoped = scoped or stripped_scope
             prompts = groups.setdefault(file, [])
-            if fix["prompt"] not in prompts:
-                prompts.append(fix["prompt"])
+            if body not in prompts:
+                prompts.append(body)
             used = True
         if used:
             cards += 1
-        elif reason:
+        for reason in reasons:
             left_out[reason] += 1
-    prompt = "\n\n".join(f"## {file}\n\n" + "\n\n".join(prompts) for file, prompts in groups.items())
+    # A workflow card's "A or B" label joins the exact file a setting change
+    # already named; it checks both files itself.
+    for label in list(groups):
+        alts = label.split(" or ")
+        if len(alts) > 1:
+            target = next((a for a in alts if a in groups), None)
+            if target:
+                groups[target].extend(p for p in groups.pop(label) if p not in groups[target])
+    ordered = [f for f in groups if f not in _NO_FILE] + [f for f in groups if f in _NO_FILE]
+    if not ordered:
+        return {
+            "prompt": "",
+            "files": [],
+            "other": 0,
+            "cards": cards,
+            "left_out": left_out,
+        }
+    parts = [_BUNDLE_OPEN]
+    parts += [f"## {file}\n\n" + "\n\n".join(groups[file]) for file in ordered]
+    parts.append(_BUNDLE_CLOSE)
+    if scoped:
+        parts.append(
+            "For the items that set a standing rule rather than edit a file: "
+            + PROMPT_SCOPE[0].lower()
+            + PROMPT_SCOPE[1:]
+            + " Ask once for all of them."
+        )
     return {
-        "prompt": prompt,
-        "files": [{"file": file, "fixes": len(prompts)} for file, prompts in groups.items()],
+        "prompt": "\n\n".join(parts),
+        "files": [{"file": f, "fixes": len(groups[f])} for f in ordered if f not in _NO_FILE],
+        "other": sum(len(groups[f]) for f in ordered if f in _NO_FILE),
         "cards": cards,
         "left_out": left_out,
     }

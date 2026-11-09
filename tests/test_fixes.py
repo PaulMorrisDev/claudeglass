@@ -491,6 +491,7 @@ def _agent_change(agent="x", key="model", **kw):
 
 
 def test_project_prompt_groups_changes_under_one_header_per_file():
+    from claudeglass import fixes as fixes_mod
     from claudeglass.fixes import project_prompt
     from claudeglass.model import SettingChange
 
@@ -505,10 +506,11 @@ def test_project_prompt_groups_changes_under_one_header_per_file():
     assert out["files"] == [{"file": "~/.claude/agents/x.md", "fixes": 2}, {"file": "~/.claude/settings.json", "fixes": 2}]
     assert out["cards"] == 4
     for rec in (a, b, c, d):
-        assert rec.fixes[0]["prompt"] in out["prompt"]
+        assert fixes_mod._bundle_body(rec.fixes[0]["prompt"])[0] in out["prompt"]
 
 
 def test_project_prompt_leaves_out_fixed_unconfirmed_managed_and_skipped_cards():
+    from claudeglass import fixes as fixes_mod
     from claudeglass.fixes import project_prompt
     from claudeglass.model import SettingChange
 
@@ -519,23 +521,98 @@ def test_project_prompt_leaves_out_fixed_unconfirmed_managed_and_skipped_cards()
     ignored = _bundle_rec("ign", [_agent_change("y")])
     out = project_prompt([keep, fixed, unconfirmed, managed, ignored], {"ign"})
     assert out["cards"] == 1
-    assert out["left_out"] == {"fixed": 1, "unconfirmed": 1, "managed": 1}
-    assert keep.fixes[0]["prompt"] in out["prompt"]
+    assert out["left_out"] == {"fixed": 1, "info": 0, "unconfirmed": 1, "managed": 1}
+    assert fixes_mod._bundle_body(keep.fixes[0]["prompt"])[0] in out["prompt"]
     for rec in (fixed, unconfirmed, managed, ignored):
-        assert rec.fixes[0]["prompt"] not in out["prompt"]
+        assert fixes_mod._bundle_body(rec.fixes[0]["prompt"])[0] not in out["prompt"]
 
 
 def test_project_prompt_states_identical_scope_prompts_once():
+    from claudeglass import fixes as fixes_mod
     from claudeglass.fixes import project_prompt
 
     a = _bundle_rec("agent-model-inherited-a", rec_id="agent-model-inherited", agent_type="a")
     b = _bundle_rec("agent-model-inherited-b", rec_id="agent-model-inherited", agent_type="b")
     assert a.fixes[0]["prompt"] == b.fixes[0]["prompt"]
     out = project_prompt([a, b])
-    assert out["prompt"].count(a.fixes[0]["prompt"]) == 1
-    assert out["prompt"].startswith("## CLAUDE.md (Claude asks which)\n\n")
+    body = fixes_mod._bundle_body(a.fixes[0]["prompt"])[0]
+    assert out["prompt"].count(body) == 1
+    assert out["prompt"].startswith(fixes_mod._BUNDLE_OPEN)
+    assert "\n\n## CLAUDE.md (Claude asks which)\n\n" in out["prompt"]
     assert out["files"] == [{"file": "CLAUDE.md (Claude asks which)", "fixes": 1}]
     assert out["cards"] == 2
+
+
+def test_project_prompt_leaves_out_info_cards():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.fixes import project_prompt
+
+    info = _bundle_rec("info", [_agent_change("w", "omitClaudeMd")], rec_id="spawn-claude-md")
+    info.severity = "info"
+    out = project_prompt([info])
+    assert out["prompt"] == "" and out["cards"] == 0
+    assert out["left_out"]["info"] == 1
+    assert fixes_mod._bundle_body(info.fixes[0]["prompt"])[0] not in out["prompt"]
+
+
+def test_project_prompt_states_the_closing_once():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.fixes import PROMPT_RESTART, project_prompt
+    from claudeglass.model import SettingChange
+
+    recs = [
+        _bundle_rec("a", [_agent_change("x", "model")]),
+        _bundle_rec("c", [SettingChange(key="model", value="sonnet")]),
+        _bundle_rec("agent-model-inherited-a", rec_id="agent-model-inherited", agent_type="a"),
+        _bundle_rec("wasted", rec_id="wasted-turns"),
+    ]
+    out = project_prompt(recs)
+    text = out["prompt"]
+    assert text.count("Change nothing else") == 0
+    assert text.count("Change nothing beyond") == 1
+    assert text.count(PROMPT_RESTART) == 0
+    assert text.count("remind me once to restart") == 1
+    assert text.count("use AskUserQuestion") == 1
+    assert len(text) < sum(len(r.fixes[0]["prompt"]) for r in recs)
+    assert fixes_mod._bundle_body(recs[0].fixes[0]["prompt"])[0] in text
+
+
+def test_project_prompt_puts_a_workflow_card_under_the_matching_settings_header():
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    c = _bundle_rec("c", [SettingChange(key="model", value="sonnet")])
+    w = _bundle_rec("w", rec_id="compaction-churn")
+    out = project_prompt([c, w])
+    assert out["prompt"].count("## ~/.claude/settings.json") == 1
+    assert "## ~/.claude/settings.json or" not in out["prompt"]
+    assert out["files"] == [{"file": "~/.claude/settings.json", "fixes": 2}]
+
+
+def test_project_prompt_does_not_count_no_file_cards_as_files():
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    limit = _bundle_rec("l", rec_id="limit-pressure")
+    c = _bundle_rec("c", [SettingChange(key="model", value="sonnet")])
+    out = project_prompt([limit, c])
+    assert out["files"] == [{"file": "~/.claude/settings.json", "fixes": 1}]
+    assert out["other"] == 1
+    assert out["prompt"].index("## No file") > out["prompt"].index("## ~/.claude/settings.json")
+
+
+def test_project_prompt_counts_a_partly_included_card():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    mix = _bundle_rec(
+        "mix", [_agent_change("x"), SettingChange(key="disallowedTools", value=["Skill(a)"], unconfirmed=True)]
+    )
+    out = project_prompt([mix])
+    assert out["cards"] == 1 and out["left_out"]["unconfirmed"] == 1
+    skipped = [f for f in mix.fixes if f["key"] == "disallowedTools"]
+    assert skipped and fixes_mod._bundle_body(skipped[0]["prompt"])[0] not in out["prompt"]
 
 
 def test_project_prompt_is_empty_without_open_fixes():
@@ -544,8 +621,9 @@ def test_project_prompt_is_empty_without_open_fixes():
     assert project_prompt([]) == {
         "prompt": "",
         "files": [],
+        "other": 0,
         "cards": 0,
-        "left_out": {"fixed": 0, "unconfirmed": 0, "managed": 0},
+        "left_out": {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0},
     }
 
 

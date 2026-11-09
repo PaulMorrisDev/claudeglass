@@ -898,16 +898,24 @@ carry no ignore fields.
 One prompt for a project's open fixes. Query: the same window and
 `project` as `GET /api/recommendations`.
 
-`data`: `{"prompt", "files": [{"file", "fixes"}, ...], "cards",
-"left_out": {"fixed", "unconfirmed", "managed"}}`. `prompt` joins each
-fix's own `prompt` (as in `/api/recommendations`), word for word, under a
-`## <file>` header line per file, files in the order the cards come; a
-prompt two cards share appears once. `files` lists those headers with the
-number of prompts under each, `cards` counts the cards that contributed,
-and `left_out` counts the cards left out, each under its first reason: its
-fix has landed (the `fixed` variant, which the browser never sees),
-it is an unconfirmed change, or it is a managed setting. Ignored cards
-are left out and not counted. `prompt` is `""` when nothing is open.
+`data`: `{"prompt", "files": [{"file", "fixes"}, ...], "other", "cards",
+"left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
+one opening line, then each fix's own `prompt` (as in
+`/api/recommendations`) minus its own closing (the "show me the diff"
+and restart lines, or the question about where a standing rule applies)
+under a `## <file>` header line per file, files in the order the cards
+come, then one shared closing that states those once. A prompt two cards
+share appears once, and a workflow card whose files are "A or B" sits
+under the matching exact file when there is one. Groups that are no file
+(`## No file`, `## Other`) come last. `files` lists only the groups that
+are a file, with the number of prompts under each; `other` counts the
+prompts under the rest. `cards` counts the cards that contributed.
+`left_out` counts the cards with at least one fix left out for each
+reason, so a card can count in both `cards` and `left_out`: its fix has
+landed (the `fixed` variant, which the browser never sees), it is shown
+for information only (a change that isn't safe to make without checking
+first), it is an unconfirmed change, or it is a managed setting. Ignored
+cards are left out and not counted. `prompt` is `""` when nothing is open.
 
 ### `POST /api/recommendations/ignore`
 

@@ -2269,6 +2269,7 @@ def test_recommendations_offer_one_prompt_per_project() -> None:
     assert "if (state.project)" in body
     assert 'withWindow("/api/recommendations/prompt")' in body
     assert "Copy one prompt for every open fix in" in body
+    assert '" open fix"' in body and '" file"' in body and "data.other" in body
 
 
 def test_tables_say_which_actions_they_feed() -> None:

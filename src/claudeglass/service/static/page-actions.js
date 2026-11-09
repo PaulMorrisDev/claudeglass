@@ -480,9 +480,14 @@ export function renderRecommendations(panel) {
       var data = result.body && result.body.ok === true ? result.body.data : null;
       if (!data || !data.prompt || !container.isConnected) return;
       var name = projectName(state.project);
+      var files = data.files.length;
+      var text =
+        data.cards + (data.cards === 1 ? " open fix" : " open fixes") + " for " + name +
+        (files ? ", in " + files + (files === 1 ? " file" : " files") : "") +
+        (data.other ? (files ? ", plus " : ", ") + data.other + " with no file to edit" : "") + ".";
       bundleContainer.appendChild(
         el("div", { class: "bundle-row" }, [
-          el("p", { class: "notes", text: data.cards + " open fixes for " + name + ", in " + data.files.length + " files." }),
+          el("p", { class: "notes", text: text }),
           copyPromptButton(data.prompt, null, "Copy prompt", "Copy one prompt for every open fix in " + name),
         ])
       );
