@@ -461,3 +461,102 @@ def test_plan_rounds_prompt_asks_for_a_critique_before_a_plan_and_names_the_plac
     assert rows["How to undo it"] == fixes_mod._SCOPE_UNDO_TEXT
     # It adds a standing instruction at a scope you pick: the scope note.
     assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE
+
+
+def _bundle_rec(key, changes=(), *, rec_id="model-tier", variant="", scope="user", agent_type=None):
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id=rec_id,
+        variant=variant,
+        severity="advice",
+        category="settings",
+        title="Title",
+        why="Because.",
+        action="Do it.",
+        scope=scope,
+        agent_type=agent_type,
+        changes=list(changes),
+        key=key,
+    )
+    fixes_mod.attach_fixes([rec])
+    return rec
+
+
+def _agent_change(agent="x", key="model", **kw):
+    from claudeglass.model import SettingChange
+
+    return SettingChange(target="agent", key=key, agent=agent, value="sonnet", **kw)
+
+
+def test_project_prompt_groups_changes_under_one_header_per_file():
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    a = _bundle_rec("a", [_agent_change("x", "model")])
+    b = _bundle_rec("b", [_agent_change("x", "effort")])
+    c = _bundle_rec("c", [SettingChange(key="model", value="sonnet")])
+    d = _bundle_rec("d", [SettingChange(key="env.MAX_THINKING_TOKENS", value="8000")])
+    out = project_prompt([a, b, c, d])
+    assert out["prompt"].count("## ~/.claude/agents/x.md") == 1
+    assert out["prompt"].count("## ~/.claude/settings.json") == 1
+    assert "## ~/.claude/settings.json (env block)" not in out["prompt"]
+    assert out["files"] == [{"file": "~/.claude/agents/x.md", "fixes": 2}, {"file": "~/.claude/settings.json", "fixes": 2}]
+    assert out["cards"] == 4
+    for rec in (a, b, c, d):
+        assert rec.fixes[0]["prompt"] in out["prompt"]
+
+
+def test_project_prompt_leaves_out_fixed_unconfirmed_managed_and_skipped_cards():
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    keep = _bundle_rec("keep", [_agent_change("x")])
+    fixed = _bundle_rec("fixed", rec_id="agent-model-asked", variant="fixed")
+    unconfirmed = _bundle_rec("unc", [SettingChange(key="disallowedTools", value=["Skill(a)"], unconfirmed=True)])
+    managed = _bundle_rec("man", [SettingChange(key="model", value="sonnet", scope="managed")])
+    ignored = _bundle_rec("ign", [_agent_change("y")])
+    out = project_prompt([keep, fixed, unconfirmed, managed, ignored], {"ign"})
+    assert out["cards"] == 1
+    assert out["left_out"] == {"fixed": 1, "unconfirmed": 1, "managed": 1}
+    assert keep.fixes[0]["prompt"] in out["prompt"]
+    for rec in (fixed, unconfirmed, managed, ignored):
+        assert rec.fixes[0]["prompt"] not in out["prompt"]
+
+
+def test_project_prompt_states_identical_scope_prompts_once():
+    from claudeglass.fixes import project_prompt
+
+    a = _bundle_rec("agent-model-inherited-a", rec_id="agent-model-inherited", agent_type="a")
+    b = _bundle_rec("agent-model-inherited-b", rec_id="agent-model-inherited", agent_type="b")
+    assert a.fixes[0]["prompt"] == b.fixes[0]["prompt"]
+    out = project_prompt([a, b])
+    assert out["prompt"].count(a.fixes[0]["prompt"]) == 1
+    assert out["prompt"].startswith("## CLAUDE.md (Claude asks which)\n\n")
+    assert out["files"] == [{"file": "CLAUDE.md (Claude asks which)", "fixes": 1}]
+    assert out["cards"] == 2
+
+
+def test_project_prompt_is_empty_without_open_fixes():
+    from claudeglass.fixes import project_prompt
+
+    assert project_prompt([]) == {
+        "prompt": "",
+        "files": [],
+        "cards": 0,
+        "left_out": {"fixed": 0, "unconfirmed": 0, "managed": 0},
+    }
+
+
+def test_every_file_workflow_prompt_resolves_to_a_file():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    for variant_id in fixes_mod._WORKFLOW_PROMPTS:
+        rec_id, _, variant = variant_id.partition(":")
+        if fixes_mod._NOTE_OVERRIDES.get(rec_id) == "scope":
+            continue
+        rec = Recommendation(id=rec_id, variant=variant, agent_type="x")
+        label = fixes_mod.fix_file(rec, None)
+        assert label and label != "Other", variant_id

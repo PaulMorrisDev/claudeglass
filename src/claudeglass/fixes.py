@@ -1281,6 +1281,104 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     return [fix]
 
 
+#: The file a workflow prompt (no setting to change) works in, keyed like
+#: :data:`_WORKFLOW_PROMPTS`; :func:`fix_file` uses it to group a
+#: project's fixes under one header per file. A scope prompt (see
+#: :data:`_NOTE_OVERRIDES`) is not listed: Claude asks which CLAUDE.md.
+_FIX_FILE: dict[str, str] = {
+    "spawn-shared-claude-md": "CLAUDE.md files and agent files",
+    "baseline-bloat": "MCP servers and plugins (~/.claude.json, .mcp.json, settings.json)",
+    "mcp-unused-server": "MCP servers (~/.claude.json, .mcp.json)",
+    "agent-report-size": "~/.claude/agents/{agent}.md or .claude/agents/{agent}.md",
+    "subagent-volume": "~/.claude/agents/{agent}.md or .claude/agents/{agent}.md",
+    "spawn-cost": "~/.claude/agents/{agent}.md or .claude/agents/{agent}.md",
+    "ttl-switch": "~/.claude/settings.json or .claude/settings.json",
+    "compaction-churn": "~/.claude/settings.json or .claude/settings.json",
+    "compaction-window": "~/.claude/settings.json or .claude/settings.json",
+    "effort-mismatch": "~/.claude/settings.json or .claude/settings.json",
+    "model-tier": "~/.claude/settings.json or .claude/settings.json",
+    "env-attribution-deprecated": "~/.claude/settings.json or .claude/settings.json",
+    "plan-handoff": "~/.claude/CLAUDE.md",
+    "plan-handoff:fuller_plans": "~/.claude/CLAUDE.md",
+    "run-split": "~/.claude/CLAUDE.md",
+    "hook-failures": "Hook scripts and settings.json",
+    "hook-block-resent": "Hook scripts and settings.json",
+    "hook-context-carry": "Hook scripts and settings.json",
+    "spawn-tools-list:workflow-script": "Workflow scripts, agent files and skills",
+    "agent-model-asked": "Workflow scripts, agent files and skills",
+    "pricing-coverage": "pricing.toml",
+    "discovery-share": "No file",
+    "limit-pressure": "No file",
+}
+
+
+def fix_file(rec: Recommendation, change: SettingChange | None) -> str | None:
+    """The file a fix works in, as the header :func:`project_prompt` groups
+    it under; ``None`` when it belongs in no file group (a managed setting,
+    where Claude only drafts a note to your administrator)."""
+    if change is not None:
+        if (change.scope or rec.scope) == "managed":
+            return None
+        return _where(change, rec.scope)[0].removesuffix(" (env block)")
+    variant_id = f"{rec.id}:{rec.variant}" if rec.variant else rec.id
+    if _NOTE_OVERRIDES.get(rec.id) == "scope":
+        return "CLAUDE.md (Claude asks which)"
+    label = _FIX_FILE.get(variant_id, _FIX_FILE.get(rec.id))
+    if label is None:
+        return "Other"
+    return label.format(agent=rec.agent_type or "this agent")
+
+
+def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()) -> dict:
+    """One prompt for every open fix in ``recs`` (a project's, in service
+    order), each fix's own prompt verbatim under a ``## file`` header.
+    Leaves out cards in ``skip_keys`` (ignored), cards whose fix has
+    landed (the ``fixed`` variant), unconfirmed changes and managed
+    settings; ``left_out`` counts each of those cards once."""
+    groups: dict[str, list[str]] = {}
+    left_out = {"fixed": 0, "unconfirmed": 0, "managed": 0}
+    cards = 0
+    for rec in recs:
+        if rec.key in skip_keys:
+            continue
+        if rec.variant == "fixed":
+            left_out["fixed"] += 1
+            continue
+        used = False
+        reason = None
+        for fix in rec.fixes:
+            change = next(
+                (c for c in rec.changes if fix["key"] == c.key and (fix["agent"] or "") == (c.agent or "")),
+                None,
+            )
+            if rec.changes and change is None:
+                continue
+            if not fix["prompt"]:
+                continue
+            if change is not None and change.unconfirmed:
+                reason = reason or "unconfirmed"
+                continue
+            file = fix_file(rec, change)
+            if file is None:
+                reason = reason or "managed"
+                continue
+            prompts = groups.setdefault(file, [])
+            if fix["prompt"] not in prompts:
+                prompts.append(fix["prompt"])
+            used = True
+        if used:
+            cards += 1
+        elif reason:
+            left_out[reason] += 1
+    prompt = "\n\n".join(f"## {file}\n\n" + "\n\n".join(prompts) for file, prompts in groups.items())
+    return {
+        "prompt": prompt,
+        "files": [{"file": file, "fixes": len(prompts)} for file, prompts in groups.items()],
+        "cards": cards,
+        "left_out": left_out,
+    }
+
+
 def attach_fixes(recommendations: list[Recommendation]) -> None:
     for rec in recommendations:
         rec.fixes = build_fixes(rec)
@@ -1300,8 +1398,10 @@ __all__ = [
     "build_fixes",
     "command_for",
     "explainer_for",
+    "fix_file",
     "fix_note",
     "profile_change_where",
     "profile_prompt",
+    "project_prompt",
     "prompt_for",
 ]

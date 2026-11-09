@@ -22,7 +22,8 @@ Two kinds of route:
   ``POST`` routes): read straight from ``store``'s own read queries --
   cheap, always fresh.
 - **Report-backed** (``/api/ttl``, ``/api/config-diff``,
-  ``/api/recommendations``, ``/api/report.{md,html,json}``): rebuild a
+  ``/api/recommendations``, ``/api/recommendations/prompt``,
+  ``/api/report.{md,html,json}``): rebuild a
   :class:`~claudeglass.corpus.Corpus` from the store's own
   ``transcripts.digest_blob`` rows via ``service.rebuild.corpus_from_store``
   (a sibling package's module -- imported lazily, inside the function
@@ -3644,6 +3645,28 @@ def make_handler(
             row.update(mark)
         return _ok(rows)
 
+    def route_recommendations_prompt(store, query, body):
+        """One prompt for the open fixes of the project asked about
+        (``fixes.project_prompt``): ignored cards, landed fixes,
+        unconfirmed changes and managed settings are left out."""
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        model = _get_report_model(*window, project)
+        marks = ignores.annotate(
+            model.recommendations,
+            ignores.load(options.config_dir),
+            ignores.active_profile(options.config_dir),
+            _str_query(query, "project"),
+        )
+        skip = {rec.key for rec, mark in zip(model.recommendations, marks) if mark.get("ignored")}
+        from ..fixes import project_prompt
+
+        return _ok(project_prompt(model.recommendations, skip))
+
     def route_recommendations_ignore(store, query, body):
         """Ignore recommendations, or stop ignoring them: ``{"keys":
         [...], "ignored": true|false}``. Each key must be a recommendation
@@ -3715,6 +3738,7 @@ def make_handler(
         "/api/waste": route_waste,
         "/api/config-diff": route_config_diff,
         "/api/recommendations": route_recommendations,
+        "/api/recommendations/prompt": route_recommendations_prompt,
         "/api/diagnostics": route_diagnostics,
         "/api/profile-schema": route_profile_schema,
         "/api/claude-md": route_claude_md,

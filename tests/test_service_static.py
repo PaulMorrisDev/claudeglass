@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import backtest, capture_catalogue, capture_view, footprint, helptext, quick_actions, setup_status, skills_review
+from claudeglass import backtest, capture_catalogue, capture_view, fixes, footprint, helptext, quick_actions, setup_status, skills_review
 from claudeglass.config import CaptureConfig, Config
 from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing
@@ -1360,6 +1360,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
     canned["/api/config-diff"] = to_jsonable(config_section) if config_section is not None else {"tables": []}
 
     canned["/api/recommendations"] = [to_jsonable(rec) for rec in report.recommendations]
+    canned["/api/recommendations/prompt"] = fixes.project_prompt(report.recommendations)
     canned["/api/diagnostics"] = to_jsonable(helptext.diagnostics_table(report.diagnostics))
     canned["/api/profile-schema"] = {
         "settings": [{"key": key, "label": key, "kind": spec.kind} for key, spec in profile_schema.SETTINGS_ALLOWLIST.items()],
@@ -2257,6 +2258,17 @@ def test_recommendations_are_fetched_once_per_window() -> None:
     assert "state.recommendationPromises[key]" in _function_source(app_js, "loadRecommendations")
     assert "state.recommendationPromises[scopeKey()]" in _function_source(app_js, "scopeChanged")
     assert "state.recommendationPromises = {}" in _function_source(app_js, "redrawEverything")
+
+
+def test_recommendations_offer_one_prompt_per_project() -> None:
+    """With a project picked, one Copy prompt above the inbox copies every
+    open fix, from the server's bundle (it alone knows which cards have
+    landed); with none picked it fetches nothing, and it has no Apply."""
+    body = _function_source(_app_js(), "renderRecommendations")
+    assert 'id: "recommendations-bundle"' in body
+    assert "if (state.project)" in body
+    assert 'withWindow("/api/recommendations/prompt")' in body
+    assert "Copy one prompt for every open fix in" in body
 
 
 def test_tables_say_which_actions_they_feed() -> None:

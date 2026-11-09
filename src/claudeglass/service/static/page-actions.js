@@ -448,8 +448,10 @@ export function renderRecommendations(panel) {
   clear(panel);
   viewIntro(panel, "actions/recommendations");
   var noticeContainer = el("div", { id: "recommendations-notice" });
+  var bundleContainer = el("div", { id: "recommendations-bundle" });
   var container = el("div", { id: "recommendations-list" });
   panel.appendChild(noticeContainer);
+  panel.appendChild(bundleContainer);
   panel.appendChild(container);
   container.appendChild(loadingNode("Loading recommendations", "rows"));
 
@@ -470,6 +472,22 @@ export function renderRecommendations(panel) {
       );
     }
   });
+
+  // With a project picked, one prompt for all its open fixes (built on the
+  // server: it knows which cards are ignored or already fixed).
+  if (state.project) {
+    fetchJson(withWindow("/api/recommendations/prompt")).then(function (result) {
+      var data = result.body && result.body.ok === true ? result.body.data : null;
+      if (!data || !data.prompt || !container.isConnected) return;
+      var name = projectName(state.project);
+      bundleContainer.appendChild(
+        el("div", { class: "bundle-row" }, [
+          el("p", { class: "notes", text: data.cards + " open fixes for " + name + ", in " + data.files.length + " files." }),
+          copyPromptButton(data.prompt, null, "Copy prompt", "Copy one prompt for every open fix in " + name),
+        ])
+      );
+    });
+  }
 
   // The key asked for before the list arrives is kept until it does.
   var wanted = state.params.id || null;
@@ -682,12 +700,12 @@ function shortSaving(text) {
   return String(text).replace(/\s+(over|across) the (period|spawns) in this report\.?$/, "");
 }
 
-function copyPromptButton(prompt, agent) {
-  return button("Copy", {
+function copyPromptButton(prompt, agent, text, label) {
+  return button(text || "Copy", {
     variant: "quiet",
     icon: "prompt",
     class: "action-copy",
-    label: "Copy prompt for " + agentName(agent),
+    label: label || "Copy prompt for " + agentName(agent),
     action: function () {
       copyToClipboard(prompt).then(function (ok) {
         toast(ok ? "Prompt copied. Paste it into Claude Code." : "Couldn't copy. Open the change below and copy it from there.", { tone: ok ? "success" : "warning" });

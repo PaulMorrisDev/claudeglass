@@ -821,6 +821,12 @@ detail scrolls) and the one picked.
   no longer lead with an ignored card. The Overview's
   available saving comes from the report's tables, so it still counts
   them.
+- **Copy prompt** (with a project picked): one button above the inbox
+  copies every to-do card's prompt for that project in one go, under a
+  header line per file (`/api/recommendations/prompt`). It leaves out
+  ignored cards, cards whose fix has landed (the "fixed" variant),
+  unconfirmed changes and managed settings. With no project picked there
+  is no button.
 - A notice above the inbox says the figures are provisional while a
   baseline capture window is open. An id the window doesn't have opens
   the first item with a note.

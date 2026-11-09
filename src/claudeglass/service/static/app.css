@@ -1264,6 +1264,14 @@ tr:focus-visible {
   font-size: var(--text-sm);
 }
 
+/* The project's one prompt above the recommendations inbox. */
+.bundle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
 /* -- tables ----------------------------------------------------------------- */
 
 /* Every table is a data grid (grid.js); its scroll box draws the frame. */

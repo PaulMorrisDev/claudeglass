@@ -629,7 +629,7 @@ whose first reply falls in the window are kept, so the days add up to
 
 `/api/ttl`, `/api/carry`, `/api/compaction-sim`, `/api/plan-handoff`,
 `/api/model-swap`, `/api/waste`, `/api/config-diff`, `/api/recommendations`,
-`/api/diagnostics`, `/api/claude-md`, `/api/claude-md/<id>`,
+`/api/recommendations/prompt`, `/api/diagnostics`, `/api/claude-md`, `/api/claude-md/<id>`,
 `/api/skills`, `/api/profile-goals` (with `goal`), `/api/quick-actions`,
 `/api/quick-actions/<id>`, `POST /api/whatif` and
 `/api/report.md`/`.html`/`.json` (below) all accept the same windowing
@@ -892,6 +892,22 @@ project, or `null`) and `ignored_before` (`{"ignored_at", "changes":
 suggests something else, so it shows again; else `null`). The list
 itself is never filtered, and `/api/report.json` and the CLI reports
 carry no ignore fields.
+
+### `GET /api/recommendations/prompt`
+
+One prompt for a project's open fixes. Query: the same window and
+`project` as `GET /api/recommendations`.
+
+`data`: `{"prompt", "files": [{"file", "fixes"}, ...], "cards",
+"left_out": {"fixed", "unconfirmed", "managed"}}`. `prompt` joins each
+fix's own `prompt` (as in `/api/recommendations`), word for word, under a
+`## <file>` header line per file, files in the order the cards come; a
+prompt two cards share appears once. `files` lists those headers with the
+number of prompts under each, `cards` counts the cards that contributed,
+and `left_out` counts the cards left out, each under its first reason: its
+fix has landed (the `fixed` variant, which the browser never sees),
+it is an unconfirmed change, or it is a managed setting. Ignored cards
+are left out and not counted. `prompt` is `""` when nothing is open.
 
 ### `POST /api/recommendations/ignore`
 

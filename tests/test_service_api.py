@@ -6476,3 +6476,30 @@ def test_project_files_route_is_empty_without_any_read_file(server):
     resp, payload = server.get_json("/api/project-files")
     assert resp.status == 200
     assert payload["data"]["files"] == [] and payload["data"]["total"] == 0 and payload["data"]["named"] == 0
+
+
+def test_recommendations_prompt_bundles_the_open_fixes_and_leaves_out_ignored_ones(tmp_path, monkeypatch):
+    handle = _start_agent_model_server(tmp_path, monkeypatch)
+    try:
+        resp, body = handle.get_json("/api/recommendations/prompt")
+        assert resp.status == 200 and body["ok"] is True
+        data = body["data"]
+        assert set(data) == {"prompt", "files", "cards", "left_out"}
+        _resp, rows = handle.get_json("/api/recommendations")
+        [card] = [row for row in rows["data"] if row["id"] == "agent-model-inherited"]
+        prompt = card["fixes"][0]["prompt"]
+        assert data["cards"] >= 1 and prompt in data["prompt"]
+        assert data["prompt"].startswith("## ")
+
+        handle.post_json("/api/recommendations/ignore", {"keys": [card["key"]], "ignored": True})
+        _resp, body = handle.get_json("/api/recommendations/prompt")
+        assert prompt not in body["data"]["prompt"]
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_recommendations_prompt_rejects_a_bad_window(server):
+    resp, body = server.get_json("/api/recommendations/prompt?since=not-a-date")
+    assert resp.status == 400
+    assert body["error"]["code"] == "bad_request"
