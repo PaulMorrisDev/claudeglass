@@ -968,6 +968,51 @@ def test_a_read_only_agent_keeps_its_severity():
     assert "move the rules it needs" not in rec.why
 
 
+def test_a_read_only_tools_line_keeps_its_severity_even_after_a_stray_edit():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 1
+    snap = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Grep"]}})
+    rec = next(r for r in _recs(_report(acc), snapshot=snap) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+    assert "edited files" not in rec.why
+    assert "move the rules it needs" not in rec.why
+
+
+def _with_spawn_write(report, agent_type, mean_first_call):
+    """Add the agents section's spawn-write row spawn-cost is gated on."""
+    report.sections.append(
+        Section(
+            key="agents",
+            title="Agents",
+            tables=[
+                Table(
+                    name="topology_spawn_write",
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="spawns", label="Spawns"),
+                        Column(key="mean_first_call", label="Mean first call"),
+                    ],
+                    rows=[[agent_type, 20, mean_first_call]],
+                )
+            ],
+        )
+    )
+    return report
+
+
+def test_a_tools_line_already_in_place_stops_the_generic_spawn_cost_card_too():
+    def fired(snap):
+        report = _with_spawn_write(_report(_diet_acc("searcher")), "searcher", 50_000.0)
+        recs = _recs(report, snapshot=snap, units=Units())
+        return {r.id for r in recs if r.agent_type == "searcher"}
+
+    # Control: with no line, the tools list is offered and spawn-cost would fire without it.
+    assert "spawn-tools-list" in fired(_snapshot({"searcher": {"source": "user"}}))
+    snap = _snapshot({"searcher": {"source": "user", "tools": ["Read", "Grep", "Bash"]}})
+    ids = fired(snap)
+    assert "spawn-tools-list" not in ids and "spawn-cost" not in ids
+
+
 def test_a_writer_that_reports_it_did_not_use_the_rules_keeps_its_severity():
     acc = _acc("reviewer")
     acc.edit_spawns = 8
@@ -984,9 +1029,15 @@ def test_a_task_prompt_mostly_from_one_run_names_it_and_its_share():
     acc = _acc("reviewer", claude_md=0.0, task=6000.0)
     acc.run_keys = ["wf_big"] * 8 + ["wf_a", "wf_b"]
     rec = _task_prompt_rec(acc)
-    assert "80% of it came from wf_big" in rec.why
+    assert "80% of it came from one workflow run, wf_big." in rec.why
     row = _row_values(_report(acc), "agent_startup", "agent_startup_breakdown", "reviewer")
     assert row["task_prompt_top_run"] == "wf_big" and row["task_prompt_top_share"] == pytest.approx(80.0)
+
+
+def test_a_task_prompt_mostly_from_one_session_says_session():
+    acc = _acc("reviewer", claude_md=0.0, task=6000.0)
+    acc.run_keys = ["sess-big"] * 8 + ["sess-a", "sess-b"]
+    assert "80% of it came from one session, sess-big." in _task_prompt_rec(acc).why
 
 
 def test_a_task_prompt_spread_over_many_runs_names_none():

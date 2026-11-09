@@ -2052,14 +2052,17 @@ def _rule_spawn_parts(
 
         # The tools list comes first: the skills list and MCP cards below
         # point at it, and the generic spawn-cost card leaves the agent alone
-        # once it is given.
+        # once it is given or a tools line is already in place.
         tools_card = _tools_list_card(report, th, agent_type, snapshot, units)
-        if tools_card is not None:
-            out.append(tools_card)
-            covered.add(agent_type)
-        diet_row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
         current_tools = _agent_current(agent_type, "tools", snapshot)
         known_line = known_tools_line(current_tools)
+        if tools_card is not None:
+            out.append(tools_card)
+        # A known tools line means the tools lever is already used, and
+        # spawn-cost's removable_tools is measured on spawns from before it.
+        if tools_card is not None or known_line is not None:
+            covered.add(agent_type)
+        diet_row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
         diet_rare = _split_names(current_diet(diet_row, current_tools).get("rare_tools")) if diet_row is not None else []
 
         claude_md_total = part(agent_type, "claude_md")
@@ -2089,7 +2092,7 @@ def _rule_spawn_parts(
             # saying it didn't, the card stays but asks for the rules to move first.
             edited = used(agent_type, "edit_spawns")
             edited = edited if isinstance(edited, int) else 0
-            writer = bool(set(known_line or []) & _FILE_TOOLS) or edited > 0
+            writer = bool(set(known_line) & _FILE_TOOLS) if known_line is not None else edited > 0
             writer_first = writer and rules_unused == 0
             why = f"Each {agent_type} spawn starts with about {claude_md:,.0f} tokens of CLAUDE.md files and memory."
             if writer_first:
@@ -2348,7 +2351,7 @@ def _rule_spawn_parts(
             top_share = part(agent_type, "task_prompt_top_share")
             top_run = part(agent_type, "task_prompt_top_run")
             concentrated = (
-                f" {top_share:.0f}% of it came from {top_run}."
+                f" {top_share:.0f}% of it came from one {'workflow run' if str(top_run).startswith('wf_') else 'session'}, {top_run}."
                 if _is_number(top_share) and top_share >= _TASK_PROMPT_TOP_SHARE_PCT and top_run
                 else ""
             )

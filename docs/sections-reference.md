@@ -2624,15 +2624,16 @@ none writes a file.
   line, a built-in type, a workflow agent or a new agent file, every tool
   counts as present and the card is as it was.
 - `spawn-claude-md` for a writer agent (its `tools:` line names Edit,
-  Write, MultiEdit or NotebookEdit, or its own spawns called one; no
-  `tools:` line counts only through the spawns) with no run saying it
+  Write, MultiEdit or NotebookEdit; with no `tools:` line, its own spawns
+  called one. A known read-only line stays read-only after a stray edit) with no run saying it
   didn't use CLAUDE.md is kept at `info`. Its why and fix start with
   "move the rules it needs into its agent file first, then omitClaudeMd",
   and say how many of its spawns edited files. Read-only agents are
   unchanged. Its `saving_usd` is the figure in `estimated_saving`.
 - `spawn-task-prompt` is gated and priced on the mean task prompt. When one
   workflow run (or session, outside workflows) holds half or more of the
-  task prompt tokens, the why names it and its share.
+  task prompt tokens, the why names it ("one workflow run, wf_..." or "one
+  session, ...") and its share.
 - `spawn-unused-skills` offers the tools list first (leave Skill off it)
   and keeps `disallowedTools: Skill` as the narrow alternative. When the
   tools list card leaves Skill out, its saving is a part of that card's,
@@ -2656,7 +2657,9 @@ none writes a file.
   task prompt: its start is Claude Code's own system prompt and tool
   definitions, which a tools list trims. `Explore`, `Plan` and
   `claude-code-guide`, which the tools list card leaves alone, get no
-  `spawn-cost` card unless an agent file of yours defines them. The
+  `spawn-cost` card unless an agent file of yours defines them. An agent
+  whose `tools:` line is already known gets no `spawn-cost` card either: its
+  rarely used tools were measured on spawns from before the line. The
   baseline card suggests shortening an agent's `description:` only when
   your own agents add 1,000 tokens or more to every session.
 - `spawn-claude-md`, `spawn-unused-skills` and `spawn-task-prompt` are

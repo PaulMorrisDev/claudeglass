@@ -724,9 +724,11 @@ class _AgentStartupAcc:
     #: it ran under, or its session when it ran outside one (``""`` when
     #: neither is known).
     run_keys: list[str] = field(default_factory=list)
-    #: The first turn's model's 5-minute cache-write list price (USD per
-    #: million tokens), per measured spawn whose model is on the rate card,
-    #: with the model family it came from beside it.
+    #: The first turn's model's cache-write list price (USD per million
+    #: tokens), weighted by that call's own 5-minute/1-hour split, or the
+    #: 5-minute price when the call recorded no split, per measured spawn
+    #: whose model is on the rate card, with the model family it came from
+    #: beside it.
     write_prices: list[float] = field(default_factory=list)
     write_price_models: list[str] = field(default_factory=list)
     #: ... and the same model's cache-read price, beside each write price

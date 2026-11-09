@@ -871,7 +871,7 @@ read files): it holds back suggesting `omitClaudeMd: true` once at least as many
 an agent's reported runs said they did use the rules as said they
 didn't (a tie holds it back), and otherwise cites how many said they
 didn't. An agent that edits files (its tools list names Edit, Write,
-MultiEdit or NotebookEdit, or its spawns called one) with no run saying
+MultiEdit or NotebookEdit; with no tools line, its spawns called one) with no run saying
 it didn't use them gets the card at `info`, telling you to move the
 rules it needs into its agent file first.
 
