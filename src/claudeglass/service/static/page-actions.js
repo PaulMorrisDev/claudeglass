@@ -481,10 +481,18 @@ export function renderRecommendations(panel) {
       if (!data || !data.prompt || !container.isConnected) return;
       var name = projectName(state.project);
       var files = data.files.length;
-      var text =
-        data.cards + (data.cards === 1 ? " open fix" : " open fixes") + " for " + name +
-        (files ? ", in " + files + (files === 1 ? " file" : " files") : "") +
-        (data.other ? (files ? ", plus " : ", ") + data.other + " with no file to edit" : "") + ".";
+      var other = data.other || 0;
+      // Fixes are counted in the same unit throughout: the prompts in files, then the ones with no file.
+      var inFiles = data.files.reduce(function (n, f) {
+        return n + f.fixes;
+      }, 0);
+      var fixes = function (n) {
+        return n + (n === 1 ? " open fix" : " open fixes");
+      };
+      var text = files
+        ? fixes(inFiles) + " for " + name + ", in " + files + (files === 1 ? " file" : " files") +
+          (other ? ", plus " + other + " with no file to edit" : "") + "."
+        : fixes(other) + " for " + name + ", with no file to edit.";
       bundleContainer.appendChild(
         el("div", { class: "bundle-row" }, [
           el("p", { class: "notes", text: text }),

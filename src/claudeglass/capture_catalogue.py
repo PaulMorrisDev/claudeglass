@@ -316,7 +316,7 @@ WEB_TOOLS = ("WebFetch", "WebSearch")
 BIG_OUTPUT_TOOLS = ("Read", *WEB_TOOLS)
 
 #: Tools that start an agent or a workflow, which the coaching entry also
-#: watches (:data:`COACHING_TOOLS`) for ``report_reread``. Their results are
+#: watches (:data:`COACHING_TOOLS`) for ``split_run``. Their results are
 #: a report or a launch message, not a file or a search: neither the
 #: ``big_output`` note nor ``quiet_output`` applies to them, and the hook
 #: skips both for these names. (``AGENT_TOOLS``, further down, is the
@@ -635,7 +635,7 @@ COACH_STATE_FILE = "coach-state.json"
 #: Tools whose results a coaching note may follow: every tool the
 #: large-output note watches, ``ExitPlanMode`` for an approved plan, and
 #: the tools that start an agent or a workflow (:data:`SPAWN_TOOLS`) for
-#: ``report_reread`` and ``split_run``. The matcher is these names joined by ``|``;
+#: ``split_run``. The matcher is these names joined by ``|``;
 #: ``update --finish`` and ``capture connect`` rewrite it
 #: (``hook_health.plan_capture``, through ``cli._capture_settings_step``).
 #: A settings.json written before the shell and MCP tools were dropped
@@ -643,9 +643,7 @@ COACH_STATE_FILE = "coach-state.json"
 #: any tool not named here.
 COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode", *SPAWN_TOOLS)
 
-#: The live hints: after a tool result (the first three, and
-#: ``report_reread``, after an agent or a workflow was started in the
-#: background) and when you send a message (the rest), most useful first
+#: The live hints: after a tool result (the first three) and when you send a message (the rest), most useful first
 #: when more than one applies. ``split_run`` is the exception that comes
 #: from two places: after an agent or workflow call, and with a background
 #: task's finishing message, because what it reports (an agent run that

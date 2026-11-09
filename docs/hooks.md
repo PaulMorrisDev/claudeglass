@@ -107,9 +107,9 @@ sessions no `Glob` result passed 18,200, so neither could reach the size a
 note applies to, yet `Grep` was the call the hook most often made Claude
 wait on. With coaching
 notes on, it is also registered for the `Agent` and `Workflow` tools, so
-it can tell you what each report from background work will cost to
-answer when you start it in a long session. It reads no size from their
-results and never says a large result is large. It is also registered
+it can keep the newest reply's time and, when `split_run` is on (it is
+off now), say that an agent run was too big for one task. It reads no size
+from their results and never says a large result is large. It is also registered
 for SubagentStop, where it prints nothing: it only notes that an agent
 run ended too big for one task, so the main session's next hook can say
 so. How long a call takes depends on the machine, and Python's own start

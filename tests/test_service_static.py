@@ -4343,3 +4343,12 @@ def test_the_more_detail_copy_keeps_to_the_dashboards_copy_rules() -> None:
         assert sentence.endswith("."), sentence
         title = helptext.TABLE_COPY[targets[key].split(".", 1)[1]].title
         assert label.lower() in title.lower() or title.lower() in label.lower(), (label, title)
+
+
+def test_the_project_bundle_line_counts_fixes_in_one_unit() -> None:
+    """The line sums the prompts under each file, not the cards, and the ones
+    with no file are named in the same unit."""
+    actions = _static_text("page-actions.js")
+    assert "data.cards +" not in actions
+    assert "n + f.fixes" in actions
+    assert "with no file to edit" in actions
