@@ -761,7 +761,8 @@ def _explain_run_split(rec: Recommendation, ctx: _Context) -> None:
 def _explain_hook_block_resent(rec: Recommendation, ctx: _Context) -> None:
     rec.estimated_saving = ctx.money(rec.saving_usd, prefix="About ")
     rec.saving_basis = ctx.basis(
-        "The replies that read these blocks, each block taking its share of the reply after it. At list price."
+        "The replies spent on the blocks that were sent again, each block taking its share of the reply after it. "
+        "Not a net figure. At list price."
     )
 
 

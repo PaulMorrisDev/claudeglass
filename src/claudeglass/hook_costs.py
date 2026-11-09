@@ -650,6 +650,12 @@ def _rule_hook_block_resent(report: ReportModel, th: HookThresholds) -> list[Rec
         label = str(r["hook"])
         block_usd = _num(r.get("block_usd"))
         saving = block_usd * min(1.0, resent / blocks)
+        not_resent = (
+            f" {blocks - resent:,} blocked calls were not sent again. Letting calls through with "
+            "additionalContext gives those up too, so the saving shown is before them."
+            if blocks > resent
+            else ""
+        )
         out.append(
             Recommendation(
                 id="hook-block-resent",
@@ -659,7 +665,8 @@ def _rule_hook_block_resent(report: ReportModel, th: HookThresholds) -> list[Rec
                 title=f"Hook {label} blocks calls that Claude then sends again unchanged",
                 why=(
                     f"It blocked {blocks:,} calls, and Claude sent {resent:,} ({100.0 * resent / blocks:.0f}%) of them "
-                    "again just as they were. Each of those blocks cost a reply that changed nothing."
+                    "again just as they were. Each of those blocks cost a reply before the same call went through."
+                    + not_resent
                 ),
                 action=(
                     "If Claude only needs to know something before the call runs, let the call through and pass the "

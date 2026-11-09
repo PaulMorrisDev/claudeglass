@@ -194,7 +194,9 @@ None of them changes a setting. Each gives a prompt to hand Claude.
   `hooks_resend_share_pct` (default 50%) of them again unchanged. It
   suggests letting the call through with `additionalContext`, or
   changing it with `updatedInput`. The saving is the share of the block
-  cost those re-sent calls took.
+  cost those re-sent calls took (the re-sent replies, not a net figure).
+  When some blocks were not sent again, the card says how many, and that
+  the saving is before them.
 - **`hook-context-carry`** (severity `advice`) when a hook added context
   at least `hooks_min_contexts` (default 20) times, costing at least
   `hooks_min_context_usd` (default $1.00 at list price) to keep. It

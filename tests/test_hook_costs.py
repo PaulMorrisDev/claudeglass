@@ -604,6 +604,20 @@ def test_blocks_mostly_sent_again_get_a_card_with_their_cost():
     assert rec.title == "Hook guard.ps1 blocks calls that Claude then sends again unchanged"
     assert "additionalContext" in rec.action
     assert rec.saving_usd == pytest.approx(12 * 0.2)
+    assert "changed nothing" not in rec.why
+    assert "not sent again" not in rec.why
+
+
+def test_blocks_partly_sent_again_name_the_ones_that_were_not():
+    turns = []
+    for i in range(1, 25, 2):
+        turns.append(_turn(i, cache_read_tokens=1_000, hook_blocks={"guard.ps1": 1}, tool_calls_by_tool={"Read": 1}))
+        resent = {"guard.ps1": 1} if i < 21 else {}
+        turns.append(_turn(i + 1, cache_read_tokens=1_000_000, hook_resends=resent))
+    [rec] = _rules(_report([_result(turns)]))
+    assert rec.saving_usd == pytest.approx(12 * 0.2 * 10 / 12)
+    assert "changed nothing" not in rec.why
+    assert "2 blocked calls were not sent again" in rec.why
 
 
 def test_blocks_that_change_the_call_are_not_a_card():
