@@ -1563,11 +1563,13 @@ def test_content_layers_rules_record_unscoped_bytes_apart_from_paths_scoped(home
     (rules_dir / "always.md").write_text("always on", encoding="utf-8")
     (rules_dir / "scoped.md").write_text("---\npaths:\n  - src/**\n---\nonly for src", encoding="utf-8")
     (rules_dir / "inline.md").write_text("---\npaths: [a/**]\n---\nx", encoding="utf-8")
+    # A list written with its items at column 0 is scoped too.
+    (rules_dir / "flush.md").write_text("---\npaths:\n- src/**\n---\nbody", encoding="utf-8")
     stdin = json.dumps({"session_id": "s", "cwd": str(project)})
     result = _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin)
     assert result.returncode == 0
     rules = _latest_snapshot(config_dir)["content_layers"]["rules"]
-    assert rules["count"] == 3
+    assert rules["count"] == 4
     assert rules["unscoped_bytes"] == len("always on")
 
 

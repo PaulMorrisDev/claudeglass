@@ -1302,9 +1302,26 @@ def _unscoped_rules_bytes(base: Path) -> int:
             text = candidate.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if "paths" not in parse_frontmatter(text):
+        if not _rule_has_paths(text):
             total += size
     return total
+
+
+def _rule_has_paths(text: str) -> bool:
+    """Whether a rule's frontmatter has a top-level ``paths:`` key. Also
+    true for a list whose items sit at column 0, which ``parse_frontmatter``
+    drops (its ``- item`` lines carry no ``key:`` to attach to)."""
+    if "paths" in parse_frontmatter(text):
+        return True
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if re.match(r"paths\s*:", line):
+            return True
+    return False
 
 
 def _walk_nested_claude_md(root: Path) -> tuple[int, int]:
