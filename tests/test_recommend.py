@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import fixes as fixes_mod, recommend, report
+from claudeglass import advice, fixes as fixes_mod, recommend, report
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import (
@@ -37,6 +37,7 @@ from claudeglass.recommend import (
     render_patch_set,
 )
 from claudeglass.snapshots import Snapshot
+from claudeglass.units import Units
 
 from helpers import assert_privacy, turn_line, write_jsonl
 
@@ -1864,10 +1865,11 @@ def test_effort_mismatch_fires_with_evidence_per_purpose_row():
     # one evidence tuple for the thinking-share condition plus one per
     # contributing purpose row -- each citing its own exact cell (the
     # bug this module's docstring documents fixing).
-    assert ("Thinking share of output at high, xhigh and max effort", 40.0, "agents.topology_effort_tokens", "high") in rec.evidence
+    assert ("Thinking share at high effort", 40.0, "agents.topology_effort_tokens", "high") in rec.evidence
+    assert ("Output tokens at high effort", 10_000, "agents.topology_effort_tokens", "high") in rec.evidence
     assert ("docs-or-light-edit sessions in corpus", 6, "sessions.sessions_by_purpose", "docs-or-light-edit") in rec.evidence
     # general-dev is not light work, so it is not cited.
-    assert len(rec.evidence) == 2
+    assert len(rec.evidence) == 3
     # R22: this rule can't join the thinking-share group-by to the
     # purpose group-by by session (no report table carries both), so
     # the approximation is disclosed in the action text rather than
@@ -2068,12 +2070,18 @@ def test_effort_mismatch_fallback_pools_high_xhigh_and_max_by_output_tokens():
     purposes = [["docs-or-light-edit", 6], ["review", 2]]
     r = _effort_mismatch_report(
         purposes,
-        [["high", 10, 1_000, 100, 10.0], ["xhigh", 10, 8_000, 3_200, 40.0], ["max", 10, 1_000, 700, 70.0]],
+        [["high", 10, 2_000, 200, 10.0], ["xhigh", 10, 6_000, 3_000, 50.0], ["max", 10, 2_000, 1_400, 70.0]],
     )
     rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
-    (share,) = [v for label, v, _s, _r in rec.evidence if "Thinking share" in label]
-    assert share == pytest.approx(100 * 4_000 / 10_000)
-    assert rec.evidence[0][3] == "xhigh"
+    # One tuple per pooled row, each citing its own cell: the pooled 46% is in no row.
+    shares = {row: v for label, v, _s, row in rec.evidence if label.startswith("Thinking share at ")}
+    outputs = {row: v for label, v, _s, row in rec.evidence if label.startswith("Output tokens at ")}
+    assert shares == {"high": 10.0, "xhigh": 50.0, "max": 70.0}
+    assert outputs == {"high": 2_000, "xhigh": 6_000, "max": 2_000}
+    # The card gives the pooled, output-weighted percent.
+    snapshot = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {}})
+    (card,) = [c for c in advice.finish([rec], r, snapshot, Units()) if c.id == "effort-mismatch"]
+    assert "46% of Claude's output was thinking" in card.why
 
 
 def test_effort_mismatch_fallback_fires_without_a_high_row():

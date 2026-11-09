@@ -607,7 +607,7 @@ def test_effort_mismatch_fallback_why_gives_the_light_share():
         title="x",
         lever="effortLevel",
         evidence=[
-            ("Thinking share of output at high, xhigh and max effort", 41.0, "agents.topology_effort_tokens", "xhigh"),
+            ("Thinking share at xhigh effort", 41.0, "agents.topology_effort_tokens", "xhigh"),
             ("docs-or-light-edit sessions in corpus", 6, "sessions.sessions_by_purpose", "docs-or-light-edit"),
         ],
     )

@@ -2643,10 +2643,16 @@ def _rule_effort_mismatch(
     thinking_share = sum(weight * share for _key, weight, share in weighted) / weight_sum
     if thinking_share <= th.effort_mismatch_thinking_share_pct:
         return []
-    biggest = max(weighted, key=lambda item: item[1])[0]
-    evidence = [
-        _evidence("Thinking share of output at high, xhigh and max effort", thinking_share, "agents", "topology_effort_tokens", biggest)
-    ]
+    # The pooled share is in no row, so cite each pooled row's own cells.
+    evidence = []
+    for key, _weight, share in weighted:
+        evidence.append(_evidence(f"Thinking share at {key} effort", share, "agents", "topology_effort_tokens", key))
+        if output_idx is not None:
+            row = next(r for r in effort_table.rows if r and r[0] == key)
+            if output_idx < len(row) and isinstance(row[output_idx], (int, float)):
+                evidence.append(
+                    _evidence(f"Output tokens at {key} effort", row[output_idx], "agents", "topology_effort_tokens", key)
+                )
     for purpose, sessions in light_rows:
         evidence.append(_evidence(f"{purpose} sessions in corpus", sessions, "sessions", "sessions_by_purpose", purpose))
     lever, scope = _lever_scope("effortLevel", snapshot)
@@ -2658,7 +2664,7 @@ def _rule_effort_mismatch(
             archetypes=_ALL_ARCHETYPES,
             title="High effort is being spent on light editing work",
             action=_action_with_scope(
-                "Lower effortLevel for docs and light-edit sessions --thinking tokens dominate "
+                "Lower effortLevel for docs and light-edit sessions -- thinking tokens dominate "
                 "output there without a matching increase in edit complexity. (Approximation: "
                 "the thinking share is corpus-wide, not joined to these specific sessions -- "
                 "no report table links effort level to session purpose.)",

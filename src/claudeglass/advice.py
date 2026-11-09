@@ -689,11 +689,32 @@ def _count_sessions(ctx: _Context) -> int:
     return 0
 
 
+def _pooled_thinking_share(rec: Recommendation) -> float | None:
+    """The thinking share across the pooled effort rows the fallback cites:
+    the output-weighted mean when each row's output tokens are cited, else
+    the plain mean."""
+    shares: dict[object, float] = {}
+    outputs: dict[object, float] = {}
+    for label, value, _source, row in rec.evidence:
+        if not isinstance(value, (int, float)):
+            continue
+        if label.startswith("Thinking share at "):
+            shares[row] = value
+        elif label.startswith("Output tokens at "):
+            outputs[row] = value
+    if not shares:
+        return None
+    if outputs and all(row in outputs for row in shares) and sum(outputs[row] for row in shares) > 0:
+        total = sum(outputs[row] for row in shares)
+        return sum(outputs[row] * share for row, share in shares.items()) / total
+    return sum(shares.values()) / len(shares)
+
+
 def _explain_effort_mismatch(rec: Recommendation, ctx: _Context) -> None:
     if any(source == "habits.habits_effort_fit" for _label, _value, source, _row in rec.evidence):
         _explain_effort_mismatch_reported(rec, ctx)
         return
-    share = _evidence_value(rec, "Thinking share")
+    share = _pooled_thinking_share(rec)
     light = _evidence_value(rec, "sessions in corpus")
     total = _count_sessions(ctx)
     rec.title = "High effort is being spent on light work"
