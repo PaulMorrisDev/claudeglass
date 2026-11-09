@@ -24,7 +24,7 @@ from .compaction_sim import CompactionSimThresholds
 from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, build_fix, build_fixes, fix_note
 from .model import Recommendation, SettingChange
 from .profiles import goals
-from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE
+from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
 from .units import Units
 
 TOP = whatif.TOP
@@ -535,6 +535,9 @@ def _tools(ctx: Context) -> dict:
         row = diet.get(agent_type)
         if row is None:
             return "none"
+        # Only what the agent's file still lists is sent, as the card counts it.
+        entry = ctx.effective_agents.get(agent_type)
+        row = current_diet(row, entry.get("tools") if isinstance(entry, dict) else None)
         count = len([name for name in str(row.get("rare_tools") or "").split(", ") if name])
         left_out = sum(
             whatif._num(row.get(key)) or 0.0

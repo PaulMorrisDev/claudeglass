@@ -660,6 +660,23 @@ class _Ctx:
         return _agent_file_models(snapshots_mod.with_every_project_agents(snapshots, canonical))
 
     @cached_property
+    def agent_tools(self) -> dict[str, object]:
+        """Each agent file's ``tools`` line by agent type, from the same
+        snapshot as :attr:`agent_files`; empty without one. Read to tell
+        which rarely used tools a tools list would still leave out, never
+        exported."""
+        snapshots = snapshots_mod.load_snapshots(self.config_dir) if self.config_dir else []
+        if not snapshots:
+            return {}
+        canonical = snapshots_mod.canonical_project_keys({b.slug for b in self.corpus.sessions if b.slug})
+        merged = snapshots_mod.with_every_project_agents(snapshots, canonical)
+        agents = merged.data.get("agents") if merged is not None else None
+        return {
+            name: entry["tools"] for name, entry in (agents.items() if isinstance(agents, dict) else ())
+            if isinstance(entry, dict) and "tools" in entry
+        }
+
+    @cached_property
     def compactions(self) -> tuple[compaction_mod.CompactionStats, dict[str, float]]:
         """The summaries of every transcript, folded as the report folds
         them, and each main session's own cost (its agents cost is not in
@@ -1462,7 +1479,7 @@ def _agents(ctx: _Ctx) -> dict:
         "types": _tally(types, AGENT_TYPES),
         "models": {word: {"runs": models[word][0], "cost_usd": _num(models[word][1])} for word in MODELS if word in models},
     }
-    diet = _startup_diet_usd(ctx.startup)
+    diet = _startup_diet_usd(ctx.startup, ctx.agent_tools)
     if diet:
         block["startup_diet_usd"] = diet
     agents = ctx.habits.agents
@@ -1531,19 +1548,23 @@ def _model_choice(ctx: _Ctx) -> list[dict]:
     return rows
 
 
-def _startup_diet_usd(stats) -> dict[str, float]:
+def _startup_diet_usd(stats, agent_tools: dict | None = None) -> dict[str, float]:
     """What a tools list is worth over the window, by agent type: the
     saving of each ``agent_startup_diet`` row the dashboard would give a
     tools list card for (:func:`recommend.tools_list_offer`), at list
     prices. Built-in types by name, every other type summed as ``custom``.
+    ``agent_tools`` is each agent file's ``tools`` line: the card leaves out
+    only the rarely used tools still on a known line, and so does this.
     Amounts only: no agent's name, tool or file is in it."""
     section = context_budget_mod.build_startup_section(stats)
     table = next((t for t in section.tables if t.name == "agent_startup_diet"), None)
     saved: Counter = Counter()
     for row in table.rows if table is not None else []:
         values = dict(zip((column.key for column in table.columns), row))
+        current = (agent_tools or {}).get(values["agent_type"])
+        values = recommend.current_diet(values, current)
         usd = values.get("saving_usd")
-        if recommend.tools_list_offer(values["agent_type"], values) is None or not isinstance(usd, (int, float)):
+        if recommend.tools_list_offer(values["agent_type"], values, current=current) is None or not isinstance(usd, (int, float)):
             continue
         saved[values["agent_type"] if values["agent_type"] in AGENT_TYPES else "custom"] += usd
     return {word: _num(saved[word]) for word in AGENT_TYPES if saved.get(word, 0) > 0}

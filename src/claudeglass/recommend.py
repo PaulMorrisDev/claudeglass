@@ -160,7 +160,15 @@ from . import (
     whatif,
 )
 from .config import Config
-from .context_budget import DIET_EXCLUDED, MIN_WINDOW_DAYS, REMOVABLE_USE_SHARE, SKILLS_TOOL, diet_usd
+from .context_budget import (
+    DIET_EXCLUDED,
+    MIN_WINDOW_DAYS,
+    REMOVABLE_USE_SHARE,
+    ROSTER_TOOLS,
+    SKILLS_TOOL,
+    diet_usd,
+    mcp_tool_key,
+)
 from .fixes import BATCH_PROBES_LINE, CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
 from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
@@ -1809,8 +1817,107 @@ def _name_list(names: list[str], shown: int = _TOOLS_SHOWN) -> str:
     return f"{head}, and {extra} more" if extra > 0 else head
 
 
+def _split_line(text: str) -> list[str]:
+    """``text`` split at the commas outside parentheses, so
+    ``Agent(a, b), Read`` is two entries."""
+    parts: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def known_tools_line(current) -> list[str] | None:
+    """The entries of an agent's current ``tools:`` line, or ``None`` when
+    the line is not known: no config snapshot, no ``tools:`` line (the agent
+    gets every tool), or an empty one. An entry keeps its parentheses
+    (``Agent(a, b)``)."""
+    if isinstance(current, str) and current != _CURRENT_UNKNOWN:
+        entries = _split_line(current)
+    elif isinstance(current, (list, tuple)):
+        entries = [str(item).strip() for item in current if str(item).strip()]
+    else:
+        return None
+    return entries or None
+
+
+def _on_line(name: str, line: list[str]) -> bool:
+    """Whether the tool ``name`` (``mcp__server__*`` for a whole server) is
+    on a known ``tools:`` line. An MCP entry matches by its server:
+    ``mcp__X``, ``mcp__X__*`` and ``mcp__X__tool`` all mean server X."""
+    bases = {entry.split("(", 1)[0].strip() for entry in line}
+    if name.startswith("mcp__"):
+        prefix = name[: -len("__*")] if name.endswith("__*") else name
+        return any(base == prefix or base.startswith(prefix + "__") for base in bases)
+    return name in bases
+
+
+def _diet_sizes(text) -> dict[str, tuple[float, float, float]]:
+    """``agent_startup_diet``'s ``rare_sizes``: tool -> (definition,
+    deferred names, instructions) tokens per spawn."""
+    sizes: dict[str, tuple[float, float, float]] = {}
+    for item in _split_names(text):
+        name, _eq, numbers = item.partition("=")
+        try:
+            definitions, deferred, instructions = (float(n) for n in numbers.split("/"))
+        except ValueError:
+            continue
+        sizes[name] = (definitions, deferred, instructions)
+    return sizes
+
+
+def current_diet(diet: dict, current) -> dict:
+    """``diet``, an ``agent_startup_diet`` row, for an agent whose
+    ``tools:`` line is ``current``: only the rarely used tools still on a
+    known line are left out, the amounts are worked out again from each
+    one's size, and a tool to keep that the line lacks is dropped (a card
+    never adds one). The row as it is when the line is not known
+    (:func:`known_tools_line`) or the row has no sizes."""
+    line = known_tools_line(current)
+    sizes = _diet_sizes(diet.get("rare_sizes"))
+    if line is None or not sizes:
+        return diet
+    rare = [name for name in _split_names(diet.get("rare_tools")) if name in sizes and _on_line(name, line)]
+    row = dict(diet)
+    row["keep_tools"] = ", ".join(name for name in _split_names(diet.get("keep_tools")) if _on_line(name, line))
+    row["rare_tools"] = ", ".join(rare)
+    definitions = sum(sizes[name][0] for name in rare)
+    deferred = sum(sizes[name][1] for name in rare)
+    skills = diet.get("dropped_skills") if SKILLS_TOOL in rare else 0.0
+    roster = diet.get("dropped_roster") if ROSTER_TOOLS & set(rare) else 0.0
+    row.update(
+        dropped_definitions=definitions,
+        dropped_deferred=deferred,
+        dropped_skills=skills if _is_number(skills) else 0.0,
+        dropped_roster=roster if _is_number(roster) else 0.0,
+        kept_instructions=sum(sizes[name][2] for name in rare),
+    )
+    spawns, share = diet.get("spawns"), diet.get("prefix_write_share")
+    usd = None
+    if _is_number(spawns) and _is_number(share):
+        write, read, later = diet.get("write_price"), diet.get("read_price"), diet.get("later_calls")
+        usd = diet_usd(
+            spawns,
+            definitions,
+            deferred + row["dropped_skills"] + row["dropped_roster"],
+            write=write if _is_number(write) else None,
+            read=read if _is_number(read) else None,
+            later_calls=later if _is_number(later) else 0.0,
+            written_share=share / 100.0,
+        )
+    row["saving_usd"] = usd or None
+    return row
+
+
 def tools_list_offer(
-    agent_type: str, diet: dict, th: RecommendThresholds | None = None
+    agent_type: str, diet: dict, th: RecommendThresholds | None = None, current=None
 ) -> tuple[list[str], list[str], float] | None:
     """The tools to keep, the tools to leave off and the tokens that
     leaving them off takes from each start, for one ``agent_startup_diet``
@@ -1818,8 +1925,11 @@ def tools_list_offer(
     is worth giving: an agent the diet leaves alone, one with no file to
     give a list (a fork or an unknown type), too few spawns, no tool called
     to put on the line, or less than
-    :attr:`RecommendThresholds.spawn_tools_list_tokens` to take off it."""
+    :attr:`RecommendThresholds.spawn_tools_list_tokens` to take off it.
+    ``current`` is the agent's ``tools:`` line when it is known
+    (:func:`current_diet`)."""
     th = th or RecommendThresholds()
+    diet = current_diet(diet, current)
     if agent_type in DIET_EXCLUDED or (agent_type in _NOT_OVERRIDABLE and agent_type != _WORKFLOW_AGENT):
         return None
     measured = diet.get("spawns")
@@ -1844,11 +1954,15 @@ def _tools_list_card(
     from the tools at least a tenth of its spawns called, with the rest
     named as rarely used. Needs the ``agent_startup_diet`` row, which
     carries what leaving them out takes from a start."""
-    diet = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
-    offer = tools_list_offer(agent_type, diet, th) if diet is not None else None
+    row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
+    current = _agent_current(agent_type, "tools", snapshot)
+    offer = tools_list_offer(agent_type, row, th, current) if row is not None else None
     if offer is None:
         return None
+    diet = current_diet(row, current)
     keep, rare, dropped = offer
+    # A card never adds a tool: one the diet keeps that a known line lacks.
+    not_added = [name for name in _split_names(row["keep_tools"]) if name not in keep]
     measured = diet["spawns"]
     sizes = [(label, diet.get(column)) for column, label in _DIET_PARTS]
 
@@ -1866,9 +1980,15 @@ def _tools_list_card(
     )
     left_out = (
         f"Rarely used, so left out (each was called in fewer than {pct}% of the spawns offered it): "
-        f"{_name_list(rare)}. Claude Code adds StructuredOutput and SubagentHandback to every subagent "
+        f"{_name_list(rare)}. Claude Code adds StructuredOutput, SubagentHandback and advisor to every subagent "
         "whatever the list says."
     )
+    if not_added:
+        plural = len(not_added) > 1
+        left_out += (
+            f" {_name_list(not_added)} {'aren' if plural else 'isn'}'t on its tools line, so "
+            f"{'they aren' if plural else 'it isn'}'t added."
+        )
     if workflow:
         title = "Workflow agents are given tools they rarely call"
         action = (
@@ -2006,7 +2126,10 @@ def _rule_spawn_parts(
         if tools_card is not None:
             out.append(tools_card)
             covered.add(agent_type)
-        diet_rare = _split_names(_cell(report, "agent_startup", "agent_startup_diet", agent_type, "rare_tools"))
+        diet_row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
+        current_tools = _agent_current(agent_type, "tools", snapshot)
+        known_line = known_tools_line(current_tools)
+        diet_rare = _split_names(current_diet(diet_row, current_tools).get("rare_tools")) if diet_row is not None else []
 
         claude_md_total = part(agent_type, "claude_md")
         # PROF-11/F13: Managed policy CLAUDE.md still loads regardless of
@@ -2107,6 +2230,8 @@ def _rule_spawn_parts(
             and listed >= th.spawn_parts_min_spawns
             and skills_used == 0
             and overridable
+            # A known tools line without Skill already leaves the skills list out.
+            and (known_line is None or _on_line(SKILLS_TOOL, known_line))
         ):
             # Whether the tools list above leaves Skill out, which takes the
             # skills list with it: this card is then a part of that saving.
@@ -2183,6 +2308,9 @@ def _rule_spawn_parts(
             if not (isinstance(server_offered, int) and isinstance(server_used, int)):
                 continue
             if server_offered < th.spawn_parts_min_spawns:
+                continue
+            if known_line is not None and not _on_line(mcp_tool_key(str(values.get("server"))), known_line):
+                # A known tools line with no mcp__<server> entry never gets the server.
                 continue
             if "__" in str(values.get("server")):
                 # disallowedTools names a server as mcp__<server>, and Claude
@@ -3160,5 +3288,7 @@ __all__ = [
     "effective_min_sample",
     "recommend",
     "render_patch_set",
+    "current_diet",
+    "known_tools_line",
     "tools_list_offer",
 ]

@@ -276,12 +276,12 @@ def test_a_tool_called_in_under_a_tenth_of_the_spawns_is_left_off_the_list():
 def test_the_card_notes_the_tools_claude_code_adds_and_asks_for_a_before_and_after_check():
     recs = _recs(_report(_diet_acc("searcher")), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
     rec = _tools_rec(recs, "searcher")
-    assert "StructuredOutput and SubagentHandback" in rec.action
+    assert "StructuredOutput, SubagentHandback and advisor" in rec.action
     assert "one spawn before and one after on the same model" in rec.action
     # They are never on the line itself, or in the rarely used list.
     assert "StructuredOutput" not in rec.changes[0].value
     prompt = rec.fixes[0]["prompt"]
-    assert "StructuredOutput and SubagentHandback" in prompt
+    assert "StructuredOutput, SubagentHandback and advisor" in prompt
 
 
 def test_the_card_is_priced_from_the_diet_table_and_is_the_only_one_to_carry_a_saving():
@@ -416,6 +416,80 @@ def test_a_tools_list_already_in_the_agent_file_is_not_offered_again():
     assert _tools_rec(recs, "searcher") is None
     snap = _snapshot({"searcher": {"source": "user", "tools": "Read, Grep, Bash"}})
     assert _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units()), "searcher") is None
+
+
+_BIG_CHARS = {"Read": 1500, "Grep": 1200, "Bash": 9000, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000}
+
+
+def test_a_line_that_already_left_the_big_tools_off_gets_no_card():
+    # RevIXO #908: the file now lists Read, Grep, Bash and WebFetch, so of the
+    # rarely used tools only WebFetch (2,000 tokens) is still sent: under the
+    # 5,000-token bar. Skill is gone from the line too, so no skills card.
+    line = ["Read", "Grep", "Bash", "WebFetch"]
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    recs = _recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units())
+    assert _tools_rec(recs, "searcher") is None
+    assert not any(r.id == "spawn-unused-skills" for r in recs)
+
+
+def test_an_unknown_current_line_counts_every_tool_as_present():
+    for snap in (None, _snapshot({"searcher": {"source": "user"}}), _snapshot({"other": {"source": "user"}})):
+        recs = _recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units())
+        rec = _tools_rec(recs, "searcher")
+        assert rec is not None and rec.changes[0].value == ["Bash", "Grep", "Read"]
+        assert any(r.id == "spawn-unused-skills" for r in recs)
+
+
+def test_a_known_line_reprices_the_card_from_the_rare_tools_still_on_it():
+    # Only NotebookEdit and Skill are still on the line: 16,000 + 4,000 chars
+    # of definitions (5,000 tokens) and the 1,200-token skills list.
+    line = "Read, Grep, Bash, Agent(helper-a, helper-b), NotebookEdit, Skill"
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    report = _report(_diet_acc("searcher"))
+    full = _tools_rec(_recs(report, units=Units()), "searcher")
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    assert rec is not None and "WebFetch" not in rec.action.split("Rarely used")[1]
+    assert "NotebookEdit" in rec.action and "Skill" in rec.action
+    assert rec.saving_usd < full.saving_usd
+    assert "5,000 of tool definitions" in rec.why and "1,200 of the skills list" in rec.why
+    assert any(r.id == "spawn-unused-skills" for r in _recs(report, snapshot=snap, units=Units()))
+
+
+def test_the_card_never_adds_a_tool_the_line_does_not_have():
+    # Bash is called in 2 of 20 spawns, so the diet keeps it, but the file's
+    # line has no Bash: the card does not put it back.
+    line = ["Read", "Grep", "NotebookEdit", "WebFetch", "Skill"]
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units()), "searcher")
+    assert rec.changes[0].value == ["Grep", "Read"]
+    assert "tools: Grep, Read" in rec.action and "Bash isn't on its tools line, so it isn't added" in rec.action
+
+
+def test_mcp_entries_on_the_line_match_by_server_prefix():
+    servers = {"playwright": (0, 25_000.0, 800.0, 300.0), "sentry": (0, 20_000.0, 500.0, 200.0)}
+    line = "Read, Grep, Bash, mcp__playwright__browser_click, mcp__other"
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers=servers)), snapshot=snap, units=Units())
+    rec = _tools_rec(recs, "searcher")
+    assert "mcp__playwright__*" in rec.action and "mcp__sentry__*" not in rec.action
+    mcp = next(r for r in recs if r.id == "spawn-unused-mcp")
+    assert "playwright" in mcp.action and "sentry" not in mcp.action
+    # With no mcp__ entry for either server there is nothing to withhold.
+    snap = _snapshot({"searcher": {"source": "user", "tools": "Read, Grep, Bash"}})
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers=servers)), snapshot=snap, units=Units())
+    assert not any(r.id == "spawn-unused-mcp" for r in recs)
+
+
+def test_advisor_is_in_neither_the_kept_nor_the_rare_list():
+    chars = {**_BIG_CHARS, "advisor": 2000}
+    acc = _diet_acc("searcher", chars=chars, uses={"Read": 20, "Grep": 20, "advisor": 20})
+    row = _diet_row(_report(acc), "searcher")
+    assert "advisor" not in row["keep_tools"].split(", ") and "advisor" not in row["rare_tools"].split(", ")
+    acc = _diet_acc("searcher", chars=chars, uses={"Read": 20, "Grep": 20})
+    row = _diet_row(_report(acc), "searcher")
+    assert "advisor" not in row["rare_tools"].split(", ")
+    assert context_budget.ALWAYS_ADDED == frozenset(context_budget.AGENT_ANSWER_TOOLS) | {"advisor"}
+    assert "advisor" not in context_budget.AGENT_ANSWER_TOOLS
 
 
 def test_a_builtin_agent_gets_a_prompt_to_create_a_same_named_file():

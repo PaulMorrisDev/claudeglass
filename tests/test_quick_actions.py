@@ -2113,3 +2113,18 @@ def test_plan_approval_leaves_the_comparison_out_when_only_fresh_builds_exist(tm
     rows = [_approval_row("cleared", 2, 30, 50_000, 0.04)]
     summary = qa.run("plan-approval", _ctx(tmp_path, model=_plan_approval_model(rows)))["summary"]
     assert "2 builds started fresh." in summary and "against" not in summary
+
+
+def test_tools_leaves_out_of_the_count_the_tools_the_agents_file_no_longer_lists(tmp_path):
+    diet = [{"agent_type": "reviewer", "rare_tools": "Bash, NotebookEdit, mcp__playwright__*",
+             "rare_sizes": "Bash=2000.0000/0/0, NotebookEdit=4000.0000/0/0, mcp__playwright__*=3000.0000/400.0000/0.0000",
+             "dropped_definitions": 9000.0, "dropped_deferred": 400.0, "dropped_skills": 1200.0,
+             "dropped_roster": 0.0}]
+    model = _tools_model(diet_rows=diet)
+    # Unknown line: everything is still sent.
+    result = qa.run("tools", _ctx(tmp_path, model))
+    assert {row[0]: row[-1] for row in result["table"]["rows"]}["reviewer"] == "3 (about 10,600 tokens)"
+    # The file lists Read and NotebookEdit only: just NotebookEdit is left to take out.
+    agents = {"reviewer": {"tools": ["Read", "NotebookEdit"]}}
+    result = qa.run("tools", _ctx(tmp_path, model, effective_agents=agents))
+    assert {row[0]: row[-1] for row in result["table"]["rows"]}["reviewer"] == "1 (about 4,000 tokens)"

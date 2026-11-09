@@ -110,7 +110,7 @@ SETTING_TEXT: dict[str, tuple[str, str, str]] = {
     "tools": (
         "The only tools this agent may call. Definitions of other tools are not sent to it.",
         "The agent can't use any tool missing from the list, for example to edit a file.",
-        "Claude Code adds StructuredOutput and SubagentHandback to every subagent whatever this list says.",
+        "Claude Code adds StructuredOutput, SubagentHandback and advisor to every subagent whatever this list says.",
     ),
     "model": (
         "Which Claude model does the work. Smaller models cost less per token.",

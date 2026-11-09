@@ -589,9 +589,11 @@ REMOVABLE_USE_SHARE = 0.10
 TOOLS_MODEL_MIN_SPAWNS = 5
 
 #: The tools Claude Code adds to an agent whatever its ``tools:`` says
-#: (a workflow agent's answer and a handback), so no allowlist removes
-#: them.
-_ALWAYS_OFFERED = frozenset(AGENT_ANSWER_TOOLS)
+#: (a workflow agent's answer, a handback and the advisor), so no allowlist
+#: removes them and none is ever put on a suggested line. Not
+#: ``AGENT_ANSWER_TOOLS``: advisor is not an answer, and a run that ends on
+#: it is not finished.
+ALWAYS_ADDED = frozenset(AGENT_ANSWER_TOOLS) | {"advisor"}
 
 #: Rows of ``agent_startup_tools`` kept per agent type, largest first.
 _TOOL_ROWS_PER_AGENT = 12
@@ -785,7 +787,7 @@ class _AgentStartupAcc:
         rows = [
             (key, offer.offered, offer.used, offer.chars / offer.offered)
             for key, offer in self.tools.get(family, {}).items()
-            if offer.offered and key not in _ALWAYS_OFFERED and rarely_used(offer.used, offer.offered)
+            if offer.offered and key not in ALWAYS_ADDED and rarely_used(offer.used, offer.offered)
         ]
         rows.sort(key=lambda row: (-row[3], row[0]))
         total = sum(self.tools[family][key].chars for key, _o, _u, _c in rows) / spawns
@@ -802,7 +804,7 @@ class _AgentStartupAcc:
         servers = self.servers.get(family, {})
         kept: list[str] = []
         for key, called in self.tool_uses.get(family, {}).items():
-            if key in _ALWAYS_OFFERED:
+            if key in ALWAYS_ADDED:
                 continue
             if key.startswith("mcp__"):
                 offer = servers.get(key[len("mcp__") : -len("__*")])
@@ -2248,6 +2250,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         Column(key="read_price", label="Cache-read price per million tokens", kind="money"),
         Column(key="saving_usd", label="Saving across these spawns", kind="money"),
         Column(key="window_days", label="Days in the window", kind="float"),
+        Column(key="rare_sizes", label="Size of each rarely used tool", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2289,6 +2292,14 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
             written_share=written_share,
         )
         rare_names = [key for key, _o, _u, _c in builtin] + [mcp_tool_key(name) for name, _offer in servers]
+        sizes = [
+            f"{key}={stats.calibration.tool_tokens(tools[key].chars / snapped, family or None):.4f}/0/0"
+            for key, _o, _u, _c in builtin
+        ] + [
+            f"{mcp_tool_key(name)}={offer.definitions / snapped:.4f}/{offer.deferred / snapped:.4f}/"
+            f"{offer.instructions / snapped:.4f}"
+            for name, offer in servers
+        ]
         rows.append(
             [
                 agent_type,
@@ -2307,6 +2318,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
                 read,
                 usd or None,
                 stats.window_days,
+                ", ".join(sizes),
             ]
         )
     return Table(
@@ -2322,7 +2334,9 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
             "asked for. Tools Claude Code adds whatever the list says are in neither.",
             "Sizes are per spawn. The skills list goes with the Skill tool and the agent list with the Agent "
             "tool. An MCP server's deferred tool names go with its tools; its instructions stay under a "
-            "tools list, so they are not counted in the saving. Deferred built-in tool names are not counted.",
+            "tools list, so they are not counted in the saving. Deferred built-in tool names are not counted. "
+            "\"Size of each rarely used tool\" gives each one's definition, deferred names and instructions per "
+            "spawn. A card uses it to skip tools the agent's file no longer lists.",
             "The saving prices tool definitions as a prefix that sibling spawns share. Only the spawns that wrote it "
             "pay the cache-write price for them. The rest pay the cache-read price. The other parts are written "
             "by each spawn. Every part is then read on each later call. List prices, over the spawns in this window.",
@@ -2579,6 +2593,7 @@ def build_startup_section(stats: ContextBudgetStats) -> Section:
 
 
 __all__ = [
+    "ALWAYS_ADDED",
     "CLAUDE_MD_SOURCES",
     "ContextBudgetStats",
     "DIET_EXCLUDED",

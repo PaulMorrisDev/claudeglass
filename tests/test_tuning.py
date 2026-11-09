@@ -2238,3 +2238,14 @@ def test_the_fullest_phase_8_blocks_still_fit_the_size_limit():
     assert tuning.validate(doc) == []
     assert len(tuning.dumps(doc).encode("utf-8")) < tuning.MAX_BYTES
     assert "not_recorded" in tuning.MODEL_CHOSEN
+
+
+def test_the_tools_list_saving_leaves_out_what_the_agents_line_no_longer_lists():
+    from test_spawn_parts import _diet_acc
+
+    stats = _diet_stats(_diet_acc("reviewer"))
+    full = tuning._startup_diet_usd(stats)
+    # The file lists Read, Grep and Bash: nothing rarely used is still sent.
+    assert tuning._startup_diet_usd(stats, {"reviewer": ["Read", "Grep", "Bash"]}) == {}
+    # An unknown line, or another agent's, leaves it as it was.
+    assert tuning._startup_diet_usd(stats, {"other": ["Read"]}) == full

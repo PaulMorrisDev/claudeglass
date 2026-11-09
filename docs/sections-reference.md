@@ -2048,7 +2048,7 @@ one.
   definitions and MCP servers the agent type was offered and called in
   fewer than a tenth of the spawns offered them: what a tools list on the
   agent would leave out. Tools Claude Code adds whatever the list says,
-  `StructuredOutput` and `SubagentHandback`, are not counted) and
+  `StructuredOutput`, `SubagentHandback` and `advisor`, are not counted) and
   `largest_tools` (the three largest tool definitions or MCP servers in the
   start on the measured model, each with its average size per spawn
   offered it, like `Bash 4.6k, figma 2.3k` (servers named as above); empty when no spawn
@@ -2070,7 +2070,10 @@ one.
   which stay under a tools list and are not counted in the saving. Then the
   `later_calls`, `prefix_write_share` (the share of spawns that wrote the
   tool definitions), the two prices, `saving_usd` across the spawns
-  measured (list prices) and `window_days`. Whether the skills list and the
+  measured (list prices) and `window_days`. `rare_sizes` gives each
+  rarely used tool's definition, deferred names and instructions in tokens
+  per spawn (`tool=definition/deferred/instructions`), so a card can work
+  the amounts out again for the tools the agent's file still lists. Whether the skills list and the
   agent list really go with their tools is not in Claude Code's docs, so
   the `spawn-tools-list` card asks for a before and after check.
 - `agent_startup_servers` — per agent type (report only): one row per MCP
@@ -2598,13 +2601,22 @@ none writes a file.
   file; `general-purpose` is warned that a list limits every spawn that
   names no type. Workflow agents get a workflow-script variant: pass an
   `agentType` that names an agent file with the list. It says that
-  `StructuredOutput` and `SubagentHandback` are added whatever the list
-  says, and asks for one spawn before and one after on the same model.
-  It replaces the old `spawn-read-only-tools`.
+  `StructuredOutput`, `SubagentHandback` and `advisor` are added whatever
+  the list says (none is ever on the suggested line or in the rarely used
+  list), and asks for one spawn before and one after on the same model.
+  It replaces the old `spawn-read-only-tools`. When the agent's current
+  `tools:` line is known (a real list or comma string, with parentheses such
+  as `Agent(...)` kept whole), only the rarely used tools still on it are
+  left out, the amount is worked out again from each one's size, and the
+  card goes if that is under the 5,000-token bar. A tool to keep that the
+  line lacks is not added; the card says so. With no snapshot, no `tools:`
+  line, a built-in type, a workflow agent or a new agent file, every tool
+  counts as present and the card is as it was.
 - `spawn-unused-skills` offers the tools list first (leave Skill off it)
   and keeps `disallowedTools: Skill` as the narrow alternative. When the
   tools list card leaves Skill out, its saving is a part of that card's,
-  not on top of it.
+  not on top of it. It is skipped when the agent's known `tools:` line has no
+  `Skill`, since the skills list is already left out.
 - `spawn-unused-mcp` is one card per agent type, naming each MCP server
   that at most 2% of the spawns offered it called
   (`spawn_unused_mcp_use_share_pct`) and that costs at least 5 USD over 30
@@ -2616,7 +2628,9 @@ none writes a file.
   subagent docs give `disallowedTools` as the way to withhold a server's
   tools, whatever its kind; an `mcpServers` list only adds servers. A
   server whose name holds `__` is left off the card, since `mcp__<prefix>`
-  would also withhold the servers that share its start.
+  would also withhold the servers that share its start. With a known `tools:`
+  line, a server with no `mcp__<server>` entry on it (`mcp__X`, `mcp__X__*`
+  and `mcp__X__tool` all mean server X) is left off, since the agent never gets it.
 - A built-in agent type's `spawn-cost` card no longer says to shorten the
   task prompt: its start is Claude Code's own system prompt and tool
   definitions, which a tools list trims. `Explore`, `Plan` and

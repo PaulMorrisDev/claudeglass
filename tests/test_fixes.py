@@ -173,7 +173,7 @@ def test_tools_list_prompts_for_a_new_agent_file_do_not_say_to_keep_its_tools_th
 
     tools = prompt("tools", ["Grep", "Read"])
     assert "same name" in tools and "keep its tools the same" not in tools
-    assert "Claude Code adds StructuredOutput and SubagentHandback" in tools
+    assert "Claude Code adds StructuredOutput, SubagentHandback and advisor" in tools
     # Any other setting on a new file still carries the original tool list over.
     assert "keep its tools the same" in prompt("omitClaudeMd", True)
 
