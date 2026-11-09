@@ -428,10 +428,13 @@ export const register: Register = on => {
   })
 
   // A message sent makes sure of the session, so its heartbeat is there for the first message after a /clear:
-  // the capture hook looks for it when that message is sent. (A matcher, apart from the other files' hooks on the event.)
+  // the capture hook looks for it when that message is sent. It also beats, so a hint line drawn since the last
+  // write is in the file by then (a beat writes at once when something new was drawn, else at most once a minute).
+  // (A matcher, apart from the other files' hooks on the event.)
   on('prompt.submit', { text: /[\s\S]*/ }, async ($, e, next) => {
     try {
-      await ensure($)
+      const snap = await ensure($)
+      await beat(kit($), snap)
     } catch (error) {
       $.ui.log(`claudeglass: prompt.submit ${String(error)}`, { to: 'debug' })
     }

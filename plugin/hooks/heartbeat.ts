@@ -33,7 +33,7 @@ type Handle = { cancel: () => void }
 const drawn = new Set<string>()
 let drawnNew = false
 
-/** Records that the host drew `what` ("hint"); the next measurement writes the file at once, not a minute later. */
+/** Records that the host drew `what` ("hint"); the next message or beat writes the file at once, not a minute later. */
 export function noteDrawn(what: string): void {
   if (drawn.has(what)) return
   drawn.add(what)

@@ -82,6 +82,19 @@ test('the heartbeat lists "hint" once the hint line has been drawn, and only the
   expect(json(world, PRESENT).shows).toEqual([])
 })
 
+test('the first message within a minute of the first hint-line render already finds "hint" in the heartbeat', async ($, on) => {
+  const world = prepare(on)
+  on('prompt.submit', (_$, e) => e as never)
+  await $.session.start(START)
+  expect(json(world, PRESENT).shows).toEqual([])
+  // Drawn, then a message sent well inside the minute: no reply and no timer tick has come between.
+  await hint($)
+  await world.clock.advance(5 * 1000)
+  await $.prompt.submit({ text: 'first message', wait: false, origin: { kind: 'composer' } } as never)
+  expect(json(world, PRESENT).shows).toEqual(['hint'])
+  expect(faults(world)).toEqual([])
+})
+
 test('a session id the capture hook would not look for (an underscore) gets a sensor file but no heartbeat', async ($, on) => {
   const world = prepare(on, { session: 'with_underscore' })
   await $.session.start(START)
