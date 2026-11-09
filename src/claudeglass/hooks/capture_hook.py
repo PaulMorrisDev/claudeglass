@@ -2640,7 +2640,7 @@ def _coaching_for(
             continue
         kind, stake, fields = found
         hint = kind.split(":", 1)[0]
-        if hint in moved or hint in muted or not _gate(state, session, kind, stake, now_ts, th):
+        if hint in moved or hint in muted or hint in coaching["off_live"] or not _gate(state, session, kind, stake, now_ts, th):
             continue
         if hint in _FRESH_START_HINTS and _mod_showed_fresh_start(
             config_dir, catalogue, session_id, now_ts, th["cooldown_minutes"] * 60

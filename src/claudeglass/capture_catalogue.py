@@ -673,6 +673,21 @@ COACHING_HINTS = (
     "cold_return",
 )
 
+#: Hints whose live note is switched off: the blinded replay scored them
+#: under the 50% precision bar in their current form, so each was more
+#: often wrong than right. The hook and the mod say nothing for them. The
+#: rules themselves stay, as do the figures read from the transcript (the
+#: runs ``SubagentStop`` keeps, the tags in old notes), and they are still
+#: hints of :data:`COACHING_HINTS`; switching one back on is taking it out
+#: of this list.
+LIVE_OFF_HINTS = (
+    "plan_fresh",
+    "plan_fresh_early",
+    "split_run",
+    "quiet_output",
+    "cold_return",
+)
+
 #: Hints that no longer show live. Their notes are still in old
 #: transcripts, so the parser still knows the words and keeps those notes
 #: as the hint they were instead of ``other``. ``clear_context`` is now a
@@ -3466,6 +3481,7 @@ def export_json() -> dict:
             "text": dict(COACHING_TEXT),
             "split_why": dict(COACHING_SPLIT_WHY),
             "quiet_how": dict(COACHING_QUIET_HOW),
+            "off_live": list(LIVE_OFF_HINTS),
             "quiet_saved_pattern": QUIET_SAVED_PATTERN,
             "cold_skip_pattern": COLD_SKIP_PATTERN,
             "cold_skip_max_chars": COLD_SKIP_MAX_CHARS,

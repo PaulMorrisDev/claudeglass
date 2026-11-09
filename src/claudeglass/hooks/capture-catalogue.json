@@ -672,6 +672,13 @@
   "quiet_how": {
    "Read": "Grep the saved output, or read part of it with an offset and a limit"
   },
+  "off_live": [
+   "plan_fresh",
+   "plan_fresh_early",
+   "split_run",
+   "quiet_output",
+   "cold_return"
+  ],
   "quiet_saved_pattern": "(?:^|[\\\\/])(?:tool-results|scratchpad)[\\\\/]|[\\\\/]tasks[\\\\/][^\\\\/]+\\.output$",
   "cold_skip_pattern": "(?:please\\s+)?(?:(?:try|retry|run|do)(?: it| that| this)?(?: again| once more)|retry|try again|again)[\\s!.,]*(?:please)?[\\s!.]*|(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm)\\b[\\s,.!:\\-]+\\S.*|(?:you (?:may|can|could)|go ahead(?: and)?|please go ahead(?: and)?|feel free to)\\s+\\S.*",
   "cold_skip_max_chars": 80,

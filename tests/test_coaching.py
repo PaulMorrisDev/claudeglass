@@ -52,6 +52,15 @@ CATALOGUE = HOOK.load_catalogue()
 ON = {"capture": {"level": "off", "coaching": ["coaching_notes"]}}
 
 
+@pytest.fixture(autouse=True)
+def _hints_open(request, monkeypatch):
+    """The hints' own rules are tested with the live switch open
+    (``off_live`` empty), as the replay measured them; the ``test_live_off``
+    tests at the end of the file run on the catalogue as it ships."""
+    if not request.node.name.startswith("test_live_off"):
+        monkeypatch.setitem(CATALOGUE["coaching"], "off_live", [])
+
+
 # -- the hook's hints --------------------------------------------------------------
 
 
@@ -1904,12 +1913,26 @@ def _run(config_dir: Path, payload: dict, entrypoint: str = "") -> tuple[int, st
     return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
 
 
-def test_the_hook_runs_coaching_notes_with_capture_off(tmp_path):
+def _run_open(monkeypatch, capsys, config_dir: Path, payload: dict, entrypoint: str = "") -> tuple[int, str, str]:
+    """:func:`_run` in this process, on the catalogue with the live switch
+    open (the ``_hints_open`` fixture), for the hints the shipped one turns off."""
+    monkeypatch.setattr(HOOK, "load_catalogue", lambda path=None: CATALOGUE)
+    if entrypoint:
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", entrypoint)
+    else:
+        monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(payload).encode("utf-8")), encoding="utf-8"))
+    rc = HOOK.main(["--config-dir", str(config_dir)])
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
+
+
+def test_the_hook_runs_coaching_notes_with_capture_off(tmp_path, monkeypatch, capsys):
     config_dir = _config_dir(tmp_path)
     (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
     # The hook runs on the real clock, so a reply dated in 2026 left the cache cold long ago.
     path = _transcript(tmp_path, [_prompt(), _reply(150_000)])
-    rc, out, err = _run(config_dir, {"session_id": "s1", "cwd": "/w", **_prompt_payload(path)})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"session_id": "s1", "cwd": "/w", **_prompt_payload(path)})
     assert rc == 0 and err == ""
     output = json.loads(out)["hookSpecificOutput"]
     assert output["hookEventName"] == "UserPromptSubmit"
@@ -2130,28 +2153,28 @@ def test_the_notice_takes_the_same_fields_as_the_note(tmp_path):
     assert notice.startswith("⚠️ ClaudeGlass: Your message is about 12k tokens")
 
 
-def test_a_capture_note_and_a_coaching_note_go_out_as_one(tmp_path):
+def test_a_capture_note_and_a_coaching_note_go_out_as_one(tmp_path, monkeypatch, capsys):
     config_dir = _config_dir(tmp_path)
     (config_dir / "config.toml").write_text('[capture]\nlevel = "deep"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
     big = {"session_id": "s1", "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "Read",
            "tool_input": {"file_path": _SAVED},
            "tool_response": {"type": "text", "file": {"content": "x" * cat.BIG_OUTPUT_TOKENS * 4}}}
-    rc, out, _ = _run(config_dir, big)
+    rc, out, _ = _run_open(monkeypatch, capsys, config_dir, big)
     text = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     capture_note, coaching_note = text.split("\n" + cat.COACH_MARKER)
     assert rc == 0 and capture_note == cat.tool_note_text("big_output")
     assert coaching_note.startswith(f"{cat.COACH_VERSION} quiet_output\n")
 
 
-def test_a_broken_coaching_file_or_state_is_read_as_empty(tmp_path):
+def test_a_broken_coaching_file_or_state_is_read_as_empty(tmp_path, monkeypatch, capsys):
     config_dir = _config_dir(tmp_path)
     (config_dir / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
     (config_dir / cat.COACHING_FILE).write_text("{not json", encoding="utf-8")
     (config_dir / cat.COACH_STATE_FILE).write_text('{"sessions": [1, 2]}', encoding="utf-8")
     path = _transcript(tmp_path, [_prompt(), _reply(150_000)])
-    rc, out, err = _run(config_dir, {"session_id": "s1", **_prompt_payload(path)})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"session_id": "s1", **_prompt_payload(path)})
     assert rc == 0 and err == "" and _kind(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "cold_return"
-    rc, out, err = _run(config_dir, {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "transcript_path": 5})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "transcript_path": 5})
     assert (rc, out, err) == (0, "", "")
 
 
@@ -3413,14 +3436,14 @@ def test_the_catalogue_gives_the_hook_every_word_the_split_note_is_made_from():
     assert cat.TIP_HINT_TITLES["split_run"] and "split_run" not in cat.TIP_THRESHOLD_KEYS
 
 
-def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_next_agent_call(tmp_path):
+def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_next_agent_call(tmp_path, monkeypatch, capsys):
     config_dir = _coaching_config(_config_dir(tmp_path))
     session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
     # Recording prints nothing: a subagent's own message never shows.
-    rc, out, err = _run(config_dir, _agent_stop(session))
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, _agent_stop(session))
     assert (rc, out, err) == (0, "", "")
     assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
-    rc, out, err = _run(config_dir, {"cwd": "/work/app", **_after_the_agent(session)})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"cwd": "/work/app", **_after_the_agent(session)})
     assert rc == 0 and err == ""
     output = json.loads(out)
     assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "split_run"
@@ -3428,9 +3451,9 @@ def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_
     assert _pending(tmp_path) == {}
     # The desktop app shows no notice, so the note alone carries the tip.
     session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="desk")
-    rc, out, err = _run(config_dir, _agent_stop(session, session_id="s2"), "claude-desktop")
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, _agent_stop(session, session_id="s2"), "claude-desktop")
     assert (rc, out, err) == (0, "", "")
-    rc, out, err = _run(config_dir, {"cwd": "/work/app", **_after_the_agent(session, session_id="s2")}, "claude-desktop")
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"cwd": "/work/app", **_after_the_agent(session, session_id="s2")}, "claude-desktop")
     output = json.loads(out)
     assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "split_run" and "systemMessage" not in output
 
@@ -4009,3 +4032,41 @@ def test_plan_fresh_names_the_plan_file_in_words(tmp_path):
                    tmp_path, [_prompt("start"), _reply(5_000, ago_s=900), _prompt("plan"), _reply(120_000, ago_s=60)])}
     note = _coach(tmp_path, payload)
     assert _kind(note) == "plan_fresh" and "the plan file" in note and "<file>" not in note
+
+
+# -- hints the replay found more often wrong than right: off live -------------------------
+
+_LIVE_OFF = ("plan_fresh", "plan_fresh_early", "split_run", "quiet_output", "cold_return")
+
+
+def _live_off_cases(tmp_path) -> dict:
+    """For each hint turned off, what makes it speak with the switch open: ``(call, kind)``."""
+    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="split")
+    plan = {"hook_event_name": "PostToolUse", "tool_name": "ExitPlanMode", "session_id": "p1", "cwd": "/w",
+            "tool_input": {"plan": "p" * 400}, "transcript_path": _transcript(
+                tmp_path, [_prompt("start"), _reply(5_000, ago_s=900), _prompt("plan"), _reply(120_000, ago_s=60)], "p.jsonl")}
+    return {
+        "cold_return": lambda: _coach(tmp_path, {**_prompt_payload(cold), "session_id": "c1"}),
+        "plan_fresh": lambda: _coach(tmp_path, plan),
+        "plan_fresh_early": lambda: _planning(tmp_path, session="e1"),
+        "quiet_output": lambda: _coach(tmp_path, _saved_read(session_id="q1")),
+        "split_run": lambda: (_keep_run(tmp_path, _agent_stop(session, session_id="sp1")),
+                              _coach(tmp_path, _after_the_agent(session, session_id="sp1")))[1],
+    }
+
+
+def test_live_off_the_catalogue_names_the_hints_the_replay_found_more_often_wrong_than_right():
+    assert set(cat.LIVE_OFF_HINTS) == set(_LIVE_OFF)
+    assert set(CATALOGUE["coaching"]["off_live"]) == set(_LIVE_OFF)
+    assert set(cat.LIVE_OFF_HINTS) <= set(cat.COACHING_HINTS)
+
+
+@pytest.mark.parametrize("hint", _LIVE_OFF)
+def test_live_off_a_hint_the_replay_found_more_often_wrong_than_right_gives_no_note(tmp_path, monkeypatch, hint):
+    case = _live_off_cases(tmp_path)[hint]
+    assert case() == ""
+    # The same call speaks with the switch open, so the silence is the switch.
+    monkeypatch.setitem(CATALOGUE["coaching"], "off_live", [])
+    (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).unlink(missing_ok=True)
+    assert _kind(case()) == hint

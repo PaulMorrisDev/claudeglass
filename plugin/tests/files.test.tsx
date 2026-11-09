@@ -97,11 +97,11 @@ test('the sensor file holds closed words and times only, in the shape the Python
   await $.session.start(START)
   await reply($, world, FIRST)
 
-  // Cache expired and the hint said so: the next send is a warned cold send, and it rebuilds the cache.
+  // Cache expired, and no warning is drawn (that hint is off): the send that rebuilds the cache is unwarned.
   await world.clock.advance(400 * 1000)
   await hint($)
   await reply($, world, COLD)
-  // Expired again with no hint drawn: an unwarned one.
+  // Expired again: the same.
   await world.clock.advance(400 * 1000)
   await reply($, world, COLD)
 
@@ -113,7 +113,7 @@ test('the sensor file holds closed words and times only, in the shape the Python
 
   const seen = events(world)
   expect(seen[0]).toEqual({ ts: Math.floor(T0 / 1000), event: 'present', surface: 'terminal' })
-  expect(seen.filter(one => one.event === 'cold_send').map(one => one.outcome)).toEqual(['warned', 'unwarned'])
+  expect(seen.filter(one => one.event === 'cold_send').map(one => one.outcome)).toEqual(['unwarned', 'unwarned'])
   const rebuilds = seen.filter(one => one.event === 'rebuild')
   expect(rebuilds.length).toBeGreaterThanOrEqual(1)
 

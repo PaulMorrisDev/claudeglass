@@ -142,7 +142,6 @@ applies:
 | Small changes in a row | Your third small change request in a row, each its own message. Listing the rest in one message costs less. |
 | Large paste | The draft is about 10,000 tokens or more. If it's a log, paste only the part that matters. |
 | Background work | Work is still running in the background and you are about to ask how it's going. Asking re-reads the whole session. |
-| Cache expired | You have been idle past the cache lifetime, and the context is 100,000 tokens or more. It says what this send costs, and what `/clear` first would cost. |
 | New topic | The draft is a new request that shares no words with the session, and the session carries 20,000 tokens or more beyond its startup. It says what each later reply would save after `/clear`. A message that carries on ("commit this", "now run the tests") isn't a new topic. |
 | No file named | You ask for a change in a session that carries under 20,000 tokens and has touched no file, and name none. |
 | Read everything | You ask Claude to read the whole codebase. Asking for one folder or file, such as "read all of src/api", doesn't count. |
@@ -190,10 +189,10 @@ before Claude summarises. It is cleared when neither holds, when the session
 ends and on `/clear`. While the limit forecast is on the line it is looked at
 again every minute, so the minutes follow the clock even when you are idle.
 
-When you approve a plan after a lot of planning, the status line says a
-fresh session would save tokens on every reply. That tip has the line while
-it shows, and nothing here overwrites it. It goes at the next reply or
-summary. Leaving plan mode counts as approving.
+Approving a plan puts nothing on the status line. The tip that a fresh
+session would save tokens, and the cache-expired warning on the hint line,
+are off: the replay found them more often wrong than right (see
+[coaching](coaching.md#the-hints)).
 
 ## The Checkpoint pane
 
@@ -582,11 +581,9 @@ wording and rest rules:
 
 | Hint | Without the mod | With the mod |
 |---|---|---|
-| Cache expired | After you send, when the cost is paid | The hint line, before you send |
 | Background work | After you send | The hint line |
 | Small changes in a row | After you send | The hint line |
 | Large paste | After you send | The hint line, where you judge whether it is a log |
-| Fresh start after a plan | After you approve a plan | The status line |
 
 Some hints stay with the hook, because they steer Claude or feed a skill, or
 because the mod no longer shows them. They are the fresh start tip in plan

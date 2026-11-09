@@ -172,14 +172,14 @@ test('a new topic over a small context says nothing', async ($, on) => {
   expect(await tail($, world)).toBeUndefined()
 })
 
-test('the cold-cache warning keeps the line: the draft check waits until nothing else has anything to say', async ($, on) => {
+test('the cold-cache warning is off, so the draft check has the line after the cache expired', async ($, on) => {
   const world = prepare(on)
   const state = rig(on, world)
   await started($, world, state)
   await world.clock.advance(400 * 1000)
 
   await put($, state, NEW_TOPIC)
-  expect(await tail($, world)).toMatch(/^Idle \d+ min, so the cache expired/)
+  expect(await tail($, world)).not.toMatch(/cache expired/)
 })
 
 test('a change asked for with no file named, in a session that has touched none, asks for the file', async ($, on) => {

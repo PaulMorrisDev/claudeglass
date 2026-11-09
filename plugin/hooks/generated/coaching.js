@@ -165,6 +165,14 @@ export const MOVED = [
   "status_poll"
 ];
 
+export const OFF = [
+  "plan_fresh",
+  "plan_fresh_early",
+  "split_run",
+  "quiet_output",
+  "cold_return"
+];
+
 export const NOTE_KINDS = [
   "plan_fresh",
   "plan_fresh_early",

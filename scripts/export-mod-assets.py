@@ -265,6 +265,8 @@ def export() -> dict[str, str]:
                 # words its sensor file may carry (``SENSOR_VOCAB``), as
                 # sorted lists so the output is the same on every run.
                 "MOVED": sorted(capture_catalogue.MOVED_TO_MOD),
+                # The hints whose live note is off (``LIVE_OFF_HINTS``).
+                "OFF": list(capture_catalogue.LIVE_OFF_HINTS),
                 "NOTE_KINDS": list(capture_catalogue.SENSOR_NOTE_KINDS),
                 "MOD_NOTE_KINDS": list(capture_catalogue.MOD_NOTE_KINDS),
                 "SENSOR_EVENTS": list(capture_catalogue.SENSOR_EVENTS),

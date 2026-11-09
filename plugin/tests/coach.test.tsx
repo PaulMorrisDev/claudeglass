@@ -238,7 +238,7 @@ test('no background work, a finished one, or a message that is not a status chec
   expect((await hint($, world)).tail).toBeUndefined()
 })
 
-test('a status check after the cache expired gets the cold-cache warning, not the poll', async ($, on) => {
+test('a status check after the cache expired gets no cold-cache warning: that hint is off', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.Bash = { result: {}, text: BACKGROUND }
@@ -246,31 +246,25 @@ test('a status check after the cache expired gets the cold-cache warning, not th
   await tool($, 'Bash', { command: 'npm test &' })
   await world.clock.advance(400 * 1000)
   await put($, state, 'how is it going?')
-  const seen = await hint($, world)
-  expect(String(seen.tail)).toMatch(/^Idle \d+ min, so the cache expired/)
+  expect(String((await hint($, world)).tail ?? '')).not.toMatch(/cache expired/)
 })
 
 // -- cold_return ---------------------------------------------------------------------
 
-test('the cold-cache warning rests, and is one note for the sensor', async ($, on) => {
+test('the cold-cache warning is off: the replay found it more often wrong than right', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   await started($, world)
   await world.clock.advance(400 * 1000)
-  const first = await hint($, world)
-  expect(String(first.tail)).toMatch(/^Idle \d+ min, so the cache expired \(est\.\): this send costs about \$\d/)
-  expect(String(first.tail)).toMatch(/\/clear first costs about \$\d/)
+  expect((await hint($, world)).tail).toBeUndefined()
 
-  // The send rebuilds the cache; it expires again, but the warning rests for hours.
   await send($, state, 'carry on')
   await reply($, world, { gap: 0, steps: [{ input: 1000, cacheRead: 0, cacheWrite: 120000, output: 200 }], usd: 0.45 })
   await world.clock.advance(400 * 1000)
   expect((await hint($, world)).tail).toBeUndefined()
 
   await settle($, world)
-  const note = sensorNotes(world, 'cold_return')
-  expect(note).toHaveLength(1)
-  expect(note[0]?.surface).toBe('hint')
+  expect(sensorNotes(world, 'cold_return')).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
@@ -284,7 +278,7 @@ test('the cold-cache warning can be muted', async ($, on) => {
 
 // -- one item, in the hook's order --------------------------------------------------------
 
-test('a big paste goes before the cold-cache warning, and the warning comes back when the paste goes', async ($, on) => {
+test('a big paste shows after the cache expired, and the line is empty again when the paste goes', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   await started($, world)
@@ -296,7 +290,7 @@ test('a big paste goes before the cold-cache warning, and the warning comes back
   expect(String(paste.tail)).not.toMatch(/cache expired/)
 
   await clear($, state)
-  expect(String((await hint($, world)).tail)).toMatch(/^Idle \d+ min, so the cache expired/)
+  expect((await hint($, world)).tail).toBeUndefined()
 })
 
 test('a drip goes before the cold-cache warning', async ($, on) => {
@@ -313,13 +307,13 @@ test('a drip goes before the cold-cache warning', async ($, on) => {
   expect(String(seen.tail)).not.toMatch(/cache expired/)
 })
 
-test('a muted kind gives way to the next', async ($, on) => {
+test('a muted kind gives no hint, and the one that is off does not take its place', async ($, on) => {
   const world = prepare(on, { settings: settingsFile({ coaching: { muted: ['big_paste'] } }) })
   const state = rig(on)
   await started($, world)
   await world.clock.advance(400 * 1000)
   await put($, state, 'x'.repeat(60_000))
-  expect(String((await hint($, world)).tail)).toMatch(/^Idle \d+ min, so the cache expired/)
+  expect((await hint($, world)).tail).toBeUndefined()
 })
 
 // -- rest and once ------------------------------------------------------------------------
@@ -399,27 +393,17 @@ async function planned($: Engine, world: World, state: Rig, ctx = 90_000): Promi
   await reply($, world, { gap: MINUTE, steps: [{ input: 500, cacheRead: 20000, cacheWrite: ctx - 20500, output: 100 }], usd: 0.3 })
 }
 
-test('approving a plan after a lot of planning puts the fresh-start tip on the status line, until the next reply', async ($, on) => {
+test('approving a plan after a lot of planning gives no fresh-start tip: that hint is off', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.ExitPlanMode = { result: PLAN }
   await planned($, world, state)
 
   await tool($, 'ExitPlanMode')
-  const tip = state.statuses.filter(one => one !== undefined)
-  expect(tip).toHaveLength(1)
-  expect(String(tip[0])).toMatch(/^This plan was approved with about \d+k tokens of planning in the session, and every reply of the build reads them again\./)
-  expect(String(tip[0])).toMatch(/Run \/clear, then ask Claude to implement the plan in `\/work\/plan\.md`\.$/)
-  expect(state.statuses[state.statuses.length - 1]).toBe(String(tip[0]))
-
-  await reply($, world, { gap: MINUTE, ...AGAIN })
-  // The tip goes with the reply. (The big jumps of the planning leave no reply before Claude summarises: the urgent line takes the place.)
-  expect(state.statuses[state.statuses.length - 1]).toBe('Claude summarises on the next reply')
+  expect(state.statuses.filter(one => one !== undefined)).toEqual([])
 
   await settle($, world)
-  const shown = sensorNotes(world, 'plan_fresh')
-  expect(shown).toHaveLength(1)
-  expect(shown[0]?.surface).toBe('status')
+  expect(sensorNotes(world, 'plan_fresh')).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
@@ -454,14 +438,14 @@ test('the plan tip can be muted, and rests like the others', async ($, on) => {
   expect(state.statuses).toEqual([])
 })
 
-test('a second plan inside the rest gives no second tip', async ($, on) => {
+test('a second plan gives no tip either', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.ExitPlanMode = { result: PLAN }
   await planned($, world, state)
   await tool($, 'ExitPlanMode')
   await tool($, 'ExitPlanMode')
-  expect(state.statuses.filter(one => one !== undefined)).toHaveLength(1)
+  expect(state.statuses.filter(one => one !== undefined)).toEqual([])
 })
 
 // -- speed --------------------------------------------------------------------------------

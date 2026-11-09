@@ -157,7 +157,7 @@ test('coaching turned off: no hint, no plan tip, no agent note', async ($, on) =
   expect(faults(world)).toEqual([])
 })
 
-test('the same session with coaching on does give them (the baseline for the test above)', async ($, on) => {
+test('the same session with coaching on gives the hints that are on, and no plan tip (that hint is off)', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.ExitPlanMode = { result: PLAN }
@@ -165,7 +165,7 @@ test('the same session with coaching on does give them (the baseline for the tes
   await put($, state, 'x'.repeat(60_000))
   expect(String((await hint($, world)).tail)).toMatch(/^Large paste/)
   await tool($, 'ExitPlanMode')
-  expect(tips(state)).toHaveLength(1)
+  expect(tips(state)).toEqual([])
 })
 
 for (const coaching of [{ exclude_projects: ['project$'] }, { projects: ['elsewhere'] }, { projects: ['!-work-project'] }]) {
@@ -184,10 +184,9 @@ for (const coaching of [{ exclude_projects: ['project$'] }, { projects: ['elsewh
 test('a projects list that names this project leaves it in', async ($, on) => {
   const world = prepare(on, { settings: settingsFile({ coaching: { projects: ['-work-project'] } }) })
   const state = rig(on)
-  state.results.ExitPlanMode = { result: PLAN }
   await planned($, world, state)
-  await tool($, 'ExitPlanMode')
-  expect(tips(state)).toHaveLength(1)
+  await put($, state, 'x'.repeat(60_000))
+  expect(String((await hint($, world)).tail)).toMatch(/^Large paste/)
 })
 
 test('plan_fresh switched off in the coaching file gives no plan tip', async ($, on) => {
@@ -252,48 +251,30 @@ test('a Workflow whose result says it launched in the background says nothing ei
   expect(notes(world)).toEqual([])
 })
 
-test('a go-ahead typed after the plan was sent back approves it: the fresh-start tip, once', async ($, on) => {
+test('a go-ahead typed after the plan was sent back gives no fresh-start tip: that hint is off', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.ExitPlanMode = { result: PLAN, isError: true }
   await planned($, world, state)
   await tool($, 'ExitPlanMode')
+  await send($, state, 'go ahead')
+  await send($, state, 'go ahead')
   expect(state.statuses).toEqual([])
-
-  await send($, state, 'go ahead')
-  const tip = tips(state)
-  expect(tip).toHaveLength(1)
-  expect(String(tip[0])).toMatch(/^This plan was approved with about \d+k tokens of planning/)
-  expect(String(tip[0])).toMatch(/`\/work\/plan\.md`\.$/)
-
-  // The plan is spent: another go-ahead tips nothing.
-  await send($, state, 'go ahead')
-  expect(tips(state)).toHaveLength(1)
   expect(faults(world)).toEqual([])
 })
 
-test('leaving plan mode approves the plan sent back, whatever the next message says: the fresh-start tip, once', async ($, on) => {
+test('leaving plan mode after a plan was sent back gives no fresh-start tip: that hint is off', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.ExitPlanMode = { result: PLAN, isError: true }
   await planned($, world, state)
   await tool($, 'ExitPlanMode')
-
-  // Still in plan mode: a message that isn't a go-ahead approves nothing.
   state.mode = 'plan'
   await send($, state, 'what about the tests?')
-  expect(state.statuses).toEqual([])
-
   await tool($, 'ExitPlanMode')
   state.mode = 'default'
   await send($, state, 'looks fine, I switched out of plan mode')
-  const tip = tips(state)
-  expect(tip).toHaveLength(1)
-  expect(String(tip[0])).toMatch(/^This plan was approved with about \d+k tokens of planning/)
-
-  // The plan is spent: the next message in that mode tips nothing.
-  await send($, state, 'and now the second part')
-  expect(tips(state)).toHaveLength(1)
+  expect(state.statuses).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
@@ -322,17 +303,15 @@ test('a message that is not a go-ahead, or a go-ahead with no plan sent back, ti
   expect(state.statuses).toEqual([])
 })
 
-test('a go-ahead from a source that is not a person typing does not approve the plan', async ($, on) => {
+test('a go-ahead from a source that is not a person typing, or a person, gives no plan tip', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.ExitPlanMode = { result: PLAN, isError: true }
   await planned($, world, state)
   await tool($, 'ExitPlanMode')
   await send($, state, 'go ahead', 'task-notification')
-  expect(state.statuses).toEqual([])
-  // The person's own then does.
   await send($, state, 'go ahead', 'sdk')
-  expect(tips(state)).toHaveLength(1)
+  expect(state.statuses).toEqual([])
 })
 
 // -- what counts as typing ---------------------------------------------------------------
