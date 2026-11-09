@@ -1766,14 +1766,37 @@ FEEDBACK_NOTE_TEXT = {
     "rating_reminder": _reminder_note(),
 }
 
-#: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
+#: ``quiet_output``'s ``{how}``: it speaks only for a whole read of a saved
+#: output (:data:`QUIET_SAVED_PATTERN`), so there is one.
 COACHING_QUIET_HOW = {
-    "Read": "read only the lines you need, with an offset and a limit",
-    "Grep": "narrow the pattern or the path, or ask for file names or counts only",
-    "Glob": "narrow the pattern",
-    "": "ask for less: a narrower query or a smaller page",
+    "Read": "Grep the saved output, or read part of it with an offset and a limit",
 }
 
+#: Where the saved outputs ``quiet_output`` is about are kept, matched on a
+#: ``Read``'s ``file_path``: the ``tool-results`` folder of the session
+#: (where Claude Code saves a result too big for the context), its
+#: ``scratchpad`` folder, and a background task's ``.output`` file.
+QUIET_SAVED_PATTERN = r"(?:^|[\\/])(?:tool-results|scratchpad)[\\/]|[\\/]tasks[\\/][^\\/]+\.output$"
+
+#: The hints only Claude sees: no tip, so no question of the tip survey
+#: (:data:`TIP_HINT_TITLES`). The daily run still mutes one that Claude
+#: called a misfire (``coaching.tip_rules``), through ``coaching.json``'s
+#: ``muted``.
+CLAUDE_ONLY_HINTS = ("quiet_output",)
+
+#: A message that, sent after a break, is not new work and so gets no
+#: ``cold_return`` receipt: a go-ahead that carries on ("yes, fix the
+#: wrapper", "you may merge all the PRs", "go ahead and ...") or a retry
+#: ("try again"), matched on the whole message, at most
+#: :data:`COLD_SKIP_MAX_CHARS` characters. The plain go-ahead
+#: (:data:`GO_PATTERN`) is skipped too.
+COLD_SKIP_PATTERN = (
+    r"(?:please\s+)?(?:(?:try|retry|run|do)(?: it| that| this)?(?: again| once more)|retry|try again|again)"
+    r"[\s!.,]*(?:please)?[\s!.]*"
+    r"|(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm)\b[\s,.!:\-]+\S.*"
+    r"|(?:you (?:may|can|could)|go ahead(?: and)?|please go ahead(?: and)?|feel free to)\s+\S.*"
+)
+COLD_SKIP_MAX_CHARS = 80
 
 @dataclass(frozen=True, slots=True)
 class Metric:
@@ -3416,6 +3439,9 @@ def export_json() -> dict:
             "text": dict(COACHING_TEXT),
             "split_why": dict(COACHING_SPLIT_WHY),
             "quiet_how": dict(COACHING_QUIET_HOW),
+            "quiet_saved_pattern": QUIET_SAVED_PATTERN,
+            "cold_skip_pattern": COLD_SKIP_PATTERN,
+            "cold_skip_max_chars": COLD_SKIP_MAX_CHARS,
             "notice": dict(COACHING_NOTICE),
             "interrupt_prefix": INTERRUPT_PREFIX,
             "not_typed_prefixes": list(NOT_TYPED_PREFIXES),

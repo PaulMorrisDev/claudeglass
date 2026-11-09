@@ -508,3 +508,10 @@ def old_agent_note_text(ids, agent_type: str = "") -> str:
         "End your final report with one line, [result: done|partial|blocked key=word ...], using only these words:"
     )
 
+
+
+def reminder_led_prompt(typed: str = "") -> str:
+    """A message as the UserPromptSubmit hook sees it when Claude Code
+    puts a ``<system-reminder>`` block in front of what the user typed
+    (``typed``; nothing for a message that is only the reminder)."""
+    return "<system-reminder>\nThe user opened the session from a side panel.\n</system-reminder>\n" + typed

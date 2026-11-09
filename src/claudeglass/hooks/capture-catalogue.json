@@ -670,11 +670,11 @@
    "both": "agent runs had to summarise their own context part-way through or began from a brief of {brief_chars} characters or more"
   },
   "quiet_how": {
-   "Read": "read only the lines you need, with an offset and a limit",
-   "Grep": "narrow the pattern or the path, or ask for file names or counts only",
-   "Glob": "narrow the pattern",
-   "": "ask for less: a narrower query or a smaller page"
+   "Read": "Grep the saved output, or read part of it with an offset and a limit"
   },
+  "quiet_saved_pattern": "(?:^|[\\\\/])(?:tool-results|scratchpad)[\\\\/]|[\\\\/]tasks[\\\\/][^\\\\/]+\\.output$",
+  "cold_skip_pattern": "(?:please\\s+)?(?:(?:try|retry|run|do)(?: it| that| this)?(?: again| once more)|retry|try again|again)[\\s!.,]*(?:please)?[\\s!.]*|(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm)\\b[\\s,.!:\\-]+\\S.*|(?:you (?:may|can|could)|go ahead(?: and)?|please go ahead(?: and)?|feel free to)\\s+\\S.*",
+  "cold_skip_max_chars": 80,
   "notice": {
    "plan_fresh": "⚠️ ClaudeGlass: This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
    "plan_fresh_early": "⚠️ ClaudeGlass: Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of the build would read it again. {clear_how}",

@@ -68,14 +68,12 @@ connect``):
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
   ``ExitPlanMode``, ``Agent`` and ``Workflow``) for coaching notes
   (``[capture] coaching`` has ``coaching_notes``): a short ``cg-coach``
-  note when a hint applies -- an agent or a workflow started in the
-  background by a session holding 150k tokens or more, where the reply
-  to each report it sends back reads all of that again
-  (``report_reread``, resting 30 minutes),
-  a message sent after a break that outlasted the prompt cache (a receipt
-  for the rewrite, ``cold_return``), a message asking how background work
+  note when a hint applies -- a message sent after a break that outlasted
+  the prompt cache (a receipt for the rewrite, ``cold_return``; not for a
+  go-ahead, a retry, an answer to Claude's question or a message with no
+  typed text), a message asking how background work
   is going while it still runs (``status_poll``), small change requests
-  sent one at a time (``drip_feed``), a huge paste, a large result, a plan
+  sent one at a time (``drip_feed``), a huge paste, a whole read of a large saved output (``quiet_output``, never inside an agent), a plan
   approved after a lot of planning, or a message sent in plan mode after a
   lot of planning (the note asks Claude to end the plan it submits with
   the tip to approve it with a clear context). A tip
@@ -96,7 +94,7 @@ connect``):
   (:func:`delivery`) the note alone carries the tip. An agent run that
   ended too big (``split_run``: Claude Code summarised its context
   part-way through, or it began from a brief of ``split_brief_chars``
-  characters or more) is never told to the subagent, whose notice never
+  characters or more, which a workflow agent's never counts) is never told to the subagent, whose notice never
   shows: ``SubagentStop`` records it, as counts under the session
   (:func:`keep_run`), and the main session is told once, at the next
   ``PostToolUse`` after an agent or workflow call (a foreground run has
@@ -1443,6 +1441,43 @@ def _limit_stop(records: list[dict], at: float, prefixes: tuple[str, ...]) -> tu
     return found, reset
 
 
+#: A leading ``<system-reminder>`` block, or another app event tag
+#: (``<side-sessions-event>``), that Claude Code puts in front of what the
+#: user typed.
+_LEADING_EVENTS = re.compile(r"\A\s*(?:<(system-reminder|[a-z]+(?:-[a-z]+)*-event)>.*?</\1>\s*)+", re.DOTALL)
+
+
+def _asks_you(records: list[dict]) -> bool:
+    """Whether Claude's newest reply in ``records`` ends on a question to
+    the user: an ``AskUserQuestion`` call, or text that ends in a question
+    mark."""
+    last = next((r for r in reversed(records) if _is_reply(r)), None)
+    if last is None:
+        return False
+    blocks = _blocks(last)
+    if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion" for b in blocks):
+        return True
+    texts = [str(b.get("text") or "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+    return bool(texts) and texts[-1].rstrip().endswith("?")
+
+
+def _cold_skipped(prompt, records: list[dict], coaching: dict) -> bool:
+    """Whether a message is no new work, so the cold-return receipt (whose
+    advice is to ``/clear`` first) has nothing to say to it: it has no
+    typed text (a reminder or an app event alone, or a hook, system or task
+    notification), it is a go-ahead or a retry, or it answers a question
+    Claude asked. Only a leading reminder block is looked past, to what
+    follows it."""
+    if not isinstance(prompt, str):
+        return True
+    text = _LEADING_EVENTS.sub("", prompt, count=1).strip()
+    if not text or text.startswith(_not_typed_prefixes()) or _is_go(text, coaching):
+        return True
+    if len(text) <= coaching["cold_skip_max_chars"] and re.fullmatch(coaching["cold_skip_pattern"], text, re.IGNORECASE):
+        return True
+    return _asks_you(records)
+
+
 def _cold_hint(
     path: str, records: list[dict], replayed: bool, last: dict | None, kept: bool, th: dict, now_ts: float,
     limit_prefixes: tuple[str, ...] = (),
@@ -2245,65 +2280,27 @@ def _typed_plan_hint(payload: dict, records: list[dict], coaching: dict, th: dic
     return _fresh_hint(path, waiting["chars"], th)
 
 
-def _quiet_hint(payload: dict, result_len: int, quiet_how: dict, th: dict) -> tuple[str, float, dict] | None:
-    """``quiet_output``: a result about ``quiet_output_tokens`` long, as
-    :func:`result_chars` measures it. A read already given a limit is left
-    alone. It rests per context: the main session and each subagent keep
-    their own stamp (``quiet_output:<agent id>``), as a subagent's big
-    result is no reason to stay quiet to you, or the other way round."""
+def _quiet_hint(payload: dict, result_len: int, coaching: dict, th: dict) -> tuple[str, float, dict] | None:
+    """``quiet_output``: a whole read, with no limit or offset, of a saved
+    output (a file under the session's ``tool-results`` or ``scratchpad``
+    folder, or a background task's output file: ``quiet_saved_pattern``)
+    about ``quiet_output_tokens`` long, as :func:`result_chars` measures
+    the read. Every later reply reads it again, and a search or a part of
+    it would have done. Never inside an agent: its note never shows and
+    the reads it makes whole are the ones its work needs. Any other big
+    result is left alone."""
+    if payload.get("agent_id") or str(payload.get("tool_name") or "") != "Read":
+        return None
     tokens = result_len / _CHARS_PER_TOKEN
     if tokens < th["quiet_output_tokens"]:
         return None
-    tool = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input")
-    if tool == "Read" and isinstance(tool_input, dict) and tool_input.get("limit"):
+    if not isinstance(tool_input, dict) or tool_input.get("limit") is not None or tool_input.get("offset") is not None:
         return None
-    agent_id = str(payload.get("agent_id") or "")
-    kind = f"quiet_output:{agent_id}" if agent_id else "quiet_output"
-    return kind, tokens, {"tokens": _k(tokens), "how": quiet_how.get(tool, quiet_how[""])}
-
-
-def _background_start(payload: dict, coaching: dict) -> bool:
-    """Whether a call to an agent or workflow tool sent the work to the
-    background, so its report comes back later as a message of its own:
-    the call asked for it (``run_in_background``), or the result says it
-    launched that way (``isAsync``, a status of ``async_launched``, a
-    workflow's ``taskType``, or the wording ``background_launch_pattern``
-    matches, as the ``status_poll`` hint reads a launch). Nothing of the
-    result is kept."""
-    tool_input = payload.get("tool_input")
-    if isinstance(tool_input, dict) and tool_input.get("run_in_background") is True:
-        return True
-    response = payload.get("tool_response")
-    limit = coaching["background_scan_chars"]
-    if isinstance(response, dict):
-        if response.get("isAsync") is True or response.get("status") == "async_launched":
-            return True
-        if response.get("taskType") == "local_workflow":
-            return True
-        head = _result_head(response, limit)
-    elif isinstance(response, str):
-        head = response[:limit]
-    elif isinstance(response, list):
-        head = _result_head({"content": response}, limit)
-    else:
-        return False
-    return re.search(coaching["background_launch_pattern"], head) is not None
-
-
-def _report_hint(payload: dict, state: dict, session: str, coaching: dict, th: dict) -> tuple[str, float, dict] | None:
-    """``report_reread``: an agent or workflow started in the background
-    while the main session holds ``report_reread_tokens`` or more. Each
-    report it sends back is answered by a reply that reads the whole
-    session again, so the note says what one such read is. The context is
-    the newest reply's, kept by :func:`remember_reply` just before; with
-    none kept, nothing is said."""
-    if not _background_start(payload, coaching):
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or re.search(coaching["quiet_saved_pattern"], file_path) is None:
         return None
-    kept = _stored_reply(state, session)
-    if kept is None or kept["ctx"] < th["report_reread_tokens"]:
-        return None
-    return "report_reread", kept["ctx"], {"ctx": _k(kept["ctx"])}
+    return "quiet_output", tokens, {"tokens": _k(tokens), "how": coaching["quiet_how"]["Read"]}
 
 
 def _agent_transcript(payload: dict) -> Path | None:
@@ -2344,7 +2341,8 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     next ``PostToolUse`` after an agent or workflow call, or the next
     background task's finishing message (:func:`_split_hint`). A run counts
     when Claude Code summarised its context part-way through, or when it
-    began from a brief of ``split_brief_chars`` characters or more. Only
+    began from a brief of ``split_brief_chars`` characters or more (not a
+    workflow agent's: its brief is its script's). Only
     counts by those two words are kept, under the session: nothing of the
     run's type, brief or words. They are kept while the mod runs too: it
     tells the run on the agent's row, so only :func:`coaching_for` leaves
@@ -2366,9 +2364,11 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     if path is None:
         return False
     th = coaching_thresholds(coaching, config, personal)
+    brief, _relay, workflow = _agent_brief(_head(str(path), _AGENT_HEAD_BYTES))
     found = {
         "compaction": _compactions(str(path)) > 0,
-        "brief": len(_agent_brief(_head(str(path), _AGENT_HEAD_BYTES))[0]) >= th["split_brief_chars"],
+        # A workflow agent's brief is its script's, not the user's.
+        "brief": not workflow and len(brief) >= th["split_brief_chars"],
     }
     if not any(found.values()):
         return False
@@ -2514,7 +2514,7 @@ def coaching_for(
                     None if "drip_feed" in moved else _drip_hint(prompt, records, coaching, th, now, ctx),
                     None if "big_paste" in moved else _paste_hint(prompt, th),
                     None if "status_poll" in moved else _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
-                    None if "cold_return" in moved else _cold_hint(
+                    None if "cold_return" in moved or _cold_skipped(prompt, records, coaching) else _cold_hint(
                         path, records, replayed, last, known, th, now_ts, tuple(coaching["limit_line_prefixes"])
                     ),
                 ]
@@ -2527,22 +2527,20 @@ def coaching_for(
         if not in_agent:
             dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
         if tool in catalogue["spawn_tools"]:
-            # No size hint on a report or a launch message. An agent or a
-            # workflow the main session started in the background gets
-            # the cost of reading its report instead; one that ended too
-            # big is told here (``split_run``) when the main session
-            # called it in the foreground, as it has ended by now.
-            if not in_agent:
-                if "report_reread" not in moved:
-                    candidates.append(_report_hint(payload, state, session, coaching, th))
-                if "split_run" not in moved:
-                    candidates.append(_split_hint(state, session, coaching, th))
+            # No size hint on a report or a launch message. A run that
+            # ended too big is told here (``split_run``) when the main
+            # session called it in the foreground, as it has ended by now.
+            if not in_agent and "split_run" not in moved:
+                candidates.append(_split_hint(state, session, coaching, th))
         else:
             if result_len is None:
                 result_len = result_chars(payload, catalogue)
-            candidates.append(_quiet_hint(payload, result_len, coaching["quiet_how"], th))
+            candidates.append(_quiet_hint(payload, result_len, coaching, th))
     # How to do what a tip says depends on the app: a few words each tip fills in.
-    how = {key: variants["desktop" if desktop() else "terminal"] for key, variants in coaching["how"].items()}
+    how = {
+        key: variants["desktop" if desktop() else "terminal"].replace("the plan in `<file>`", "the plan file")
+        for key, variants in coaching["how"].items()
+    }
     for found in candidates:
         if found is None:
             continue
