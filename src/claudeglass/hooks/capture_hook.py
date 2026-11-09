@@ -113,11 +113,14 @@ connect``):
   line. While the ClaudeGlass mod is running for the session (its file
   ``<config-dir>/mod/present/<session id>.json`` is under 10 minutes old:
   :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
-  own UI, so this hook neither works them out nor stamps them as shown
+  own UI (when its file's ``shows`` lists ``"hint"``, or has no ``shows``:
+  an older mod), so this hook neither works them out nor stamps them as shown
   (a run that ended too big is still recorded, :func:`keep_run`, and a
   tip to start fresh the mod showed rests ``plan_fresh_early`` for the
   cooldown, :func:`_mod_showed_fresh_start`); without the mod, nothing
-  changes.
+  changes. Hint decisions run under a claim on ``coach-state.json``
+  (``coach-state.json.claim``, :func:`_claimed`), so parallel messages of
+  a session draw one note per hint.
 - ``UserPromptSubmit``, for the ``/cg-feedback`` survey's items (``[capture]
   feedback``: :func:`feedback_note_for`), at any capture level and in every
   session ``[capture] projects`` leaves in. A message that starts
@@ -203,6 +206,8 @@ import json
 import os
 import re
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -849,9 +854,10 @@ def _read_json(path: Path) -> dict:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    """Best-effort atomic write (a temp file, then ``os.replace``); a
-    clash with another hook call writing at the same moment loses one of
-    the two, which only means a hint may repeat."""
+    """Best-effort atomic write (a temp file, then ``os.replace``). The
+    coach state is written under :func:`_claimed`, so two hook calls do not
+    write it at the same moment: one that finds the claim held draws no
+    hint instead."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
@@ -861,6 +867,52 @@ def _write_json(path: Path, data: dict) -> None:
             tmp.unlink()
         except OSError:
             pass
+
+
+#: A claim file older than this is left by a hook call that was killed
+#: before it released it, and is taken over.
+_CLAIM_STALE_S = 5.0
+
+
+@contextmanager
+def _claimed(path: Path):
+    """Yields whether this call holds the claim on ``path`` (the state
+    file): ``<path>.claim`` created with ``O_EXCL``, never waited for. A
+    claim older than :data:`_CLAIM_STALE_S` (its mtime) is removed and taken
+    once more. Calls in parallel messages of one session, or in several
+    sessions, share the state file; the one that holds the claim reads it,
+    decides and writes it whole, and the others skip the decision (yield
+    ``False``). A claim that cannot be made for any other reason (no
+    folder yet, a read-only disk) yields ``True``, so coaching is never
+    silenced by it. The claim is released at the end, an error ignored."""
+    claim = path.with_name(path.name + ".claim")
+    held = False
+    for attempt in range(2):
+        try:
+            os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            held = True
+            break
+        except FileExistsError:
+            try:
+                if attempt == 0 and time.time() - claim.stat().st_mtime > _CLAIM_STALE_S:
+                    claim.unlink()
+                    continue
+            except OSError:
+                if attempt == 0:
+                    continue
+            yield False
+            return
+        except OSError:
+            yield True
+            return
+    try:
+        yield held
+    finally:
+        if held:
+            try:
+                claim.unlink()
+            except OSError:
+                pass
 
 
 def _number(value) -> float | None:
@@ -903,11 +955,14 @@ _PLAIN_SESSION_ID = re.compile(r"[A-Za-z0-9-]+")
 _MOD_PRESENT: dict = {}
 
 
-def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> bool:
-    """Whether the ClaudeGlass mod is running for this session: its file
-    ``<config-dir>/mod/present/<session id>.json`` (``{"schema": 1,
-    "session_id": <the id>, "seen": <epoch seconds>}``) was refreshed within
-    ``mod.present_window_s`` (10 minutes) of now, either side. The mod
+def _mod_file(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> tuple | None:
+    """``(shows,)`` when the ClaudeGlass mod is running for this session,
+    else ``None``: its file ``<config-dir>/mod/present/<session id>.json``
+    (``{"schema": 1, "session_id": <the id>, "seen": <epoch seconds>,
+    "shows": [...]}``) was refreshed within ``mod.present_window_s`` (10
+    minutes) of now, either side. ``shows`` is what the mod has seen itself
+    draw (``"hint"``: the line under the prompt); ``None`` when the file has
+    no such key (an older mod). The mod
     refreshes it every minute while the session is open and, at the
     session's end, writes it once more with ``seen`` at 0 (the engine
     cannot delete a file; the dashboard's watcher removes files a day old).
@@ -920,7 +975,7 @@ def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: flo
     leaves every note as it was). Never raises."""
     try:
         if not isinstance(session_id, str) or not _PLAIN_SESSION_ID.fullmatch(session_id):
-            return False
+            return None
         mod = catalogue["mod"]
         path = config_dir / mod["dir"] / mod["present_dir"] / f"{session_id}.json"
         stat = path.stat()
@@ -929,19 +984,36 @@ def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: flo
             _MOD_PRESENT.clear()
             data = _read_json(path)
             ok = data.get("schema") == 1 and data.get("session_id") == session_id
-            _MOD_PRESENT[key] = _number(data.get("seen")) if ok else None
-        seen = _MOD_PRESENT[key]
-        return seen is not None and abs(now_ts - seen) <= mod["present_window_s"]
+            shows = data.get("shows")
+            shows = tuple(x for x in shows if isinstance(x, str)) if isinstance(shows, list) else None
+            _MOD_PRESENT[key] = (_number(data.get("seen")), shows) if ok else (None, None)
+        seen, shows = _MOD_PRESENT[key]
+        if seen is not None and abs(now_ts - seen) <= mod["present_window_s"]:
+            return (shows,)
+        return None
     except Exception:  # noqa: BLE001 - a presence fault must leave every note as it was
-        return False
+        return None
+
+
+def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> bool:
+    """Whether the ClaudeGlass mod is running for this session
+    (:func:`_mod_file`)."""
+    return _mod_file(config_dir, catalogue, session_id, now_ts) is not None
 
 
 def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> frozenset:
     """The hints the mod delivers itself for this session
     (``capture_catalogue.MOVED_TO_MOD``, as the catalogue exports them),
     which the hook leaves out and does not stamp as shown; none when the
-    mod is not running for it."""
-    if not _mod_present(config_dir, catalogue, session_id, now_ts):
+    mod is not running for it. A mod that lists what it shows (``shows``)
+    takes them only when it lists ``"hint"``: on Desktop the hint line is
+    never drawn, ``shows`` stays empty and the hook keeps them. A file
+    without ``shows`` (an older mod) keeps the whole set moved."""
+    found = _mod_file(config_dir, catalogue, session_id, now_ts)
+    if found is None:
+        return frozenset()
+    shows = found[0]
+    if shows is not None and "hint" not in shows:
         return frozenset()
     return frozenset(catalogue["mod"]["moved"])
 
@@ -2442,6 +2514,28 @@ def coaching_note_for(
 
 
 def coaching_for(
+    payload: dict,
+    config: dict,
+    catalogue: dict,
+    config_dir: Path,
+    now: datetime | None = None,
+    result_len: int | None = None,
+    tail: _TailReader | None = None,
+) -> tuple[str, str]:
+    """:func:`_coaching_for` under the claim on the coach state
+    (:func:`_claimed`): a call that finds it held draws no hint, so
+    parallel messages of one session draw one note per hint. The rest of
+    the hook's work (capture, the facts line, the rating reminder) is not
+    part of this call and runs as it would."""
+    if not _coaching_applies(payload, config):
+        return "", ""
+    with _claimed(config_dir / catalogue["coaching"]["state_file"]) as held:
+        if not held:
+            return "", ""
+        return _coaching_for(payload, config, catalogue, config_dir, now, result_len, tail)
+
+
+def _coaching_for(
     payload: dict,
     config: dict,
     catalogue: dict,
