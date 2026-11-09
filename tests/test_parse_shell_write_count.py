@@ -345,6 +345,8 @@ def test_the_counts_are_plain_numbers_and_do_not_depend_on_the_salt(tmp_path, sa
     "echo x > src/a.py",
     "sed -i 's/a/b/' src/a.py",
     "echo x > notes.json",
+    "echo x > app/reports/views.py",
+    "echo x > docs/conf.py",
 ])
 def test_a_shell_write_to_code_counts_as_a_code_write(tmp_path, salt, command):
     turn = _turn(tmp_path, [_bash(command)], [_ok()])
@@ -357,7 +359,6 @@ def test_a_shell_write_to_code_counts_as_a_code_write(tmp_path, salt, command):
     "echo x >> notes.txt",
     "echo '{}' > audit-report.json",
     "echo '{}' > ledger.jsonl",
-    "echo x > plans/a.py",
     "echo x > reports/out.csv",
     "echo x > docs/a.html",
     "echo x > /home/me/scratchpad/run.py",
@@ -365,7 +366,7 @@ def test_a_shell_write_to_code_counts_as_a_code_write(tmp_path, salt, command):
 def test_a_shell_write_to_a_document_is_not_a_code_write(tmp_path, salt, command):
     turn = _turn(tmp_path, [_bash(command)], [_ok()])
     assert turn.shell_code_write_count == 0
-    assert turn.shell_write_count >= 1 or "scratchpad" in command
+    assert turn.shell_write_count == 1
 
 
 def test_a_shell_write_to_temp_is_not_a_code_write(tmp_path, salt):
@@ -383,3 +384,36 @@ def test_a_code_write_that_never_ran_is_taken_back(tmp_path, salt):
     turn = _turn(tmp_path, [_bash("echo x > src/a.py")],
                  [tool_result_block("t1", "The user doesn't want to proceed with this tool use.", is_error=True)])
     assert turn.shell_code_write_count == 0
+
+
+# -- the edit-tool side of it (``Turn.edit_code_count``) ---------------------------------
+
+
+def test_an_edit_to_code_counts_as_a_code_edit_even_inside_a_worktree_under_claude(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/.claude/worktrees/w/src/a.py"}),
+        tool_use_block("Edit", "t2", {"file_path": "C:/Dev/repo/src/b.py"}),
+    ], [_ok("t1"), _ok("t2")])
+    assert turn.edit_code_count == 2
+
+
+def test_an_edit_to_a_document_or_a_config_file_or_temp_is_not_a_code_edit(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Write", "t1", {"file_path": "~/.claude/agents/x.md"}),
+        tool_use_block("Write", "t2", {"file_path": "C:/Dev/repo/REVIEW.md"}),
+        tool_use_block("Edit", "t3", {"file_path": TEMP_SLASHED + "/x.py"}),
+    ], [_ok("t1"), _ok("t2"), _ok("t3")])
+    assert turn.edit_code_count == 0
+
+
+def test_a_code_edit_that_failed_or_was_denied_is_taken_back(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/a.py"}),
+        tool_use_block("Edit", "t2", {"file_path": "C:/Dev/repo/b.py"}),
+        tool_use_block("Edit", "t3", {"file_path": "C:/Dev/repo/c.py"}),
+    ], [
+        tool_result_block("t1", "File has not been read yet.", is_error=True),
+        tool_result_block("t2", "The user doesn't want to proceed with this tool use.", is_error=True),
+        _ok("t3"),
+    ])
+    assert turn.edit_code_count == 1

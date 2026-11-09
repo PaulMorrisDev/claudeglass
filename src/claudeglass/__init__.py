@@ -456,8 +456,9 @@ __version__ = "0.16.0"
 #: Bumped to 46: a read after ``||`` is the fallback for the read before it,
 #: so ``cat a 2>/dev/null || cat b`` is one ``Turn.shell_read_count``, not
 #: two. A pre-46 digest counts it twice.
-#: Bumped to 47: ``Turn.shell_code_write_count``, the shell writes to code
-#: (not documents, reports, ledgers or scratch files), which
+#: Bumped to 47: ``Turn.shell_code_write_count`` and
+#: ``Turn.edit_code_count``, the shell writes and edit-tool calls aimed at
+#: code (not documents, reports, ledgers or scratch files), which
 #: ``agent-decide-apply`` counts instead of every write. A pre-47 digest has
 #: none, so every transcript is re-read.
 PARSER_VERSION = 47

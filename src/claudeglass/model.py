@@ -586,10 +586,18 @@ phase, label, description or path:
   path.
 - ``Turn.shell_code_write_count: int = 0`` -- the part of
   ``shell_write_count`` aimed at code: not a document (a
-  ``capture_catalogue.DOC_SUFFIXES`` file, a file under ``plans/``,
-  ``reports/`` or ``docs/``, a report or ledger ``.json``/``.jsonl``) and
+  ``capture_catalogue.DOC_SUFFIXES`` file, a ``.json``, ``.csv``,
+  ``.html`` or ``.log`` file under ``plans/``, ``reports/`` or ``docs/``,
+  a report or ledger ``.json``/``.jsonl``) and
   not under ``scratchpad/``. Taken back like ``shell_write_count``. Only
   the ``agent-decide-apply`` verdict reads it.
+- ``Turn.edit_code_count: int = 0`` -- how many of this turn's edit-tool
+  calls (Edit, Write, MultiEdit, NotebookEdit) were aimed at code: outside
+  the temp dir and not a document, by the same test as
+  ``shell_code_write_count``. Counted whether or not the path is under a
+  ``.claude`` folder (a worktree there holds code). Taken back for a call
+  that failed or was denied. The ``agent-decide-apply`` verdict reads it
+  with ``shell_code_write_count``.
 
 The same bump puts ``Turn.edit_kind`` on that temp test: an
 Edit/Write/MultiEdit/NotebookEdit target in any of those forms is
@@ -1325,6 +1333,7 @@ class Turn:
     #: file written twice counts twice). A count only, never a path.
     shell_write_count: int = 0
     shell_code_write_count: int = 0
+    edit_code_count: int = 0
     #: Quality-signals addition (see module docstring): the preceding
     #: human message looks like a correction. Flag only.
     human_correction: bool = False

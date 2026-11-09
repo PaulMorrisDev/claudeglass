@@ -116,6 +116,7 @@ def _result_from_agent(agent: dict, group_fields: list[str]) -> TranscriptResult
     for turn in turns[:edits]:
         turn.edit_kind = "real"
         turn.edit_call_count = 1
+        turn.edit_code_count = 1
     for turn in turns[edits : edits + agent["shell_write_turns"]]:
         turn.shell_write_count = 1
         turn.shell_code_write_count = 1
@@ -261,6 +262,7 @@ def _agent(
             shell_code_write_count=1 if real_edits <= i < real_edits + shell_writes else 0,
             edit_call_count=1 if i < real_edits + doc_edits else 0,
             edit_doc_count=1 if real_edits <= i < real_edits + doc_edits else 0,
+            edit_code_count=1 if i < real_edits else 0,
             **_TOKENS,
         )
         for i in range(turns)
@@ -471,6 +473,55 @@ def test_a_decider_that_only_wrote_documents_is_not_decide_apply():
 def test_a_decider_that_wrote_code_is_decide_apply_beside_its_documents():
     run = _agent(role_word="review", turns=8, shell_writes=3, shell_doc_writes=2)
     assert set(_verdicts([run])) == {("general-purpose", "decide-apply")}
+
+
+def _parsed_decider(tmp_path, paths):
+    """A decider's transcript, parsed: one reply per path, each an Edit to it."""
+    import tempfile as _tempfile
+
+    from claudeglass.parse import parse_transcript
+    from helpers import tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
+
+    lines = [user_str_line("go", timestamp="2026-09-23T12:00:00.000Z")]
+    for i, path in enumerate(paths):
+        reply = turn_line(
+            model=OPUS,
+            content=[tool_use_block("Edit", f"t{i}", {"file_path": path})],
+            timestamp=f"2026-09-23T12:00:{1 + 2 * i:02d}.000Z",
+            cwd="C:/Dev/repo",
+        )
+        reply["message"]["stop_reason"] = "tool_use"
+        lines.append(reply)
+        lines.append(
+            user_block_line([tool_result_block(f"t{i}", "ok")], timestamp=f"2026-09-23T12:00:{2 + 2 * i:02d}.000Z")
+        )
+    final = turn_line(model=OPUS, content=[{"type": "text", "text": "done"}], timestamp="2026-09-23T12:01:00.000Z")
+    final["message"]["stop_reason"] = "end_turn"
+    lines.append(final)
+    file = tmp_path / "agent.jsonl"
+    write_jsonl(file, lines)
+    meta = TranscriptMeta(
+        path=str(file),
+        kind="subagent",
+        session_id="sess-e2e",
+        agent_type="general-purpose",
+        role_word="review",
+        model_recorded=True,
+    )
+    return parse_transcript(file, meta)
+
+
+def test_a_decider_that_edited_worktree_code_is_decide_apply_end_to_end(tmp_path):
+    result = _parsed_decider(tmp_path, ["C:/Dev/repo/.claude/worktrees/w/src/a.py"] * 3)
+    assert set(_verdicts([result])) == {("general-purpose", "decide-apply")}
+
+
+def test_a_decider_that_only_wrote_temp_files_and_reports_is_not_decide_apply_end_to_end(tmp_path):
+    import tempfile as _tempfile
+
+    temp = _tempfile.gettempdir().replace("\\", "/")
+    result = _parsed_decider(tmp_path, [f"{temp}/x.py", "C:/Dev/repo/REVIEW.md"] * 3)
+    assert _verdicts([result]) == {}
 
 
 def test_a_decider_that_edited_less_than_the_threshold_is_not_flagged():

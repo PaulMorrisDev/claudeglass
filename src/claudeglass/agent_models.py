@@ -300,12 +300,8 @@ def _analyse(
 
     write_turns = sum(1 for t in result.turns if t.edit_kind == "real" or t.shell_write_count > 0)
     # A decider that only wrote its report or a ledger did not change code:
-    # decide-apply counts shell writes to code and edit calls on non-documents.
-    code_write_turns = sum(
-        1
-        for t in result.turns
-        if t.shell_code_write_count > 0 or (t.edit_kind == "real" and t.edit_call_count > t.edit_doc_count)
-    )
+    # decide-apply counts shell writes and edit-tool calls aimed at code.
+    code_write_turns = sum(1 for t in result.turns if t.shell_code_write_count > 0 or t.edit_code_count > 0)
     role_class = agent_roles.role_class(meta.role_word)
     writer = (role_class == "writer" and write_turns >= 1) or (
         role_class is None and write_turns >= th.unknown_min_edit_turns

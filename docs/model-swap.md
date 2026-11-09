@@ -287,11 +287,13 @@ A run gets a verdict only when its dominant model is above Sonnet:
 - `decide-apply`: a `decider` with at least
   `decide_apply_min_edit_turns` (default 3) code write turns, whoever
   chose its model. It decided and also applied the changes. A code write
-  turn is an Edit, Write, MultiEdit or NotebookEdit call on a file that
-  isn't a document (`.md`, `.rst`, `.txt`, `.adoc`), or a shell command
-  that wrote to code (`Turn.shell_code_write_count` above 0): not a
-  document, not a file under `plans/`, `reports/`, `docs/` or
-  `scratchpad/`, not a report or ledger `.json`/`.jsonl`. An agent that
+  turn is one with a shell command that wrote to code
+  (`Turn.shell_code_write_count` above 0) or an edit-tool call aimed at
+  code (`Turn.edit_code_count` above 0), whichever tool did the writing and
+  whether or not the path is under `.claude`. Code is not a document (`.md`,
+  `.rst`, `.txt`, `.adoc`), not a data, web or log file under `plans/`,
+  `reports/` or `docs/`, not a file under `scratchpad/` or temp, and not a
+  report or ledger `.json`/`.jsonl`. An agent that
   only wrote its review and a ledger isn't flagged.
 
 A writer chosen by `file` gets none. Neither does an `integrates`

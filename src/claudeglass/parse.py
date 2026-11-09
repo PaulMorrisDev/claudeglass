@@ -663,6 +663,9 @@ def _temp_prefixes() -> tuple[str, ...]:
 #: the folder an agent session keeps its scratch files in.
 _DOC_FOLDERS = frozenset({"plans", "reports", "docs"})
 _SCRATCH_FOLDERS = frozenset({"scratchpad"})
+#: Under one of those folders, only a file with one of these endings is a
+#: document: ``app/reports/views.py`` and ``docs/conf.py`` are code.
+_DOC_FOLDER_SUFFIXES = (".json", ".jsonl", ".csv", ".tsv", ".html", ".htm", ".log")
 #: A ``.json`` or ``.jsonl`` file with one of these in its name is a report
 #: or ledger, not code.
 _LEDGER_NAME_RE = re.compile(r"report|ledger|audit|finding|review|verdict|result", re.IGNORECASE)
@@ -670,15 +673,16 @@ _LEDGER_NAME_RE = re.compile(r"report|ledger|audit|finding|review|verdict|result
 
 def _is_code_write_target(target: str, prefixes: tuple[str, ...]) -> bool:
     """Whether a shell write target is code: not temp or scratchpad, and not
-    a document (a ``DOC_SUFFIXES`` file, a file under ``plans/``,
-    ``reports/`` or ``docs/``, or a report or ledger in ``.json``/``.jsonl``).
-    ``Turn.shell_code_write_count`` counts only these."""
+    a document (a ``DOC_SUFFIXES`` file, a data, web or log file under
+    ``plans/``, ``reports/`` or ``docs/``, or a report or ledger in
+    ``.json``/``.jsonl``). ``Turn.shell_code_write_count`` and
+    ``Turn.edit_code_count`` count only these."""
     normal = _normalize_path_for_hash(target)
     if normal.startswith(prefixes):
         return False
     folders, _, name = normal.rpartition("/")
     parts = set(folders.split("/"))
-    if parts & _SCRATCH_FOLDERS or parts & _DOC_FOLDERS:
+    if parts & _SCRATCH_FOLDERS or (parts & _DOC_FOLDERS and name.endswith(_DOC_FOLDER_SUFFIXES)):
         return False
     if name.endswith(DOC_SUFFIXES):
         return False
@@ -940,6 +944,10 @@ class _PendingTurn:
     #: ``Turn.shell_code_write_count``), with the part each tool_use added.
     shell_code_write_count: int = 0
     shell_code_writes_by_tool_use: dict[str, int] = field(default_factory=dict)
+    #: The edit-tool calls aimed at code (see model.py's
+    #: ``Turn.edit_code_count``), with the part each tool_use added.
+    edit_code_count: int = 0
+    edit_code_by_tool_use: dict[str, int] = field(default_factory=dict)
     #: Live-coaching addition (see model.py's ``Turn.config_edit_count``/
     #: ``Turn.agent_edit_files``): the edit calls and shell write targets
     #: inside a ``.claude`` folder (with the part each tool_use added, so a
@@ -1335,6 +1343,12 @@ def _merge_content_blocks(
                     pending.edit_scratch_found = True
                 else:
                     pending.edit_real_found = True
+                    # Counted before the .claude split, as the shell side
+                    # counts it: a worktree under .claude holds code.
+                    if _is_code_write_target(path_value, temp_prefixes):
+                        pending.edit_code_count += 1
+                        if isinstance(tool_use_id, str) and tool_use_id:
+                            pending.edit_code_by_tool_use[tool_use_id] = 1
                 if prompt_shape.is_config_path(path_value):
                     pending.config_edit_count += 1
                     if isinstance(tool_use_id, str) and tool_use_id:
@@ -2146,6 +2160,7 @@ def _accumulate_tool_results(
                 if config_made and (name not in _SHELL_TOOL_NAMES or kind in _SHELL_NOT_RUN_KINDS):
                     current.config_edit_count -= config_made
                 # And the edit calls and file-changing commands, the same way.
+                current.edit_code_count -= current.edit_code_by_tool_use.pop(tool_use_id, 0)
                 calls_made, docs_made = current.edit_calls_by_tool_use.pop(tool_use_id, (0, 0))
                 current.edit_call_count -= calls_made
                 current.edit_doc_count -= docs_made
@@ -2585,6 +2600,7 @@ def _finalize_turn(
         edit_target_hashes=tuple(pending.edit_target_hashes),
         shell_write_count=pending.shell_write_count,
         shell_code_write_count=pending.shell_code_write_count,
+        edit_code_count=pending.edit_code_count,
         config_edit_count=pending.config_edit_count,
         agent_edit_files=pending.agent_edit_files,
         edit_call_count=pending.edit_call_count,
