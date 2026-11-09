@@ -129,7 +129,11 @@ The ClaudeGlass mod, a separate plugin that runs inside Claude Code, shows
 some of the hints itself, in its own panes, so they cost no context. It
 tells the hook which sessions it is running in with one small file per
 session, `mod/present/<session id>.json` in ClaudeGlass's data folder:
-`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>, "active": <seconds since 1970>}`.
+`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>, "active": <seconds since 1970>, "shows": ["hint"]}`.
+`shows` lists what the mod has seen drawn, and starts empty: `"hint"` appears once the
+hint line under the prompt has been rendered (the desktop app never renders it). The hook
+hands the mod its hints only when `shows` lists `"hint"`; a file without the key, from an
+older mod, keeps the earlier rule.
 `active` is when the session last sent a request (0 before its first); the mod uses it to
 tell another session that is working from one that is only open, and the hook ignores it.
 The mod refreshes it every minute on a timer while the session is open, so
@@ -142,7 +146,7 @@ The hook reads the session's own file on a call that could draw a note
 session counts as having the mod when the file's `session_id` is its own
 name, its schema is 1 and `seen` is within the last 10 minutes; a session
 id that isn't letters, digits and `-` never counts. Then the hook leaves
-out the hints the mod shows, and doesn't note that it did: `cold_return`,
+out the hints the mod shows (when `shows` allows it), and doesn't note that it did: `cold_return`,
 `status_poll`, `drip_feed`, `big_paste` and `plan_fresh`. It doesn't work
 them out either, so
 a call with the mod present is a little quicker (about 39 milliseconds

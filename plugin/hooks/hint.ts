@@ -5,6 +5,7 @@ import { amountOfAfterAbout, minutes, withEst } from './fmt'
 import { COPY } from './generated/copy.js'
 import { emptySnap, flags } from './live'
 import { chooseHint, hintText } from './coach-mem'
+import { noteDrawn } from './heartbeat'
 import { draftLine } from './draft'
 import { drawView, sendCostNow } from './view'
 import type { View } from './view'
@@ -51,6 +52,8 @@ export function hintLine(view: View, surface = 'terminal'): string | null {
 
 export const register: Register = on => {
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    // The host draws this line: the heartbeat says so, and the capture hook leaves the hints to it.
+    noteDrawn('hint')
     if (!e.props.isDraft || e.props.isWorking) return next(e)
     const line = hintLine(drawView(await read($, snapAtom), await read($, settingsAtom), await read($, detailedAtom), await $.clock.now(), false), e.surface)
     if (line === null) return next(e)

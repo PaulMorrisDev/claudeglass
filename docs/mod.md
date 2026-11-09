@@ -529,7 +529,7 @@ or `claudeglass` under `CLAUDE_CONFIG_DIR`.
 | File | Who writes it | What it holds |
 |---|---|---|
 | `mod/settings.json` | ClaudeGlass: `update --finish`, then the dashboard's service after a report, and again at once when you rate a session or change the capture settings | Your billing mode, rate card, cache lifetime and characters per token. Also the coaching thresholds, your `muted` and `once` lists, whether coaching is on, "your usual", and where the dashboard answers. The mod only reads it. |
-| `mod/present/<session id>.json` | The mod | A heartbeat: the session id, the last time seen and the time of the session's last request. It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
+| `mod/present/<session id>.json` | The mod | A heartbeat: the session id, the last time seen, the time of the session's last request and `shows`, what the mod has seen drawn (`"hint"` once the hint line has been rendered). It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
 | `mod/sensor/<session id>.json` | The mod | What the mod showed and what you did next, as closed words and counts. |
 
 ### The sensor

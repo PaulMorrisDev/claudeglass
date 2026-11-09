@@ -36,7 +36,7 @@ test('the heartbeat is one file per session, written at the start, every minute,
   await $.session.start(START)
 
   // The shape the capture hook reads: schema, the session's own id, the seconds it was seen, and when its last request was (none yet).
-  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: now, active: 0 })
+  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: now, active: 0, shows: [] })
   expect([...world.files.keys()].filter(path => path.includes('/present'))).toEqual([PRESENT])
 
   // A measurement within a minute of the last write leaves the file alone.
@@ -49,7 +49,7 @@ test('the heartbeat is one file per session, written at the start, every minute,
   const first = json(world, PRESENT)
   expect(first.schema).toBe(1)
   expect(first.session_id).toBe(SESSION)
-  expect(Object.keys(first).sort()).toEqual(['active', 'schema', 'seen', 'session_id'])
+  expect(Object.keys(first).sort()).toEqual(['active', 'schema', 'seen', 'session_id', 'shows'])
   // The first reply's request was at the start, and the file says so.
   expect(first.active).toBe(now)
   expect(first.seen).toBeGreaterThan(now)
@@ -60,11 +60,26 @@ test('the heartbeat is one file per session, written at the start, every minute,
 
   // The engine can't remove a file: at the end it says the session is no longer seen, and the timer stops.
   await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
-  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: 0, active: 0 })
+  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: 0, active: 0, shows: [] })
   world.files.set(PRESENT, 'after the end')
   await world.clock.advance(5 * 60 * 1000)
   expect(world.files.get(PRESENT)).toBe('after the end')
   expect(faults(world)).toEqual([])
+})
+
+test('the heartbeat lists "hint" once the hint line has been drawn, and only then', async ($, on) => {
+  const world = prepare(on)
+  await $.session.start(START)
+  expect(json(world, PRESENT).shows).toEqual([])
+  // Drawn: the next write says so (the capture hook then leaves its hints to the mod), without waiting a minute.
+  await hint($)
+  await reply($, world, FIRST)
+  expect(json(world, PRESENT).shows).toEqual(['hint'])
+  await world.clock.advance(61 * 1000)
+  expect(json(world, PRESENT).shows).toEqual(['hint'])
+  // A new session in the same process starts from nothing drawn.
+  await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
+  expect(json(world, PRESENT).shows).toEqual([])
 })
 
 test('a session id the capture hook would not look for (an underscore) gets a sensor file but no heartbeat', async ($, on) => {
