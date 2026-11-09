@@ -815,7 +815,7 @@ def _explain_baseline_bloat(rec: Recommendation, ctx: _Context) -> None:
     else:
         rec.why = "MCP servers and plugins you load everywhere add to every session's startup context."
     # Keep the sentence that points at the largest bucket.
-    pointer = next((part for part in rec.action.split(". ") if "largest estimated share" in part), "")
+    pointer = next((part for part in rec.action.split(". ") if "largest estimated part" in part), "")
     rec.action = "Turn off MCP servers and plugins in the projects that don't use them."
     if pointer:
         rec.action += " " + (pointer if pointer.endswith(".") else pointer + ".")

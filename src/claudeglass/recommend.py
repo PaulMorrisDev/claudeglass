@@ -1132,7 +1132,7 @@ def _rule_baseline_bloat(
         "ones shrinks every session's first call."
     )
     if biggest_bucket_label:
-        action += f" The largest estimated share of that baseline is {biggest_bucket_label}."
+        action += f" The largest estimated part of every session's startup is {biggest_bucket_label} (see Context files)."
 
     return [
         Recommendation(
