@@ -1506,6 +1506,22 @@ def test_the_diet_counts_the_tool_prefix_at_the_write_price_only_for_the_spawns_
     assert row["saving_usd"] < every
 
 
+def test_the_write_price_follows_the_first_calls_own_cache_lifetime_split(tmp_path):
+    # Sonnet 5 lists 2.5 for a 5-minute write and 4.0 for a 1-hour write.
+    def write_price(cc_5m, cc_1h):
+        lines = _sub_lines(written=cc_5m + cc_1h)
+        usage = next(line for line in lines if line.get("message", {}).get("id") == "sub_1")["message"]["usage"]
+        usage["cache_creation"] = {"ephemeral_5m_input_tokens": cc_5m, "ephemeral_1h_input_tokens": cc_1h}
+        stats = context_budget.ContextBudgetStats()
+        stats.add_subagent(_sub(tmp_path, f"agent-{cc_5m}-{cc_1h}", lines), pricing=PRICING)
+        return _diet_row(stats)["write_price"]
+
+    assert write_price(0, 3_000) == pytest.approx(4.0)
+    assert write_price(1_000, 3_000) == pytest.approx((1_000 * 2.5 + 3_000 * 4.0) / 4_000)
+    # No split, or no write at all: the 5-minute price.
+    assert write_price(0, 0) == pytest.approx(2.5)
+
+
 def test_the_startup_breakdown_carries_the_read_price_and_the_calls_after_the_first(tmp_path):
     stats = _spawn_many(tmp_path, 3, used=lambda n: "Read")
     row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")

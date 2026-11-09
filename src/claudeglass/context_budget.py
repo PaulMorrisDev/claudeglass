@@ -1183,7 +1183,15 @@ class ContextBudgetStats:
             acc.snapshot_spawns += 1
         resolved = pricing.resolve_model(first.model) if pricing is not None else None
         if resolved is not None:
-            acc.write_prices.append(resolved.rates.cache_write_5m)
+            # The first call's own split of 5-minute and 1-hour writes; with
+            # no split (or no write) the 5-minute price, as compaction_sim does.
+            written = first.cc_5m + first.cc_1h
+            write_price = resolved.rates.cache_write_5m
+            if written > 0:
+                write_price = (
+                    first.cc_5m * resolved.rates.cache_write_5m + first.cc_1h * resolved.rates.cache_write_1h
+                ) / written
+            acc.write_prices.append(write_price)
             acc.read_prices.append(resolved.rates.cache_read)
             acc.write_price_models.append(family)
 

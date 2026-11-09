@@ -2036,8 +2036,9 @@ one.
   snapshot was recorded), `not_recorded` (the rest; a spawn with no
   snapshot leaves its tool definitions here, since Claude Code writes the
   snapshot after the first call), `measured_pct`,
-  `write_price` (the first turn's model's 5-minute cache-write list
-  price per million tokens, used to price each part), and
+  `write_price` (the first turn's model's cache-write list price per
+  million tokens, weighted by that call's own 5-minute and 1-hour write
+  split, or the 5-minute price when it has none; used to price each part), and
   `claude_md_managed` (PROF-11/F13 — the share of `claude_md` that is
   Managed policy CLAUDE.md, which still loads regardless of
   `omitClaudeMd`; `goals._omit_claude_md`, `whatif._omit_claude_md` and
