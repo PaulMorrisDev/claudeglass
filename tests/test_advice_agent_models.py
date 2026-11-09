@@ -434,3 +434,19 @@ def test_the_cards_stay_through_finish_and_sort_advice_first():
     assert [r.id for r in out] == ["agent-model-inherited", "agent-model-asked", "agent-decide-apply"]
     assert [r.severity for r in out] == ["advice", "info", "info"]
     assert all(r.changes == [] and r.title and r.why and r.action for r in out)
+
+
+# -- built-in agent types -----------------------------------------------------------
+
+_BUILT_IN = "A file named Explore.md in .claude/agents/ replaces the built-in Explore, so make the change there."
+
+
+def test_the_model_cards_for_a_built_in_agent_say_a_same_named_file_replaces_it():
+    asked = _finish(_rec("agent-model-asked", agent_type="Explore", severity="info", workflow_runs=0))
+    assert asked.action.endswith(_BUILT_IN)
+    inherited = _finish(_rec(agent_type="Explore", workflow_runs=0))
+    assert inherited.action.endswith(_BUILT_IN)
+    # Not for a custom agent, a workflow, or a card that looks fixed.
+    assert "replaces" not in _finish(_rec(agent_type="claude-implementer", workflow_runs=0)).action
+    assert "replaces" not in _finish(_rec(workflow_runs=2)).action
+    assert "replaces" not in _finish(_rec("agent-model-asked", agent_type="Explore", severity="info", variant="fixed", later=4)).action

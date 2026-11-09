@@ -1229,6 +1229,17 @@ def _agent_model_saving(rec: Recommendation, facts: _AgentModelFacts, ctx: _Cont
     rec.saving_basis = ctx.basis(_AGENT_MODEL_BASIS)
 
 
+def _built_in_model_note(rec: Recommendation, ctx: _Context, workflow: bool) -> str:
+    """The sentence a built-in agent type's model card ends with, or nothing
+    for a workflow, a custom agent or one with its own file."""
+    agent = rec.agent_type
+    if workflow or agent is None or agent == "workflow-subagent" or ctx.agent_scope(agent)[1]:
+        return ""
+    from .recommend import _built_in_note
+
+    return " " + _built_in_note(agent)
+
+
 def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
     facts = _agent_model_facts(rec)
     if facts is None:
@@ -1272,6 +1283,7 @@ def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
         "If this rule lives in one project's notes, copy it to ~/.claude/CLAUDE.md so every project follows it."
         if rec.variant == "fixed"
         else "Paste the prompt below so Claude sets the model on every agent it starts."
+        + _built_in_model_note(rec, ctx, workflow)
     )
     _agent_model_saving(rec, facts, ctx)
 
@@ -1305,7 +1317,7 @@ def _explain_agent_model_asked(rec: Recommendation, ctx: _Context) -> None:
     else:
         rec.action = (
             f"Check the prompt, skill or script that starts {'these agents' if many else 'this agent'}. "
-            f"Ask for Sonnet where nothing needs {family}."
+            f"Ask for Sonnet where nothing needs {family}." + _built_in_model_note(rec, ctx, _started_by_workflow(facts))
         )
     _agent_model_saving(rec, facts, ctx)
 

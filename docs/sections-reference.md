@@ -2579,6 +2579,8 @@ via `recommend.render_patch_set`, showing the before and after value for
 each lever. A managed-scope lever is marked
 `# managed by policy -- shown for reference only`.
 
+The `spawn-tools-list`, `spawn-unused-skills`, `spawn-unused-mcp`, `spawn-claude-md`, `agent-model-inherited` and `agent-model-asked` cards for a built-in agent type with no agent file (general-purpose, Explore, Plan, statusline-setup) end with one sentence: a file named like the agent in `.claude/agents/` replaces the built-in, so the change goes there.
+
 With metrics capture on, some rules read the `habits` section too. Each
 cites the cell it used:
 

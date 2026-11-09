@@ -1045,3 +1045,20 @@ def test_a_task_prompt_spread_over_many_runs_names_none():
     acc.run_keys = [f"wf_{i}" for i in range(10)]
     rec = _task_prompt_rec(acc)
     assert "came from" not in rec.why
+
+
+# -- built-in agents: the same-named file is the lever -----------------------
+
+def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    recs = _recs(_report(builtin), units=Units())
+    for rule in ("spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp", "spawn-claude-md"):
+        (rec,) = [r for r in recs if r.id == rule and r.agent_type == "general-purpose"]
+        assert "A file named general-purpose.md in .claude/agents/ replaces the built-in" in rec.action, rule
+    # A custom agent with a file, and a built-in with an override file, get no such sentence.
+    snap = _snapshot({"general-purpose": {"source": "user"}})
+    recs = _recs(_report(builtin), snapshot=snap, units=Units())
+    assert not any("replaces the built-in" in r.action for r in recs if r.id != "spawn-claude-md")
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": big})), units=Units())
+    assert not any("replaces the built-in" in r.action for r in recs)

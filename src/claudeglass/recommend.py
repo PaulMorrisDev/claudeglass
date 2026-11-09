@@ -239,6 +239,13 @@ def _agent_has_frontmatter(agent_type: str, snapshot: Snapshot | None) -> bool:
     return agent_type not in _BUILTIN_AGENT_TYPES
 
 
+def _built_in_note(agent_type: str) -> str:
+    """The sentence a built-in agent type's card ends with: the built-in has
+    no file, but a same-named one in ``.claude/agents/`` replaces it, so the
+    change goes there."""
+    return f"A file named {agent_type}.md in .claude/agents/ replaces the built-in {agent_type}, so make the change there."
+
+
 # -- thresholds --------------------------------------------------------------
 
 
@@ -1938,6 +1945,8 @@ def _tools_list_card(
         title = f"{agent_type} is given tools it rarely calls"
         action = f"Limit {agent_type}'s tools to the ones it calls: {line}. {left_out} {check}"
         category = "settings"
+        if not has_file:
+            action += " " + _built_in_note(agent_type)
         if general:
             action += " " + _GENERAL_PURPOSE_WARNING
 
@@ -2144,9 +2153,7 @@ def _rule_spawn_parts(
                         else f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
                         "sending it CLAUDE.md (omitClaudeMd: true)."
                         if has_file
-                        else f"{agent_type} is a built-in agent, so it has no file to change. Create a "
-                        f"same-named agent file that does the same job with omitClaudeMd: true; it replaces "
-                        "the built-in one."
+                        else f"{_built_in_note(agent_type)} Give it omitClaudeMd: true and the same job."
                     ),
                     lever="omitClaudeMd" if has_file else None,
                     scope=scope,
@@ -2214,6 +2221,7 @@ def _rule_spawn_parts(
                         else f"Give {agent_type} a tools list that leaves Skill out, or, to change nothing else, "
                         "add Skill to its disallowedTools."
                     )
+                    + ("" if has_file else " " + _built_in_note(agent_type))
                     + undocumented,
                     lever=None,
                     scope=scope,
@@ -2315,6 +2323,7 @@ def _rule_spawn_parts(
                     action=(
                         f"Add {_name_list(entries)} to the disallowedTools of {agent_type}, so its spawns no "
                         f"longer get these servers: {_name_list(names)}."
+                        + ("" if has_file else " " + _built_in_note(agent_type))
                     ),
                     lever=None,
                     scope=scope,
