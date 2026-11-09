@@ -1239,10 +1239,10 @@ def test_the_habits_saving_includes_the_playbook_saving_over_the_window(tmp_path
     assert result["saving_usd"] == pytest.approx(4.0 + 1.75 * 2)
     assert result["saving"] == (
         f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits, "
-        "most of it from Tools often wait on you."
+        "most of it from the card \"Tools often wait on you\"."
     )
     assert result["saving"] == (
-        "About 7.50 USD over the last 14 days if you change these habits, most of it from Tools often wait on you."
+        "About 7.50 USD over the last 14 days if you change these habits, most of it from the card \"Tools often wait on you\"."
     )
     # A covered habit is in the recommendation's saving already: uncovered, it adds its 2.00 a week.
     both = qa.run("habits", _ctx(tmp_path, model=_saving_model(covered=False), **two_weeks))
@@ -1259,16 +1259,21 @@ def test_the_habits_saving_says_none_of_it_is_from_rework(tmp_path):
     model = _saving_model()
     model.sections.extend(_rework_model(2, 10).sections[-1:])
     result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
-    assert result["headline"] and result["saving"].endswith("most of it from Tools often wait on you (none of it from rework).")
+    assert result["headline"] and result["saving"].endswith("most of it from the card \"Tools often wait on you\" (none of it from rework).")
 
 
 def test_the_habits_saving_says_at_most_when_the_largest_part_is_an_upper_bound(tmp_path):
     model = _saving_model()
     model.recommendations = [Recommendation(
         id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
-        saving_usd=4.0, saving_basis="At most this much: an upper bound.")]
+        saving_usd=4.0, estimated_saving="At most 4.00 USD", saving_basis="Replays the waits at list price.")]
     result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
     assert result["saving"].startswith("At most 7.50 USD")
+    assert 'the card "Tools often wait on you"' in result["saving"]
+    # A plain estimate is "About", whatever the basis says.
+    model.recommendations[0].estimated_saving = "About 4.00 USD"
+    model.recommendations[0].saving_basis = "At most this much: a ceiling."
+    assert qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))["saving"].startswith("About")
 
 
 def test_an_ignored_habit_card_is_not_a_way_a_tip_or_a_fix(tmp_path):

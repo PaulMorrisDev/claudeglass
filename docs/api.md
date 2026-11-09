@@ -1119,9 +1119,9 @@ recommendation it draws on, plus the playbook's habits that no
 recommendation already covers (each one's own total over the window, the
 playbook's `saving_total`). `saving` says that in the billing
 mode and names where it comes from: "..., most of it from <the largest
-part>", that part being a recommendation's title or "the Work habits
+part>", that part being a recommendation's title (as the card "<title>") or "the Work habits
 playbook" (with "(none of it from rework)" when the rework headline leads,
-and "At most" when that part is an upper bound). The `models` and `habits`
+and "At most" when the largest part's estimate starts "At most"). The `models` and `habits`
 checks leave out a recommendation you ignored: `habits` by its key, `models`
 by the change it suggested (value included, so a new value comes back). The
 `claude-md` check's figure is the file as it is today, estimated from its

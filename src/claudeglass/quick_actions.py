@@ -1492,7 +1492,8 @@ def _habits_saving_text(ctx: Context, recs, playbook_usd: float, total: float, r
     """The habits row's saving sentence, saying where the figure comes from:
     its largest part (a card's title, or the playbook), and that none of it
     is rework when the rework sentence leads."""
-    parts = [(usd, rec.title.rstrip("."), "at most" in (rec.saving_basis or "").lower())
+    # An upper bound is marked by an estimate that starts "At most ".
+    parts = [(usd, f'the card "{rec.title.rstrip(".")}"', (rec.estimated_saving or "").lstrip().lower().startswith("at most"))
              for usd, rec in _saving_groups(ctx, recs)]
     if playbook_usd > 0:
         parts.append((playbook_usd, "the Work habits playbook", False))
