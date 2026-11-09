@@ -137,6 +137,28 @@ Cards and checks:
   replaces the built-in.** The asked-model card no longer points at that file,
   because a model named in the call overrides it.
 
+Coaching:
+
+- **`report_reread` is retired, and `coaching_report_reread_tokens` now has no
+  effect.** The blinded replay found it more often wrong than right.
+- **`quiet_output` speaks only for a whole read of a saved output, and only in
+  the main session.** Claude saying the note does not apply now mutes it
+  (parser 49).
+- **Parallel messages draw one note per hint.** Every write to
+  `coach-state.json` takes a claim file; a call that loses it skips only its
+  own hint or upkeep, and a stale claim is taken over safely.
+- **The mod's present file lists what it has drawn (`shows`), and the hook
+  hands hints over only when the mod has drawn the line.** The four
+  hint-line hints move when it lists `hint`, `plan_fresh` when it lists
+  `status`. An older mod without the key keeps today's rule, and a message
+  sent now writes the file at once, so a hint line drawn a moment ago counts.
+- **A tip counts as passed on only when the reply holds the note's own
+  words.** The bare "ClaudeGlass tip:" label counts for a note that came
+  alone with its message.
+- **`plan_fresh`, `plan_fresh_early`, `split_run`, `quiet_output` and
+  `cold_return` are off for everyone** until their new rules pass the
+  replay. `capture status` names them, and which notes to Claude were muted.
+
 The mod:
 
 - **The mod notes which app a Desktop, VS Code or mobile session runs in.** It

@@ -56,19 +56,13 @@ still keeps the runs that ended too big), and taking a name out of the list
 switches its note back on. Where a rule below is described in the present
 tense, it is the rule the note followed when it was on.
 
-One note at most per tool result or message: the first hint in the table
-that applies. `plan_fresh` (a plan approved in the dialog), `split_run`
-and `quiet_output` come after a tool result (`split_run`
-also with a background task's finishing message), the rest when
-you send a message (`plan_fresh` too, for a go-ahead you type). They show
-only in the main session: a subagent's own notice never shows, and a note
-to one would steer work already under way, so `split_run` waits for the
-main session and `quiet_output` is never given inside an agent. The prompting
-hints (`drip_feed` and `big_paste`), `status_poll`, `cold_return`
-and `split_run` are about how you prompt or what a way of
-working costs, not about the work, so they
-never change what Claude does: it handles the message or the call as it
-would have and only ends its reply with the tip.
+One note at most per message: the first hint in the table that applies.
+The hints that speak are the ones about how you prompt: `drip_feed`,
+`big_paste` and `status_poll`, all on the message you send. They show only
+in the main session, and they are about how you prompt or what a way of
+working costs, not about the work, so they never change what Claude does:
+it handles the message as it would have and only ends its reply with the
+tip. The hints marked Off in the table say nothing live.
 A message you didn't type gets no hint: a background agent's report
 (which Claude Code hands to Claude as the next message), a scheduled
 task, a slash command's output, another session's message, the desktop

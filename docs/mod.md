@@ -585,10 +585,9 @@ wording and rest rules:
 | Small changes in a row | After you send | The hint line |
 | Large paste | After you send | The hint line, where you judge whether it is a log |
 
-Some hints stay with the hook, because they steer Claude or feed a skill, or
-because the mod no longer shows them. They are the fresh start tip in plan
-mode, the quiet output tip, the plan check, the facts line, the capture note,
-the tips for agent reports and split runs, and the rating reminder.
+The hints that stay with the hook are the plan check, the facts line, the
+capture note and the rating reminder. The others are off or retired; see
+[coaching](coaching.md) for which.
 
 A hint the hook leaves out is not marked as shown. If the mod closes, goes
 stale or can't be read, the hint returns at once. Nothing changes without
