@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Actions › Recommendations has one Copy prompt for a project's open
-  fixes**, grouped under a header per file.
+  fixes**, grouped under a header per file. It leaves out cards that only
+  inform, and counts files honestly.
 
 ### Fixed
 
@@ -136,6 +137,11 @@ Cards and checks:
 - **The models and habits checks leave out cards you ignored, and the habits
   saving names its source.** The CLAUDE.md figures say what they count, and
   the shared CLAUDE.md card names the file it is about.
+- **The pointer to the largest part of startup no longer names a "baseline"
+  the action never shows.**
+- **Updating re-reads your transcripts once.** The parser changed four times
+  on this branch (to version 49), so the dashboard rebuilds its rows from
+  them on the first start after you upgrade.
 - **The capture audit counts `queue-operation.content` as read**, so its
   unread-key alarm stops.
 - **Cards for built-in agents say a same-named file in `.claude/agents/`
@@ -149,6 +155,8 @@ Coaching:
 - **`quiet_output` speaks only for a whole read of a saved output, and only in
   the main session.** Claude saying the note does not apply now mutes it
   (parser 49).
+- **`split_run` and `cold_return` are narrowed, and `plan_fresh` names the
+  plan file** for when they speak again.
 - **Parallel messages draw one note per hint.** Every write to
   `coach-state.json` takes a claim file; a call that loses it skips only its
   own hint or upkeep, and a stale claim is taken over safely.
