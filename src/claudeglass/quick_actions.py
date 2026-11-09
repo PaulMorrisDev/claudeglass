@@ -14,6 +14,7 @@ never disagree. The quality check is the one with thresholds of its own
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -222,6 +223,12 @@ def _goal_fixes(ctx: Context, draft: dict, title: Callable[[dict], str]) -> list
 # -- checks ------------------------------------------------------------------
 
 
+def _change_id(key, agent, value) -> tuple:
+    """A setting change's identity; a value may be a list, so it is compared
+    by its JSON form."""
+    return (key, agent, json.dumps(value, sort_keys=True, default=str))
+
+
 def _models(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = [r for r in tables.rows("model_swap", "model_swap_by_agent_type") if whatif._num(r.get("observed_cost"))]
@@ -243,12 +250,12 @@ def _models(ctx: Context) -> dict:
     # A card you ignored is left out by what it suggested (key, agent and
     # value), so a new value for the same setting still comes back.
     ignored = {
-        (change.key, change.agent, change.value)
+        _change_id(change.key, change.agent, change.value)
         for rec in getattr(ctx.model, "recommendations", ()) or ()
         if rec.key in ctx.skip_keys
         for change in rec.changes or ()
     }
-    draft = {**draft, "candidates": [c for c in draft["candidates"] if (c["key"], c["agent"], c["value"]) not in ignored]}
+    draft = {**draft, "candidates": [c for c in draft["candidates"] if _change_id(c["key"], c["agent"], c["value"]) not in ignored]}
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
@@ -1497,7 +1504,11 @@ def _habits_saving_text(ctx: Context, recs, playbook_usd: float, total: float, r
              for usd, rec in _saving_groups(ctx, recs)]
     if playbook_usd > 0:
         parts.append((playbook_usd, "the Work habits playbook", False))
-    usd, title, upper = max(parts)
+    usd, title, _upper = max(parts)
+    # The total holds the largest card group plus the playbook, so that group
+    # (not the largest part) says whether the card part is an upper bound.
+    groups = _saving_groups(ctx, recs)
+    upper = bool(groups) and (max(groups, key=lambda g: g[0])[1].estimated_saving or "").lstrip().lower().startswith("at most")
     phrase = _money(ctx, total, period=True, prefix="At most " if upper else "About ")
     share = "most of it" if usd * 2 > total else "the largest part"
     return f"{phrase[:1].upper()}{phrase[1:]} if you change these habits, {share} from {title}" + (

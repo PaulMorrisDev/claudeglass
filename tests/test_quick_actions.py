@@ -2225,3 +2225,29 @@ def test_tools_leaves_out_of_the_count_the_tools_the_agents_file_no_longer_lists
     agents = {"reviewer": {"tools": ["Read", "NotebookEdit"]}}
     result = qa.run("tools", _ctx(tmp_path, model, effective_agents=agents))
     assert {row[0]: row[-1] for row in result["table"]["rows"]}["reviewer"] == "1 (about 4,000 tokens)"
+
+
+def test_the_habits_saving_is_an_upper_bound_when_the_card_part_is_and_the_playbook_is_larger(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(
+        id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+        action="Pre-approve routine tools.", saving_usd=2.5, estimated_saving="At most $2.50",
+    )]
+    rows = [dict(row, covered_by="", saving_total=None) for row in _PLAYBOOK[:1]]
+    rows[0]["saving_total"] = 3.0
+    model.sections.append(_habits_tables(habits_playbook=rows))
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["saving"].startswith("At most ")
+    assert "from the Work habits playbook" in result["saving"]
+
+
+def test_models_check_survives_an_ignored_card_whose_value_is_a_list(tmp_path):
+    model = _full_model()
+    model.recommendations = [_main_sonnet_card(), Recommendation(
+        id="spawn-tools-list", key="spawn-tools-list:reviewer", severity="advice", title="t",
+        changes=[SettingChange(target="agent", key="tools", agent="reviewer", value=["Read", "Edit"])],
+    )]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"spawn-tools-list:reviewer", "model-tier-main"}))
+    result = qa.run("models", ctx)
+    assert "Main session" not in result["summary"]
+    assert len(qa.run_all(ctx)) == 20
