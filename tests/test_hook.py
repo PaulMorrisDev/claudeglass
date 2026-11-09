@@ -1348,7 +1348,11 @@ def test_content_layers_claude_md_rules_commands_and_skills(home, project):
     assert claude_md["project_root_imports"] == 0
     assert claude_md["project_local_imports"] == 0
 
-    assert content["rules"] == {"count": 2, "bytes": len("rule one") + len("rule two")}
+    assert content["rules"] == {
+        "count": 2,
+        "bytes": len("rule one") + len("rule two"),
+        "unscoped_bytes": len("rule one") + len("rule two"),
+    }
     assert content["commands"] == {"count": 1, "bytes": len("command body")}
     assert content["skills"]["project"]["names"] == ["my-skill"]
     assert content["skills"]["project"]["total_bytes"] == len("skill body")
@@ -1552,6 +1556,21 @@ def test_content_layers_mcp_json_and_claude_config_dir_flag(home, project):
     assert content["claude_config_dir_set"] is True
 
 
+def test_content_layers_rules_record_unscoped_bytes_apart_from_paths_scoped(home, project):
+    config_dir = home / ".claude" / "claudeglass"
+    rules_dir = project / ".claude" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "always.md").write_text("always on", encoding="utf-8")
+    (rules_dir / "scoped.md").write_text("---\npaths:\n  - src/**\n---\nonly for src", encoding="utf-8")
+    (rules_dir / "inline.md").write_text("---\npaths: [a/**]\n---\nx", encoding="utf-8")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    result = _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin)
+    assert result.returncode == 0
+    rules = _latest_snapshot(config_dir)["content_layers"]["rules"]
+    assert rules["count"] == 3
+    assert rules["unscoped_bytes"] == len("always on")
+
+
 def test_content_layers_absent_content_degrades_to_zero_counts(home, project):
     config_dir = home / ".claude" / "claudeglass"
     stdin = json.dumps({"session_id": "s", "cwd": str(project)})
@@ -1559,7 +1578,7 @@ def test_content_layers_absent_content_degrades_to_zero_counts(home, project):
     assert result.returncode == 0
     snapshot = _latest_snapshot(config_dir)
     content = snapshot["content_layers"]
-    assert content["rules"] == {"count": 0, "bytes": 0}
+    assert content["rules"] == {"count": 0, "bytes": 0, "unscoped_bytes": 0}
     assert content["commands"] == {"count": 0, "bytes": 0}
     assert content["mcp_json"] == {"present": False, "names": []}
     assert content["managed_mcp_present"] is False

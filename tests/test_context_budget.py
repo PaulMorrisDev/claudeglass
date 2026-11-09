@@ -384,6 +384,31 @@ def test_baseline_table_uses_snapshot_for_memory_agents_mcp(tmp_path):
     assert_privacy(section)
 
 
+def test_memory_files_leave_out_scoped_rules_and_nested_claude_md(tmp_path):
+    """paths:-scoped rules and nested CLAUDE.md files load only when Claude
+    reads a matching file, so the at-start figure counts the unscoped rule
+    bytes and no nested bytes."""
+    layers = {
+        "claude_md": {"project_root_bytes": 4000, "user_bytes": 0, "project_local_bytes": 0, "nested_bytes": 50_000},
+        "rules": {"count": 10, "bytes": 54_000, "unscoped_bytes": 800},
+    }
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1"))
+    _, col, rows = _baseline_rows(stats, snapshots=[_snapshot("proj-a", content_layers=layers)])
+    assert rows["proj-a"][col["memory_files_est"]] == pytest.approx((4000 + 800) / 4)
+
+
+def test_memory_files_of_an_old_snapshot_count_all_rule_bytes(tmp_path):
+    layers = {
+        "claude_md": {"project_root_bytes": 4000, "user_bytes": 0, "project_local_bytes": 0, "nested_bytes": 0},
+        "rules": {"count": 2, "bytes": 800},
+    }
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1"))
+    _, col, rows = _baseline_rows(stats, snapshots=[_snapshot("proj-a", content_layers=layers)])
+    assert rows["proj-a"][col["memory_files_est"]] == pytest.approx((4000 + 800) / 4)
+
+
 def test_memory_files_adds_the_auto_memory_the_first_call_carried(tmp_path):
     """MEMORY.md is loaded in every session and is part of Claude Code's
     Memory files category; the snapshot's CLAUDE.md and rules figures leave

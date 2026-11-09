@@ -1132,6 +1132,8 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
     # Only what a setting can change competes for "largest".
     raw = recommend._rule_baseline_bloat(r, RecommendThresholds(), snapshot, None)[0]
     assert "largest estimated share of that baseline is MCP tools" in raw.action
+    # The advice text keeps that pointer.
+    assert "largest estimated share of that baseline is MCP tools" in rec.action
 
 
 def test_baseline_bloat_fires_without_snapshot():

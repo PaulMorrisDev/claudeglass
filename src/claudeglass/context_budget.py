@@ -320,7 +320,9 @@ def _skills_listing_est_tokens(
 def _memory_files_est_tokens(
     snapshot: Snapshot | None, calibration: Calibration | None = None, auto_memory_tokens: float = 0.0
 ) -> float | None:
-    """CLAUDE.md family bytes + rules bytes, as tokens on the corpus's
+    """User and project CLAUDE.md bytes + unscoped rules bytes (paths:-scoped
+    rules and nested CLAUDE.md files load only on demand, so they are left
+    out), as tokens on the corpus's
     most common model (bytes treated the same as chars for this
     approximation -- see the module docstring), plus ``auto_memory_tokens``:
     the project's auto memory (``MEMORY.md``), which Claude Code loads in
@@ -342,12 +344,13 @@ def _memory_files_est_tokens(
             claude_md.get("user_bytes"),
             claude_md.get("project_root_bytes"),
             claude_md.get("project_local_bytes"),
-            claude_md.get("nested_bytes"),
         )
         if isinstance(value, (int, float))
     )
     rules = content.get("rules") or {}
-    rules_bytes = rules.get("bytes")
+    # Only unscoped rules load at the start; a snapshot from before the
+    # hook recorded ``unscoped_bytes`` counts all rule bytes.
+    rules_bytes = rules.get("unscoped_bytes", rules.get("bytes"))
     total_bytes = claude_md_bytes + (rules_bytes if isinstance(rules_bytes, (int, float)) else 0)
     return (calibration or Calibration()).text_tokens(total_bytes) + auto_memory_tokens
 

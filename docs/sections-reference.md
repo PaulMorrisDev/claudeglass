@@ -2147,8 +2147,10 @@ when the corpus has no top-level transcripts at all.
   the first turn's own `human_prompt_chars`, over the calibrated
   characters per token), `skills_listing` (every `skill_listing`
   attachment's `size_chars` preceding the first turn), `memory_files` (the
-  joined schema-2 snapshot's `content_layers` CLAUDE.md family + rules
-  bytes, plus the median auto memory (`MEMORY.md`) the project's first
+  joined schema-2 snapshot's `content_layers` user and project CLAUDE.md
+  bytes + unscoped rules bytes (rules with a `paths:` key and nested
+  CLAUDE.md files load only on demand, so they are left out; a snapshot
+  without `unscoped_bytes` counts all rule bytes), plus the median auto memory (`MEMORY.md`) the project's first
   calls carried, which Claude Code loads in every session; `null` without
   a snapshot), `custom_agents` (labelled "Your own agents (est)": the
   snapshot's agent count out of the agent types the first calls' agent list

@@ -1282,6 +1282,31 @@ def _count_bytes_for_glob(base: Path, pattern: str) -> tuple[int, int]:
     return count, total
 
 
+def _unscoped_rules_bytes(base: Path) -> int:
+    """Total bytes of the ``*.md`` rules under ``base`` with no ``paths:``
+    frontmatter key. A rule with ``paths:`` loads only when Claude reads a
+    matching file, so only these load at the start of a session. Only the
+    frontmatter's key is read, never its value."""
+    if not base.is_dir():
+        return 0
+    total = 0
+    try:
+        candidates = list(base.glob("*.md"))
+    except OSError:
+        return 0
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            size = candidate.stat().st_size
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "paths" not in parse_frontmatter(text):
+            total += size
+    return total
+
+
 def _walk_nested_claude_md(root: Path) -> tuple[int, int]:
     """Bounded walk for nested ``CLAUDE.md`` files below (not including)
     ``root`` itself -- the project root's own ``CLAUDE.md``/``CLAUDE.local.md``
@@ -1583,7 +1608,11 @@ def build_content_layers(
             "project_root_imports": _count_claude_md_imports(project_root_claude_md),
             "project_local_imports": _count_claude_md_imports(project_local_claude_md),
         },
-        "rules": {"count": rules_count, "bytes": rules_bytes},
+        "rules": {
+            "count": rules_count,
+            "bytes": rules_bytes,
+            "unscoped_bytes": _unscoped_rules_bytes(cwd_path / ".claude" / "rules"),
+        },
         "commands": {"count": commands_count, "bytes": commands_bytes},
         "skills": {
             "project": _skills_summary(cwd_path / ".claude" / "skills"),

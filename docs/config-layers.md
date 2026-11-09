@@ -260,7 +260,10 @@ layer the plan's "Configuration layers" section lists:
   recommendation can flag an unusually import-heavy CLAUDE.md without
   ever reading what it imports.
 - `rules` / `commands` — count and total bytes of
-  `.claude/rules/*.md` / `.claude/commands/**/*.md`.
+  `.claude/rules/*.md` / `.claude/commands/**/*.md`. `rules` also has
+  `unscoped_bytes`: the bytes of the rules with no `paths:` frontmatter
+  key (only its presence is read), which are the ones that load at the
+  start of a session. A snapshot without it counts all rule bytes.
 - `skills` — `{project, user}`, each `{names, total_bytes, config}` from
   `.claude/skills/*/SKILL.md` (a skill directory without a `SKILL.md`
   isn't a skill Claude Code will load, so it's excluded). COV-10/PROF-09:
