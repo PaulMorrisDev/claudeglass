@@ -115,7 +115,7 @@ connect``):
   :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
   own UI (each when its file's ``shows`` lists the surface that serves it,
   ``"hint"`` or ``"status"``, or has no ``shows``: an older mod), so this hook neither works them out nor stamps them as shown
-  (a run that ended too big is still recorded, :func:`keep_run`, and a
+  (no run is recorded while ``split_run`` is off, :func:`keep_run`, and a
   tip to start fresh the mod showed rests ``plan_fresh_early`` for the
   cooldown, :func:`_mod_showed_fresh_start`); without the mod, nothing
   changes. The hint decision and its write run under a claim on
@@ -207,6 +207,7 @@ it can never block or break a session.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -879,6 +880,10 @@ def _write_json(path: Path, data: dict) -> None:
 #: A claim file older than this is left by a hook call that was killed
 #: before it released it, and is taken over.
 _CLAIM_STALE_S = 5.0
+#: How long a call waits for a claim another call holds, and how often it
+#: tries again: the holder's work (a transcript tail read) is short.
+_CLAIM_WAIT_S = 0.1
+_CLAIM_POLL_S = 0.005
 
 
 def _take_stale(claim: Path) -> bool:
@@ -918,8 +923,8 @@ def _take_stale(claim: Path) -> bool:
 @contextmanager
 def _claimed(path: Path):
     """Yields whether this call holds the claim on ``path`` (the state
-    file): ``<path>.claim`` created with ``O_EXCL``, never waited for. A
-    claim older than :data:`_CLAIM_STALE_S` (its mtime) is taken over once
+    file): ``<path>.claim`` created with ``O_EXCL``, waited for briefly,
+    never longer than :data:`_CLAIM_WAIT_S`. A claim older than :data:`_CLAIM_STALE_S` (its mtime) is taken over once
     (:func:`_take_stale`). Calls in parallel messages of one session, or in
     several sessions, share the state file; the one that holds the claim
     reads it, decides and writes it whole, and the others skip their
@@ -929,16 +934,24 @@ def _claimed(path: Path):
     silenced by it. The claim is released at the end, an error ignored."""
     claim = path.with_name(path.name + ".claim")
     held = False
-    for attempt in range(2):
+    attempt = 0
+    deadline = None
+    while True:
         try:
             os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
             held = True
             break
         except FileExistsError:
-            if attempt == 0 and _take_stale(claim):
-                continue
-            yield False
-            return
+            if attempt == 0:
+                attempt = 1
+                if _take_stale(claim):
+                    continue
+            now = time.monotonic()
+            deadline = now + _CLAIM_WAIT_S if deadline is None else deadline
+            if now >= deadline:
+                yield False
+                return
+            time.sleep(_CLAIM_POLL_S)
         except PermissionError:
             yield False
             return
@@ -3239,6 +3252,13 @@ def feedback_note_for(
         return _facts_line(scan, plans, personal, coaching)
     feedback = coaching["feedback"]
     state_path = config_dir / coaching["state_file"]
+    # With no plan check to ask, a call whose reminder is not due (judged on a
+    # copy of the state, unclaimed) takes no claim and waits for nothing.
+    if "plan_check" not in ids and not _reminder_due(
+        scan, personal, th, coaching, copy.deepcopy(_read_json(state_path)), _session_key(session_id, config_dir),
+        now_ts, config_dir, session_id,
+    ):
+        return ""
     # Claimed like the coaching decision (:func:`_claimed`): a call that finds it
     # held leaves the plan check and the reminder to the one that holds it.
     with _claimed(state_path) as held:

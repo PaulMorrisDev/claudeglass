@@ -17,7 +17,8 @@ import { configDir } from './settings'
 // deletes files a day old. `shows` is what this copy of the mod has seen the host draw: "hint" once the
 // line under the prompt (hint.ts) has been rendered, so the capture hook hands the mod the hints that line
 // carries only where it is drawn (the desktop app never draws it: the list stays empty and the hook keeps
-// them). A file without the key comes from an older copy of the mod.
+// them). "status" is listed with it once the terminal hint line has been drawn, because the status line the
+// plan tip uses is drawn in the terminal too. A file without the key comes from an older copy of the mod.
 
 export const BEAT_EVERY_MS = 60 * 1000
 /** Another session counts as running when its file was seen this recently (the capture hook's ten minutes). */

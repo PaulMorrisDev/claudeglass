@@ -74,9 +74,9 @@ test('the heartbeat lists "hint" once the hint line has been drawn, and only the
   // Drawn: the next write says so (the capture hook then leaves its hints to the mod), without waiting a minute.
   await hint($)
   await reply($, world, FIRST)
-  expect(json(world, PRESENT).shows).toEqual(['hint'])
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
   await world.clock.advance(61 * 1000)
-  expect(json(world, PRESENT).shows).toEqual(['hint'])
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
   // A new session in the same process starts from nothing drawn.
   await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
   expect(json(world, PRESENT).shows).toEqual([])
@@ -91,8 +91,17 @@ test('the first message within a minute of the first hint-line render already fi
   await hint($)
   await world.clock.advance(5 * 1000)
   await $.prompt.submit({ text: 'first message', wait: false, origin: { kind: 'composer' } } as never)
-  expect(json(world, PRESENT).shows).toEqual(['hint'])
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
   expect(faults(world)).toEqual([])
+})
+
+test('the desktop hint line lists "hint" only: it has no status line', async ($, on) => {
+  const world = prepare(on)
+  await $.session.start(START)
+  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'desktop', component: 'PromptHint', props: { isDraft: true, isWorking: false, hint: 'Enter to send' } as never })
+  await mounted.unmount()
+  await reply($, world, FIRST)
+  expect(json(world, PRESENT).shows).toEqual(['hint'])
 })
 
 test('a session id the capture hook would not look for (an underscore) gets a sensor file but no heartbeat', async ($, on) => {

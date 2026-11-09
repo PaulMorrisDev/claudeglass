@@ -4253,3 +4253,37 @@ def test_live_off_a_hint_the_replay_found_more_often_wrong_than_right_gives_no_n
     monkeypatch.setitem(CATALOGUE["coaching"], "off_live", [])
     (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).unlink(missing_ok=True)
     assert _kind(case()) == hint
+
+
+def test_a_claim_released_within_a_moment_is_waited_for(tmp_path):
+    import threading
+
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    timer = threading.Timer(0.03, claim.unlink)
+    timer.start()
+    try:
+        assert _kind(_coach(tmp_path, payload)) == "big_paste"
+    finally:
+        timer.join()
+
+
+def test_a_claim_that_stays_held_is_given_up_on_after_a_moment(tmp_path):
+    import time
+
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    started = time.monotonic()
+    assert _coach(tmp_path, payload) == ""
+    assert time.monotonic() - started < 1.0 and claim.exists()
+
+
+def test_plan_fresh_is_moved_only_when_the_status_line_has_been_drawn(tmp_path):
+    _heartbeat(tmp_path, shows=["hint", "status"])
+    assert "plan_fresh" in HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp())
+    _heartbeat(tmp_path, shows=["hint"])
+    assert "plan_fresh" not in HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp())

@@ -54,6 +54,8 @@ export const register: Register = on => {
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     // The host draws this line: the heartbeat says so, and the capture hook leaves the hints to it.
     noteDrawn('hint')
+    // The status line (the plan tip's place) is a terminal surface too, drawn wherever this line is.
+    if (e.surface === 'terminal') noteDrawn('status')
     if (!e.props.isDraft || e.props.isWorking) return next(e)
     const line = hintLine(drawView(await read($, snapAtom), await read($, settingsAtom), await read($, detailedAtom), await $.clock.now(), false), e.surface)
     if (line === null) return next(e)

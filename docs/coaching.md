@@ -51,8 +51,9 @@ Five hints are off: `plan_fresh`, `plan_fresh_early`, `split_run`,
 read by the hook and by the mod). Replaying 30 days of sessions blind, the
 tips of each were judged right less than half the time, so each was more
 often wrong than right. Their rules and the figures read from transcripts
-stay (the prompting page still counts cold returns, and `SubagentStop`
-still keeps the runs that ended too big), and taking a name out of the list
+stay (the prompting page still counts cold returns), while `split_run` is
+off `SubagentStop` keeps no counts (nothing would read them), so switching it
+back on reports only runs that end after that. Taking a name out of the list
 switches its note back on. Where a rule below is described in the present
 tense, it is the rule the note followed when it was on.
 
@@ -143,6 +144,7 @@ end of the transcript alone and Setup › Capture shows a "Needs a hook entry" c
 record it makes has to be there when the main session's hook runs right
 after an agent call. Without it, `split_run` never speaks, and Setup ›
 Capture shows the same chip.
+While `split_run` is off, `SubagentStop` records nothing.
 
 The /cg-feedback rating reminder (`feedback_reminder`) has the same look,
 labelled **ClaudeGlass:**. It comes on a message of yours, not at the
