@@ -434,24 +434,6 @@ def test_the_asked_and_decide_apply_explainers():
     assert "started with model set to opus or fable" in asked["prompt"]
 
 
-def test_agent_batch_probes_prompt_carries_the_agent_and_the_line_and_the_explainer_has_its_three_headings():
-    from claudeglass import fixes as fixes_mod
-    from claudeglass.model import Recommendation
-
-    rec = Recommendation(
-        id="agent-batch-probes", severity="advice", category="workflow", title="Explore looks things up one call at a time",
-        agent_type="Explore", lever=None,
-    )
-    (fix,) = fixes_mod.build_fixes(rec)
-    assert [pair[0] for pair in fix["explainer"]] == ["Where and who it affects", "Trade-off", "How to undo it"]
-    assert "Explore's agent file (~/.claude/agents/Explore.md or .claude/agents/Explore.md)" in fix["prompt"]
-    assert fixes_mod.BATCH_PROBES_LINE in fix["prompt"]
-    assert "{" not in fix["prompt"]
-    # It proposes an edit to a prompt that a restart picks up: the default note, not "none" or the scope one.
-    assert fix.get("note") not in ("none", "scope")
-    assert fixes_mod.fix_note(fix) == fixes_mod.RESTART_NOTE
-
-
 def test_plan_rounds_prompt_asks_for_a_critique_before_a_plan_and_names_the_places_to_put_it():
     from claudeglass import fixes as fixes_mod
     from claudeglass.model import Recommendation

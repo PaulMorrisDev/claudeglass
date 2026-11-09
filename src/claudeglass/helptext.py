@@ -1411,8 +1411,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "together count once. The last column prices only those re-reads, because a batched message still "
             "writes the tool results. It is an upper bound. It takes the lookups to be independent, and "
             "some aren't, such as a read that needs the name a search found first.",
-            act="Ask for independent lookups in one message. Add \"Batch independent Read/Grep/Glob calls into a "
-            "single message\" to the agent definitions or workflow prompts at the top of the list.",
+            act="This is a measurement, not a recommendation. A shell command that chains several reads is already "
+            "a batch, so it is not counted as a single lookup.",
         ),
         columns={
             "agent_type": ("Where", "The main session, or the subagent type."),

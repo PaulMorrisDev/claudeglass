@@ -452,7 +452,11 @@ __version__ = "0.16.0"
 #: none of these, so those replies are priced on their partial output
 #: counts and a cold compaction as a cache write, and its copies, UNKNOWN
 #: request-log events and zeroed copies are still in it.
-PARSER_VERSION = 45
+#:
+#: Bumped to 46: a read after ``||`` is the fallback for the read before it,
+#: so ``cat a 2>/dev/null || cat b`` is one ``Turn.shell_read_count``, not
+#: two. A pre-46 digest counts it twice.
+PARSER_VERSION = 46
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

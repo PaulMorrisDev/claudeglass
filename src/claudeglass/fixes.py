@@ -60,10 +60,6 @@ SCOPE_NOTE = (
     "lasts; new sessions read it when they start."
 )
 
-#: The line ``agent-batch-probes`` tells you to add to an agent definition or
-#: a workflow prompt, word for word (the Work habits table's help says it too).
-BATCH_PROBES_LINE = "Batch independent Read/Grep/Glob calls into a single message"
-
 #: The standing request ``plan-rounds`` tells you to put in your first
 #: planning message, in CLAUDE.md or in a plan skill, word for word (the Work
 #: habits table's help asks for the same in its own words).
@@ -365,14 +361,6 @@ _WORKFLOW_PROMPTS = {
         "not the working. If {agent} has no agent file (it is built into Claude Code), propose a sentence I "
         "can add to the task prompts I send it instead. Show me the diff before saving. Claude Code will ask "
         "my permission before editing files under .claude."
-    ),
-    "agent-batch-probes": (
-        "{agent} often makes one read-only call per reply, and each reply reads its whole context again. Please "
-        "read {agent}'s agent file (~/.claude/agents/{agent}.md or .claude/agents/{agent}.md). Then propose "
-        "adding this line to its prompt: \"" + BATCH_PROBES_LINE + ".\" Some agents have no agent file, because "
-        "they are built into Claude Code or a workflow script starts them. If {agent} is one, propose a sentence "
-        "I can add to the task prompts or the workflow script instead. Show me the diff before saving. "
-        "Claude Code will ask my permission before editing files under .claude."
     ),
     # UX-8: the rest of the workflow-rule ids below (every one that used
     # to fall through build_fixes with no template at all, per this
@@ -721,13 +709,6 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "hard to summarise briefly.",
         "Remove the added report-length instruction (Claude Code shows the change before saving it if "
         "it's in an agent file).",
-    ),
-    "agent-batch-probes": (
-        "The agent's own file (~/.claude/agents/<type>.md or .claude/agents/<type>.md) if it has one, or the "
-        "Agent prompt or workflow script that starts it.",
-        "Calls that depend on each other can't share a message. Where one search names the next file to read, "
-        "the agent still looks things up one at a time.",
-        "Remove the added line (Claude Code shows the change before saving it if it's in an agent file).",
     ),
     "spawn-task-prompt": (
         _SCOPE_WHERE_TEXT,

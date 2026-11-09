@@ -345,7 +345,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 
 - **Level:** Always measured, no hook
 - **Captures:** Search and read tokens in the main session against those in Explore agents. Also how many calls were a single lookup in a reply of its own.
-- **Why:** When to hand research to an agent, and when to ask for lookups to be batched.
+- **Why:** When to hand research to an agent.
 - **Tag:** No tag. Read from the transcript Claude Code already writes; Claude is never asked, and it costs no tokens.
 - **Powers:** Researching, Delegating to agents
 

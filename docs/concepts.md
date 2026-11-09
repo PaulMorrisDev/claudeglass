@@ -915,8 +915,9 @@ for all three, so it can't be used. A workflow's agents, and every agent of
 a resumed workflow, are one run.
 
 **Single lookups.** A reply is a single lookup when it made one read-only
-call (a Read, a Grep, a Glob or a shell command that reads files) and
-nothing else. Every reply re-reads the whole context, so lookups sent one
+call (a Read, a Grep, a Glob or a shell command that reads files once) and
+nothing else. One shell command that chains several reads is already a
+batch and is not counted. Every reply re-reads the whole context, so lookups sent one
 by one cost one re-read each, where one message holding them all would cost
 one. The saving counts the cache reads of the replies after the first of each
 stretch. A batched message still writes the tool results. It is an upper

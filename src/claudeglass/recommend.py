@@ -169,7 +169,7 @@ from .context_budget import (
     diet_usd,
     mcp_tool_key,
 )
-from .fixes import BATCH_PROBES_LINE, CRITIQUE_PLAN_LINE
+from .fixes import CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
 from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
 from .units import NO_LIMIT_SHARE_HINT, Units
@@ -300,18 +300,6 @@ class RecommendThresholds:
     # agent-report-size: "mean Agent tool_result > 8k tokens for an
     # agent type".
     agent_report_size_tokens: float = 8_000.0
-
-    # agent-batch-probes: "an agent type that made at least 100 replies, a
-    # quarter or more of them one read-only call and nothing else, where
-    # batching the runs of those would have spared at least $1". The
-    # habits_probes figure is the cache reads of the replies after the first
-    # of each run, and takes the lookups of a run to be independent, which
-    # some are (a read that needs the name a search just found), so the card
-    # quotes this share of it.
-    agent_batch_probes_min_replies: int = 100
-    agent_batch_probes_share_pct: float = 25.0
-    agent_batch_probes_min_saving_usd: float = 1.0
-    agent_batch_probes_saving_factor: float = 0.5
 
     # plan-rounds: "at least 5 approved plans, 30% or more of them sent back
     # before you approved, and 30% or more of those rounds a question, a
@@ -1543,69 +1531,6 @@ def _rule_agent_report_size(report: ReportModel, th: RecommendThresholds, archet
                 evidence=[
                     _evidence("Mean report size (tokens)", mean_proxy, "agents", "topology_report_proxy", agent_type),
                 ],
-            )
-        )
-    return out
-
-
-#: The columns of ``habits_probes`` the rule reads, in the order it uses them.
-_PROBE_COLUMNS = ("calls", "probes", "shell", "runs", "batch_cost")
-
-
-def _rule_agent_batch_probes(report: ReportModel, th: RecommendThresholds, archetype: str | None) -> list[Recommendation]:
-    """``agent-batch-probes``: an agent type whose replies are often one
-    read-only call and nothing else (a Read, a Grep, a Glob or a file-reading
-    shell command). Each such reply reads the agent's whole context again to
-    look at one thing, so independent lookups in one message would have cost
-    one read instead of several. Reads the Work habits section's
-    ``habits_probes``, a row for each agent type; the main session's row is
-    left out, since its prompts are yours and the card is for agent
-    definitions and workflow prompts. ``saving_usd`` is
-    :attr:`~RecommendThresholds.agent_batch_probes_saving_factor` of the
-    row's ``batch_cost``, the cache reads of the replies after the first of
-    each run: the table's figure is an upper bound, and what a batched
-    message still writes is not in it."""
-    if archetype in _NO_SUBAGENT_ARCHETYPES:
-        return []
-    table = _table(report, "habits", "habits_probes")
-    if table is None:
-        return []
-    at = {key: _col_index(table, key) for key in _PROBE_COLUMNS}
-    if None in at.values():
-        return []
-    out: list[Recommendation] = []
-    for row in table.rows:
-        agent_type = row[0] if row else None
-        if not isinstance(agent_type, str) or agent_type == "top-level" or len(row) <= max(at.values()):
-            continue
-        calls, probes, shell, runs, cost = (row[at[key]] for key in _PROBE_COLUMNS)
-        if not all(_is_number(value) for value in (calls, probes, shell, runs, cost)):
-            continue
-        if calls < th.agent_batch_probes_min_replies or probes * 100 < calls * th.agent_batch_probes_share_pct:
-            continue
-        saving = cost * th.agent_batch_probes_saving_factor
-        if saving < th.agent_batch_probes_min_saving_usd:
-            continue
-        out.append(
-            Recommendation(
-                id="agent-batch-probes",
-                severity="advice",
-                category="workflow",
-                archetypes=_ALL_ARCHETYPES,
-                title=f"{agent_type} looks things up one call at a time",
-                action=(
-                    f"Add \"{BATCH_PROBES_LINE}\" to {agent_type}'s agent definition, or to the workflow "
-                    "prompt that starts it, so independent lookups share one message."
-                ),
-                lever=None,
-                agent_type=agent_type,
-                evidence=[
-                    _evidence("Replies it made", calls, "habits", "habits_probes", agent_type),
-                    _evidence("Single read-only calls", probes, "habits", "habits_probes", agent_type),
-                    _evidence("Of them by shell command", shell, "habits", "habits_probes", agent_type),
-                    _evidence("Re-reads a batch would spare", cost, "habits", "habits_probes", agent_type),
-                ],
-                saving_usd=saving,
             )
         )
     return out
@@ -3087,7 +3012,6 @@ def recommend(
     recs.extend(_rule_env_subagent_model(report, snapshot, archetype))
     recs.extend(_rule_attribution_deprecated(report, snapshot))
     recs.extend(_rule_agent_report_size(report, th, archetype))
-    recs.extend(_rule_agent_batch_probes(report, th, archetype))
     recs.extend(_rule_plan_rounds(report, th))
     part_recs, covered_agents = _rule_spawn_parts(report, th, archetype, snapshot, units)
     recs.extend(part_recs)

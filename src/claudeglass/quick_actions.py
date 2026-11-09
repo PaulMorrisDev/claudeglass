@@ -1349,7 +1349,7 @@ def _cost_record(ctx: Context) -> dict:
 
 
 _HABIT_RECS = {
-    "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "agent-batch-probes",
+    "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size",
     "spawn-task-prompt", "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume",
     "discovery-share",
 }

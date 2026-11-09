@@ -1884,11 +1884,6 @@ def test_the_agent_reports_check_follows_failed_calls_and_has_no_rule_behind_it(
     assert check.rule_ids == ()
 
 
-def test_the_habits_check_claims_the_batch_probes_card_and_no_other_check_does():
-    claimed = [c.id for c in qa.CHECKS if "agent-batch-probes" in c.rule_ids]
-    assert claimed == ["habits"]
-
-
 def test_agent_reports_without_the_table_has_no_data(tmp_path):
     result = qa.run("agent-reports", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
     assert result["status"] == "no_data" and result["table"] is None and result["tips"] == []

@@ -1384,10 +1384,16 @@ columns of a table still divide by that table's own messages.
   row, and `batch_cost`: the cache reads of the replies after the first of
   each run, at list price. A batched message still writes the tool results
   and names the calls, so those are left out. That is an upper bound, since
-  it takes the lookups of a run to be independent. Rows with no single lookups are left out,
-  costliest first. It feeds `research_split`, `explore_research` and
-  `name_files`, "lookups before the first edit", and the
-  `agent-batch-probes` card. The Overview's **More detail** links to it.
+  it takes the lookups of a run to be independent. A shell command that
+  chains several reads (`grep a x; grep b y`) is already a batch: it is not
+  a single lookup, though it neither ends a run nor goes unpriced inside
+  one, and a `||` fallback (`cat a || cat b`) counts as one read. Rows with
+  no single lookups are left out, costliest first. It feeds `research_split`,
+  `explore_research` and `name_files`, "lookups before the first edit", and
+  is a measurement only: the `agent-batch-probes` card it once fed was
+  dropped because it did not predict batching misses (replayed against a
+  control group, it was right less often than wrong). The Overview's
+  **More detail** links to it.
 - `habits_agent_runs` — what agent runs did, by how they were started
   (`background`, `foreground`, `workflow`; a row is left out with no
   replies). Runs are counted per run (a workflow's agents are all one run,
@@ -2543,7 +2549,7 @@ Rules implemented today, in the order they run. From `recommend.py`'s
 own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `notification-invalidation`, `batch-instructions`, `subagent-volume`,
 `compaction-churn`, `long-context-share`, `cache-read-dominance`,
-`baseline-bloat`, `agent-report-size`, `agent-batch-probes`, `plan-rounds`, `spawn-cost` (for agent types
+`baseline-bloat`, `agent-report-size`, `plan-rounds`, `spawn-cost` (for agent types
 without `agent_startup` data, and only when the mean first call is over
 40k tokens and at least 5k tokens of its tool definitions are rarely or
 never used; otherwise the per-part `spawn-tools-list`,
@@ -2580,16 +2586,6 @@ cites the cell it used:
 - `spawn-claude-md` is held back when at least as many of an agent type's
   runs said they used CLAUDE.md as said they didn't (a tie holds it back),
   and cites the ones that didn't. With no runs that said, it still fires.
-- `agent-batch-probes` is a card per agent type (not the main session)
-  from `habits_probes`, when the type made 100 replies or more, a
-  quarter or more of them a single read-only call, and half of
-  `batch_cost` is $1 or more (`agent_batch_probes_min_replies`,
-  `_share_pct`, `_min_saving_usd` and `_saving_factor`). `batch_cost` is the
-  re-reads only: the tool results are written once either way. The halving is
-  because some lookups of a run depend on one another. It cites the four
-  cells it used and offers one line to add to the agent's definition or
-  the workflow prompt that starts it: "Batch independent Read/Grep/Glob
-  calls into a single message".
 - `plan-rounds` is one card, from `habits_plan_rounds`, when at least 5
   plans were approved, 30% or more of them were sent back first, 30% or
   more of the rounds read as a question, a critique or a doubt, and the

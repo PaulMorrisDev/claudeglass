@@ -9,6 +9,8 @@ A pipeline counts once, by the command that starts it: ``grep``, ``egrep``,
 PowerShell's ``Get-Content`` (``gc``, ``type``) and ``Select-String``
 (``sls``). What follows a pipe filters that output and isn't another read,
 and a leading ``cd X &&`` is a pipeline of its own that reads nothing.
+A read after ``||`` is a fallback for the read before it
+(``cat a 2>/dev/null || cat b``) and is not counted again.
 
 Not a read: a command whose output goes to a file (``cat a b > c``,
 ``git diff > x.patch``) or is fed by a heredoc (``cat <<EOF``), ``sed -i``,
@@ -55,11 +57,14 @@ def read_count(command: str, *, powershell: bool) -> int:
     docstring)."""
     if not _MAYBE_READS_RE.search(command):
         return 0
-    return sum(
-        1
-        for pipeline in shell_writes.simple_commands(command, powershell=powershell)
-        if _reads(pipeline[0], powershell)
-    )
+    count = 0
+    previous = False
+    for pipeline in shell_writes.simple_commands(command, powershell=powershell):
+        reads = _reads(pipeline[0], powershell)
+        if reads and not (pipeline[0].fallback and previous):
+            count += 1
+        previous = reads
+    return count
 
 
 def _reads(cmd: SimpleCommand, powershell: bool) -> bool:

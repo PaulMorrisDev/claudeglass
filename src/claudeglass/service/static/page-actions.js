@@ -84,7 +84,6 @@ export var RULE_AREA = {
   "spawn-task-prompt": "agents",
   "subagent-volume": "agents",
   "agent-report-size": "agents",
-  "agent-batch-probes": "agents",
   "run-split": "agents",
   "discovery-share": "habits",
   "limit-pressure": "habits",
@@ -159,7 +158,6 @@ var RULE_MECHANISM = {
   "spawn-tools-list": "startup",
   "spawn-task-prompt": "startup",
   "agent-report-size": "report",
-  "agent-batch-probes": "carried",
   "plan-rounds": "carried",
 };
 

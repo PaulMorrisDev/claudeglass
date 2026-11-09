@@ -2067,6 +2067,9 @@ def test_a_run_that_changed_nothing_has_no_calls_before_an_edit_and_a_message_is
     (_shell("pytest -q"), False),
     (_shell("echo hi > out.txt"), False),
     (_shell("cat a.py && rm b.py"), False),         # a read that also moves a file is not a probe
+    (_shell("grep a x; grep b y"), False),          # one command chaining reads is already a batch
+    (_shell("cd app && grep -n foo src/"), True),   # a leading cd reads nothing
+    (_shell("cat a 2>/dev/null || cat b"), True),   # a fallback is one lookup
     (tool_use_block("WebFetch", "w1", {"url": "https://example.com"}), False),
     (tool_use_block("Edit", "e1", {"file_path": "/w/a.py"}), False),
 ])

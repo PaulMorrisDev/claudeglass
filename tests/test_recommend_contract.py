@@ -468,7 +468,6 @@ _ALL_RULE_IDS = frozenset(
         "cache-read-dominance",
         "baseline-bloat",
         "agent-report-size",
-        "agent-batch-probes",
         "plan-rounds",
         "spawn-cost",
         "effort-mismatch",

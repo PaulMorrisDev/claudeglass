@@ -95,19 +95,22 @@ class _Command:
     words: list[tuple[str, bool]] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     fed: bool = False
+    #: Whether it starts after ``||``: an alternative to the command before.
+    fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SimpleCommand:
     """One simple command as ``shell_reads`` reads it: the program (lower
     case, no directory or ``.exe``), its arguments as plain words,
-    whether its standard output goes to a file, and whether a heredoc or
-    here-string feeds it."""
+    whether its standard output goes to a file, whether a heredoc or
+    here-string feeds it, and whether it follows ``||`` (a fallback)."""
 
     program: str
     args: tuple[str, ...]
     redirected: bool
     fed: bool
+    fallback: bool = False
 
 
 def write_targets(command: str, *, powershell: bool, cwd: str | None) -> list[str]:
@@ -169,7 +172,7 @@ def simple_commands(command: str, *, powershell: bool) -> list[list[SimpleComman
         simple = []
         for cmd in pipeline:
             program, args = _program(cmd.words, powershell)
-            simple.append(SimpleCommand(program, tuple(text for text, _quoted in args), bool(cmd.writes), cmd.fed))
+            simple.append(SimpleCommand(program, tuple(text for text, _quoted in args), bool(cmd.writes), cmd.fed, cmd.fallback))
         result.append(simple)
     return result
 
@@ -204,7 +207,7 @@ def _pipelines(command: str, powershell: bool) -> list[list[_Command]]:
             if text == "|":
                 pipelines[-1].append(_Command())
             else:
-                pipelines.append([_Command()])
+                pipelines.append([_Command(fallback=text == "||")])
     return [p for p in pipelines if any(c.words or c.writes or c.fed for c in p)]
 
 

@@ -132,6 +132,21 @@ def test_a_run_of_lookups_is_priced_from_its_second_reply(tmp_path, pricing):
     assert cycle.probe_batch_cost == pytest.approx(_read_cost(top.turns[1], pricing) + _read_cost(top.turns[2], pricing))
 
 
+def test_a_command_chaining_reads_is_no_single_lookup_but_keeps_its_place_in_a_run(tmp_path, pricing):
+    chained = tool_use_block("Bash", "c1", {"command": "sed -n 1,5p src/a.py; sed -n 1,5p src/b.py"})
+    top = _parse(tmp_path, "top.jsonl", [
+        _human(0),
+        _step(1, _read("r1")), _result(2, "r1"),
+        _step(3, chained), _result(4, "c1"),
+        _step(5, _read("r2", "src/b.py")), _result(6, "r2"),
+        _step(7),
+    ], kind="top-level")
+    (cycle,) = habits.collect(_corpus(top), pricing).cycles
+    # The chained command already batched two reads: it is not counted, but the run goes on through it.
+    assert (cycle.probe_calls, cycle.probe_shell_calls, cycle.probe_runs) == (2, 0, 1)
+    assert cycle.probe_batch_cost == pytest.approx(_read_cost(top.turns[1], pricing) + _read_cost(top.turns[2], pricing))
+
+
 def test_an_agents_lookups_reach_its_row_and_the_probes_table(tmp_path, pricing):
     top = _parse(tmp_path, "top.jsonl", [
         _human(0),

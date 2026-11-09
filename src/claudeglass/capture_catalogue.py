@@ -2243,7 +2243,7 @@ METRICS: tuple[Metric, ...] = (
         title="Where research happens",
         what="Search and read tokens in the main session against those in Explore agents. Also how many calls were a "
         "single lookup in a reply of its own.",
-        why="When to hand research to an agent, and when to ask for lookups to be batched.",
+        why="When to hand research to an agent.",
         powers=("research", "delegation"),
     ),
     # -- Live coaching ----------------------------------------------------

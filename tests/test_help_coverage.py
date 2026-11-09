@@ -563,19 +563,13 @@ def test_the_copy_the_failed_calls_check_and_the_work_habits_row_add_keeps_to_th
         _plain(text, where)
 
 
-def test_the_copy_the_agent_reports_check_and_the_batch_probes_card_keep_to_the_help_rules(tmp_path):
+def test_the_copy_the_agent_reports_check_keeps_to_the_help_rules(tmp_path):
     """The "Replies to agent reports" check: its question and why, its two
     tips, and what it says when it finds something, when it finds little,
-    when no report came back and when there is no data; and the card that
-    tells you to batch an agent's lookups: its title, why, action, saving
-    basis, the prompt to copy and the explainer."""
+    when no report came back and when there is no data."""
     from types import SimpleNamespace as NS
 
-    from claudeglass import advice, fixes
     from claudeglass import quick_actions as qa
-    from claudeglass.model import Recommendation
-    from claudeglass.units import Units
-    from test_advice import _batch_probes, _model_swap_report
     from test_quick_actions import _ctx, _report_turn_rows, _reports_model
 
     check = next(c for c in qa.CHECKS if c.id == "agent-reports")
@@ -593,20 +587,7 @@ def test_the_copy_the_agent_reports_check_and_the_batch_probes_card_keep_to_the_
     nothing = qa.run("agent-reports", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
     strings.append(("no data summary", nothing["summary"]))
 
-    for agent in ("Explore", "workflow-subagent"):
-        (card,) = advice.finish([_batch_probes(agent)], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
-        strings += [(f"{agent} card {key}", getattr(card, key)) for key in ("title", "why", "action", "estimated_saving", "saving_basis")]
-        rec = Recommendation(
-            id="agent-batch-probes", severity="advice", category="workflow", title=card.title, action=card.action,
-            agent_type=agent, lever=None,
-        )
-        (fix,) = fixes.build_fixes(rec)
-        strings += [(f"{agent} explainer {heading}", text) for heading, text in fix["explainer"]]
-        # The opening line every finding's prompt shares is not this card's copy.
-        opening = fixes._FINDING_OPEN.format(title=card.title) + " "
-        assert fix["prompt"].startswith(opening)
-        strings.append((f"{agent} fix prompt", fix["prompt"].removeprefix(opening).removesuffix(" " + fixes.PROMPT_RESTART)))
-    assert len(strings) >= 20
+    assert len(strings) >= 8
     for where, text in strings:
         _plain(text, where)
 

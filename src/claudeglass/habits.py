@@ -1871,10 +1871,12 @@ def _share_reads(reads: dict) -> None:
 
 def _is_probe(turn) -> bool:
     """Whether a reply (one message id) only looked, once: its one tool call
-    was a Read, Grep or Glob, or a shell command that reads files
+    was a Read, Grep or Glob, or a shell command that reads files once
     (``shell_reads``: grep, sed -n, cat, find, git log) and writes or moves
     none. A reply with two calls, or with a call that did anything else,
-    is not. What a small model does as well as a large one."""
+    is not, and neither is one command that chains several reads: that is
+    already a batch (:func:`_is_batched_shell_read`). What a small model
+    does as well as a large one."""
     calls = turn.tool_calls_by_tool
     if sum(calls.values()) != 1:
         return False
@@ -1882,7 +1884,20 @@ def _is_probe(turn) -> bool:
         return True
     return (
         any(calls.get(tool) for tool in _SHELL_TOOLS)
-        and turn.shell_read_count > 0
+        and turn.shell_read_count == 1
+        and not (turn.shell_write_count or turn.shell_change_count)
+    )
+
+
+def _is_batched_shell_read(turn) -> bool:
+    """Whether a reply's one call was a read-only shell command that chains
+    several reads (a ``||`` fallback counts as one): a batch already, so
+    not a probe, though it still sits in a run of lookups."""
+    calls = turn.tool_calls_by_tool
+    return (
+        sum(calls.values()) == 1
+        and any(calls.get(tool) for tool in _SHELL_TOOLS)
+        and turn.shell_read_count >= 2
         and not (turn.shell_write_count or turn.shell_change_count)
     )
 
@@ -1899,7 +1914,8 @@ def _probe_counts(turns, read_costs) -> tuple[int, int, int, float]:
     :meth:`_CarryCost.read_cost`): how many replies were a single read-only
     probe, how many of those were a shell command, how many runs of two or
     more probes in a row came, and the cache reads of the replies after the
-    first of each run. Those are the re-reads one message holding the calls
+    first of each run. A command chaining several reads is no probe, but it
+    neither ends a run nor goes unpriced inside one. Those are the re-reads one message holding the calls
     side by side would not have needed, as far as the calls didn't depend on
     each other. Each reply's cache write and output stay out of it: a
     batched message still writes the tool results and still names the
@@ -1908,11 +1924,13 @@ def _probe_counts(turns, read_costs) -> tuple[int, int, int, float]:
     cost = 0.0
     run = 0
     for turn, usd in zip(turns, read_costs):
-        if not _is_probe(turn):
+        batched = _is_batched_shell_read(turn)
+        if not (batched or _is_probe(turn)):
             run = 0
             continue
-        probes += 1
-        shell += _is_shell_probe(turn)
+        if not batched:
+            probes += 1
+            shell += _is_shell_probe(turn)
         run += 1
         if run == 2:
             runs += 1
