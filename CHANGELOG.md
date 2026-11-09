@@ -115,6 +115,28 @@ Capture and dashboard:
   it.** It printed `/plugin install python -m claudeglass ...`, taking the
   mod's name for this command.
 
+Cards and checks:
+
+- **The agent-decide-apply card counts only writes to code, whatever tool
+  wrote them.** Reports, ledgers, plans and scratch files no longer flag an
+  agent, and an Edit or Write to code in a `.claude/worktrees` folder counts
+  as it does from the shell. Transcripts are read again once (parser 47).
+- **The effort-mismatch card fires only when docs or light edits are most
+  sessions, pools high, xhigh and max effort, and cites each row.**
+- **The memory-at-start figure leaves out rules with a `paths:` list and
+  nested CLAUDE.md files.** Older snapshots count every rule until the next
+  session start.
+- **The hook-block-resent card says the blocked calls not sent again would
+  run too, and that its saving does not subtract them.**
+- **The models and habits checks leave out cards you ignored, and the habits
+  saving names its source.** The CLAUDE.md figures say what they count, and
+  the shared CLAUDE.md card names the file it is about.
+- **The capture audit counts `queue-operation.content` as read**, so its
+  unread-key alarm stops.
+- **Cards for built-in agents say a same-named file in `.claude/agents/`
+  replaces the built-in.** The asked-model card no longer points at that file,
+  because a model named in the call overrides it.
+
 The mod:
 
 - **The mod notes which app a Desktop, VS Code or mobile session runs in.** It
