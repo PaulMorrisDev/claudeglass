@@ -675,11 +675,14 @@ COACHING_HINTS = (
 
 #: Hints whose live note is switched off: the blinded replay scored them
 #: under the 50% precision bar in their current form, so each was more
-#: often wrong than right. The hook and the mod say nothing for them. The
-#: rules themselves stay, as do the figures read from the transcript (the
-#: runs ``SubagentStop`` keeps, the tags in old notes), and they are still
+#: often wrong than right. The hook and the mod say nothing for them, and
+#: ``SubagentStop`` keeps no count of runs for ``split_run`` while it is
+#: off (nothing reads it). The rules themselves stay, as do the figures
+#: read from the transcript (the tags in old notes), and they are still
 #: hints of :data:`COACHING_HINTS`; switching one back on is taking it out
-#: of this list.
+#: of this list. The narrowed ``quiet_output``, ``cold_return`` and
+#: ``split_run`` rules have not passed the replay live, and must pass it
+#: before any of them is taken out of the list.
 LIVE_OFF_HINTS = (
     "plan_fresh",
     "plan_fresh_early",

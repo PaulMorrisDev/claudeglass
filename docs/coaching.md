@@ -634,7 +634,11 @@ days, whether or not the mod runs.
 When several messages are sent at once, the hook calls run side by side:
 the one that takes `coach-state.json.claim` (made next to the state file, and
 taken over once it is more than 5 seconds old) picks the hint, and the others
-skip only the hint, so one message draws one note per hint.
+skip only the hint, so one message draws one note per hint. A call with no hint
+to pick and nothing to keep up (an agent's tool result, say) takes no claim.
+Every other write to that file takes the claim too (the reply times, the runs
+that ended too big, the plan check and the rating reminder), and a call that
+loses it skips that write; the next call catches up from the transcript.
 
 A hint left out is not marked as shown, so it comes back at once if the mod
 stops. A mod that is missing, closed, or whose file is unreadable or stale

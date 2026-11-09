@@ -3675,6 +3675,134 @@ def test_two_calls_racing_in_one_message_draw_one_note(tmp_path, monkeypatch):
     assert inner == [""] and _kind(outer) == "big_paste"
 
 
+def test_keep_reply_and_keep_run_leave_the_state_alone_while_the_claim_is_held(tmp_path):
+    records = [_prompt(), _reply(20_000, ago_s=100)]
+    assert _stop(tmp_path, records, name="first.jsonl")
+    state_file = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    before = state_file.read_bytes()
+    claim = _claim_path(tmp_path)
+    claim.write_text("", encoding="utf-8")
+    newer = [*records, _reply(30_000, ago_s=10, message_id="msg_newer")]
+    assert _stop(tmp_path, newer, name="second.jsonl") is False
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="held")
+    assert _keep_run(tmp_path, _agent_stop(session)) is False
+    assert state_file.read_bytes() == before and claim.exists()
+    # Released, the same calls write.
+    claim.unlink()
+    assert _stop(tmp_path, newer, name="second.jsonl") is True
+    assert _keep_run(tmp_path, _agent_stop(session)) is True
+
+
+def test_keep_run_keeps_no_count_while_split_run_is_off_live(tmp_path, monkeypatch):
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="off")
+    monkeypatch.setitem(CATALOGUE["coaching"], "off_live", ["split_run"])
+    assert _keep_run(tmp_path, _agent_stop(session)) is False
+    assert not (_config_dir(tmp_path) / cat.COACH_STATE_FILE).exists()
+
+
+def test_a_reply_kept_while_a_hint_is_being_decided_is_still_there_afterwards(tmp_path, monkeypatch):
+    # keep_reply runs (Stop) while the status_poll decision computes its candidate: both writes survive.
+    payload = _scene_status_poll(tmp_path)
+    stop = {"hook_event_name": "Stop", "session_id": "s1", "cwd": "/work/app", "transcript_path": payload["transcript_path"]}
+    real = HOOK._poll_hint
+    kept = []
+
+    def poll(*args, **kwargs):
+        found = real(*args, **kwargs)
+        kept.append(HOOK.keep_reply(stop, ON, CATALOGUE, _config_dir(tmp_path), now=NOW))
+        return found
+
+    monkeypatch.setattr(HOOK, "_poll_hint", poll)
+    assert _kind(_coach(tmp_path, payload)) == "status_poll"
+    assert kept == [True]
+    assert "status_poll" in _rested(tmp_path)
+    assert _kept(tmp_path) is not None
+
+
+def test_an_agent_call_that_has_nothing_to_decide_takes_no_claim(tmp_path, monkeypatch):
+    taken = []
+    real = HOOK._claimed
+
+    def recorder(path):
+        taken.append(path)
+        return real(path)
+
+    monkeypatch.setattr(HOOK, "_claimed", recorder)
+    assert _coach(tmp_path, _saved_read(agent_id="ag1", agent_type="general-purpose")) == ""
+    assert taken == [] and not _claim_path(tmp_path).exists()
+
+
+def test_a_message_gets_its_hint_when_an_agent_call_runs_during_its_transcript_read(tmp_path, monkeypatch):
+    payload = _scene_status_poll(tmp_path)
+    real = HOOK._TailReader.get
+    inner = []
+
+    def get(self):
+        if not inner:
+            inner.append(_coach(tmp_path, _saved_read(session_id="s1", agent_id="ag1", agent_type="general-purpose")))
+        return real(self)
+
+    monkeypatch.setattr(HOOK._TailReader, "get", get)
+    assert _kind(_coach(tmp_path, payload)) == "status_poll"
+    assert inner == [""]
+
+
+def test_a_hint_that_is_off_live_costs_no_claim(tmp_path, monkeypatch):
+    taken = []
+    real = HOOK._claimed
+    monkeypatch.setattr(HOOK, "_claimed", lambda path: (taken.append(path), real(path))[1])
+    monkeypatch.setitem(CATALOGUE["coaching"], "off_live", ["big_paste"])
+    assert _coach(tmp_path, _scene_big_paste(tmp_path)) == ""
+    assert taken == []
+
+
+def test_a_claim_of_the_last_second_is_not_taken_over(tmp_path):
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    old = datetime.now(timezone.utc).timestamp() - 1
+    os.utime(claim, (old, old))
+    assert HOOK._take_stale(claim) is False and claim.exists()
+
+
+def test_a_stale_claim_is_taken_over_once(tmp_path):
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    old = datetime.now(timezone.utc).timestamp() - 10
+    os.utime(claim, (old, old))
+    assert HOOK._take_stale(claim) is True and not claim.exists()
+    assert not list(claim.parent.glob("*.stale"))
+    # Gone already: the create may be tried again.
+    assert HOOK._take_stale(claim) is True
+
+
+def test_a_fresh_claim_that_replaced_the_stale_one_is_put_back(tmp_path, monkeypatch):
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    real = HOOK.time.time
+    calls = []
+
+    def clock():
+        # The first look sees an old claim; by the second, what was moved aside is another call's fresh one.
+        calls.append(1)
+        return real() + (100 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(HOOK.time, "time", clock)
+    assert HOOK._take_stale(claim) is False
+    assert claim.exists() and not list(claim.parent.glob("*.stale"))
+
+
+def test_a_claim_that_windows_refuses_to_make_reads_as_held(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise PermissionError("being deleted")
+
+    monkeypatch.setattr(HOOK.os, "open", refuse)
+    with HOOK._claimed(_config_dir(tmp_path) / cat.COACH_STATE_FILE) as held:
+        assert held is False
+
+
 def _stale(base):
     return _heartbeat(base, {"s1": cat.MOD_PRESENT_WINDOW_S + 1})
 

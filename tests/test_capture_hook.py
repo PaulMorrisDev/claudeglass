@@ -1198,6 +1198,21 @@ def test_a_fix_after_an_approved_plan_and_a_build_gets_the_plan_check(tmp_path):
     assert _fb(tmp_path, _timeline(*WORK), "Why not rename the importer to loader instead?", session="s3") == ""
 
 
+def test_a_feedback_call_that_finds_the_claim_held_leaves_the_state_alone_and_notes_nothing(tmp_path):
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    state = config_dir / cat.COACH_STATE_FILE
+    state.write_text('{"sessions":{}}', encoding="utf-8")
+    claim = config_dir / (cat.COACH_STATE_FILE + ".claim")
+    claim.write_text("", encoding="utf-8")
+    assert _fb(tmp_path, _timeline(*WORK), FIX) == ""
+    assert state.read_text(encoding="utf-8") == '{"sessions":{}}' and claim.exists()
+    # The call that held it decided: once released, the next call asks.
+    claim.unlink()
+    assert _hint(_fb(tmp_path, _timeline(*WORK), FIX)) == "plan_check"
+    assert not claim.exists()
+
+
 def test_a_plan_approved_by_a_typed_go_ahead_gets_the_plan_check_too(tmp_path):
     rejected = _comes_back("p1", error=True, text="The user doesn't want to proceed with this tool use.")
     records = _timeline(_types("Plan it"), _plans("p1"), rejected, _says("Waiting."), _types("go ahead"), *_edits(), _says("Built."))
