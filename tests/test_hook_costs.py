@@ -618,6 +618,8 @@ def test_blocks_partly_sent_again_name_the_ones_that_were_not():
     assert rec.saving_usd == pytest.approx(12 * 0.2 * 10 / 12)
     assert "changed nothing" not in rec.why
     assert "2 blocked calls were not sent again" in rec.why
+    assert "the saving shown does not subtract them" in rec.why
+    assert "before them" not in rec.why
 
 
 def test_blocks_that_change_the_call_are_not_a_card():

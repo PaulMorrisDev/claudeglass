@@ -651,8 +651,8 @@ def _rule_hook_block_resent(report: ReportModel, th: HookThresholds) -> list[Rec
         block_usd = _num(r.get("block_usd"))
         saving = block_usd * min(1.0, resent / blocks)
         not_resent = (
-            f" {blocks - resent:,} blocked calls were not sent again. Letting calls through with "
-            "additionalContext gives those up too, so the saving shown is before them."
+            f" {blocks - resent:,} blocked calls were not sent again; letting calls through with "
+            "additionalContext would let those run too, and the saving shown does not subtract them."
             if blocks > resent
             else ""
         )

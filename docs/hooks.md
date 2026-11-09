@@ -196,7 +196,7 @@ None of them changes a setting. Each gives a prompt to hand Claude.
   changing it with `updatedInput`. The saving is the share of the block
   cost those re-sent calls took (the re-sent replies, not a net figure).
   When some blocks were not sent again, the card says how many, and that
-  the saving is before them.
+  the saving does not subtract them.
 - **`hook-context-carry`** (severity `advice`) when a hook added context
   at least `hooks_min_contexts` (default 20) times, costing at least
   `hooks_min_context_usd` (default $1.00 at list price) to keep. It
