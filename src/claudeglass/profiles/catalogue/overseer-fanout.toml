@@ -14,7 +14,7 @@ profile does not try to guess a maxTurns cap tight enough to force \
 concise reports (that is workflow advice, not a settings lever, per \
 recommend.py's own category split), only keeps the top-level effort at \
 "high" (an overseer session's whole point is judging and directing, the \
-opposite of the effort-mismatch rule's docs/general-dev concern) while \
+opposite of the effort-mismatch rule's docs and light-edit concern) while \
 its implementer agents run at "medium" -- the same delegation-cost \
 concern topology_spawn_write's mean_write column measures for \
 recommend.py's spawn-cost rule. subagentPromptCacheTtl stays at the \

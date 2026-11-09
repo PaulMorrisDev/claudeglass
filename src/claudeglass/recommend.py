@@ -80,20 +80,21 @@ Deviations from the plan/brief, reported rather than made silently (see
   ``scorecard.dimensions`` row for ``"data_quality"`` (a table cell that
   genuinely exists) and states the diagnostics-derived counts in prose in
   ``action`` instead of fabricating a table citation for them.
-- A5's ``effort-mismatch`` rule ("thinking share high on docs/general-dev
+- A5's ``effort-mismatch`` fallback ("thinking share high on light
   sessions") wants the high-effort thinking share computed *for those
   sessions specifically*, but no report table joins
   ``topology_effort_tokens``'s per-effort-level thinking share to
   ``sessions_by_purpose``'s per-purpose session counts -- they're
   independent group-bys (one by effort level, one by purpose) with no
   shared key exposed anywhere in this codebase. This rule instead
-  compares the corpus-wide high-effort thinking share against the mere
-  presence of docs/general-dev sessions in the corpus, which can over-
-  or under-state the mismatch for a corpus whose docs/general-dev
-  sessions don't run at high effort (or vice versa). Both the action
-  text and the evidence list disclose this: the evidence separately
-  cites the (unjoined) thinking-share and session-count cells rather
-  than implying a single joined metric.
+  compares the corpus-wide thinking share at high, xhigh and max effort
+  (pooled by output tokens) against the share of sessions that are
+  docs-or-light-edit, and fires only when those are more than half of all
+  sessions -- only then does a corpus-wide figure say much about light
+  work. Both the action text and the evidence list disclose the
+  approximation: the evidence separately cites the (unjoined)
+  thinking-share and session-count cells rather than implying a single
+  joined metric.
 - A5's ``long-context-share`` rule's second clause ("median top-level ctx
   > 150k") has no table exposing a *median*; ``scorecard.dimensions``'s
   ``context_hygiene`` row exposes ``p90_top_level_ctx`` instead (the one
@@ -174,9 +175,10 @@ from .model import Recommendation, ReportModel, Section, SettingChange, Table
 from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
 from .units import NO_LIMIT_SHARE_HINT, Units
 
-#: Purposes ``classify.classify_purpose`` can return that count as
-#: "docs/general-dev" for the ``effort-mismatch`` rule (plan A5 wording).
-_DOCS_GENERAL_PURPOSES = frozenset({"docs-or-light-edit", "general-dev"})
+#: The one purpose ``classify.classify_purpose`` returns that counts as light
+#: work for the ``effort-mismatch`` fallback (``general-dev`` is the catch-all
+#: and includes heavy sessions, so it does not).
+_LIGHT_PURPOSES = frozenset({"docs-or-light-edit"})
 
 #: Archetypes that never spawn subagents of their own -- rules whose
 #: advice is about subagent behaviour (TTL-per-agent-type, spawn cost,
@@ -342,6 +344,10 @@ class RecommendThresholds:
     # effort-mismatch: ">= 30% of output tokens are thinking on sessions
     # whose purpose is docs/general-dev at effort high or above".
     effort_mismatch_thinking_share_pct: float = 30.0
+    # effort-mismatch fallback (no effort tags captured): docs-or-light-edit
+    # sessions must be more than this share of all sessions. Unvalidated:
+    # chosen as "most sessions", with no backtest.
+    effort_mismatch_light_share_pct: float = 50.0
 
     # discovery-share: a phases section with DISCOVERY > 35% (matches
     # phases.DISCOVERY_SHARE_THRESHOLD's 0.35, expressed here as a pct).
@@ -2587,8 +2593,8 @@ def _rule_effort_mismatch(
     (:func:`_effort_mismatch_reported`); otherwise the fallback below.
 
     Fix R22 (see module docstring's deviations list): the fallback's
-    corpus-wide high-effort thinking share and the docs/general-dev
-    session counts are read from two independent group-bys with no report
+    corpus-wide high-effort thinking share and the docs-or-light-edit
+    session count are read from two independent group-bys with no report
     table joining them by session -- this is an approximation, not a per-
     session join, and both ``action`` and the module docstring say so."""
     direct = _effort_mismatch_reported(report, th, snapshot)
@@ -2601,18 +2607,35 @@ def _rule_effort_mismatch(
     sessions_idx = _col_index(purpose_table, "sessions")
     if sessions_idx is None:
         return []
-    docs_purpose_rows = [
+    counted = [
         (row[0], row[sessions_idx])
         for row in purpose_table.rows
-        if row and row[0] in _DOCS_GENERAL_PURPOSES and sessions_idx < len(row)
+        if row and sessions_idx < len(row) and isinstance(row[sessions_idx], (int, float))
     ]
-    if not docs_purpose_rows:
+    total = sum(sessions for _purpose, sessions in counted)
+    light_rows = [(purpose, sessions) for purpose, sessions in counted if purpose in _LIGHT_PURPOSES and sessions > 0]
+    if not total or sum(sessions for _p, sessions in light_rows) * 100.0 <= th.effort_mismatch_light_share_pct * total:
         return []
-    thinking_share = _cell(report, "agents", "topology_effort_tokens", "high", "thinking_share")
-    if not isinstance(thinking_share, (int, float)) or thinking_share <= th.effort_mismatch_thinking_share_pct:
+    share_idx = _col_index(effort_table, "thinking_share")
+    output_idx = _col_index(effort_table, "output_tokens")
+    if share_idx is None:
         return []
-    evidence = [_evidence("High-effort thinking share of output", thinking_share, "agents", "topology_effort_tokens", "high")]
-    for purpose, sessions in docs_purpose_rows:
+    weighted = []  # (row key, output tokens, thinking share)
+    for row in effort_table.rows:
+        if row and row[0] in _HIGH_EFFORT_LEVELS and share_idx < len(row) and isinstance(row[share_idx], (int, float)):
+            weight = row[output_idx] if output_idx is not None and output_idx < len(row) else 1
+            weighted.append((row[0], weight if isinstance(weight, (int, float)) else 1, row[share_idx]))
+    weight_sum = sum(weight for _key, weight, _share in weighted)
+    if not weight_sum:
+        return []
+    thinking_share = sum(weight * share for _key, weight, share in weighted) / weight_sum
+    if thinking_share <= th.effort_mismatch_thinking_share_pct:
+        return []
+    biggest = max(weighted, key=lambda item: item[1])[0]
+    evidence = [
+        _evidence("Thinking share of output at high, xhigh and max effort", thinking_share, "agents", "topology_effort_tokens", biggest)
+    ]
+    for purpose, sessions in light_rows:
         evidence.append(_evidence(f"{purpose} sessions in corpus", sessions, "sessions", "sessions_by_purpose", purpose))
     lever, scope = _lever_scope("effortLevel", snapshot)
     return [
@@ -2623,7 +2646,7 @@ def _rule_effort_mismatch(
             archetypes=_ALL_ARCHETYPES,
             title="High effort is being spent on light editing work",
             action=_action_with_scope(
-                "Lower effortLevel for docs/general-dev sessions -- thinking tokens dominate "
+                "Lower effortLevel for docs and light-edit sessions --thinking tokens dominate "
                 "output there without a matching increase in edit complexity. (Approximation: "
                 "the thinking share is corpus-wide, not joined to these specific sessions -- "
                 "no report table links effort level to session purpose.)",

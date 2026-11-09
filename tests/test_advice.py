@@ -599,6 +599,36 @@ def test_effort_mismatch_from_reported_work_is_explained_as_measured():
     assert out.estimated_saving.startswith("About ")
 
 
+def test_effort_mismatch_fallback_why_gives_the_light_share():
+    rec = Recommendation(
+        id="effort-mismatch",
+        severity="advice",
+        category="settings",
+        title="x",
+        lever="effortLevel",
+        evidence=[
+            ("Thinking share of output at high, xhigh and max effort", 41.0, "agents.topology_effort_tokens", "xhigh"),
+            ("docs-or-light-edit sessions in corpus", 6, "sessions.sessions_by_purpose", "docs-or-light-edit"),
+        ],
+    )
+    purposes = Table(
+        name="sessions_by_purpose",
+        title="Sessions by purpose",
+        columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
+        rows=[["docs-or-light-edit", 6], ["general-dev", 4]],
+    )
+    report = ReportModel(meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)),
+                         sections=[Section(key="sessions", title="Sessions", tables=[purposes])],
+                         diagnostics=Diagnostics(lines=1000))
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {}})
+    (out,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "effort-mismatch"]
+    assert out.why == (
+        "At high effort or above, 41% of Claude's output was thinking, yet 6 of 10 (60%) of your sessions "
+        "are docs or light edits that rarely need it."
+    )
+    assert "many" not in out.why
+
+
 def test_effort_mismatch_change_keeps_the_recommendations_own_scope():
     # COV-01: every _EXPLAIN entry used to flatten anything but "managed"
     # down to "user" (`scope="managed" if rec.scope == "managed" else

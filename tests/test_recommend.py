@@ -1830,7 +1830,7 @@ def test_effort_mismatch_fires_with_evidence_per_purpose_row():
                     name="sessions_by_purpose",
                     title="Sessions by purpose",
                     columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
-                    rows=[["docs-or-light-edit", 4], ["general-dev", 3], ["review", 2]],
+                    rows=[["docs-or-light-edit", 6], ["general-dev", 3], ["review", 2]],
                 )
             ],
         ),
@@ -1862,10 +1862,10 @@ def test_effort_mismatch_fires_with_evidence_per_purpose_row():
     # one evidence tuple for the thinking-share condition plus one per
     # contributing purpose row -- each citing its own exact cell (the
     # bug this module's docstring documents fixing).
-    assert ("High-effort thinking share of output", 40.0, "agents.topology_effort_tokens", "high") in rec.evidence
-    assert ("docs-or-light-edit sessions in corpus", 4, "sessions.sessions_by_purpose", "docs-or-light-edit") in rec.evidence
-    assert ("general-dev sessions in corpus", 3, "sessions.sessions_by_purpose", "general-dev") in rec.evidence
-    assert len(rec.evidence) == 3
+    assert ("Thinking share of output at high, xhigh and max effort", 40.0, "agents.topology_effort_tokens", "high") in rec.evidence
+    assert ("docs-or-light-edit sessions in corpus", 6, "sessions.sessions_by_purpose", "docs-or-light-edit") in rec.evidence
+    # general-dev is not light work, so it is not cited.
+    assert len(rec.evidence) == 2
     # R22: this rule can't join the thinking-share group-by to the
     # purpose group-by by session (no report table carries both), so
     # the approximation is disclosed in the action text rather than
@@ -1892,7 +1892,7 @@ def test_effort_mismatch_scope_follows_effort_levels_own_provenance():
                     name="sessions_by_purpose",
                     title="Sessions by purpose",
                     columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
-                    rows=[["docs-or-light-edit", 4], ["general-dev", 3]],
+                    rows=[["docs-or-light-edit", 4], ["general-dev", 2]],
                 )
             ],
         ),
@@ -2005,6 +2005,80 @@ def test_effort_mismatch_does_not_fire_below_thinking_share():
     )
     recs = recommend_fn(r, config=_config(), archetype=None)
     assert not any(rec.id == "effort-mismatch" for rec in recs)
+
+
+def _effort_mismatch_report(purpose_rows, effort_rows):
+    r = _add_section(
+        _base_report(),
+        Section(
+            key="sessions",
+            title="Sessions",
+            tables=[
+                Table(
+                    name="sessions_by_purpose",
+                    title="Sessions by purpose",
+                    columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
+                    rows=purpose_rows,
+                )
+            ],
+        ),
+    )
+    return _add_section(
+        r,
+        Section(
+            key="agents",
+            title="Agents",
+            tables=[
+                Table(
+                    name="topology_effort_tokens",
+                    title="Effort tokens",
+                    columns=[
+                        Column(key="effort", label="Effort"),
+                        Column(key="turns", label="Turns"),
+                        Column(key="output_tokens", label="Output tokens"),
+                        Column(key="thinking_tokens", label="Thinking tokens"),
+                        Column(key="thinking_share", label="Thinking share", kind="pct"),
+                    ],
+                    rows=effort_rows,
+                )
+            ],
+        ),
+    )
+
+
+def _fires_effort_mismatch(r):
+    return any(rec.id == "effort-mismatch" for rec in recommend_fn(r, config=_config(), archetype=None))
+
+
+def test_effort_mismatch_fallback_does_not_count_general_dev_as_light():
+    r = _effort_mismatch_report([["general-dev", 9]], [["high", 100, 10_000, 4_000, 40.0]])
+    assert not _fires_effort_mismatch(r)
+
+
+def test_effort_mismatch_fallback_needs_docs_to_be_more_than_half_of_sessions():
+    effort = [["xhigh", 100, 10_000, 4_000, 40.0]]
+    assert not _fires_effort_mismatch(_effort_mismatch_report([["docs-or-light-edit", 2], ["general-dev", 28]], effort))
+    assert not _fires_effort_mismatch(_effort_mismatch_report([["docs-or-light-edit", 5], ["general-dev", 5]], effort))
+    assert _fires_effort_mismatch(_effort_mismatch_report([["docs-or-light-edit", 6], ["general-dev", 5]], effort))
+
+
+def test_effort_mismatch_fallback_pools_high_xhigh_and_max_by_output_tokens():
+    purposes = [["docs-or-light-edit", 6], ["review", 2]]
+    r = _effort_mismatch_report(
+        purposes,
+        [["high", 10, 1_000, 100, 10.0], ["xhigh", 10, 8_000, 3_200, 40.0], ["max", 10, 1_000, 700, 70.0]],
+    )
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    (share,) = [v for label, v, _s, _r in rec.evidence if "Thinking share" in label]
+    assert share == pytest.approx(100 * 4_000 / 10_000)
+    assert rec.evidence[0][3] == "xhigh"
+
+
+def test_effort_mismatch_fallback_fires_without_a_high_row():
+    r = _effort_mismatch_report([["docs-or-light-edit", 6]], [["xhigh", 100, 10_000, 4_000, 40.0]])
+    assert _fires_effort_mismatch(r)
+    low = _effort_mismatch_report([["docs-or-light-edit", 6]], [["medium", 100, 10_000, 9_000, 90.0]])
+    assert not _fires_effort_mismatch(low)
 
 
 # -- discovery-share ----------------------------------------------------

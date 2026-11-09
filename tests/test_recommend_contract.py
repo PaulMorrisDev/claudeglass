@@ -730,7 +730,7 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                 name="sessions_by_purpose",
                 title="Sessions by purpose",
                 columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
-                rows=[["general-dev", 5]],
+                rows=[["docs-or-light-edit", 5]],
             )
         ],
     )

@@ -677,16 +677,31 @@ def _explain_ttl_switch(rec: Recommendation, ctx: _Context) -> None:
     )
 
 
+def _count_sessions(ctx: _Context) -> int:
+    """All sessions in ``sessions_by_purpose``."""
+    for section in ctx.report.sections:
+        for table in section.tables:
+            if section.key == "sessions" and table.name == "sessions_by_purpose":
+                keys = [c.key for c in table.columns]
+                if "sessions" in keys:
+                    idx = keys.index("sessions")
+                    return sum(r[idx] for r in table.rows if len(r) > idx and isinstance(r[idx], int))
+    return 0
+
+
 def _explain_effort_mismatch(rec: Recommendation, ctx: _Context) -> None:
     if any(source == "habits.habits_effort_fit" for _label, _value, source, _row in rec.evidence):
         _explain_effort_mismatch_reported(rec, ctx)
         return
-    share = _evidence_value(rec, "thinking share")
+    share = _evidence_value(rec, "Thinking share")
+    light = _evidence_value(rec, "sessions in corpus")
+    total = _count_sessions(ctx)
     rec.title = "High effort is being spent on light work"
-    rec.why = (
-        (f"At high effort, {share:.0f}% of Claude's output was thinking, " if isinstance(share, (int, float)) else "")
-        + "yet many of your sessions are docs or light edits that rarely need it."
-    )
+    lead = f"At high effort or above, {share:.0f}% of Claude's output was thinking, " if isinstance(share, (int, float)) else ""
+    if isinstance(light, int) and total:
+        rec.why = f"{lead}yet {light} of {total} ({100 * light / total:.0f}%) of your sessions are docs or light edits that rarely need it."
+    else:
+        rec.why = f"{lead}yet most of your sessions are docs or light edits that rarely need it."
     rec.why = rec.why[:1].upper() + rec.why[1:]
     rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
     rec.changes = [

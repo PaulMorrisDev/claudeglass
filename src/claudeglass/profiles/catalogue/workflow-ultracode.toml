@@ -17,7 +17,7 @@ same short-gap 5m "experimental.cacheTtl"/subagentPromptCacheTtl \
 pairing as implementation-heavy for the same reason (ttl.ttl_by_agent_type's \
 per-agent-type lever). No effortLevel override: a scripted workflow's \
 own phases already fix what each step does, so the effort-mismatch \
-rule's docs/general-dev concern (agents.topology_effort_tokens's \
+rule's docs and light-edit concern (agents.topology_effort_tokens's \
 thinking_share column) does not apply the same way here.
 
 PROF-11/F11: also the starting point for "ops" work Claude reported \
