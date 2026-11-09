@@ -584,6 +584,12 @@ phase, label, description or path:
   as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
   back for a command that was blocked or denied. A count only, never a
   path.
+- ``Turn.shell_code_write_count: int = 0`` -- the part of
+  ``shell_write_count`` aimed at code: not a document (a
+  ``capture_catalogue.DOC_SUFFIXES`` file, a file under ``plans/``,
+  ``reports/`` or ``docs/``, a report or ledger ``.json``/``.jsonl``) and
+  not under ``scratchpad/``. Taken back like ``shell_write_count``. Only
+  the ``agent-decide-apply`` verdict reads it.
 
 The same bump puts ``Turn.edit_kind`` on that temp test: an
 Edit/Write/MultiEdit/NotebookEdit target in any of those forms is
@@ -1318,6 +1324,7 @@ class Turn:
     #: this turn's Bash/PowerShell commands named outside the temp dir (a
     #: file written twice counts twice). A count only, never a path.
     shell_write_count: int = 0
+    shell_code_write_count: int = 0
     #: Quality-signals addition (see module docstring): the preceding
     #: human message looks like a correction. Flag only.
     human_correction: bool = False

@@ -299,6 +299,13 @@ def _analyse(
     tier = workstyle.model_tier(model) if model else -1
 
     write_turns = sum(1 for t in result.turns if t.edit_kind == "real" or t.shell_write_count > 0)
+    # A decider that only wrote its report or a ledger did not change code:
+    # decide-apply counts shell writes to code and edit calls on non-documents.
+    code_write_turns = sum(
+        1
+        for t in result.turns
+        if t.shell_code_write_count > 0 or (t.edit_kind == "real" and t.edit_call_count > t.edit_doc_count)
+    )
     role_class = agent_roles.role_class(meta.role_word)
     writer = (role_class == "writer" and write_turns >= 1) or (
         role_class is None and write_turns >= th.unknown_min_edit_turns
@@ -313,7 +320,7 @@ def _analyse(
             # no verdict here. model-tier prices such a run only when it is a
             # direct Agent-tool run; a workflow agent's is left alone.
             verdict = {"inherited": "inherited", "call": "asked"}.get(chosen_by)
-        elif role_class == "decider" and write_turns >= th.decide_apply_min_edit_turns:
+        elif role_class == "decider" and code_write_turns >= th.decide_apply_min_edit_turns:
             verdict = "decide-apply"
 
     return _Run(

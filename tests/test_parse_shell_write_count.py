@@ -336,3 +336,50 @@ def test_the_counts_are_plain_numbers_and_do_not_depend_on_the_salt(tmp_path, sa
     ], [_ok("t1"), _ok("t2")])
     assert (turn.edit_call_count, turn.edit_doc_count, turn.shell_change_count) == (1, 0, 1)
     assert all(type(n) is int for n in (turn.edit_call_count, turn.edit_doc_count, turn.shell_change_count))
+
+
+# -- the part of it aimed at code (``Turn.shell_code_write_count``) --------------------
+
+
+@pytest.mark.parametrize("command", [
+    "echo x > src/a.py",
+    "sed -i 's/a/b/' src/a.py",
+    "echo x > notes.json",
+])
+def test_a_shell_write_to_code_counts_as_a_code_write(tmp_path, salt, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()])
+    assert turn.shell_code_write_count == 1
+    assert turn.shell_write_count == 1
+
+
+@pytest.mark.parametrize("command", [
+    "cat > review-1.md <<'EOF'\nfindings\nEOF",
+    "echo x >> notes.txt",
+    "echo '{}' > audit-report.json",
+    "echo '{}' > ledger.jsonl",
+    "echo x > plans/a.py",
+    "echo x > reports/out.csv",
+    "echo x > docs/a.html",
+    "echo x > /home/me/scratchpad/run.py",
+])
+def test_a_shell_write_to_a_document_is_not_a_code_write(tmp_path, salt, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()])
+    assert turn.shell_code_write_count == 0
+    assert turn.shell_write_count >= 1 or "scratchpad" in command
+
+
+def test_a_shell_write_to_temp_is_not_a_code_write(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash(f"echo x > {TEMP_SLASHED}/a.py")], [_ok()])
+    assert turn.shell_code_write_count == 0
+
+
+def test_only_code_targets_are_counted_when_a_command_writes_both(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo a > review.md && echo b > src/b.py")], [_ok()])
+    assert turn.shell_write_count == 2
+    assert turn.shell_code_write_count == 1
+
+
+def test_a_code_write_that_never_ran_is_taken_back(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo x > src/a.py")],
+                 [tool_result_block("t1", "The user doesn't want to proceed with this tool use.", is_error=True)])
+    assert turn.shell_code_write_count == 0

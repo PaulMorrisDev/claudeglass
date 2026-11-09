@@ -659,6 +659,32 @@ def _temp_prefixes() -> tuple[str, ...]:
     return (_normalize_path_for_hash(tempfile.gettempdir()).rstrip("/") + "/", "/tmp/")
 
 
+#: Folders whose files are reports, plans and notes rather than code, and
+#: the folder an agent session keeps its scratch files in.
+_DOC_FOLDERS = frozenset({"plans", "reports", "docs"})
+_SCRATCH_FOLDERS = frozenset({"scratchpad"})
+#: A ``.json`` or ``.jsonl`` file with one of these in its name is a report
+#: or ledger, not code.
+_LEDGER_NAME_RE = re.compile(r"report|ledger|audit|finding|review|verdict|result", re.IGNORECASE)
+
+
+def _is_code_write_target(target: str, prefixes: tuple[str, ...]) -> bool:
+    """Whether a shell write target is code: not temp or scratchpad, and not
+    a document (a ``DOC_SUFFIXES`` file, a file under ``plans/``,
+    ``reports/`` or ``docs/``, or a report or ledger in ``.json``/``.jsonl``).
+    ``Turn.shell_code_write_count`` counts only these."""
+    normal = _normalize_path_for_hash(target)
+    if normal.startswith(prefixes):
+        return False
+    folders, _, name = normal.rpartition("/")
+    parts = set(folders.split("/"))
+    if parts & _SCRATCH_FOLDERS or parts & _DOC_FOLDERS:
+        return False
+    if name.endswith(DOC_SUFFIXES):
+        return False
+    return not (name.endswith((".json", ".jsonl")) and _LEDGER_NAME_RE.search(name))
+
+
 def _is_temp_target(target: str, prefixes: tuple[str, ...]) -> bool:
     """Whether a write target is inside a temp dir. A scratch file is not
     an edit to your work, so ``Turn.shell_write_count`` leaves a shell
@@ -910,6 +936,10 @@ class _PendingTurn:
     #: back like ``edit_hashes_by_tool_use``.
     shell_write_count: int = 0
     shell_writes_by_tool_use: dict[str, int] = field(default_factory=dict)
+    #: The part of ``shell_write_count`` aimed at code (see model.py's
+    #: ``Turn.shell_code_write_count``), with the part each tool_use added.
+    shell_code_write_count: int = 0
+    shell_code_writes_by_tool_use: dict[str, int] = field(default_factory=dict)
     #: Live-coaching addition (see model.py's ``Turn.config_edit_count``/
     #: ``Turn.agent_edit_files``): the edit calls and shell write targets
     #: inside a ``.claude`` folder (with the part each tool_use added, so a
@@ -1386,7 +1416,7 @@ def _merge_content_blocks(
                     pending.test_scopes_by_tool_use[
                         tool_use_id if isinstance(tool_use_id, str) and tool_use_id else f"#{len(pending.tool_use_ids)}"
                     ] = scope
-                outside_temp = config_targets = 0
+                outside_temp = config_targets = code_targets = 0
                 for target in shell_writes.write_targets(
                     command, powershell=name == "PowerShell", cwd=cwd if isinstance(cwd, str) else None
                 ):
@@ -1396,6 +1426,8 @@ def _merge_content_blocks(
                     # keeps no path.
                     if not _is_temp_target(target, temp_prefixes):
                         outside_temp += 1
+                        if _is_code_write_target(target, temp_prefixes):
+                            code_targets += 1
                         if prompt_shape.is_config_path(target):
                             config_targets += 1
                 if outside_temp:
@@ -1403,6 +1435,12 @@ def _merge_content_blocks(
                     if isinstance(tool_use_id, str) and tool_use_id:
                         pending.shell_writes_by_tool_use[tool_use_id] = (
                             pending.shell_writes_by_tool_use.get(tool_use_id, 0) + outside_temp
+                        )
+                if code_targets:
+                    pending.shell_code_write_count += code_targets
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.shell_code_writes_by_tool_use[tool_use_id] = (
+                            pending.shell_code_writes_by_tool_use.get(tool_use_id, 0) + code_targets
                         )
                 if config_targets:
                     pending.config_edit_count += config_targets
@@ -2099,6 +2137,9 @@ def _accumulate_tool_results(
                 shell_writes_made = current.shell_writes_by_tool_use.pop(tool_use_id, 0)
                 if shell_writes_made and kind in _SHELL_NOT_RUN_KINDS:
                     current.shell_write_count -= shell_writes_made
+                code_writes_made = current.shell_code_writes_by_tool_use.pop(tool_use_id, 0)
+                if code_writes_made and kind in _SHELL_NOT_RUN_KINDS:
+                    current.shell_code_write_count -= code_writes_made
                 # And the part of either inside a ``.claude`` folder, on the
                 # same terms as the hashes above.
                 config_made = current.config_edits_by_tool_use.pop(tool_use_id, 0)
@@ -2543,6 +2584,7 @@ def _finalize_turn(
         tool_errors_by_kind=dict(pending.tool_errors_by_kind),
         edit_target_hashes=tuple(pending.edit_target_hashes),
         shell_write_count=pending.shell_write_count,
+        shell_code_write_count=pending.shell_code_write_count,
         config_edit_count=pending.config_edit_count,
         agent_edit_files=pending.agent_edit_files,
         edit_call_count=pending.edit_call_count,

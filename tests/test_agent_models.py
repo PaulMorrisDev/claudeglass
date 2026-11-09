@@ -115,8 +115,10 @@ def _result_from_agent(agent: dict, group_fields: list[str]) -> TranscriptResult
     edits = agent["real_edit_turns"]
     for turn in turns[:edits]:
         turn.edit_kind = "real"
+        turn.edit_call_count = 1
     for turn in turns[edits : edits + agent["shell_write_turns"]]:
         turn.shell_write_count = 1
+        turn.shell_code_write_count = 1
     return TranscriptResult(meta=meta, turns=turns)
 
 
@@ -241,6 +243,8 @@ def _agent(
     turns: int = 3,
     real_edits: int = 0,
     shell_writes: int = 0,
+    doc_edits: int = 0,
+    shell_doc_writes: int = 0,
     alias: str | None = None,
     recorded: bool = True,
     first_ts: str = "2026-09-23T12:00:00.000Z",
@@ -252,8 +256,11 @@ def _agent(
             turn_index=i + 1,
             ts=(start + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
             model=model,
-            edit_kind="real" if i < real_edits else None,
-            shell_write_count=1 if real_edits <= i < real_edits + shell_writes else 0,
+            edit_kind="real" if i < real_edits + doc_edits else None,
+            shell_write_count=1 if real_edits <= i < real_edits + shell_writes + shell_doc_writes else 0,
+            shell_code_write_count=1 if real_edits <= i < real_edits + shell_writes else 0,
+            edit_call_count=1 if i < real_edits + doc_edits else 0,
+            edit_doc_count=1 if real_edits <= i < real_edits + doc_edits else 0,
             **_TOKENS,
         )
         for i in range(turns)
@@ -452,6 +459,18 @@ def test_a_decider_that_edited_enough_is_decide_apply_whoever_chose_the_model():
     assert set(_verdicts([run], agent_files={"general-purpose": "opus"})) == {("general-purpose", "decide-apply")}
     asked = _agent(role_word="review", turns=6, real_edits=3, alias="opus")
     assert set(_verdicts([asked])) == {("general-purpose", "decide-apply")}
+
+
+def test_a_decider_that_only_wrote_documents_is_not_decide_apply():
+    # Reports and ledgers written through the shell, and a report made with
+    # the Write tool, are not changing code.
+    assert _verdicts([_agent(role_word="review", turns=8, shell_doc_writes=4, doc_edits=2)]) == {}
+    assert _verdicts([_workflow(role_word="audit", turns=8, shell_doc_writes=5)]) == {}
+
+
+def test_a_decider_that_wrote_code_is_decide_apply_beside_its_documents():
+    run = _agent(role_word="review", turns=8, shell_writes=3, shell_doc_writes=2)
+    assert set(_verdicts([run])) == {("general-purpose", "decide-apply")}
 
 
 def test_a_decider_that_edited_less_than_the_threshold_is_not_flagged():

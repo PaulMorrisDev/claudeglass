@@ -670,7 +670,7 @@ changes a figure.
   counts, such as "implement 4, fix 1"; "other" when no word fits),
   `model`, `cost_usd`, `cost_on_sonnet_usd`, `saving_usd`, `saving_pct`
   (these last three empty for `decide-apply`), `write_turns` (replies
-  that wrote code), `workflow_runs`, `first_seen`, `last_seen`,
+  that wrote files; `decide-apply` counts only writes to code, not to reports, plans or ledgers), `workflow_runs`, `first_seen`, `last_seen`,
   `later_compliant` (later writers on Sonnet or
   smaller: the same kind for `inherited`, the same Agent-tool type
   whose call named the model for `asked`; empty when not measured) and `env_var_set` (`yes` or `no`:
