@@ -138,6 +138,25 @@ The mod:
   never in that figure.
 - **The mod's settings file no longer carries rating-reminder fields nothing
   reads**, and dead mod code went with them.
+- **The tools, skills and MCP cards read the agent's current `tools:` line.**
+  A card closes when the rare tools left on it fall under the bar, a card
+  never adds a tool, and `advisor` is listed with the tools Claude Code always
+  adds. A known tools line also stops the generic `spawn-cost` card.
+- **The subagent startup write is priced at the first call's own 5-minute and
+  1-hour split**, and at the 5-minute rate when it recorded none.
+- **`spawn-claude-md` holds back on a tie** between runs that said they used
+  CLAUDE.md and runs that said they didn't. An agent whose tools line names a
+  file tool, or, with no line, whose spawns edited files, gets an info card
+  that moves the rules into its agent file first. The card carries its saving.
+- **`spawn-task-prompt` names the workflow run or session** that holds at
+  least half the brief text.
+- **`agent-model-asked` counts only later calls of the same agent type on
+  Sonnet or smaller**, and no longer shows an unmeasured 0. A fixed card asks
+  only for a check and says how many later calls named Sonnet.
+- **`agent-batch-probes` is gone**, and chained shell reads are no longer
+  counted as single lookups.
+- **`agent-report-size` leaves workflow agents out**, and its why shows the
+  mean report size.
 - **SECURITY.md and the capture docs name the four background hooks and say
   what headless runs get.**
 - **The command and whole-percent Node tests run in CI, and the Haiku worker

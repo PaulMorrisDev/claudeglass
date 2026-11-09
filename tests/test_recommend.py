@@ -1469,6 +1469,8 @@ def test_agent_report_size_fires_per_agent_type():
     assert fired[0].evidence == [
         ("Mean report size (tokens)", 12_000, "agents.topology_report_proxy", "claude-implementer"),
     ]
+    # advice reads the figure back by its label, so a changed label would drop it.
+    assert "12,000" in fired[0].why and "averages" in fired[0].why
 
 
 def test_agent_report_size_suppressed_for_chat_only():
