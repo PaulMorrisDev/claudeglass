@@ -24,9 +24,11 @@ The dashboard's **Ignore this recommendation** button stores one entry in
   entry's ``changes`` keep what was ignored, for "shown again because it
   now suggests ...".
 
-Only the dashboard's list reads this (``service/api.py``'s
-``/api/recommendations`` annotates each row, and the profile goals skip
-what's ignored), and ``coaching.py``, which leaves an ignored run-split
+The dashboard's list reads this (``service/api.py``'s
+``/api/recommendations`` annotates each row), and so do the profile goals,
+which skip what's ignored, the models and habits quick-action checks, which
+leave an ignored card out (the models check by the change it suggested,
+value included), and ``coaching.py``, which leaves an ignored run-split
 or plan-handoff tip out of the coaching notes. ``/api/report.json`` and
 the CLI reports stay complete.
 """

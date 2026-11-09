@@ -817,7 +817,8 @@ detail scrolls) and the one picked.
   seen from one project). Ignored items leave every other list: the
   Overview's checklist, the Actions badge, search, "Feeds N
   actions" and the checks' links (`groupRecommendations` leaves them out
-  unless asked), and **Start from my recommendations**. The Overview's
+  unless asked), and **Start from my recommendations**. The models and habits checks
+  no longer lead with an ignored card. The Overview's
   available saving comes from the report's tables, so it still counts
   them.
 - A notice above the inbox says the figures are provisional while a

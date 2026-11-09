@@ -240,6 +240,15 @@ def _models(ctx: Context) -> dict:
         ],
     )
     draft = _goal(ctx, "models")
+    # A card you ignored is left out by what it suggested (key, agent and
+    # value), so a new value for the same setting still comes back.
+    ignored = {
+        (change.key, change.agent, change.value)
+        for rec in getattr(ctx.model, "recommendations", ()) or ()
+        if rec.key in ctx.skip_keys
+        for change in rec.changes or ()
+    }
+    draft = {**draft, "candidates": [c for c in draft["candidates"] if (c["key"], c["agent"], c["value"]) not in ignored]}
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
@@ -671,9 +680,9 @@ def _claude_md(ctx: Context) -> dict:
         return _result("ok", "Your CLAUDE.md files are small or rarely sent.", table=table)
     return _result(
         "act",
-        f"{summaries[0]['path']} costs most: {summaries[0]['tokens']:,} tokens sent to {summaries[0]['reach_text']}, "
-        f"{summaries[0]['cost_text']}. Context files (or claudeglass review claude-md) shows every file's "
-        "sections.",
+        f"{summaries[0]['path']} costs most: {summaries[0]['tokens']:,} tokens in the file today (estimated "
+        f"from its characters), sent to {summaries[0]['reach_text']}, {summaries[0]['cost_text']}. Context files "
+        "(or claudeglass review claude-md) shows every file's sections.",
         table=table,
         fixes=fixes,
     )
@@ -1458,19 +1467,41 @@ def _rework_lead(tables) -> str:
     return match.group(0) if match else ""
 
 
-def _recs_saving_usd(ctx: Context, recs) -> float:
-    """What the largest of ``recs``' groups saves over the window, as the
-    Overview counts a row's recommendations: one rule is one group (its agent
-    types together, each once), the row takes its largest group, and a card
-    you ignored counts for nothing."""
+def _saving_groups(ctx: Context, recs) -> list[tuple[float, object]]:
+    """``recs``' savings as the Overview counts a row's recommendations: one
+    rule is one group (its agent types together, each once), as (dollars,
+    the group's largest card), and a card you ignored counts for nothing."""
     groups: dict = {}
     for rec in recs:
         usd = rec.saving_usd
         if rec.key in ctx.skip_keys or rec.severity not in ("action", "advice") or not usd or usd <= 0:
             continue
         slot = (rec.id, rec.severity) if rec.agent_type else (rec.key or rec.id)
-        groups[slot] = groups.get(slot, 0.0) + usd
-    return max(groups.values(), default=0.0)
+        total, lead = groups.get(slot, (0.0, rec))
+        groups[slot] = (total + usd, rec if usd > lead.saving_usd else lead)
+    return list(groups.values())
+
+
+def _recs_saving_usd(ctx: Context, recs) -> float:
+    """What the largest of ``recs``' groups saves over the window (the row
+    takes its largest group)."""
+    return max((usd for usd, _lead in _saving_groups(ctx, recs)), default=0.0)
+
+
+def _habits_saving_text(ctx: Context, recs, playbook_usd: float, total: float, rework: str) -> str:
+    """The habits row's saving sentence, saying where the figure comes from:
+    its largest part (a card's title, or the playbook), and that none of it
+    is rework when the rework sentence leads."""
+    parts = [(usd, rec.title.rstrip("."), "at most" in (rec.saving_basis or "").lower())
+             for usd, rec in _saving_groups(ctx, recs)]
+    if playbook_usd > 0:
+        parts.append((playbook_usd, "the Work habits playbook", False))
+    usd, title, upper = max(parts)
+    phrase = _money(ctx, total, period=True, prefix="At most " if upper else "About ")
+    share = "most of it" if usd * 2 > total else "the largest part"
+    return f"{phrase[:1].upper()}{phrase[1:]} if you change these habits, {share} from {title}" + (
+        " (none of it from rework)." if rework else "."
+    )
 
 
 def _playbook_saving_usd(ctx: Context, tables) -> float:
@@ -1493,7 +1524,7 @@ def _habits(ctx: Context) -> dict:
         [("cause", "Replies that went nowhere"), ("turns", "Replies"), ("cost", "Cost"), ("lever", "What helps")],
         [[r["label"], r["turns"], _cell(ctx, r["cost_usd"]), r["lever"]] for r in rows],
     )
-    recs = _recommendations(ctx, _HABIT_RECS)
+    recs = [rec for rec in _recommendations(ctx, _HABIT_RECS) if rec.key not in ctx.skip_keys]
     skip_as_tip = _recs_with_prompt_fix(recs)
     tips = [{"title": rec.title, "text": rec.action or rec.why} for rec in recs if rec.id not in skip_as_tip]
     playbook = _playbook_tips(ctx, tables)
@@ -1520,11 +1551,9 @@ def _habits(ctx: Context) -> dict:
     ways = len(recs) + len(playbook) + (1 if rework else 0)
     top = max(rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
     why = f" The costliest: {top['label']} ({_cell(ctx, top['cost_usd'])})." if top else ""
-    saving_usd = _recs_saving_usd(ctx, recs) + _playbook_saving_usd(ctx, tables)
-    saving = ""
-    if saving_usd > 0:
-        phrase = _money(ctx, saving_usd, period=True, prefix="About ")
-        saving = f"{phrase[:1].upper()}{phrase[1:]} if you change these habits."
+    playbook_usd = _playbook_saving_usd(ctx, tables)
+    saving_usd = _recs_saving_usd(ctx, recs) + playbook_usd
+    saving = _habits_saving_text(ctx, recs, playbook_usd, saving_usd, rework) if saving_usd > 0 else ""
     return _result(
         "act",
         (f"{rework} " if rework else "")

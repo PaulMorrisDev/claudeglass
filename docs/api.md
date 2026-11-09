@@ -1118,7 +1118,15 @@ changes would save over the window, at list price: the largest
 recommendation it draws on, plus the playbook's habits that no
 recommendation already covers (each one's own total over the window, the
 playbook's `saving_total`). `saving` says that in the billing
-mode.
+mode and names where it comes from: "..., most of it from <the largest
+part>", that part being a recommendation's title or "the Work habits
+playbook" (with "(none of it from rework)" when the rework headline leads,
+and "At most" when that part is an upper bound). The `models` and `habits`
+checks leave out a recommendation you ignored: `habits` by its key, `models`
+by the change it suggested (value included, so a new value comes back). The
+`claude-md` check's figure is the file as it is today, estimated from its
+characters; the `spawn-shared-claude-md` card's is the average per spawn over
+the window, as Claude Code sent it.
 
 ### `GET /api/quick-actions/<id>`
 

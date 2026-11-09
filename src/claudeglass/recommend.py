@@ -2412,7 +2412,10 @@ def _rule_spawn_parts(
                     _evidence("Size per spawn", mean_tokens, "agent_startup", "agent_startup_shared", key),
                     _evidence("Agent types given it", reach, "agent_startup", "agent_startup_shared", key),
                 ],
-                why=f"About {mean_tokens:,.0f} tokens of it are sent to each of these agents when they start.",
+                why=(
+                    f"About {mean_tokens:,.0f} tokens of project instruction text went to each of these agents, "
+                    "averaged over this window's spawns as Claude Code sent it. The file's size today is in Context files."
+                ),
             )
         )
     return out, covered

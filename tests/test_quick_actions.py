@@ -15,7 +15,7 @@ import pytest
 from claudeglass import agent_models, capture_catalogue, discovery, known_savers, quality, waste
 from claudeglass import quick_actions as qa
 from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
-from claudeglass.model import Recommendation
+from claudeglass.model import Recommendation, SettingChange
 from claudeglass.units import Units
 
 from test_whatif import _model, _table
@@ -357,6 +357,45 @@ def test_models_check_leaves_an_ignored_agent_model_card_out(tmp_path):
     result = qa.run("models", ctx)
     assert result["status"] == "ok"
     assert [fix["prompt"] for fix in result["fixes"]] == ["Find where these agents are started."]
+
+
+def _main_sonnet_card(value="sonnet"):
+    """The ``model-tier-main`` card as ``advice`` leaves it: one change,
+    the main session's model."""
+    return Recommendation(
+        id="model-tier-main", key="model-tier-main", severity="advice", title="Main session on a cheaper model",
+        changes=[SettingChange(target="settings", key="model", agent=None, value=value)],
+    )
+
+
+def test_models_check_drops_the_model_change_of_an_ignored_card(tmp_path):
+    model = _full_model()
+    model.recommendations = [_main_sonnet_card()]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"}))
+    result = qa.run("models", ctx)
+    assert result["summary"].startswith("1 model change would have cost less. The largest: Explore on haiku")
+    assert "Main session" not in result["summary"]
+    assert [fix["title"] for fix in result["fixes"]] == ["Explore: use haiku"]
+    # Only the ignored card's own value goes: a card that is not ignored changes nothing.
+    assert "Main session on sonnet" in qa.run("models", _ctx(tmp_path, model=model))["summary"]
+
+
+def test_models_check_is_ok_when_the_ignored_card_was_its_only_change(tmp_path):
+    model = _full_model()
+    model.sections[0].tables[0].rows[1][-3] = None  # Explore has no cheaper alternative
+    model.recommendations = [_main_sonnet_card()]
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert "Main session on sonnet" not in result["summary"]
+
+
+def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
+    """The ignore holds for the value that was ignored; a different value for
+    the same setting is a new finding (``ignores.fingerprint``)."""
+    model = _full_model()
+    model.recommendations = [_main_sonnet_card(value="opusplan")]
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert "Main session on sonnet" in result["summary"]
 
 
 def test_models_check_claims_the_three_agent_model_rule_ids(tmp_path):
@@ -1198,11 +1237,56 @@ def test_the_habits_saving_includes_the_playbook_saving_over_the_window(tmp_path
     result = qa.run("habits", ctx)
     # The recommendation's 4.00, and the habits it doesn't cover: 3.50 over the window.
     assert result["saving_usd"] == pytest.approx(4.0 + 1.75 * 2)
-    assert result["saving"] == f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits."
-    assert result["saving"] == "About 7.50 USD over the last 14 days if you change these habits."
+    assert result["saving"] == (
+        f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits, "
+        "most of it from Tools often wait on you."
+    )
+    assert result["saving"] == (
+        "About 7.50 USD over the last 14 days if you change these habits, most of it from Tools often wait on you."
+    )
     # A covered habit is in the recommendation's saving already: uncovered, it adds its 2.00 a week.
     both = qa.run("habits", _ctx(tmp_path, model=_saving_model(covered=False), **two_weeks))
     assert both["saving_usd"] == pytest.approx(4.0 + 3.75 * 2)
+
+
+def test_the_habits_saving_names_the_playbook_when_it_is_the_largest_part(tmp_path):
+    model = _saving_model(covered=False)
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["saving"].endswith("if you change these habits, most of it from the Work habits playbook.")
+
+
+def test_the_habits_saving_says_none_of_it_is_from_rework(tmp_path):
+    model = _saving_model()
+    model.sections.extend(_rework_model(2, 10).sections[-1:])
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["headline"] and result["saving"].endswith("most of it from Tools often wait on you (none of it from rework).")
+
+
+def test_the_habits_saving_says_at_most_when_the_largest_part_is_an_upper_bound(tmp_path):
+    model = _saving_model()
+    model.recommendations = [Recommendation(
+        id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+        saving_usd=4.0, saving_basis="At most this much: an upper bound.")]
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["saving"].startswith("At most 7.50 USD")
+
+
+def test_an_ignored_habit_card_is_not_a_way_a_tip_or_a_fix(tmp_path):
+    model = _full_model()
+    model.recommendations = [
+        Recommendation(id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+                       action="Pre-approve routine tools."),
+        Recommendation(id="cache-read-dominance", key="cache-read-dominance", severity="advice",
+                       title="Cache reads dominate cost", action="Batch work."),
+    ]
+    both = qa.run("habits", _ctx(tmp_path, model=model))
+    assert "2 ways of working" in both["summary"]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"cache-read-dominance"}))
+    result = qa.run("habits", ctx)
+    assert "1 way of working" in result["summary"]
+    assert any("Cache reads" in t["title"] for t in both["tips"]) or any("Cache reads" in f["title"] for f in both["fixes"])
+    assert all("Cache reads" not in t["title"] for t in result["tips"])
+    assert all("Cache reads" not in f["title"] for f in result["fixes"])
 
 
 def test_the_playbook_saving_is_its_own_total_whatever_the_window(tmp_path):
