@@ -132,8 +132,9 @@ session, `mod/present/<session id>.json` in ClaudeGlass's data folder:
 `{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>, "active": <seconds since 1970>, "shows": ["hint"]}`.
 `shows` lists what the mod has seen drawn, and starts empty: `"hint"` appears once the
 hint line under the prompt has been rendered (the desktop app never renders it). The hook
-hands the mod its hints only when `shows` lists `"hint"`; a file without the key, from an
-older mod, keeps the earlier rule.
+hands the mod `cold_return`, `status_poll`, `drip_feed` and `big_paste` only when `shows` lists
+`"hint"`, and `plan_fresh` only when it lists `"status"` (the status line); a file without the key,
+from an older mod, keeps the earlier rule.
 `active` is when the session last sent a request (0 before its first); the mod uses it to
 tell another session that is working from one that is only open, and the hook ignores it.
 The mod refreshes it every minute on a timer while the session is open, so

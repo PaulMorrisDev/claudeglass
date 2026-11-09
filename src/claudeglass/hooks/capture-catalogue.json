@@ -346,6 +346,13 @@
    "plan_fresh",
    "status_poll"
   ],
+  "moved_on": {
+   "cold_return": "hint",
+   "status_poll": "hint",
+   "drip_feed": "hint",
+   "big_paste": "hint",
+   "plan_fresh": "status"
+  },
   "dir": "mod",
   "present_dir": "present",
   "present_window_s": 600,

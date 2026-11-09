@@ -611,8 +611,9 @@ Claude never has to remember to pass them on. For a session the mod is
 running in (it says so in `mod/present/<session id>.json`; see
 [Your hooks](hooks.md#with-the-claudeglass-mod)), the hook leaves out
 `cold_return`, `status_poll`, `drip_feed`, `big_paste` and `plan_fresh`,
-but only while that file lists `"hint"` under `shows`: the mod writes it
-once the hint line has been drawn, and the desktop app never draws it. A file
+but only for what that file lists under `shows`: the first four when it lists
+`"hint"` (the mod writes it once the hint line has been drawn, and the desktop
+app never draws it), `plan_fresh` when it lists `"status"` (the status line). A file
 with no `shows` (an older mod) keeps today's rule, and one with an empty
 `shows` leaves all of them with the hook. `report_reread`, `split_run` and the
 rating reminder stay with the hook, as do `plan_fresh_early`,

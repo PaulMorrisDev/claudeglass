@@ -3628,12 +3628,35 @@ def test_a_mod_that_shows_no_hint_leaves_the_moved_hints_with_the_hook(tmp_path,
     assert _kind(_coach(tmp_path, payload)) == _hint_of(scene)
 
 
-@pytest.mark.parametrize("scene", list(_MOVED_SCENES))
-def test_a_mod_that_lists_hint_takes_the_moved_hints(tmp_path, scene):
+@pytest.mark.parametrize("scene", [s for s in _MOVED_SCENES if _hint_of(s) != "plan_fresh"])
+def test_a_mod_that_lists_hint_takes_the_hint_line_hints(tmp_path, scene):
     payload = _MOVED_SCENES[scene](tmp_path)
     _heartbeat(tmp_path, shows=["hint"])
     assert _coach(tmp_path, payload) == ""
     assert _hint_of(scene) not in _rested(tmp_path)
+
+
+@pytest.mark.parametrize("scene", [s for s in _MOVED_SCENES if _hint_of(s) == "plan_fresh"])
+def test_plan_fresh_stays_with_the_hook_until_the_mod_lists_status(tmp_path, scene):
+    payload = _MOVED_SCENES[scene](tmp_path)
+    _heartbeat(tmp_path, shows=["hint"])
+    assert _kind(_coach(tmp_path, payload)) == "plan_fresh"
+    (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).unlink()
+    _heartbeat(tmp_path, shows=["hint", "status"])
+    assert _coach(tmp_path, payload) == ""
+    assert "plan_fresh" not in _rested(tmp_path)
+
+
+def test_a_present_file_that_lists_hint_moves_the_four_hint_line_hints_and_not_plan_fresh(tmp_path):
+    _heartbeat(tmp_path, shows=["hint"])
+    moved = HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp())
+    assert moved == frozenset({"cold_return", "status_poll", "drip_feed", "big_paste"})
+
+
+def test_every_moved_hint_names_the_surface_that_shows_it():
+    assert set(cat.MOVED_TO_MOD_SHOWN_ON) == set(cat.MOVED_TO_MOD)
+    assert CATALOGUE["mod"]["moved_on"] == dict(cat.MOVED_TO_MOD_SHOWN_ON)
+    assert set(cat.MOVED_TO_MOD_SHOWN_ON.values()) == {"hint", "status"}
 
 
 def test_a_present_file_from_an_older_mod_without_shows_keeps_the_whole_set_moved(tmp_path):
@@ -3641,6 +3664,8 @@ def test_a_present_file_from_an_older_mod_without_shows_keeps_the_whole_set_move
     assert "shows" not in json.loads(_heartbeat_path(tmp_path).read_text(encoding="utf-8"))
     assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset(cat.MOVED_TO_MOD)
     _heartbeat(tmp_path, shows=["status"])
+    assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset({"plan_fresh"})
+    _heartbeat(tmp_path, shows=[])
     assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset()
 
 

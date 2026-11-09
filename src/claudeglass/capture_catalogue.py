@@ -755,6 +755,17 @@ MOVED_TO_MOD = frozenset(
     }
 )
 
+#: What the mod has to have drawn (its present file's ``shows``) before
+#: the hook leaves a hint to it: the hint line serves four, the status line
+#: ``plan_fresh``. The keys are :data:`MOVED_TO_MOD`.
+MOVED_TO_MOD_SHOWN_ON = {
+    "cold_return": "hint",
+    "status_poll": "hint",
+    "drip_feed": "hint",
+    "big_paste": "hint",
+    "plan_fresh": "status",
+}
+
 #: The mod's folder under the data folder, and the two things the mod
 #: writes there for the hook and the watcher to read. The ``present``
 #: folder holds one ``<session id>.json`` per session, ``{"schema": 1,
@@ -3442,6 +3453,7 @@ def export_json() -> dict:
         "spawn_tools": list(SPAWN_TOOLS),
         "mod": {
             "moved": sorted(MOVED_TO_MOD),
+            "moved_on": dict(MOVED_TO_MOD_SHOWN_ON),
             "dir": MOD_DIR,
             "present_dir": MOD_PRESENT_DIR,
             "present_window_s": MOD_PRESENT_WINDOW_S,

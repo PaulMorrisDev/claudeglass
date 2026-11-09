@@ -113,8 +113,8 @@ connect``):
   line. While the ClaudeGlass mod is running for the session (its file
   ``<config-dir>/mod/present/<session id>.json`` is under 10 minutes old:
   :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
-  own UI (when its file's ``shows`` lists ``"hint"``, or has no ``shows``:
-  an older mod), so this hook neither works them out nor stamps them as shown
+  own UI (each when its file's ``shows`` lists the surface that serves it,
+  ``"hint"`` or ``"status"``, or has no ``shows``: an older mod), so this hook neither works them out nor stamps them as shown
   (a run that ended too big is still recorded, :func:`keep_run`, and a
   tip to start fresh the mod showed rests ``plan_fresh_early`` for the
   cooldown, :func:`_mod_showed_fresh_start`); without the mod, nothing
@@ -1046,16 +1046,19 @@ def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) ->
     (``capture_catalogue.MOVED_TO_MOD``, as the catalogue exports them),
     which the hook leaves out and does not stamp as shown; none when the
     mod is not running for it. A mod that lists what it shows (``shows``)
-    takes them only when it lists ``"hint"``: on Desktop the hint line is
-    never drawn, ``shows`` stays empty and the hook keeps them. A file
-    without ``shows`` (an older mod) keeps the whole set moved."""
+    takes each hint only when it lists the surface that serves it
+    (``mod.moved_on``: ``"hint"`` for the four hint-line hints, ``"status"``
+    for ``plan_fresh``): on Desktop the hint line is never drawn, ``shows``
+    stays empty and the hook keeps them. A file without ``shows`` (an older
+    mod) keeps the whole set moved."""
     found = _mod_file(config_dir, catalogue, session_id, now_ts)
     if found is None:
         return frozenset()
     shows = found[0]
-    if shows is not None and "hint" not in shows:
-        return frozenset()
-    return frozenset(catalogue["mod"]["moved"])
+    mod = catalogue["mod"]
+    if shows is None:
+        return frozenset(mod["moved"])
+    return frozenset(hint for hint in mod["moved"] if mod["moved_on"][hint] in shows)
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
