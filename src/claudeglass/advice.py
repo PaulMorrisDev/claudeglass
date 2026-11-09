@@ -831,7 +831,7 @@ def _explain_spawn_cost(rec: Recommendation, ctx: _Context) -> None:
 
 
 def _explain_agent_report_size(rec: Recommendation, ctx: _Context) -> None:
-    size = _evidence_value(rec, "report proxy")
+    size = _evidence_value(rec, "Mean report size")
     agent = rec.agent_type or "this agent"
     rec.title = f"{agent} sends back long reports"
     rec.why = (

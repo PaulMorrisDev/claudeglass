@@ -855,7 +855,8 @@ the agents/skills/workflows it spawns" with numbers only:
   type.
 - `topology_report_proxy` — a per-subagent report-size proxy by agent
   type, for transcripts where the parent-side tool_result isn't directly
-  available.
+  available. Workflow agents are left out (their report goes to the
+  workflow script, not the main session).
 - `topology_skills_rollup` — a skill's own direct cost plus every agent
   (and workflow) it spawned, recursively via `parentAgentId`: invocations,
   direct cost, spawned cost, mean spawns per invocation, mean report

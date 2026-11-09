@@ -516,6 +516,8 @@ class TopologyStats:
         self.workflow_tool_result_calls += top.tool_result_calls.get("Workflow", 0)
         index = _report_index(top, subs)
         for sub in subs:
+            if sub.meta.kind == "workflow-agent":
+                continue  # its report goes to the workflow script, not the main session
             label = _agent_type_label(sub)
             self.report_proxy_by_agent_type.setdefault(label, []).append(
                 _report_tokens(sub, index, self.calibration)
@@ -577,7 +579,9 @@ class TopologyStats:
             closure = _transitive_closure(direct_subs, children_by_parent)
             acc.spawned_cost += sum(_transcript_cost(sub, rates_lookup) for sub in closure)
             acc.report_proxy_values.extend(
-                _report_tokens(sub, report_index, self.calibration) for sub in closure
+                _report_tokens(sub, report_index, self.calibration)
+                for sub in closure
+                if sub.meta.kind != "workflow-agent"  # its report goes to the script
             )
 
     # -- (d) chains --------------------------------------------------------
@@ -941,7 +945,8 @@ def _build_report_proxy_table(stats: TopologyStats) -> Table:
             " where the report arrived: the Agent tool's result in the parent,"
             " or a background agent's task notification. When the parent side wasn't found,"
             " it falls back to the output tokens of the subagent's own last"
-            " reply, an approximation.",
+            " reply, an approximation. Workflow agents are left out: their report goes"
+            " to the workflow script, not the main session.",
         ],
     )
 
