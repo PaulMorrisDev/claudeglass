@@ -329,7 +329,7 @@ price for.
 | `cost_on_sonnet_usd` | the same replies priced at Sonnet. Empty for `decide-apply` |
 | `saving_usd` | cost minus cost on Sonnet, never below 0. Empty for `decide-apply` |
 | `saving_pct` | that saving as a share of cost. Empty for `decide-apply` |
-| `write_turns` | write turns across these agents |
+| `write_turns` | write turns across these agents (for `decide-apply`, the replies that wrote code) |
 | `workflow_runs` | how many separate workflow runs they came from; 0 for Agent-tool agents |
 | `first_seen` | the date (`YYYY-MM-DD`) of the earliest agent's first reply |
 | `last_seen` | the date of the latest agent's first reply |

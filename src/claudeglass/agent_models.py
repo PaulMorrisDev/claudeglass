@@ -223,6 +223,8 @@ class _Run:
     role: str
     model: str
     write_turns: int
+    #: The replies that wrote code, which decide-apply counts instead.
+    code_write_turns: int
     workflow_run_id: str | None
     first_ts: datetime | None
     date: str
@@ -328,6 +330,7 @@ def _analyse(
         role=meta.role_word or _UNKNOWN_ROLE,
         model=model,
         write_turns=write_turns,
+        code_write_turns=code_write_turns,
         workflow_run_id=meta.workflow_run_id,
         first_ts=_parse_ts(priced[0].ts),
         date=(priced[0].ts or "")[:10],
@@ -382,7 +385,9 @@ def compute_agent_models(
         group.runs += 1
         group.role_counts[run.role] = group.role_counts.get(run.role, 0) + 1
         group.model_counts[run.model] = group.model_counts.get(run.model, 0) + 1
-        group.write_turns += run.write_turns
+        # A decide-apply row shows the code-writing replies its verdict
+        # used, so the card's "edited code in N replies" is a real cell.
+        group.write_turns += run.code_write_turns if run.verdict == "decide-apply" else run.write_turns
         if run.workflow_run_id:
             group.workflow_run_ids.add(run.workflow_run_id)
         if run.date:
@@ -463,6 +468,7 @@ def build_table(stats: AgentModelStats) -> Table:
         Column(key="cost_on_sonnet_usd", label="Cost on Sonnet", kind="money"),
         Column(key="saving_usd", label="Most you could save", kind="money"),
         Column(key="saving_pct", label="Ceiling saving (%)", kind="pct"),
+        # For a decide-apply row, the replies that wrote code (what the verdict counted).
         Column(key="write_turns", label="Edit turns", kind="int"),
         Column(key="workflow_runs", label="Workflow runs", kind="int"),
         Column(key="first_seen", label="First seen", kind="str"),

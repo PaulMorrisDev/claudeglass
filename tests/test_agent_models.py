@@ -473,6 +473,17 @@ def test_a_decider_that_only_wrote_documents_is_not_decide_apply():
 def test_a_decider_that_wrote_code_is_decide_apply_beside_its_documents():
     run = _agent(role_word="review", turns=8, shell_writes=3, shell_doc_writes=2)
     assert set(_verdicts([run])) == {("general-purpose", "decide-apply")}
+    # The Edit turns cell is the count the verdict used (3), not every write (5).
+    assert _verdicts([run])[("general-purpose", "decide-apply")]["write_turns"] == 3
+    stats = compute_agent_models([run], PRICING)
+    report = _report(stats)
+    [rec] = _fire(report, "agent-decide-apply")
+    from claudeglass import advice
+    from claudeglass.snapshots import Snapshot
+    from claudeglass.units import Units
+
+    (card,) = advice.finish([rec], report, Snapshot(path=None, ts="2026-10-02T00:00:00Z", data={"agents": {}}), Units())
+    assert "edited code in 3 replies" in card.why
 
 
 def _parsed_decider(tmp_path, paths):
