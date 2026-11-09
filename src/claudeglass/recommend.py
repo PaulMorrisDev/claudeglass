@@ -2422,12 +2422,18 @@ def _rule_spawn_parts(
                     _evidence("Agent types given it", reach, "agent_startup", "agent_startup_shared", key),
                 ],
                 why=(
-                    f"About {mean_tokens:,.0f} tokens of project instruction text went to each of these agents, "
-                    "averaged over this window's spawns as Claude Code sent it. The file's size today is in Context files."
+                    f"Each of these agents got about {mean_tokens:,.0f} tokens of {_mid_sentence(source_label)} when it started, "
+                    "on average over this window. Its size today is in Context files."
                 ),
             )
         )
     return out, covered
+
+
+def _mid_sentence(label: str) -> str:
+    """A source label ("The project's CLAUDE.md") with a leading "The "
+    lower-cased, so it reads inside a sentence."""
+    return "the " + label[4:] if label.startswith("The ") else label
 
 
 def _rule_spawn_cost(

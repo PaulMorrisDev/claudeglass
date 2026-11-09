@@ -713,7 +713,7 @@ def test_a_claude_md_is_sized_over_the_spawns_that_loaded_it():
     assert rec is not None
     assert any(label == "Size per spawn" and value == pytest.approx(3000.0) for label, value, *_ in rec.evidence)
     assert any(label == "Agent types given it" and value == "2 of 2" for label, value, *_ in rec.evidence)
-    assert "About 3,000 tokens" in rec.why
+    assert "about 3,000 tokens of the project's CLAUDE.md" in rec.why
 
 
 def test_a_type_that_loaded_no_claude_md_is_not_counted_as_given_it():
@@ -738,6 +738,20 @@ def test_the_shared_claude_md_is_compared_on_one_model_over_the_spawns_that_load
     rec = _shared_rec(_recs(_report(one, two)))
     assert rec is not None
     assert any(label == "Size per spawn" and value == pytest.approx(3000.0) for label, value, *_ in rec.evidence)
+
+
+def test_the_shared_claude_md_why_names_the_source_it_is_about():
+    one, two = _acc("a", claude_md=0.0), _acc("b", claude_md=0.0)
+    for acc in (one, two):
+        acc.claude_md_by_source = {"AutoMem": [3000.0] * acc.spawns, "Project": [3000.0] * acc.spawns}
+    recs = _recs(_report(one, two))
+    shared = [r for r in recs if r.id == "spawn-shared-claude-md"]
+    memory = next(r for r in shared if "Auto memory" in r.title)
+    assert "Auto memory (MEMORY.md)" in memory.why
+    assert "project instruction text" not in memory.why
+    project = next(r for r in shared if "Auto memory" not in r.title)
+    assert "project instruction text" not in project.why
+    assert "tokens of " in project.why and "Context files" in project.why
 
 
 # -- recommendation key --------------------------------------------------
