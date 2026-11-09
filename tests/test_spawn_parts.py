@@ -1067,12 +1067,24 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     big = (0, 25_000.0, 800.0, 300.0)
     builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
     recs = _recs(_report(builtin), units=Units())
-    for rule in ("spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp", "spawn-claude-md"):
+    for rule in ("spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp"):
         (rec,) = [r for r in recs if r.id == rule and r.agent_type == "general-purpose"]
         assert "A file named general-purpose.md in .claude/agents/ replaces the built-in" in rec.action, rule
+    (rec,) = [r for r in recs if r.id == "spawn-claude-md" and r.agent_type == "general-purpose"]
+    assert "Create general-purpose.md in .claude/agents/ (it replaces the built-in general-purpose)" in rec.action
+    assert rec.action.endswith("omitClaudeMd: true.")
     # A custom agent with a file, and a built-in with an override file, get no such sentence.
     snap = _snapshot({"general-purpose": {"source": "user"}})
     recs = _recs(_report(builtin), snapshot=snap, units=Units())
     assert not any("replaces the built-in" in r.action for r in recs if r.id != "spawn-claude-md")
     recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": big})), units=Units())
     assert not any("replaces the built-in" in r.action for r in recs)
+
+
+def test_a_built_in_writer_is_told_to_carry_its_rules_into_the_new_file_first():
+    writer = _diet_acc("general-purpose", spawns=50, claude_md=6000.0)
+    writer.edit_spawns = 8
+    (rec,) = [r for r in _recs(_report(writer), units=Units()) if r.id == "spawn-claude-md"]
+    assert rec.severity == "info"
+    assert rec.action.index("the CLAUDE.md rules general-purpose needs") < rec.action.index("omitClaudeMd: true")
+    assert "replaces the built-in general-purpose" in rec.action

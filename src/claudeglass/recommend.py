@@ -2153,7 +2153,11 @@ def _rule_spawn_parts(
                         else f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
                         "sending it CLAUDE.md (omitClaudeMd: true)."
                         if has_file
-                        else f"{_built_in_note(agent_type)} Give it omitClaudeMd: true and the same job."
+                        else f"Create {agent_type}.md in .claude/agents/ (it replaces the built-in {agent_type}) with the "
+                        f"same job and the CLAUDE.md rules {agent_type} needs, then give it omitClaudeMd: true."
+                        if writer_first
+                        else f"Create {agent_type}.md in .claude/agents/ (it replaces the built-in {agent_type}) with the "
+                        "same job, and give it omitClaudeMd: true."
                     ),
                     lever="omitClaudeMd" if has_file else None,
                     scope=scope,
