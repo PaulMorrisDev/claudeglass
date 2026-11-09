@@ -1251,14 +1251,13 @@ def _agent_model_saving(rec: Recommendation, facts: _AgentModelFacts, ctx: _Cont
 
 
 def _built_in_model_note(rec: Recommendation, ctx: _Context, workflow: bool) -> str:
-    """The sentence a built-in agent type's model card ends with, or nothing
-    for a workflow, a custom agent or one with its own file."""
+    """The sentence a built-in agent type's inherited-model card ends with, or
+    nothing for a workflow, a custom agent or one with its own file. Not for
+    the asked card: a model named in the call beats an agent file's."""
     agent = rec.agent_type
     if workflow or agent is None or agent == "workflow-subagent" or ctx.agent_scope(agent)[1]:
         return ""
-    from .recommend import _built_in_note
-
-    return " " + _built_in_note(agent)
+    return f" Or create {agent}.md in .claude/agents/ (it replaces the built-in {agent}) and set model: sonnet in it."
 
 
 def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
@@ -1338,7 +1337,7 @@ def _explain_agent_model_asked(rec: Recommendation, ctx: _Context) -> None:
     else:
         rec.action = (
             f"Check the prompt, skill or script that starts {'these agents' if many else 'this agent'}. "
-            f"Ask for Sonnet where nothing needs {family}." + _built_in_model_note(rec, ctx, _started_by_workflow(facts))
+            f"Ask for Sonnet where nothing needs {family}."
         )
     _agent_model_saving(rec, facts, ctx)
 

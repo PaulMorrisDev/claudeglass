@@ -438,12 +438,14 @@ def test_the_cards_stay_through_finish_and_sort_advice_first():
 
 # -- built-in agent types -----------------------------------------------------------
 
-_BUILT_IN = "A file named Explore.md in .claude/agents/ replaces the built-in Explore, so make the change there."
+_BUILT_IN = " Or create Explore.md in .claude/agents/ (it replaces the built-in Explore) and set model: sonnet in it."
 
 
 def test_the_model_cards_for_a_built_in_agent_say_a_same_named_file_replaces_it():
+    # The asked card's call names the model, which beats a file's model: line,
+    # so the file is no lever there.
     asked = _finish(_rec("agent-model-asked", agent_type="Explore", severity="info", workflow_runs=0))
-    assert asked.action.endswith(_BUILT_IN)
+    assert "replaces the built-in" not in asked.action
     inherited = _finish(_rec(agent_type="Explore", workflow_runs=0))
     assert inherited.action.endswith(_BUILT_IN)
     # Not for a custom agent, a workflow, or a card that looks fixed.
