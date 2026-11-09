@@ -3618,7 +3618,7 @@ READ_KEYS: dict[str, frozenset[str]] = {
         }
     ),
     "attachment": _BASE_READ_KEYS | frozenset({"timestamp", "message", "attachment", "rendered"}),
-    "queue-operation": _BASE_READ_KEYS | frozenset({"timestamp", "message", "operation"}),
+    "queue-operation": _BASE_READ_KEYS | frozenset({"timestamp", "message", "operation", "content"}),
     "agent-setting": _BASE_READ_KEYS | frozenset({"agentSetting"}),
     "mode": _BASE_READ_KEYS | frozenset({"mode"}),
     "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage", "startTime"}),
