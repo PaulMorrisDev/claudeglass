@@ -3052,9 +3052,10 @@ def test_the_summary_names_a_muted_note_to_claude_apart_from_the_tips_you_called
 def test_the_summary_says_which_hints_are_off_for_everyone_and_gives_no_reason_about_you_for_them():
     lines = coaching.describe({"plan_fresh": False, "typical_piece_tokens": 0})
     assert not any("you ignored its tip" in line for line in lines)
-    off = next(line for line in lines if line.startswith("Off for everyone (the replay found them more often wrong than right): "))
-    assert "building a plan in a fresh session" in off and "reading a saved output whole" in off
-    assert "coming back after a break" in off and "raw" not in off and "quiet_output" not in off
+    prefix = "Off for everyone (the replay found them more often wrong than right): "
+    off = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+    assert off == [f"{coaching._hint_name(hint)}." for hint in cat.LIVE_OFF_HINTS]
+    assert "building a plan in a fresh session." in off and "reading a saved output whole." in off
 
 
 def _as_the_daily_run_writes_it(tmp_path, report) -> Path:

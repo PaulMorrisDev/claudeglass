@@ -224,11 +224,9 @@ def describe(data: dict) -> list[str]:
     off = capture_catalogue.LIVE_OFF_HINTS
     if data.get("plan_fresh") is False and "plan_fresh" not in off:
         lines.append("The fresh-session hint after a plan is off: you ignored its tip, or said builds need the discussion.")
-    if off:
-        lines.append(
-            "Off for everyone (the replay found them more often wrong than right): "
-            + ", ".join(_hint_name(hint) for hint in off) + "."
-        )
+    # One short line each: the summary keeps its sentences short.
+    for hint in off:
+        lines.append(f"Off for everyone (the replay found them more often wrong than right): {_hint_name(hint)}.")
     muted = [hint for hint in data.get("muted") or () if hint in capture_catalogue.TIP_HINT_TITLES]
     if muted:
         lines.append("Tips left out because you called them wrong: " + ", ".join(_hint_name(hint) for hint in muted) + ".")
