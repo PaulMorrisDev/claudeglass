@@ -595,6 +595,13 @@ TOOLS_MODEL_MIN_SPAWNS = 5
 #: it is not finished.
 ALWAYS_ADDED = frozenset(AGENT_ANSWER_TOOLS) | {"advisor"}
 
+#: The agent type every unnamed workflow agent runs as, and the tools that
+#: write files or run commands: its card never calls one rare once any of
+#: its spawns, on any model, called it (a writer on another model than the
+#: measured one, or with no role word, would otherwise be missed).
+_WORKFLOW_AGENT = "workflow-subagent"
+_WRITER_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"})
+
 #: Rows of ``agent_startup_tools`` kept per agent type, largest first.
 _TOOL_ROWS_PER_AGENT = 12
 
@@ -2264,6 +2271,13 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         count = len(acc.startup_tokens)
         _total, rare_rows = acc.removable_chars(family)
         builtin = [row for row in rare_rows if not row[0].startswith("mcp__")]
+        keep = acc.kept_tools(family)
+        if agent_type == _WORKFLOW_AGENT:
+            called = {key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
+            builtin = [row for row in builtin if row[0] not in called]
+            keep = sorted(
+                set(keep) | called, key=lambda key: (key.startswith("mcp__"), key)
+            )
         servers = acc.rare_servers(family)
         if not builtin and not servers:
             continue
@@ -2305,7 +2319,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
                 agent_type,
                 family or None,
                 snapped,
-                ", ".join(acc.kept_tools(family)),
+                ", ".join(keep),
                 ", ".join(rare_names),
                 definitions,
                 deferred,

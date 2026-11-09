@@ -363,6 +363,31 @@ def test_the_tools_list_card_is_priced_on_the_model_that_recorded_tools_not_the_
     assert rec.saving_usd == pytest.approx(row["saving_usd"])
 
 
+def test_workflow_tools_that_write_or_run_commands_are_never_rare_once_any_spawn_called_them():
+    # Edit and PowerShell are offered to every spawn and each was called by
+    # one spawn on another model than the one the card is measured on (and by
+    # none on it), so the measured family alone would call them rare.
+    sonnet = "claude-sonnet-5"
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "PowerShell": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+
+    def card(agent_type, *, other_family):
+        acc = _diet_acc(agent_type, spawns=20, uses={"Read": 20, "Grep": 20}, chars=chars)
+        if other_family:
+            acc.tool_uses[sonnet] = {"Edit": 1, "PowerShell": 1}
+        return _diet_row(_report(acc), agent_type)
+
+    plain = card("workflow-subagent", other_family=False)
+    assert {"Edit", "PowerShell"} <= set(plain["rare_tools"].split(", "))
+    row = card("workflow-subagent", other_family=True)
+    assert set(row["rare_tools"].split(", ")) == {"NotebookEdit", "WebFetch"}
+    assert row["keep_tools"] == "Edit, Grep, PowerShell, Read"
+    # The saving comes from the final keep list, so it only goes down.
+    assert 0 < row["saving_usd"] < plain["saving_usd"]
+    # Any other agent type is measured as before.
+    other = card("searcher", other_family=True)
+    assert {"Edit", "PowerShell"} <= set(other["rare_tools"].split(", "))
+
+
 def test_the_model_with_the_most_tool_snapshots_is_the_one_a_tools_list_is_measured_on():
     haiku, sonnet = "claude-haiku-4-5", "claude-sonnet-5"
     acc = _diet_acc("searcher", spawns=40, uses={"Read": 8, "Grep": 8}, family=sonnet, snapshots=8)

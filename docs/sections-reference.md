@@ -2062,7 +2062,11 @@ one.
   would take out of a start, on the model with the most spawns that
   recorded their tools. `keep_tools` are the tools and MCP servers (as `mcp__server__*`) called
   in at least a tenth of the spawns offered them, whether sent in full or
-  loaded when asked for. `rare_tools` are the rest. `dropped_definitions`,
+  loaded when asked for. `rare_tools` are the rest. For `workflow-subagent`,
+  Edit, Write, MultiEdit, NotebookEdit, Bash and PowerShell are never rare
+  once any of its spawns, on any model, called them: they go to
+  `keep_tools` and the amounts and saving are worked out without them.
+  `dropped_definitions`,
   `dropped_deferred` (the deferred tool names of the MCP servers left out),
   `dropped_skills` (the skills list, when Skill is left out) and
   `dropped_roster` (the agent list, when Agent is left out) are tokens per
@@ -2604,6 +2608,9 @@ none writes a file.
   `StructuredOutput`, `SubagentHandback` and `advisor` are added whatever
   the list says (none is ever on the suggested line or in the rarely used
   list), and asks for one spawn before and one after on the same model.
+  Edit, Write, MultiEdit, NotebookEdit, Bash and PowerShell stay on a
+  workflow line (and out of the rarely used list) once any workflow agent
+  called them, on any model; the saving is for the final list.
   It replaces the old `spawn-read-only-tools`. When the agent's current
   `tools:` line is known (a real list or comma string, with parentheses such
   as `Agent(...)` kept whole), only the rarely used tools still on it are
