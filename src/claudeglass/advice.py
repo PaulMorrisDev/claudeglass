@@ -1266,16 +1266,21 @@ def _explain_agent_model_asked(rec: Recommendation, ctx: _Context) -> None:
     family = _family_name(facts.model)
     many = count != 1
     rec.title = f"{count} {noun} that wrote code {'were' if many else 'was'} started on {model}"
+    fixed = rec.variant == "fixed"
     rec.why = " ".join(
         [
             f"{_roles_phrase(facts, noun)} {'were' if many else 'was'} started with {model} named in the call"
             f"{_most_recently(facts.last_seen, ctx.report)}.",
             f"{'They' if many else 'It'} wrote code to a settled spec, which Sonnet does well.",
-            f"If whatever starts {'them' if many else 'it'} asks for {family} out of habit, Sonnet would cost less.",
+            (
+                f"Since then, {facts.later} later call{'s' if facts.later != 1 else ''} of this agent type named "
+                "Sonnet or a smaller model, so this looks fixed."
+                if fixed
+                else f"If whatever starts {'them' if many else 'it'} asks for {family} out of habit, Sonnet would cost less."
+            ),
         ]
     )
-    if rec.variant == "fixed":
-        rec.why += " Later calls of this agent type name Sonnet; this looks fixed."
+    if fixed:
         rec.action = "Nothing to do unless it comes back."
     else:
         rec.action = (

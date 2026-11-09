@@ -383,6 +383,14 @@ def test_the_agent_model_notes_follow_the_prompt():
     assert fixes_mod.fix_note(fix) == fixes_mod.RESTART_NOTE
 
 
+def test_the_fixed_asked_card_asks_only_for_a_check_not_a_change():
+    from claudeglass import fixes as fixes_mod
+
+    (fix,) = fixes_mod.build_fixes(_agent_model_rec("agent-model-asked", "fixed"))
+    assert "Propose sonnet" not in fix["prompt"]
+    assert "Change nothing" in fix["prompt"]
+
+
 def test_the_inherited_prompt_asks_for_the_rule_and_the_fixed_card_keeps_it():
     from claudeglass import fixes as fixes_mod
 

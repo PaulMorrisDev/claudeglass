@@ -297,8 +297,9 @@ def test_a_card_is_a_workflow_card_by_the_runs_a_script_started_and_not_by_its_a
 
 
 def test_the_fixed_asked_card_says_it_looks_fixed_and_does_not_point_at_claude_md():
-    card = _finish(_rec("agent-model-asked", agents=2, roles="fix 2", severity="info", variant="fixed"))
-    assert "Later calls of this agent type name Sonnet; this looks fixed." in card.why
+    card = _finish(_rec("agent-model-asked", agents=2, roles="fix 2", severity="info", variant="fixed", later=4))
+    assert "Since then, 4 later calls of this agent type named Sonnet or a smaller model, so this looks fixed." in card.why
+    assert "out of habit" not in card.why
     assert "CLAUDE.md" not in card.action
     assert card.estimated_saving
 

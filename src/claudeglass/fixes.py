@@ -532,6 +532,11 @@ _WORKFLOW_PROMPTS = {
         "agent files, workflow scripts and CLAUDE.md files. For each place, say whether its work needs Opus. "
         "Propose sonnet where it doesn't, and show me each change before saving. " + PROMPT_RESTART
     ),
+    # The fixed card has nothing to save, so its prompt only looks: no restart suffix.
+    "agent-model-asked:fixed": (
+        "Please check the skills, agent files, workflow scripts and CLAUDE.md files that start my agents "
+        "that write code, and tell me any place that still sets model to opus or fable. Change nothing."
+    ),
     "agent-decide-apply": (
         "From now on, when an agent's job is to review, audit, verify or judge, have it report the exact "
         "changes instead of making them. Then start a separate agent on Sonnet to apply them. Keep the "

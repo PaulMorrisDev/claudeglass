@@ -419,8 +419,10 @@ measured: `later_compliant` is empty. A `decide-apply` row isn't
 measured either. A cell that isn't measured has no "Later compliant
 writers" line in the card's evidence; it is never shown as 0. At
 `later_compliant_for_info` or more, the `asked` card keeps `info` and
-its saving, takes variant `fixed`, and says later calls of this agent
-type name Sonnet and it looks fixed. It does not suggest CLAUDE.md.
+its saving, takes variant `fixed`, and says how many later calls of
+this agent type named Sonnet or a smaller model and that it looks fixed.
+It does not suggest CLAUDE.md. Its prompt only asks Claude to check where
+Opus is still set and to change nothing.
 
 ### `CLAUDE_CODE_SUBAGENT_MODEL`
 
