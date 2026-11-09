@@ -296,6 +296,13 @@ def test_a_card_is_a_workflow_card_by_the_runs_a_script_started_and_not_by_its_a
     assert inherited.why.startswith("4 implementers and 1 fixer in 3 workflow runs started with no model")
 
 
+def test_the_fixed_asked_card_says_it_looks_fixed_and_does_not_point_at_claude_md():
+    card = _finish(_rec("agent-model-asked", agents=2, roles="fix 2", severity="info", variant="fixed"))
+    assert "Later calls of this agent type name Sonnet; this looks fixed." in card.why
+    assert "CLAUDE.md" not in card.action
+    assert card.estimated_saving
+
+
 def test_the_asked_card_reads_in_the_singular():
     card = _finish(_rec("agent-model-asked", agents=1, roles="fix 1", severity="info"))
     assert card.title == "1 workflow agent that wrote code was started on Opus 5.5"
@@ -375,8 +382,6 @@ def _every_card() -> list[Recommendation]:
         for agent_type, runs in (("workflow-subagent", 12), ("a-long-agent-type-name", 0)):
             for rule_id in ("agent-model-inherited", "agent-model-asked"):
                 for variant, severity, later in (("", "advice", 0), ("fixed", "info", 14)):
-                    if rule_id == "agent-model-asked" and variant:
-                        continue
                     cards.append(
                         _rec(
                             rule_id, agent_type=agent_type, variant=variant, severity=severity, later=later,

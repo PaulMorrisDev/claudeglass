@@ -671,8 +671,9 @@ changes a figure.
   `model`, `cost_usd`, `cost_on_sonnet_usd`, `saving_usd`, `saving_pct`
   (these last three empty for `decide-apply`), `write_turns` (replies
   that wrote code), `workflow_runs`, `first_seen`, `last_seen`,
-  `later_compliant` (later writers of the same kind on Sonnet or
-  smaller) and `env_var_set` (`yes` or `no`:
+  `later_compliant` (later writers on Sonnet or
+  smaller: the same kind for `inherited`, the same Agent-tool type
+  whose call named the model for `asked`; empty when not measured) and `env_var_set` (`yes` or `no`:
   `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's
   environment variable names). It holds agent types, role words,
   counts, models, amounts and dates, and nothing else.
@@ -717,6 +718,8 @@ replies wrote code.
   saved where you choose (this session, a project's CLAUDE.md or
   `~/.claude/CLAUDE.md`); no setting changes.
 - `agent-model-asked` (info) — the same, but the call named the model.
+  It takes `variant` `fixed` once `later_compliant_for_info` later
+  calls of the same Agent-tool type named Sonnet or smaller.
 - `agent-decide-apply` (info) — an agent whose word decides that also
   wrote code in at least `decide_apply_min_edit_turns` (default 3)
   replies. It has no saving: the fix is two agents, one to decide and

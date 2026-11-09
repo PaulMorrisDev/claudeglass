@@ -4847,7 +4847,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "last_seen": ("Last", "The date of the most recent of these agents."),
             "later_compliant": (
                 "Later on Sonnet",
-                "Agents of the same kind that wrote code on Sonnet or a smaller model after the last one flagged here.",
+                "Later agents that wrote code on Sonnet or a smaller model after the last one flagged here. Blank when not measured.",
             ),
             "env_var_set": (
                 "Env var set",

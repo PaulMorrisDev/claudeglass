@@ -1299,10 +1299,14 @@ def _explain_agent_model_asked(rec: Recommendation, ctx: _Context) -> None:
             f"If whatever starts {'them' if many else 'it'} asks for {family} out of habit, Sonnet would cost less.",
         ]
     )
-    rec.action = (
-        f"Check the prompt, skill or script that starts {'these agents' if many else 'this agent'}. "
-        f"Ask for Sonnet where nothing needs {family}."
-    )
+    if rec.variant == "fixed":
+        rec.why += " Later calls of this agent type name Sonnet; this looks fixed."
+        rec.action = "Nothing to do unless it comes back."
+    else:
+        rec.action = (
+            f"Check the prompt, skill or script that starts {'these agents' if many else 'this agent'}. "
+            f"Ask for Sonnet where nothing needs {family}."
+        )
     _agent_model_saving(rec, facts, ctx)
 
 

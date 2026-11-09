@@ -325,7 +325,7 @@ price for.
 | `workflow_runs` | how many separate workflow runs they came from; 0 for Agent-tool agents |
 | `first_seen` | the date (`YYYY-MM-DD`) of the earliest agent's first reply |
 | `last_seen` | the date of the latest agent's first reply |
-| `later_compliant` | for `inherited` rows, the later writers on Sonnet or smaller (see "When a card looks fixed"); 0 on the other rows |
+| `later_compliant` | the later writers on Sonnet or smaller (see "When a card looks fixed"). Empty on a `decide-apply` row and on a workflow `asked` row: not measured |
 | `env_var_set` | `yes` or `no`: whether `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's environment variable names. The same on every row |
 
 ### The three rules
@@ -344,7 +344,7 @@ applies.
 | Rule | Severity | Variant | Reads rows |
 |---|---|---|---|
 | `agent-model-inherited` | `advice`, or `info` once `later_compliant` reaches `later_compliant_for_info` | `fixed` when `info` | `inherited` |
-| `agent-model-asked` | `info` | none | `asked` |
+| `agent-model-asked` | `info` | `fixed` once `later_compliant` reaches `later_compliant_for_info` | `asked` |
 | `agent-decide-apply` | `info` | none | `decide-apply` |
 
 The thresholds are `AgentModelThresholds` fields, read from
@@ -352,7 +352,7 @@ The thresholds are `AgentModelThresholds` fields, read from
 
 | Field | Default | Meaning |
 |---|---|---|
-| `later_compliant_for_info` | 3 | an `inherited` card drops from advice to info once this many later writers of the same kind ran on Sonnet or smaller |
+| `later_compliant_for_info` | 3 | an `inherited` card drops from advice to info once this many later writers of the same kind ran on Sonnet or smaller. An `asked` card of an Agent-tool type gets variant `fixed` at this count of later calls of that type that named Sonnet or smaller |
 | `unknown_min_edit_turns` | 2 | an agent with no role word counts as a writer at this many write turns |
 | `decide_apply_min_edit_turns` | 3 | a deciding agent counts as also changing code at this many write turns |
 
@@ -409,6 +409,18 @@ that this looks fixed. Its action becomes copying the rule to
 live in only one project's notes. It keeps its saving. A new flagged
 agent moves the start of the count, so the card returns to advice
 until enough writers follow it.
+
+An `asked` row's `later_compliant` is stricter: it counts only later
+writers of the same Agent-tool type whose own call named a model on
+Sonnet or smaller. A run that named none and inherited a Sonnet main
+session doesn't count, and neither does another agent type. Workflow
+agents carry no script identity, so a workflow `asked` row is not
+measured: `later_compliant` is empty. A `decide-apply` row isn't
+measured either. A cell that isn't measured has no "Later compliant
+writers" line in the card's evidence; it is never shown as 0. At
+`later_compliant_for_info` or more, the `asked` card keeps `info` and
+its saving, takes variant `fixed`, and says later calls of this agent
+type name Sonnet and it looks fixed. It does not suggest CLAUDE.md.
 
 ### `CLAUDE_CODE_SUBAGENT_MODEL`
 

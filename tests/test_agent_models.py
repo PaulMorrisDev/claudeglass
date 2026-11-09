@@ -200,7 +200,7 @@ def test_fixture_deciders_that_edited_get_cost_but_no_saving(fixture_stats):
     assert row["saving_usd"] is None
     assert row["saving_pct"] is None
     assert row["write_turns"] >= 4 * AgentModelThresholds().decide_apply_min_edit_turns
-    assert row["later_compliant"] == 0
+    assert row["later_compliant"] is None
 
 
 def test_fixture_table_holds_no_paths_and_every_row_key_is_a_string(fixture_stats):
@@ -550,15 +550,50 @@ def test_later_compliant_for_an_agent_tool_group_counts_agent_tool_writers_of_an
     assert row["later_compliant"] == 2
 
 
-def test_later_compliant_is_zero_for_asked_and_decide_apply():
+def test_asked_later_compliant_counts_only_same_type_runs_whose_call_named_sonnet():
+    flagged = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, alias="opus",
+                     first_ts="2026-09-23T08:00:00.000Z")
+    named = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET, alias="sonnet",
+                   first_ts="2026-09-24T08:00:00.000Z")
+    inherited_sonnet = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET,
+                              first_ts="2026-09-25T08:00:00.000Z")
+    other_type = _agent(agent_type="general-purpose", role_word="fix", real_edits=1, model=SONNET, alias="sonnet",
+                        first_ts="2026-09-26T08:00:00.000Z")
+    workflow = _workflow(role_word="fix", real_edits=1, model=SONNET, alias="sonnet", first_ts="2026-09-27T08:00:00.000Z")
+    before = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET, alias="sonnet",
+                    first_ts="2026-09-22T08:00:00.000Z")
+    rows = _verdicts([flagged, named, inherited_sonnet, other_type, workflow, before])
+    assert rows[("claude-implementer", "asked")]["later_compliant"] == 1
+
+
+def test_asked_workflow_group_and_decide_apply_are_not_measured():
     runs = [
-        _agent(role_word="fix", real_edits=1, alias="opus", first_ts="2026-09-23T08:00:00.000Z"),
+        _workflow(role_word="fix", real_edits=1, alias="opus", first_ts="2026-09-23T08:00:00.000Z"),
+        _workflow(role_word="fix", real_edits=1, model=SONNET, alias="sonnet", first_ts="2026-09-25T08:00:00.000Z"),
         _agent(role_word="review", turns=6, real_edits=4, first_ts="2026-09-23T08:00:00.000Z"),
-        _agent(role_word="fix", real_edits=1, model=SONNET, first_ts="2026-09-25T08:00:00.000Z"),
     ]
     rows = _verdicts(runs)
-    assert rows[("general-purpose", "asked")]["later_compliant"] == 0
-    assert rows[("general-purpose", "decide-apply")]["later_compliant"] == 0
+    assert rows[("workflow-subagent", "asked")]["later_compliant"] is None
+    assert rows[("general-purpose", "decide-apply")]["later_compliant"] is None
+    report = _report(compute_agent_models(runs, PRICING))
+    for rule_id in ("agent-model-asked", "agent-decide-apply"):
+        for rec in _fire(report, rule_id):
+            assert "Later compliant writers" not in [label for label, *_ in rec.evidence]
+
+
+def test_asked_card_is_fixed_once_later_calls_of_the_type_name_sonnet():
+    runs = [_agent(agent_type="claude-implementer", role_word="implement", real_edits=1, alias="opus",
+                   first_ts="2026-09-23T08:00:00.000Z")]
+    runs += [
+        _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET, alias="sonnet",
+               first_ts=f"2026-09-2{day}T08:00:00.000Z")
+        for day in (4, 5, 6)
+    ]
+    [rec] = _fire(_report(compute_agent_models(runs, PRICING)), "agent-model-asked")
+    assert (rec.severity, rec.variant) == ("info", "fixed")
+    assert rec.saving_usd is not None and rec.saving_usd > 0
+    open_ = _fire(_report(compute_agent_models(runs[:3], PRICING)), "agent-model-asked")
+    assert [(r.severity, r.variant) for r in open_] == [("info", "")]
 
 
 # -- thresholds ----------------------------------------------------------------
@@ -713,6 +748,11 @@ def test_each_rule_fires_only_for_its_own_verdict(fixture_stats):
     assert len(_fire(report, "agent-decide-apply")) == 1
 
 
+def row_of(rows, rec, rule_id):
+    verdict = {"agent-model-inherited": "inherited", "agent-model-asked": "asked", "agent-decide-apply": "decide-apply"}[rule_id]
+    return rows[(rec.agent_type, verdict)]
+
+
 def test_evidence_labels_are_exactly_the_contract_and_resolve_to_the_row(fixture_stats):
     report = _report(fixture_stats)
     table = report.sections[0].tables[0]
@@ -734,7 +774,11 @@ def test_evidence_labels_are_exactly_the_contract_and_resolve_to_the_row(fixture
     }
     for rule_id in agent_models.RULES:
         for rec in _fire(report, rule_id):
-            assert [label for label, *_ in rec.evidence] == EVIDENCE_LABELS
+            # A row that did not measure it (None) has no "Later compliant writers" evidence.
+            expected = [
+                label for label in EVIDENCE_LABELS if label != "Later compliant writers" or row_of(rows, rec, rule_id)["later_compliant"] is not None
+            ]
+            assert [label for label, *_ in rec.evidence] == expected
             verdict = {"agent-model-inherited": "inherited", "agent-model-asked": "asked", "agent-decide-apply": "decide-apply"}[rule_id]
             row = rows[(rec.agent_type, verdict)]
             for label, value, source, row_key in rec.evidence:

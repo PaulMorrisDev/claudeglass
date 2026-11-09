@@ -184,9 +184,11 @@ class AgentModelGroup:
     #: ``YYYY-MM-DD`` of each agent's first reply; "" until one is seen.
     first_seen: str = ""
     last_seen: str = ""
-    #: Writers of the same kind on Sonnet or smaller that started after the
-    #: latest agent in this group. Only ever set for ``inherited``.
-    later_compliant: int = 0
+    #: Later writers on Sonnet or smaller. ``inherited``: the same kind, any
+    #: type. ``asked``: the same Agent-tool type, whose own call named the
+    #: model. None when not measured (``decide-apply``, and a workflow's
+    #: ``asked``, since no script can be told apart).
+    later_compliant: int | None = None
 
 
 @dataclass(slots=True)
@@ -216,6 +218,8 @@ class _Run:
     verdict: str | None
     #: A writer on Sonnet or smaller, by a known tier (counts towards "this looks fixed").
     compliant: bool
+    #: The call that started the run named a model.
+    call_named: bool
     role: str
     model: str
     write_turns: int
@@ -317,6 +321,7 @@ def _analyse(
         kind="workflow" if is_workflow else "agent tool",
         verdict=verdict,
         compliant=writer and 0 <= tier <= _SONNET_OR_SMALLER,
+        call_named=bool(meta.agent_model_alias),
         role=meta.role_word or _UNKNOWN_ROLE,
         model=model,
         write_turns=write_turns,
@@ -394,11 +399,22 @@ def compute_agent_models(
 
     for (group_key, verdict), group in stats.groups.items():
         latest = latest_flagged.get((group_key, verdict))
-        if verdict != "inherited" or latest is None:
-            continue
-        group.later_compliant = sum(
-            1 for run in compliant if run.kind == group.kind and run.first_ts is not None and run.first_ts > latest
-        )
+        if latest is None:
+            group.later_compliant = 0 if verdict == "inherited" else None
+        elif verdict == "inherited":
+            group.later_compliant = sum(
+                1 for run in compliant if run.kind == group.kind and run.first_ts is not None and run.first_ts > latest
+            )
+        elif verdict == "asked" and group.kind == "agent tool":
+            group.later_compliant = sum(
+                1
+                for run in compliant
+                if run.kind == group.kind
+                and run.group == group_key
+                and run.call_named
+                and run.first_ts is not None
+                and run.first_ts > latest
+            )
     return stats
 
 
@@ -598,15 +614,17 @@ def _recommendations(
             continue
         agent_type = cell(row, "agent_type")
         later = cell(row, "later_compliant")
-        later = later if isinstance(later, int) and not isinstance(later, bool) else 0
+        later = later if isinstance(later, int) and not isinstance(later, bool) else None
 
         severity = "info"
         variant = ""
         if verdict == "inherited":
-            if later >= th.later_compliant_for_info:
+            if (later or 0) >= th.later_compliant_for_info:
                 variant = "fixed"
             else:
                 severity = "advice"
+        elif verdict == "asked" and later is not None and later >= th.later_compliant_for_info:
+            variant = "fixed"
 
         who = "Workflow agents" if agent_type == WORKFLOW_GROUP else f"{agent_type} agents"
         # The row's own key: the agent type alone repeats across verdicts.
@@ -628,6 +646,7 @@ def _recommendations(
                 evidence=[
                     _evidence(label, cell(row, column_key), _SOURCE_SECTION, TABLE_NAME, row_key)
                     for label, column_key in _EVIDENCE_COLUMNS
+                    if column_key != "later_compliant" or later is not None
                 ],
             )
         )
@@ -655,7 +674,9 @@ def _rule_agent_model_asked(
     snapshot: Snapshot | None = None,
 ) -> list[Recommendation]:
     """``agent-model-asked``: agents that wrote code on a larger model
-    because the call named it. Info only."""
+    because the call named it. Info only, with variant ``"fixed"`` once
+    ``th.later_compliant_for_info`` later calls of the same agent type named
+    Sonnet or smaller."""
     return _recommendations(report, th, archetype, "agent-model-asked", "asked")
 
 
