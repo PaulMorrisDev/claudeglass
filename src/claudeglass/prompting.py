@@ -84,7 +84,10 @@ question (useful, known or wrong) and the trust figure they make
 (:func:`trust_pct`). A hint whose note asks for the tip
 every time is relayed; one whose note leaves Claude to judge whether the
 message calls for it (``capture_catalogue.CONDITIONAL_TIP_HINTS``) is
-judged relevant, and a tip it doesn't show there isn't a miss.
+judged relevant, and a tip it doesn't show there isn't a miss. A hint
+only Claude sees (``capture_catalogue.CLAUDE_ONLY_HINTS``) asks for no tip:
+it is counted by its notes and by Claude's words that it misfired
+(``Turn.coach_disowned``).
 """
 
 from __future__ import annotations
@@ -631,7 +634,7 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
             kind = event.detail.get("kind")
         elif event.subkind == "capture_note":
             kind = event.detail.get("coach")
-        if kind not in TIP_HINTS:
+        if kind not in TIP_HINTS and kind not in catalogue.CLAUDE_ONLY_HINTS:
             continue
         notes[kind] += 1
         at = _moment(event.ts)
@@ -646,6 +649,11 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
     # How many notes came with each message: a lone one owns the cycle's tip.
     together = Counter(id(cycle[0]) for _kind, cycle in found if cycle)
     for kind, cycle in found:
+        if kind in catalogue.CLAUDE_ONLY_HINTS:
+            # No tip asked: only Claude's words that the note misfired count.
+            if any(turn.coach_disowned for turn in cycle):
+                misfires[kind] += 1
+            continue
         alone = bool(cycle) and together[id(cycle[0])] == 1
         if any(_relayed(kind, turn, alone) for turn in cycle):
             tips[kind] += 1
@@ -829,6 +837,8 @@ def relay_text(hint: str, notes: int, shown: int) -> str | None:
     hook wrote no note for (the mod showed it, :func:`glass_tips`)."""
     if not notes:
         return None
+    if hint in catalogue.CLAUDE_ONLY_HINTS:
+        return "no tip asked"
     return f"{'judged relevant' if hint in catalogue.CONDITIONAL_TIP_HINTS else 'relayed'} {shown} of {notes}"
 
 
@@ -966,13 +976,14 @@ def build_section(
         ],
         rows=[
             [
-                hint, notes[hint], tips[hint], 100.0 * tips[hint] / notes[hint] if notes[hint] else None,
+                hint, notes[hint], tips[hint],
+                100.0 * tips[hint] / notes[hint] if notes[hint] and hint in TIP_HINTS else None,
                 relay_text(hint, notes[hint], tips[hint]), glass.shown[hint], glass_where(hint, glass.surfaces),
                 tips[hint] + glass.shown[hint], misfires[hint],
                 answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")],
                 trust_pct(answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")], misfires[hint]),
             ]
-            for hint in TIP_HINTS if notes[hint] or glass.shown[hint]
+            for hint in (*TIP_HINTS, *catalogue.CLAUDE_ONLY_HINTS) if notes[hint] or glass.shown[hint]
         ],
         notes=[
             "Tips shown: the tips Claude passed on in its reply plus the ones ClaudeGlass showed itself, "

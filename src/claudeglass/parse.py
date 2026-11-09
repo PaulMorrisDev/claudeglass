@@ -2669,6 +2669,7 @@ def _finalize_turn(
         admit_candidate=pending.admit_found,
         admit_caught=("user" if pending.after_challenge else "self") if pending.admit_found else "",
         tip_disowned=pending.tip_carried and pending.tip_disown_found,
+        coach_disowned=pending.tip_disown_found,
         read_target_chars=tuple(pending.read_target_chars),
         shell_read_count=pending.shell_read_count,
         shell_read_chars=pending.shell_read_chars,

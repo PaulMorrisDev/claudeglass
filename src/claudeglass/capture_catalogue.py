@@ -1733,7 +1733,8 @@ COACHING_TEXT = {
         when="most of the user's message is a log, a file or command output",
         then="Otherwise don't mention this note.",
     ),
-    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
+    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}."
+    " If the whole result was needed, say in one line that the ClaudeGlass note doesn't apply.",
     "report_reread": _tip_note(
         "report_reread",
         then="The user's session just started background work. Carry on exactly as you would have without this "
@@ -1828,6 +1829,11 @@ QUIET_SAVED_PATTERN = r"(?:^|[\\/])(?:tool-results|scratchpad)[\\/]|[\\/]tasks[\
 #: called a misfire (``coaching.tip_rules``), through ``coaching.json``'s
 #: ``muted``.
 CLAUDE_ONLY_HINTS = ("quiet_output",)
+
+#: What :data:`CLAUDE_ONLY_HINTS` are about, in words, where a hint is
+#: named to you (``capture status``), as :data:`TIP_HINT_TITLES` do for
+#: the tips.
+CLAUDE_ONLY_HINT_TITLES: dict[str, str] = {"quiet_output": "reading a saved output whole"}
 
 #: A message that, sent after a break, is not new work and so gets no
 #: ``cold_return`` receipt: a go-ahead that carries on ("yes, fix the

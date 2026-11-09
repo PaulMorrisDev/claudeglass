@@ -748,6 +748,8 @@ memory and dropped:
   tip and says, near "ClaudeGlass" and outside the tip's quote block, that
   it misfired, was a false positive or doesn't apply
   (``capture_catalogue.MISFIRE_PATTERN``).
+- ``Turn.coach_disowned: bool = False`` -- the same words, with or without
+  a tip in the reply: how Claude disowns a note that asks for no tip.
 - ``Turn.read_target_chars: tuple[int, ...] = ()`` -- the size of each
   ``Read`` result, in the order of ``read_target_hashes``; 0 for a read
   that failed. A result Claude Code saved to a file and answered with a
@@ -1462,6 +1464,10 @@ class Turn:
     admit_candidate: bool = False
     admit_caught: str = ""
     tip_disowned: bool = False
+    #: The reply calls a ClaudeGlass note a misfire, whether or not it
+    #: carries a tip (:attr:`tip_disowned` needs one): how Claude disowns
+    #: a note that asks for none (``quiet_output``).
+    coach_disowned: bool = False
     read_target_chars: tuple[int, ...] = ()
     shell_read_count: int = 0
     shell_read_chars: int = 0

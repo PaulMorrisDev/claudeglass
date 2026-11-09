@@ -1680,7 +1680,9 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   whose note orders the tip every time, so a tip left out was missed;
   `judged relevant N of M` for
   `big_paste`, where Claude decides whether the message calls for it and
-  a tip left out is no miss; empty for a hint the hook wrote no note for),
+  a tip left out is no miss; `no tip asked` for `quiet_output`, a note to
+  Claude alone, counted by its notes and by Claude calling it a misfire,
+  `Turn.coach_disowned`; empty for a hint the hook wrote no note for),
   `glass` (tips the ClaudeGlass mod showed itself, counted from its sensor
   files, `mod_events`), `where` (the places it showed them, with counts),
   `total` (`shown` plus `glass`: the tips shown by both), `misfires` (notes whose replies called

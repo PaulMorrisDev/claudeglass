@@ -974,7 +974,9 @@ def test_the_tips_table_counts_the_notes_claude_passed_on(tmp_path):
         # A note of a retired hint in an old transcript is recognised, but not counted: no tip is asked for.
         _said("one more", 8), _note_line("plan_first", 8), _reply(9, edit=True, say=f"Done.\n\n{_TIP}"),
     ])
-    assert session.notes == {"drip_feed": 2} and session.tips == {"drip_feed": 1} and not session.misfires
+    # quiet_output asks for no tip: it is counted by its notes, and its row says so.
+    assert session.notes == {"drip_feed": 2, "quiet_output": 1} and session.tips == {"drip_feed": 1}
+    assert not session.misfires
     tips = prompting.build_section([session]).tables[1]
     assert tips.name == "prompting_tips"
     assert [c.key for c in tips.columns] == [
@@ -982,7 +984,10 @@ def test_the_tips_table_counts_the_notes_claude_passed_on(tmp_path):
         "wrong", "trust_pct",
     ]
     # No answers to the tip question and no misfire: no trust figure yet. No mod either: nothing shown by Glass.
-    assert tips.rows == [["drip_feed", 2, 1, 50.0, "relayed 1 of 2", 0, None, 1, 0, 0, 0, 0, None]]
+    assert tips.rows == [
+        ["drip_feed", 2, 1, 50.0, "relayed 1 of 2", 0, None, 1, 0, 0, 0, 0, None],
+        ["quiet_output", 1, 0, None, "no tip asked", 0, None, 0, 0, 0, 0, 0, None],
+    ]
 
 
 def test_a_note_counts_as_relayed_only_when_its_own_tip_text_is_in_the_reply(tmp_path):

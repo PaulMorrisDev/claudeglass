@@ -3043,6 +3043,20 @@ def test_the_summary_says_which_tips_are_left_out_wait_for_more_or_show_once():
     assert not any("called them wrong" in line or "knew" in line for line in quiet)
 
 
+def test_the_summary_names_a_muted_note_to_claude_apart_from_the_tips_you_called_wrong():
+    lines = coaching.describe({"muted": ["quiet_output"], "typical_piece_tokens": 0})
+    assert "Notes to Claude left out because Claude called them misfires: reading a saved output whole." in lines
+    assert not any("you called them wrong" in line for line in lines)
+
+
+def test_the_summary_says_which_hints_are_off_for_everyone_and_gives_no_reason_about_you_for_them():
+    lines = coaching.describe({"plan_fresh": False, "typical_piece_tokens": 0})
+    assert not any("you ignored its tip" in line for line in lines)
+    off = next(line for line in lines if line.startswith("Off for everyone (the replay found them more often wrong than right): "))
+    assert "building a plan in a fresh session" in off and "reading a saved output whole" in off
+    assert "coming back after a break" in off and "raw" not in off and "quiet_output" not in off
+
+
 def _as_the_daily_run_writes_it(tmp_path, report) -> Path:
     config_dir = _coaching_config(_config_dir(tmp_path))
     coaching.write(config_dir, coaching.from_report(report, config_dir, now=NOW))
@@ -4094,17 +4108,32 @@ def test_quiet_output_never_fires_inside_an_agent(tmp_path):
     assert _kind(_coach(tmp_path, _saved_read(session_id="main"))) == "quiet_output"
 
 
-def test_quiet_output_has_its_own_mute_entry_and_is_no_question_of_the_tip_survey(tmp_path):
+def _says(second: int, text: str) -> dict:
+    return turn_line(content=[{"type": "text", "text": text}], model="claude-widget-9",
+                     timestamp=f"2026-09-18T12:00:{second:02d}.000Z", cache_read_input_tokens=5_000)
+
+
+def test_quiet_output_has_its_own_mute_entry_and_is_no_question_of_the_tip_survey(tmp_path, _salt):
     assert cat.CLAUDE_ONLY_HINTS == ("quiet_output",)
     assert "quiet_output" not in cat.TIP_HINT_TITLES and "quiet_output" not in cat.TIP_THRESHOLD_KEYS
-    columns = [NS(key=key) for key in ("hint", "useful", "known", "wrong", "misfires")]
-    table = NS(name="prompting_tips", columns=columns, rows=[["quiet_output", 0, 0, 0, 2]])
-    report = NS(recommendations=[], sections=[NS(key="prompting", tables=[table])])
-    assert coaching.tip_rules(report, 1.5) == (["quiet_output"], [], {})
+    # Claude calls the note a misfire in words, with no tip in the reply: the transcript alone mutes it.
+    lines = []
+    for n in range(cat.TIP_WRONG_MIN):
+        second = 3 * n
+        lines += [_ask(second), _note_line(_coach_text("quiet_output"), "PostToolUse", second + 1),
+                  _says(second + 2, "That ClaudeGlass note doesn't apply: I needed the whole file.")]
+    top = _session(tmp_path, lines)
+    session = prompting.session_prompting(NS(top=top, session_id="q"), prompting._Prices(load_pricing()))
+    assert session.notes == {"quiet_output": cat.TIP_WRONG_MIN} and session.misfires == {"quiet_output": cat.TIP_WRONG_MIN}
+    section = prompting.build_section([session])
+    tips = next(t for t in section.tables if t.name == "prompting_tips")
+    cells = dict(zip([c.key for c in tips.columns], tips.rows[0]))
+    assert cells["hint"] == "quiet_output" and cells["relay"] == "no tip asked" and cells["shown"] == 0
+    report = NS(recommendations=[], sections=[section])
     config_dir = _config_dir(tmp_path)
+    assert "quiet_output" in coaching.from_report(report, config_dir, now=NOW)["muted"]
     coaching.write(config_dir, coaching.from_report(report, config_dir, now=NOW))
     assert coaching.read(config_dir)["muted"] == ["quiet_output"]
-    assert any("quiet_output" in line or "reading a saved output" in line for line in coaching.describe(coaching.read(config_dir)))
     assert _coach(tmp_path, _saved_read()) == ""
 
 

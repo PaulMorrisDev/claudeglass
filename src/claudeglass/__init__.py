@@ -463,7 +463,10 @@ __version__ = "0.16.0"
 #: none, so every transcript is re-read.
 #: Bumped to 48: ``Turn.coach_tips``, the hints whose own tip words the
 #: reply holds. A pre-48 digest has none, so every transcript is re-read.
-PARSER_VERSION = 48
+#: Bumped to 49: ``Turn.coach_disowned``, a reply that calls a ClaudeGlass
+#: note a misfire with no tip in it (the mute of ``quiet_output``). A
+#: pre-49 digest has none, so every transcript is re-read.
+PARSER_VERSION = 49
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

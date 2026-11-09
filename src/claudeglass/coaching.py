@@ -204,7 +204,7 @@ def write(config_dir: str | Path, data: dict) -> Path:
 
 
 def _hint_name(hint: str) -> str:
-    return capture_catalogue.TIP_HINT_TITLES.get(hint, hint)
+    return capture_catalogue.TIP_HINT_TITLES.get(hint) or capture_catalogue.CLAUDE_ONLY_HINT_TITLES.get(hint, hint)
 
 
 def _raised(data: dict, key: str) -> bool:
@@ -221,11 +221,23 @@ def describe(data: dict) -> list[str]:
     if not data:
         return ["No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
     lines = []
-    if data.get("plan_fresh") is False:
+    off = capture_catalogue.LIVE_OFF_HINTS
+    if data.get("plan_fresh") is False and "plan_fresh" not in off:
         lines.append("The fresh-session hint after a plan is off: you ignored its tip, or said builds need the discussion.")
-    muted = [hint for hint in data.get("muted") or () if hint in _MUTABLE]
+    if off:
+        lines.append(
+            "Off for everyone (the replay found them more often wrong than right): "
+            + ", ".join(_hint_name(hint) for hint in off) + "."
+        )
+    muted = [hint for hint in data.get("muted") or () if hint in capture_catalogue.TIP_HINT_TITLES]
     if muted:
         lines.append("Tips left out because you called them wrong: " + ", ".join(_hint_name(hint) for hint in muted) + ".")
+    claude = [hint for hint in data.get("muted") or () if hint in capture_catalogue.CLAUDE_ONLY_HINTS]
+    if claude:
+        lines.append(
+            "Notes to Claude left out because Claude called them misfires: "
+            + ", ".join(_hint_name(hint) for hint in claude) + "."
+        )
     raised = [
         _hint_name(hint)
         for hint, key in capture_catalogue.TIP_THRESHOLD_KEYS.items()
