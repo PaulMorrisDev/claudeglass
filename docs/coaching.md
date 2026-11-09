@@ -604,27 +604,22 @@ in its own panes instead of through Claude, so they cost no context and
 Claude never has to remember to pass them on. For a session the mod is
 running in (it says so in `mod/present/<session id>.json`; see
 [Your hooks](hooks.md#with-the-claudeglass-mod)), the hook leaves out
-`cold_return`, `status_poll`, `drip_feed`, `big_paste` and `plan_fresh`,
-but only for what that file lists under `shows`: the first four when it lists
-`"hint"` (the mod writes it once the hint line has been drawn, and the desktop
-app never draws it), `plan_fresh` when it lists `"status"` (the status line). A file
-with no `shows` (an older mod) keeps today's rule, and one with an empty
-`shows` leaves all of them with the hook. `report_reread`, `split_run` and the
-rating reminder stay with the hook, as do `plan_fresh_early`,
-`quiet_output`, the plan check, the facts line and the capture note, since
-those steer Claude or feed a skill.
+`status_poll`, `drip_feed` and `big_paste` (and the off `cold_return` and
+`plan_fresh`), but only for what that file lists under `shows`: the first
+four when it lists `"hint"` (the mod writes it once the hint line has been
+drawn, and the desktop app never draws it), `plan_fresh` when it lists
+`"status"` (the status line). A file with no `shows` (an older mod) keeps
+today's rule, and one with an empty `shows` leaves all of them with the
+hook. The plan check, the facts line, the capture note and the rating
+reminder stay with the hook, since those steer Claude or feed a skill.
 
-The mod decides four of them from your draft, before you send it, and shows
+The mod decides three of them from your draft, before you send it, and shows
 one at a time on the hint line under the prompt: `drip_feed`, `big_paste`,
-`status_poll`, then `cold_return` (the cold-cache warning, with its cost and
-what `/clear` first would cost), the first that applies and isn't muted or
-resting. Same thresholds, rest rules and `muted` and `once` lists as above;
+then `status_poll`, the first that applies and isn't muted or resting. Same thresholds, rest rules and `muted` and `once` lists as above;
 a draft's length counts in tokens at the rate your sessions measured, 4
 characters to a token before any. It keeps a draft's length and word shape,
 never its words. `status_poll` also needs background work still running,
-which the mod knows from the result that said it was launched. `plan_fresh`
-shows on the status line when you approve the plan, until the next reply or a
-summary. The rating reminder is not the mod's: the capture hook gives it as a
+which the mod knows from the result that said it was launched. The rating reminder is not the mod's: the capture hook gives it as a
 note on your next message, at most once every `coaching_rating_rest_days`
 days, whether or not the mod runs.
 
@@ -640,10 +635,7 @@ loses it skips that write; the next call catches up from the transcript.
 A hint left out is not marked as shown, so it comes back at once if the mod
 stops. A mod that is missing, closed, or whose file is unreadable or stale
 (no refresh for 10 minutes) changes nothing. An agent run that ended too big
-is still noted while the mod runs, so it is told once the mod stops. And
-because the hook doesn't mark what the mod showed, it asks the mod's file of
-what it showed: a tip to start fresh the mod showed within the cooldown
-holds back `plan_fresh_early`.
+is still noted while the mod runs, so it is told once the mod stops.
 
 On the dashboard's Work habits tab, the Tips table counts both sources.
 **Passed on by Claude** is the tips in Claude's replies, as before.
