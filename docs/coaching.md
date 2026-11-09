@@ -107,7 +107,9 @@ in it. Two kinds of note differ only in the first sentence:
   `plan_fresh_early`, as the last line of the plan it submits. A plan that
   ends with the tip counts as having relayed it. A tip counts as relayed
   only when the reply holds that note's own words, so a different tip in the
-  same reply doesn't count for it.
+  same reply doesn't count for it. A note that came alone with its message
+  also counts when the reply holds the bare "ClaudeGlass tip:" label, since
+  that one tip can only be its.
 - **Judged.** The note tells Claude to write the tip only if it judges
   your message calls for it, and to say nothing otherwise: `big_paste`
   (is most of it a log or a file?).

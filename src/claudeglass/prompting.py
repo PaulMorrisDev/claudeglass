@@ -606,12 +606,13 @@ def _stops(top, prices: _Prices) -> list[tuple[datetime, float]]:
     return out
 
 
-def _relayed(kind: str, turn) -> bool:
+def _relayed(kind: str, turn, alone: bool = False) -> bool:
     """Whether the reply passes on the tip of a ``kind`` note: its own
-    words are in it. A hint with no tip words of its own (an older format)
-    counts on the tip label alone."""
+    words are in it. The tip label alone counts when the note is the only
+    one in its cycle (``alone``: the one tip can only be its), and for a
+    hint with no tip words of its own (an older format)."""
     if kind in catalogue.TIP_FRAGMENTS:
-        return kind in turn.coach_tips
+        return kind in turn.coach_tips or (alone and turn.coach_tip)
     return turn.coach_tip
 
 
@@ -623,6 +624,7 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
     tips: Counter = Counter()
     misfires: Counter = Counter()
     turns = capture_mod._priced(top)
+    found = []
     for event in top.events:
         kind = None
         if event.subkind == "coaching_note":
@@ -640,7 +642,12 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
             if n and turn.human_prompt_chars is not None:
                 break
             cycle.append(turn)
-        if any(_relayed(kind, turn) for turn in cycle):
+        found.append((kind, cycle))
+    # How many notes came with each message: a lone one owns the cycle's tip.
+    together = Counter(id(cycle[0]) for _kind, cycle in found if cycle)
+    for kind, cycle in found:
+        alone = bool(cycle) and together[id(cycle[0])] == 1
+        if any(_relayed(kind, turn, alone) for turn in cycle):
             tips[kind] += 1
         if any(turn.tip_disowned for turn in cycle):
             misfires[kind] += 1

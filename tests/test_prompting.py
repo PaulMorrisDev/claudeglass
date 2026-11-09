@@ -994,7 +994,17 @@ def test_a_note_counts_as_relayed_only_when_its_own_tip_text_is_in_the_reply(tmp
         _said("again", 4), _note_line("drip_feed", 4), _reply(5, edit=True, say=f"Done.\n\n{_TIP}"),
     ])
     assert session.notes == {"report_reread": 1, "plan_fresh": 1, "drip_feed": 1}
-    assert session.tips == {"report_reread": 1}
+    # The lone drip_feed note answered with the bare marker counts: the one tip can only be its.
+    assert session.tips == {"report_reread": 1, "drip_feed": 1}
+
+
+def test_a_lone_cold_return_note_answered_with_a_composed_receipt_and_the_marker_counts(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("back", 2), _note_line("cold_return", 2),
+        _reply(3, edit=True, say=f"Done. The break cost about 40k tokens to re-read.\n\n{_TIP}"),
+    ])
+    assert session.notes == {"cold_return": 1} and session.tips == {"cold_return": 1}
 
 
 def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_path):
