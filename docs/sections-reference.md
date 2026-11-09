@@ -2053,7 +2053,9 @@ one.
   `largest_tools` (the three largest tool definitions or MCP servers in the
   start on the measured model, each with its average size per spawn
   offered it, like `Bash 4.6k, figma 2.3k` (servers named as above); empty when no spawn
-  recorded its tools). The startup chart's "Tool definitions" tooltip
+  recorded its tools), `task_prompt_top_share` and `task_prompt_top_run` (the
+  share, 0 to 100, of the task prompt tokens that came from the largest single
+  workflow run, or session for spawns outside workflows, and its id). The startup chart's "Tool definitions" tooltip
   repeats it.
 - `agent_startup_tools` — per agent type, one row per tool (built-in) or
   MCP server it was offered and rarely used (called in fewer than a tenth
@@ -2102,7 +2104,8 @@ one.
 - `agent_startup_unused` — per agent type: spawns measured, the skills
   list size, spawns given it and spawns that called the Skill tool,
   spawns offered MCP tools and spawns that called one, the CLAUDE.md
-  size and spawns that only used search and read tools.
+  size, spawns that only used search and read tools and spawns that edited
+  files (called Edit, Write, MultiEdit or NotebookEdit).
 - `agent_startup_shared` — parts (CLAUDE.md by source, and the other
   parts) that at least half the agent types receive at about the same
   size, with where they come from and the total across spawns. A
@@ -2571,9 +2574,9 @@ cites the cell it used:
   more messages Claude reported easy ran at high effort or above with
   a thinking share over the threshold. Otherwise it falls back to the
   corpus-wide approximation.
-- `spawn-claude-md` is held back when more of an agent type's runs said
-  they used CLAUDE.md than said they didn't, and cites the ones that
-  didn't.
+- `spawn-claude-md` is held back when at least as many of an agent type's
+  runs said they used CLAUDE.md as said they didn't (a tie holds it back),
+  and cites the ones that didn't. With no runs that said, it still fires.
 - `agent-batch-probes` is a card per agent type (not the main session)
   from `habits_probes`, when the type made 100 replies or more, a
   quarter or more of them a single read-only call, and half of
@@ -2620,6 +2623,16 @@ none writes a file.
   line lacks is not added; the card says so. With no snapshot, no `tools:`
   line, a built-in type, a workflow agent or a new agent file, every tool
   counts as present and the card is as it was.
+- `spawn-claude-md` for a writer agent (its `tools:` line names Edit,
+  Write, MultiEdit or NotebookEdit, or its own spawns called one; no
+  `tools:` line counts only through the spawns) with no run saying it
+  didn't use CLAUDE.md is kept at `info`. Its why and fix start with
+  "move the rules it needs into its agent file first, then omitClaudeMd",
+  and say how many of its spawns edited files. Read-only agents are
+  unchanged. Its `saving_usd` is the figure in `estimated_saving`.
+- `spawn-task-prompt` is gated and priced on the mean task prompt. When one
+  workflow run (or session, outside workflows) holds half or more of the
+  task prompt tokens, the why names it and its share.
 - `spawn-unused-skills` offers the tools list first (leave Skill off it)
   and keeps `disallowedTools: Skill` as the narrow alternative. When the
   tools list card leaves Skill out, its saving is a part of that card's,

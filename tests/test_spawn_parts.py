@@ -24,7 +24,7 @@ from claudeglass.model import (
     SettingChange,
     Table,
 )
-from claudeglass.recommend import recommend
+from claudeglass.recommend import _row_values, recommend
 from claudeglass.snapshots import Snapshot
 from claudeglass.units import NO_LIMIT_SHARE_HINT, Units
 
@@ -926,3 +926,71 @@ def test_runs_that_said_they_did_not_use_claude_md_are_cited():
     rec = next(r for r in _recs(report, snapshot=snap) if r.id == "spawn-claude-md")
     assert ("Runs that said they didn't use CLAUDE.md", 3, "habits.habits_agents", "reviewer") in rec.evidence
     assert "3 of the 4 runs that said, said they didn't use your CLAUDE.md." in rec.why
+
+
+def test_a_tie_between_runs_that_used_and_did_not_use_claude_md_is_held_back():
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    recs = _recs(_with_rules(_report(_acc("reviewer")), "reviewer", used=1, unused=1), snapshot=snap)
+    assert not any(r.id == "spawn-claude-md" for r in recs)
+
+
+def test_claude_md_saving_usd_is_the_figure_in_estimated_saving():
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    rec = next(r for r in _recs(_report(_acc("reviewer")), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    # 3,000 tokens x 10 spawns x 3.75 USD per million.
+    assert rec.saving_usd == pytest.approx(0.1125)
+
+
+def test_a_writer_agent_with_no_rules_reports_gets_an_info_card_that_moves_the_rules_first():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 8
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    rec = next(r for r in _recs(_report(acc), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert rec.why.startswith("8 of its 10 spawns edited files")
+    assert "move the rules it needs into its agent file first, then omitClaudeMd" in rec.why
+    assert rec.action.startswith("First move the CLAUDE.md rules reviewer needs into its agent file")
+    assert rec.saving_usd == pytest.approx(0.1125)
+
+
+def test_an_agent_whose_tools_line_names_a_file_tool_is_a_writer_even_before_any_spawn_edited():
+    snap = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Write"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer")), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert "move the rules it needs into its agent file first, then omitClaudeMd" in rec.why
+    assert "edited files" not in rec.why
+
+
+def test_a_read_only_agent_keeps_its_severity():
+    snap = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Grep"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer", read_only=10)), snapshot=snap) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+    assert "move the rules it needs" not in rec.why
+
+
+def test_a_writer_that_reports_it_did_not_use_the_rules_keeps_its_severity():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 8
+    report = _with_rules(_report(acc), "reviewer", used=0, unused=3)
+    rec = next(r for r in _recs(report, snapshot=_snapshot({"reviewer": {"source": "user"}})) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+
+
+def _task_prompt_rec(acc):
+    return next(r for r in _recs(_report(acc)) if r.id == "spawn-task-prompt")
+
+
+def test_a_task_prompt_mostly_from_one_run_names_it_and_its_share():
+    acc = _acc("reviewer", claude_md=0.0, task=6000.0)
+    acc.run_keys = ["wf_big"] * 8 + ["wf_a", "wf_b"]
+    rec = _task_prompt_rec(acc)
+    assert "80% of it came from wf_big" in rec.why
+    row = _row_values(_report(acc), "agent_startup", "agent_startup_breakdown", "reviewer")
+    assert row["task_prompt_top_run"] == "wf_big" and row["task_prompt_top_share"] == pytest.approx(80.0)
+
+
+def test_a_task_prompt_spread_over_many_runs_names_none():
+    acc = _acc("reviewer", claude_md=0.0, task=6000.0)
+    acc.run_keys = [f"wf_{i}" for i in range(10)]
+    rec = _task_prompt_rec(acc)
+    assert "came from" not in rec.why

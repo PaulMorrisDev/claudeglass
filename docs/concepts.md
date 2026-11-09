@@ -867,9 +867,13 @@ look, and the calls before the first edit) is shown beside it and never
 pushes a suggestion. The `spawn-claude-md` rule adds
 `habits_agents`' reported `rules_used`/`rules_unused` counts on top of
 its structural evidence (whether every measured spawn only searched or
-read files): it holds back suggesting `omitClaudeMd: true` once most of
-an agent's reported runs said they did use the rules, and otherwise
-cites how many said they didn't.
+read files): it holds back suggesting `omitClaudeMd: true` once at least as many of
+an agent's reported runs said they did use the rules as said they
+didn't (a tie holds it back), and otherwise cites how many said they
+didn't. An agent that edits files (its tools list names Edit, Write,
+MultiEdit or NotebookEdit, or its spawns called one) with no run saying
+it didn't use them gets the card at `info`, telling you to move the
+rules it needs into its agent file first.
 
 The full table reference — every column of every `habits` and `capture`
 table — is in

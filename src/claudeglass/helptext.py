@@ -803,6 +803,12 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "",
                 "The average number of replies a spawn made after its first. A saving counts each of them.",
             ),
+            "task_prompt_top_share": (
+                "",
+                "The share of the task prompt tokens that came from the one workflow run, or session outside "
+                "workflows, that wrote the most.",
+            ),
+            "task_prompt_top_run": ("", "The workflow run or session behind that share."),
             "largest_tools": (
                 "",
                 "The three biggest tools or MCP servers in this agent type's tool definitions, on the model "
@@ -832,6 +838,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "mcp_used_spawns": ("", "Spawns that called at least one MCP tool."),
             "claude_md_tokens": ("", "Average size of CLAUDE.md and memory per spawn, in tokens."),
             "read_only_spawns": ("", "Spawns given CLAUDE.md that only searched or read files."),
+            "edit_spawns": ("", "Spawns that changed files (Edit, Write, MultiEdit or NotebookEdit)."),
         },
         lead_columns=[
             "agent_type", "spawns", "skills_listing_tokens", "skills_used_spawns", "mcp_used_spawns",

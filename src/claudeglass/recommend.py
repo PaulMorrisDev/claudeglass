@@ -1680,6 +1680,12 @@ def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Reco
 #: (its sub-agents docs), so omitClaudeMd means nothing for them.
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
 
+#: Tools that change files: an agent whose ``tools:`` line names one is a writer.
+_FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+#: The share of an agent type's task prompt tokens one run must hold for
+#: the spawn-task-prompt card to name it.
+_TASK_PROMPT_TOP_SHARE_PCT = 50.0
+
 #: Agent types started by Claude Code itself (workflow scripts, forks)
 #: rather than by name, so no agent file can override them.
 _NOT_OVERRIDABLE = frozenset({"workflow-subagent", "fork", "unknown", "(unknown)"})
@@ -2150,9 +2156,24 @@ def _rule_spawn_parts(
             and agent_type not in _SKIPS_CLAUDE_MD
             and overridable
             and rules_used <= rules_unused
+            # With no reports (0 and 0) the card still fires; with reports, a tie holds it back.
+            and (rules_used + rules_unused == 0 or rules_unused > rules_used)
         ):
             rules_evidence = []
+            # An agent that edits files leans on the rules it is sent. With no run
+            # saying it didn't, the card stays but asks for the rules to move first.
+            edited = used(agent_type, "edit_spawns")
+            edited = edited if isinstance(edited, int) else 0
+            writer = bool(set(known_line or []) & _FILE_TOOLS) or edited > 0
+            writer_first = writer and rules_unused == 0
             why = f"Each {agent_type} spawn starts with about {claude_md:,.0f} tokens of CLAUDE.md files and memory."
+            if writer_first:
+                why = (
+                    (f"{edited} of its {spawns} spawns edited files, so " if edited else "It can edit files, so ")
+                    + "move the rules it needs into its agent file first, then omitClaudeMd. "
+                    + why
+                )
+                why = why[:1].upper() + why[1:]
             if all_read_only:
                 why += " Every measured spawn only searched or read files, so it rarely needs your working rules."
             if claude_md_managed:
@@ -2178,12 +2199,15 @@ def _rule_spawn_parts(
             out.append(
                 Recommendation(
                     id="spawn-claude-md",
-                    severity="advice",
+                    severity="info" if writer_first else "advice",
                     category="settings",
                     archetypes=_ALL_ARCHETYPES,
                     title=f"{agent_type} is sent your CLAUDE.md files every time it starts",
                     action=(
-                        f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
+                        f"First move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
+                        "sending it CLAUDE.md (omitClaudeMd: true)."
+                        if has_file and writer_first
+                        else f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
                         "sending it CLAUDE.md (omitClaudeMd: true)."
                         if has_file
                         else f"{agent_type} is a built-in agent, so it has no file to change. Create a "
@@ -2209,6 +2233,7 @@ def _rule_spawn_parts(
                         )
                     ],
                     estimated_saving=_startup_saving(units, claude_md_usd),
+                    saving_usd=claude_md_usd if _is_number(claude_md_usd) and claude_md_usd > 0 else None,
                     saving_basis=(
                         _startup_basis(units, carried=carried)
                         + (" It is priced as the Context files section prices carrying it." if carried else "")
@@ -2395,6 +2420,13 @@ def _rule_spawn_parts(
         task_prompt = part(agent_type, "task_prompt")
         if isinstance(task_prompt, (int, float)) and task_prompt >= th.spawn_task_prompt_tokens:
             prompt_usd, prompt_carried = _body_usd(task_prompt / 2, spawns, price, read_price, later_calls)
+            top_share = part(agent_type, "task_prompt_top_share")
+            top_run = part(agent_type, "task_prompt_top_run")
+            concentrated = (
+                f" {top_share:.0f}% of it came from {top_run}."
+                if _is_number(top_share) and top_share >= _TASK_PROMPT_TOP_SHARE_PCT and top_run
+                else ""
+            )
             out.append(
                 Recommendation(
                     id="spawn-task-prompt",
@@ -2417,7 +2449,7 @@ def _rule_spawn_parts(
                     saving_basis=(
                         _startup_basis(units, carried=prompt_carried) if units is not None and prompt_usd else ""
                     ),
-                    why=f"Each {agent_type} spawn starts with about {task_prompt:,.0f} tokens of instructions from its parent.",
+                    why=f"Each {agent_type} spawn starts with about {task_prompt:,.0f} tokens of instructions from its parent.{concentrated}",
                 )
             )
             covered.add(agent_type)

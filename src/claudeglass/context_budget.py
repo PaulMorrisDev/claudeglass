@@ -563,6 +563,9 @@ _LATE_STARTUP_SUBKINDS = frozenset({"mcp_instructions_delta", "agent_listing_del
 #: Tools that only search or read. A subagent that used nothing else
 #: counts towards :class:`_AgentStartupAcc`'s ``read_only_spawns``.
 _READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "ToolSearch"})
+#: The tools that change files. A spawn that called one counts towards
+#: :class:`_AgentStartupAcc`'s ``edit_spawns``.
+_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 #: A subagent counts as a fork (it inherited the parent's conversation
 #: and prompt cache) when its first turn reads at least this share of the
@@ -715,6 +718,12 @@ class _AgentStartupAcc:
     mcp_used_spawns: int = 0
     claude_md_spawns: int = 0
     read_only_spawns: int = 0
+    #: Spawns that called a tool that changes files (:data:`_EDIT_TOOLS`).
+    edit_spawns: int = 0
+    #: Per measured spawn, in step with ``startup_tokens``: the workflow run
+    #: it ran under, or its session when it ran outside one (``""`` when
+    #: neither is known).
+    run_keys: list[str] = field(default_factory=list)
     #: The first turn's model's 5-minute cache-write list price (USD per
     #: million tokens), per measured spawn whose model is on the rate card,
     #: with the model family it came from beside it.
@@ -1170,6 +1179,7 @@ class ContextBudgetStats:
         acc.written_tokens.append(first.cache_creation_tokens)
         acc.prompt_tokens.append(first.input_tokens)
         acc.models.append(family)
+        acc.run_keys.append(sub.meta.workflow_run_id or sub.meta.session_id or "")
         acc.later_calls.append(sum(1 for turn in sub.turns if turn.turn_index > 1))
         acc.roster_tokens.append(sizes.agent_roster)
         for part, tokens in parts.items():
@@ -1196,6 +1206,8 @@ class ContextBudgetStats:
             acc.write_price_models.append(family)
 
         tool_names = {name for turn in sub.turns for name in turn.tool_names}
+        if tool_names & _EDIT_TOOLS:
+            acc.edit_spawns += 1
         if startup.saw_tools:
             acc.tool_spawns[family] = acc.tool_spawns.get(family, 0) + 1
             # The tool definitions are the front of the cached prefix: a
@@ -2114,6 +2126,27 @@ def _largest_tools(acc: _AgentStartupAcc, family: str, calibration: Calibration)
     return ", ".join(f"{key} {tokens_text(round(tokens))}" for key, tokens in sized[:3]) or None
 
 
+def _largest_run(acc: _AgentStartupAcc, positions: list[int], count: int) -> tuple[float | None, str | None]:
+    """The share (0-100) of this agent type's task prompt tokens that came
+    from its largest single workflow run, or from its largest session when
+    the spawns ran outside workflows, and that run's id. ``(None, None)``
+    when the spawns don't say which run they belong to or have no task
+    prompt."""
+    keys = _picked(acc.run_keys, positions, count)
+    sizes = _picked(acc.parts.get("task_prompt", []), positions, count)
+    if len(keys) != len(sizes):
+        return None, None
+    by_run: dict[str, float] = {}
+    for key, size in zip(keys, sizes):
+        if key:
+            by_run[key] = by_run.get(key, 0.0) + size
+    total = sum(sizes)
+    if not by_run or total <= 0:
+        return None, None
+    top = max(sorted(by_run), key=lambda key: by_run[key])
+    return by_run[top] / total * 100, top
+
+
 def _build_startup_table(stats: ContextBudgetStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
@@ -2150,6 +2183,8 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
         # recommendation rules read them; see ``diet_usd``).
         Column(key="read_price", label="Cache-read price per million tokens", kind="money"),
         Column(key="later_calls", label="Calls after the first", kind="float"),
+        Column(key="task_prompt_top_share", label="Task prompt from the largest run", kind="pct"),
+        Column(key="task_prompt_top_run", label="Largest run (workflow run or session)", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2175,6 +2210,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             + [not_recorded, measured_pct, fmean(prices) if prices else None, managed_claude_md, removable]
             + [_largest_tools(acc, family, stats.calibration)]
             + [read_price, later_calls if acc.later_calls else None]
+            + list(_largest_run(acc, positions, count))
         )
     return Table(
         name="agent_startup_breakdown",
@@ -2194,6 +2230,8 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             "\"Not recorded\".",
             "Forks inherit the parent's conversation and prompt cache, so they are counted but kept "
             "out of the averages.",
+            "\"Task prompt from the largest run\" is the share from one workflow run, or one session "
+            "outside workflows.",
             "\"CLAUDE.md and memory\" includes a managed policy CLAUDE.md (also shown on its own in "
             "the last column). An agent's setting that skips CLAUDE.md files skips only the project's "
             "own ones: a policy CLAUDE.md still loads.",
@@ -2440,6 +2478,7 @@ def _build_unused_table(stats: ContextBudgetStats) -> Table:
         Column(key="mcp_used_spawns", label="Spawns that used an MCP tool", kind="int"),
         Column(key="claude_md_tokens", label="CLAUDE.md size", kind="tokens"),
         Column(key="read_only_spawns", label="Spawns that only searched or read", kind="int"),
+        Column(key="edit_spawns", label="Spawns that edited files", kind="int"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2457,6 +2496,7 @@ def _build_unused_table(stats: ContextBudgetStats) -> Table:
                 acc.mcp_used_spawns,
                 _mean_or_zero(acc.parts.get("claude_md")),
                 acc.read_only_spawns,
+                acc.edit_spawns,
             ]
         )
     return Table(
@@ -2469,6 +2509,8 @@ def _build_unused_table(stats: ContextBudgetStats) -> Table:
             "used when any of its turns called one.",
             "\"Only searched or read\" means every tool the subagent called was one of "
             + ", ".join(sorted(_READ_ONLY_TOOLS))
+            + ". \"Edited files\" means it called "
+            + ", ".join(sorted(_EDIT_TOOLS))
             + ".",
         ],
     )
