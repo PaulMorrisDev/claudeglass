@@ -664,29 +664,60 @@ def _temp_prefixes() -> tuple[str, ...]:
 _DOC_FOLDERS = frozenset({"plans", "reports", "docs"})
 _SCRATCH_FOLDERS = frozenset({"scratchpad"})
 #: Under one of those folders, only a file with one of these endings is a
-#: document: ``app/reports/views.py`` and ``docs/conf.py`` are code.
-_DOC_FOLDER_SUFFIXES = (".json", ".jsonl", ".csv", ".tsv", ".html", ".htm", ".log")
-#: A ``.json`` or ``.jsonl`` file with one of these in its name is a report
-#: or ledger, not code.
+#: document: ``app/reports/views.py`` and ``docs/conf.py`` are code, and so
+#: are ``package.json`` and ``web/index.html`` anywhere else.
+_DOC_FOLDER_SUFFIXES = (".json", ".html", ".htm")
+#: Endings of a log, a table of results and a record-per-line ledger: a
+#: document wherever the file sits, because an agent that keeps a record of
+#: its work appends to one in the project or the folder it runs in.
+_DOC_SUFFIXES_ANYWHERE = (".log", ".csv", ".tsv", ".jsonl")
+#: A ``.json`` file with one of these in its name is a report or ledger,
+#: not code.
 _LEDGER_NAME_RE = re.compile(r"report|ledger|audit|finding|review|verdict|result", re.IGNORECASE)
+#: A normalised path that starts at a root: ``/...`` or ``c:/...``.
+_ABSOLUTE_RE = re.compile(r"^(?:/|[a-z]:/)")
 
 
-def _is_code_write_target(target: str, prefixes: tuple[str, ...]) -> bool:
+def _folders_below(normal: str, cwd: str | None) -> set[str]:
+    """The folder names that can make ``normal`` (a normalised target) a
+    document or scratch file. Only folders below the session's working
+    folder count when the target is inside it, since the path the project
+    itself sits at says nothing about what its files are (a repository in
+    ``~/docs/shop``). A relative target is below the working folder by
+    being relative: all its folders count. A target outside the working
+    folder, or any absolute one when no working folder is known, has no
+    project root to measure from, so only the folder it sits in counts."""
+    folders = normal.rpartition("/")[0]
+    if not _ABSOLUTE_RE.match(normal):
+        return set(folders.split("/"))
+    if isinstance(cwd, str) and cwd:
+        root = _normalize_path_for_hash(cwd)
+        if _ABSOLUTE_RE.match(root):
+            root = root.rstrip("/") + "/"
+            if normal.startswith(root):
+                return set(normal[len(root):].rpartition("/")[0].split("/"))
+    return {folders.rpartition("/")[2]}
+
+
+def _is_code_write_target(target: str, prefixes: tuple[str, ...], cwd: str | None = None) -> bool:
     """Whether a shell write target is code: not temp or scratchpad, and not
-    a document (a ``DOC_SUFFIXES`` file, a data, web or log file under
-    ``plans/``, ``reports/`` or ``docs/``, or a report or ledger in
-    ``.json``/``.jsonl``). ``Turn.shell_code_write_count`` and
-    ``Turn.edit_code_count`` count only these."""
+    a document (a ``DOC_SUFFIXES`` file, a log, table or ``.jsonl`` ledger,
+    a ``.json``, ``.html`` or ``.htm`` file under ``plans/``, ``reports/``
+    or ``docs/``, or a report or ledger in ``.json``). ``cwd`` is the
+    working folder of the line that made the call: the folders that count
+    are those below it (:func:`_folders_below`).
+    ``Turn.shell_code_write_count`` and ``Turn.edit_code_count`` count only
+    these."""
     normal = _normalize_path_for_hash(target)
     if normal.startswith(prefixes):
         return False
-    folders, _, name = normal.rpartition("/")
-    parts = set(folders.split("/"))
+    name = normal.rpartition("/")[2]
+    parts = _folders_below(normal, cwd)
     if parts & _SCRATCH_FOLDERS or (parts & _DOC_FOLDERS and name.endswith(_DOC_FOLDER_SUFFIXES)):
         return False
-    if name.endswith(DOC_SUFFIXES):
+    if name.endswith(DOC_SUFFIXES) or name.endswith(_DOC_SUFFIXES_ANYWHERE):
         return False
-    return not (name.endswith((".json", ".jsonl")) and _LEDGER_NAME_RE.search(name))
+    return not (name.endswith(".json") and _LEDGER_NAME_RE.search(name))
 
 
 def _is_temp_target(target: str, prefixes: tuple[str, ...]) -> bool:
@@ -1355,7 +1386,7 @@ def _merge_content_blocks(
                     pending.edit_real_found = True
                     # Counted before the .claude split, as the shell side
                     # counts it: a worktree under .claude holds code.
-                    if _is_code_write_target(path_value, temp_prefixes):
+                    if _is_code_write_target(path_value, temp_prefixes, cwd):
                         pending.edit_code_count += 1
                         if isinstance(tool_use_id, str) and tool_use_id:
                             pending.edit_code_by_tool_use[tool_use_id] = 1
@@ -1450,7 +1481,7 @@ def _merge_content_blocks(
                     # keeps no path.
                     if not _is_temp_target(target, temp_prefixes):
                         outside_temp += 1
-                        if _is_code_write_target(target, temp_prefixes):
+                        if _is_code_write_target(target, temp_prefixes, cwd):
                             code_targets += 1
                         if prompt_shape.is_config_path(target):
                             config_targets += 1

@@ -362,6 +362,12 @@ def test_a_shell_write_to_code_counts_as_a_code_write(tmp_path, salt, command):
     "echo x > reports/out.csv",
     "echo x > docs/a.html",
     "echo x > /home/me/scratchpad/run.py",
+    # A log, a table of results or a line-per-record ledger is a document wherever it sits.
+    "echo x >> progress.log",
+    "echo x >> verify.csv",
+    "printf 'a,b' >> results.tsv",
+    "echo '{}' >> progress.jsonl",
+    "echo x >> src/run.log",
 ])
 def test_a_shell_write_to_a_document_is_not_a_code_write(tmp_path, salt, command):
     turn = _turn(tmp_path, [_bash(command)], [_ok()])
@@ -384,6 +390,102 @@ def test_a_code_write_that_never_ran_is_taken_back(tmp_path, salt):
     turn = _turn(tmp_path, [_bash("echo x > src/a.py")],
                  [tool_result_block("t1", "The user doesn't want to proceed with this tool use.", is_error=True)])
     assert turn.shell_code_write_count == 0
+
+
+# -- where the work sits: only the folders below the working folder name a document ------
+
+#: A project whose own path holds a folder with a document name.
+_UNDER_A_DOCUMENT_FOLDER = [
+    "/home/ana/docs/shop",
+    "/srv/plans/api",
+    "C:/Users/ana/reports/etl",
+    "C:\\Users\\Ana\\Reports\\etl",
+    "/home/ana/scratchpad/shop",
+]
+
+
+def _inside(cwd: str, rest: str) -> str:
+    return cwd.replace("\\", "/") + "/" + rest
+
+
+@pytest.mark.parametrize("cwd", _UNDER_A_DOCUMENT_FOLDER)
+@pytest.mark.parametrize("command", [
+    "echo '{}' > package.json",
+    "echo '<p>' > web/index.html",
+    "echo x > src/app.py",
+])
+def test_a_project_under_a_folder_named_like_a_document_folder_still_has_its_code_writes(tmp_path, salt, cwd, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()], cwd=cwd)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 1
+
+
+@pytest.mark.parametrize("cwd", _UNDER_A_DOCUMENT_FOLDER)
+def test_an_edit_in_a_project_under_a_folder_named_like_a_document_folder_is_a_code_edit(tmp_path, salt, cwd):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": _inside(cwd, "package.json")}),
+        tool_use_block("Write", "t2", {"file_path": _inside(cwd, "web/index.html")}),
+    ], [_ok("t1"), _ok("t2")], cwd=cwd)
+    assert turn.edit_code_count == 2
+
+
+@pytest.mark.parametrize("cwd", _UNDER_A_DOCUMENT_FOLDER)
+@pytest.mark.parametrize("command", [
+    "echo '{}' > reports/summary.json",
+    "echo x > docs/a.html",
+    "echo '{}' > plans/2026/q3/data.json",
+    "echo x > scratchpad/run.py",
+    "echo x > docs/api/notes.md",
+])
+def test_the_projects_own_document_folders_still_hold_documents_wherever_it_sits(tmp_path, salt, cwd, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()], cwd=cwd)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 0
+
+
+def test_an_edit_into_the_projects_own_reports_folder_is_not_a_code_edit(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Write", "t1", {"file_path": "/home/ana/docs/shop/reports/out.json"}),
+    ], [_ok("t1")], cwd="/home/ana/docs/shop")
+    assert turn.edit_code_count == 0
+
+
+@pytest.mark.parametrize(("target", "cwd", "code"), [
+    # Inside the working folder: the folders below it decide.
+    ("/home/ana/docs/shop/package.json", "/home/ana/docs/shop", True),
+    ("/home/ana/docs/shop/docs/package.json", "/home/ana/docs/shop", False),
+    ("/home/ana/docs/shop/docs/api/spec.json", "/home/ana/docs/shop", False),
+    ("/home/ana/docs/shop/src/docs/spec.json", "/home/ana/docs/shop", False),
+    ("/home/ana/docs/shop/src/docs.json", "/home/ana/docs/shop", True),
+    # Case and slash direction do not tell two spellings of one folder apart.
+    ("C:/Users/ana/reports/etl/package.json", "c:\\users\\ANA\\Reports\\etl", True),
+    ("c:/users/ana/reports/etl/Reports/a.json", "C:\\Users\\ana\\reports\\etl\\", False),
+    ("/c/Users/ana/reports/etl/package.json", "C:/Users/ana/reports/etl", True),
+    ("/home/ana/docs/shop/package.json", "/home/ana/docs/shop/", True),
+    # A relative target is below the working folder by being relative.
+    ("docs/a.json", "/home/ana/docs/shop", False),
+    ("package.json", "/home/ana/docs/shop", True),
+    ("docs/a.json", None, False),
+    ("package.json", None, True),
+    # Outside the working folder, or with none: the folder the file sits in decides, nothing above it.
+    ("/srv/docs/notes.json", "/home/ana/work", False),
+    ("/srv/docs/shop/package.json", "/home/ana/work", True),
+    ("/srv/docs/notes.json", None, False),
+    ("/srv/docs/shop/package.json", None, True),
+    ("/srv/plans/api/app.py", None, True),
+    ("/srv/scratchpad/a.py", None, False),
+    ("/srv/scratchpad/job/a.py", None, True),
+    # A working folder that is not absolute names nothing: it is as good as none.
+    ("/srv/docs/shop/package.json", "shop", True),
+    ("/home/ana/work2/package.json", "/home/ana/work", True),
+    # The folder rule is for .json, .html and .htm: the other endings need none.
+    ("/home/ana/work/run.log", "/home/ana/work", False),
+    ("/home/ana/work/data.csv", "/home/ana/work", False),
+    ("/home/ana/work/data.tsv", "/home/ana/work", False),
+    ("/home/ana/work/progress.jsonl", "/home/ana/work", False),
+    ("/home/ana/work/package.json", "/home/ana/work", True),
+    ("/home/ana/work/index.html", "/home/ana/work", True),
+])
+def test_the_folders_that_make_a_json_or_html_file_a_document_are_those_below_the_working_folder(target, cwd, code):
+    assert parse._is_code_write_target(target, parse._temp_prefixes(), cwd) is code
 
 
 # -- the edit-tool side of it (``Turn.edit_code_count``) ---------------------------------

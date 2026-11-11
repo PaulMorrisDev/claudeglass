@@ -586,10 +586,15 @@ phase, label, description or path:
   path.
 - ``Turn.shell_code_write_count: int | None = None`` -- the part of
   ``shell_write_count`` aimed at code: not a document (a
-  ``capture_catalogue.DOC_SUFFIXES`` file, a ``.json``, ``.csv``,
-  ``.html`` or ``.log`` file under ``plans/``, ``reports/`` or ``docs/``,
-  a report or ledger ``.json``/``.jsonl``) and
-  not under ``scratchpad/``. Taken back like ``shell_write_count``. Only
+  ``capture_catalogue.DOC_SUFFIXES`` file, a ``.log``, ``.csv``, ``.tsv``
+  or ``.jsonl`` file wherever it is, a ``.json``, ``.html`` or ``.htm``
+  file under ``plans/``, ``reports/`` or ``docs/``, a report or ledger
+  ``.json``) and not under ``scratchpad/``. Those folders are the ones
+  below the working folder of the line that made the call (the target is
+  inside it; a repository kept under a folder named ``docs`` is not a
+  ``docs`` folder of its own). A target outside the working folder, or any
+  absolute one when the line names none, is judged by the folder it sits
+  in alone. Taken back like ``shell_write_count``. Only
   the ``agent-decide-apply`` verdict reads it. ``None`` in a digest an
   older parser wrote: not measured, which is not 0. Nothing can measure
   it once the transcript is gone, so the verdict leaves that run out.
