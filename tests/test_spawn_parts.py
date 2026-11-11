@@ -1109,17 +1109,24 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     assert not any("replaces the built-in" in r.action for r in recs)
 
 
-def test_the_folder_a_built_in_agents_card_names_is_the_one_its_fix_writes_to():
+@pytest.mark.parametrize("agent", sorted(recommend_mod._BUILTIN_AGENT_TYPES - recommend_mod._NOT_OVERRIDABLE))
+@pytest.mark.parametrize("writer", [False, True])
+def test_the_folder_a_built_in_agents_card_names_is_the_one_its_fix_writes_to(agent, writer):
     big = (0, 25_000.0, 800.0, 300.0)
-    builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
-    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == "general-purpose" and r.changes]
-    assert {r.id for r in recs} >= {"spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp", "spawn-claude-md"}
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    if writer:
+        builtin.edit_spawns = 8
+    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == agent and r.changes]
+    # Explore and Plan are not sent CLAUDE.md, so they get no card for it.
+    assert {r.id for r in recs} >= {"spawn-unused-skills", "spawn-unused-mcp"}
     for rec in recs:
         where = fixes.fix_file(rec, rec.changes[0])
-        assert where == "~/.claude/agents/general-purpose.md"
+        assert where == f"~/.claude/agents/{agent}.md"
         assert where in rec.action, rec.id
-    # The project prompt files the tools card under that same path.
-    assert "## ~/.claude/agents/general-purpose.md" in fixes.project_prompt(recs)["prompt"]
+    # The project prompt files the tools card (the diet leaves Explore, Plan and the guide alone) under that path.
+    tools = _tools_rec(recs, agent)
+    if tools is not None:
+        assert f"## ~/.claude/agents/{agent}.md" in fixes.project_prompt(recs)["prompt"]
 
 
 def test_a_built_in_writer_is_told_to_carry_its_rules_into_the_new_file_first():

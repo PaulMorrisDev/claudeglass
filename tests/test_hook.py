@@ -1680,6 +1680,22 @@ def test_snapshot_project_key_matches_the_hooks_stored_slug():
     assert snap_mod.snapshot_project_key(raw) == hook._redact_slug(raw)
 
 
+def test_the_hooks_name_cap_cut_marker_and_entry_split_are_the_packages_copies():
+    """The hook keeps its own copies of what ``snapshots.py`` reads back to tell a
+    cut or masked name from a whole one; a drift stops the cut-off detection
+    silently."""
+    from claudeglass import snapshots as snap_mod
+
+    hook = _load_hook_module()
+    assert hook._MAX_NAME_CHARS == snap_mod.NAME_CAP
+    cut = hook._clip_name("x" * 200)
+    assert len(cut) == snap_mod.NAME_CAP and cut.endswith(snap_mod.NAME_CUT) and snap_mod.cut_off_name(cut)
+    assert hook._clip_name("/home/u/x").startswith(snap_mod.NAME_REDACTED)
+    assert hook._clip_name("https://example.com/x").startswith(snap_mod.NAME_REDACTED)
+    for line in ("Read, Grep", "Agent(a, b), Read", "Agent(a, (b, c)), , Read,", "", " , ", "Bash(cat x, y"):
+        assert hook._split_tool_line(line) == snap_mod.split_tool_line(line), line
+
+
 @pytest.mark.parametrize("raw", ["C--Dev-x", "c--Dev-x", "c--dev-X", "-home-alice-x", "c-Users-x", "x--y", ""])
 def test_the_hooks_stored_slug_is_the_packages_canonical_key_for_either_drive_letter_case(raw):
     """The hook keeps its own copy of the drive-letter fold, so a drift

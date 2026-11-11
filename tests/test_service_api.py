@@ -6506,3 +6506,40 @@ def test_recommendations_prompt_rejects_a_bad_window(server):
     resp, body = server.get_json("/api/recommendations/prompt?since=not-a-date")
     assert resp.status == 400
     assert body["error"]["code"] == "bad_request"
+
+
+def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_builds_it_once(server, monkeypatch):
+    """``api._quick_context`` hands the Tools check the snapshot's ``agents`` map,
+    where the line is (``effective_agents`` never holds one), and builds the
+    merged snapshot once for it and for the settings."""
+    from claudeglass import quick_actions, snapshots
+
+    server.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts="2026-09-19T12:00:00Z",
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "effective": {"model": "opus"},
+                "agents": {"reviewer": {"source": "user", "tools": ["Read", "Grep"]}},
+                "effective_agents": {"reviewer": {"source": "user", "model": "haiku"}},
+            }
+        ),
+    )
+    seen, merges = [], []
+    real_run, real_merge = quick_actions.run, snapshots.with_every_project_agents
+    monkeypatch.setattr(quick_actions, "run", lambda check, ctx: seen.append(ctx) or real_run(check, ctx))
+    monkeypatch.setattr(snapshots, "with_every_project_agents", lambda *args, **kw: merges.append(1) or real_merge(*args, **kw))
+
+    server.get_json("/api/quick-actions/tools")  # builds and caches the report
+    seen.clear()
+    merges.clear()
+    resp, payload = server.get_json("/api/quick-actions/tools")
+
+    assert resp.status == 200, payload
+    [ctx] = seen
+    assert ctx.agents == {"reviewer": {"source": "user", "tools": ["Read", "Grep"]}}
+    assert ctx.effective == {"model": "opus"}
+    assert ctx.effective_agents == {"reviewer": {"source": "user", "model": "haiku"}}
+    assert len(merges) == 1

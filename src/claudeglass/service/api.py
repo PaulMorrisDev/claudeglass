@@ -3205,9 +3205,15 @@ def make_handler(
         from .. import quick_actions
 
         model = _get_report_model(*window, project)
-        effective, effective_agents, _env_set = _current_settings(project)
-        # The tools lines are in the snapshot's agents map, which the cards read.
+        # The settings in force and every project's agents come from one merged
+        # snapshot (as _current_settings reads it); the tools lines are in its
+        # agents map, which the cards read.
         snapshot = _config_snapshot_with_every_project_agents(project)
+        effective, effective_agents = {}, {}
+        if snapshot is not None:
+            effective = snapshots_mod.effective_config_in_force(snapshot)
+            agents = snapshot.data.get("effective_agents")
+            effective_agents = agents if isinstance(agents, dict) else {}
         agent_files = snapshot.data.get("agents") if snapshot is not None else None
         window_days, since, until, _window_by = window
         since_dt, until_dt = _resolve_window(window_days, since, until)
