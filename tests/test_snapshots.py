@@ -760,6 +760,36 @@ def test_with_every_project_agents_folds_a_projects_drive_letter_keys():
     assert view.data["agents"]["implementer"] == _agent("project", "opus")
 
 
+def test_with_every_project_agents_drops_a_user_agent_the_newest_snapshot_no_longer_lists():
+    """A user-level agent file is read in every session, so the newest
+    snapshot's agents map is the whole list of them: an older project's
+    snapshot that still lists a deleted one does not bring it back. Project
+    agents of other projects are still taken."""
+    stale = _schema2_snapshot(
+        project_slug="a",
+        ts="20260920T000000Z",
+        agents={"general-purpose": _agent("user", "haiku"), "implementer": _agent("project", "haiku")},
+        effective_agents={"general-purpose": _agent("user", "haiku"), "implementer": _agent("project", "haiku")},
+    )
+    newest = _schema2_snapshot(
+        project_slug="b",
+        ts="20260923T000000Z",
+        agents={"helper": _agent("user", "opus")},
+        effective_agents={"helper": _agent("user", "opus")},
+    )
+
+    view = snap_mod.with_every_project_agents([stale, newest])
+
+    assert set(view.data["agents"]) == {"helper", "implementer"}
+    assert set(view.data["effective_agents"]) == {"helper", "implementer"}
+    # An agent the newest snapshot lists is still taken from the newer record.
+    kept = _schema2_snapshot(project_slug="c", ts="20260924T000000Z", agents={"general-purpose": _agent("user", "sonnet")})
+    assert snap_mod.with_every_project_agents([stale, newest, kept]).data["agents"]["general-purpose"] == _agent("user", "sonnet")
+    # With no agents map to go by (a snapshot without one), nothing is dropped.
+    bare = _schema2_snapshot(project_slug="d", ts="20260925T000000Z")
+    assert "general-purpose" in snap_mod.with_every_project_agents([stale, bare]).data["agents"]
+
+
 def test_with_every_project_agents_is_none_without_snapshots():
     assert snap_mod.with_every_project_agents([]) is None
 

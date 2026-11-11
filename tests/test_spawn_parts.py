@@ -1164,3 +1164,24 @@ def test_an_agent_entry_with_an_allowlist_is_not_widened_on_the_suggested_line()
     rec = _tools_rec(_recs(_report(_orchestrator()), snapshot=snap, units=Units()), "orchestrator")
     assert rec.changes[0].value == ["Agent(worker, reviewer)", "Grep", "Read"]
     assert "tools: Agent(worker, reviewer), Grep, Read" in rec.action
+
+
+def test_a_deleted_user_override_of_a_built_in_in_an_older_snapshot_does_not_drive_the_cards():
+    # general-purpose's override file was deleted. Another project's older
+    # snapshot still lists it, with a tools line, but the newest says it is gone.
+    from claudeglass import snapshots
+
+    def snap(slug, ts, agents):
+        data = {"schema": 2, "ts": ts, "project_slug": slug, "agents": agents, "effective": {}, "effective_agents": {}}
+        return Snapshot(path=None, ts=ts, data=data)
+
+    stale = snap("a", "20260920T000000Z", {"general-purpose": {"source": "user", "tools": ["Read"]}})
+    newest = snap("b", "20260923T000000Z", {})
+    report = _report(_diet_acc("general-purpose", spawns=50))
+    stale_only = _tools_rec(_recs(report, snapshot=stale, units=Units()), "general-purpose")
+    merged = snapshots.with_every_project_agents([stale, newest])
+    rec = _tools_rec(_recs(report, snapshot=merged, units=Units()), "general-purpose")
+    # The built-in is given every tool, so its card keeps the tools it called.
+    assert stale_only is None
+    assert rec is not None and rec.changes[0].value == ["Bash", "Grep", "Read"]
+    assert "replaces the built-in" in rec.action

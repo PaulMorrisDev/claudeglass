@@ -751,7 +751,11 @@ def with_every_project_agents(
     unset, call them built into Claude Code and point ``apply`` at the
     user folder. A project agent wins over a user agent of the same name
     (Claude Code's own order); otherwise the newer snapshot wins.
-    Settings, provenance and managed keys stay the newest snapshot's.
+    Every session lists all of the user's own agent files, so the base
+    snapshot's agents map, when it has one, is the whole list of them:
+    another project's older snapshot cannot bring back a user agent deleted
+    since (a built-in it overrode would still read as overridden). Settings,
+    provenance and managed keys stay the newest snapshot's.
     ``None`` when ``snapshots`` is empty.
     """
     base = next((s for s in reversed(snapshots) if isinstance(s.data.get("effective"), dict)), None)
@@ -765,7 +769,16 @@ def with_every_project_agents(
             entries = snap.data.get(section)
             if not isinstance(entries, dict):
                 continue
+            listed = base.data.get(section)
             for name, entry in entries.items():
+                if (
+                    snap is not base
+                    and isinstance(listed, dict)
+                    and name not in listed
+                    and isinstance(entry, dict)
+                    and entry.get("source") == "user"
+                ):
+                    continue
                 held = into.get(name)
                 if (
                     isinstance(held, dict)
