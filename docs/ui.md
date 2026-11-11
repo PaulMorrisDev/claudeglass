@@ -530,8 +530,9 @@ that order, each as a heading with a one-line answer beside it.
    its card is Worth considering, and only where the model lever has no
    saving for that agent type (`agentModelItems`): a workflow agent's,
    which has no lever, is a share of all the spend. The other two
-   agent-model cards add nothing. The total is still "at most", and
-   never above the spend.
+   agent-model cards add nothing. A card at For your information level
+   adds nothing either: the headline counts only the changes worth
+   making. The total is still "at most", and never above the spend.
    The previous period comes from `/api/summary?previous=1` for the same
    window and project, so a change compares a summary with a summary.
    The service works the period out in its own days, and `previousPhrase`
