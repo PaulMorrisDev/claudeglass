@@ -1,3 +1,4 @@
+import re
 
 
 def test_profile_prompt_lists_changed_unmanaged_keys_with_their_files():
@@ -664,6 +665,38 @@ def test_project_prompt_counts_an_a_or_b_pair_as_a_file():
     out = project_prompt([pair])
     assert out["files"] == [{"file": "~/.claude/settings.json or .claude/settings.json", "fixes": 1}]
     assert out["several"] == 0
+
+
+def _header_kind_problems():
+    """The ``_FIX_FILE`` ids whose kind is wrong for their header: a header
+    is a ``file`` exactly when each of its "A or B" parts is one path (no
+    spaces), so a header added without a kind row cannot count as a file."""
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    problems = []
+    for variant_id in fixes_mod._FIX_FILE:
+        rec_id, _, variant = variant_id.partition(":")
+        rec = Recommendation(id=rec_id, variant=variant, agent_type="x")
+        header, kind = fixes_mod.fix_group(rec, None)
+        one_path = all(re.fullmatch(r"\S+", part) for part in header.split(" or "))
+        if (kind == "file") != one_path:
+            problems.append((variant_id, header, kind))
+    return problems
+
+
+def test_a_header_counts_as_a_file_exactly_when_it_is_one_path_or_an_a_or_b_pair():
+    assert _header_kind_problems() == []
+
+
+def test_a_new_header_without_a_kind_row_is_caught():
+    from claudeglass import fixes as fixes_mod
+
+    fixes_mod._FIX_FILE["brand-new-rule"] = "Skill files and settings.json"
+    try:
+        assert [p[0] for p in _header_kind_problems()] == ["brand-new-rule"]
+    finally:
+        del fixes_mod._FIX_FILE["brand-new-rule"]
 
 
 def test_project_prompt_counts_a_partly_included_card():
