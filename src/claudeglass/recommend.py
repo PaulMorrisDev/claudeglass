@@ -171,7 +171,7 @@ from .context_budget import (
     diet_usd,
     mcp_tool_key,
 )
-from .fixes import CRITIQUE_PLAN_LINE
+from .fixes import _SCOPE_WHERE, CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
 from .snapshots import (
     NAME_CUT,
@@ -249,11 +249,17 @@ def _agent_has_frontmatter(agent_type: str, snapshot: Snapshot | None) -> bool:
     return agent_type not in _BUILTIN_AGENT_TYPES
 
 
-def _built_in_note(agent_type: str) -> str:
+def agent_file_path(agent_type: str, scope: str) -> str:
+    """Where the agent's file goes, as the card's fix writes it: the same path
+    :func:`fixes.fix_file` names (``~/.claude/agents/<agent>.md`` for a
+    built-in with no file)."""
+    return _SCOPE_WHERE.get(scope, _SCOPE_WHERE["user"])[0].format(agent=agent_type)
+
+
+def _built_in_note(agent_type: str, scope: str) -> str:
     """The sentence a built-in agent type's card ends with: the built-in has
-    no file, but a same-named one in ``.claude/agents/`` replaces it, so the
-    change goes there."""
-    return f"A file named {agent_type}.md in .claude/agents/ replaces the built-in {agent_type}, so make the change there."
+    no file, but a same-named one replaces it, so the change goes there."""
+    return f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
 
 
 # -- thresholds --------------------------------------------------------------
@@ -2031,7 +2037,7 @@ def _tools_list_card(
         action = f"Limit {agent_type}'s tools to the ones it calls: {line}. {left_out} {check}"
         category = "settings"
         if not has_file:
-            action += " " + _built_in_note(agent_type)
+            action += " " + _built_in_note(agent_type, scope)
         if general:
             action += " " + _GENERAL_PURPOSE_WARNING
 
@@ -2245,10 +2251,10 @@ def _rule_spawn_parts(
                         else f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
                         "sending it CLAUDE.md (omitClaudeMd: true)."
                         if has_file
-                        else f"Create {agent_type}.md in .claude/agents/ (it replaces the built-in {agent_type}) with the "
+                        else f"Create {agent_file_path(agent_type, scope)} (it replaces the built-in {agent_type}) with the "
                         f"same job and the CLAUDE.md rules {agent_type} needs, then give it omitClaudeMd: true."
                         if writer_first
-                        else f"Create {agent_type}.md in .claude/agents/ (it replaces the built-in {agent_type}) with the "
+                        else f"Create {agent_file_path(agent_type, scope)} (it replaces the built-in {agent_type}) with the "
                         "same job, and give it omitClaudeMd: true."
                     ),
                     lever="omitClaudeMd" if has_file else None,
@@ -2317,7 +2323,7 @@ def _rule_spawn_parts(
                         else f"Give {agent_type} a tools list that leaves Skill out, or, to change nothing else, "
                         "add Skill to its disallowedTools."
                     )
-                    + ("" if has_file else " " + _built_in_note(agent_type))
+                    + ("" if has_file else " " + _built_in_note(agent_type, scope))
                     + undocumented,
                     lever=None,
                     scope=scope,
@@ -2419,7 +2425,7 @@ def _rule_spawn_parts(
                     action=(
                         f"Add {_name_list(entries)} to the disallowedTools of {agent_type}, so its spawns no "
                         f"longer get these servers: {_name_list(names)}."
-                        + ("" if has_file else " " + _built_in_note(agent_type))
+                        + ("" if has_file else " " + _built_in_note(agent_type, scope))
                     ),
                     lever=None,
                     scope=scope,

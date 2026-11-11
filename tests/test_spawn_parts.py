@@ -1097,9 +1097,9 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     recs = _recs(_report(builtin), units=Units())
     for rule in ("spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp"):
         (rec,) = [r for r in recs if r.id == rule and r.agent_type == "general-purpose"]
-        assert "A file named general-purpose.md in .claude/agents/ replaces the built-in" in rec.action, rule
+        assert "A file at ~/.claude/agents/general-purpose.md replaces the built-in" in rec.action, rule
     (rec,) = [r for r in recs if r.id == "spawn-claude-md" and r.agent_type == "general-purpose"]
-    assert "Create general-purpose.md in .claude/agents/ (it replaces the built-in general-purpose)" in rec.action
+    assert "Create ~/.claude/agents/general-purpose.md (it replaces the built-in general-purpose)" in rec.action
     assert rec.action.endswith("omitClaudeMd: true.")
     # A custom agent with a file, and a built-in with an override file, get no such sentence.
     snap = _snapshot({"general-purpose": {"source": "user"}})
@@ -1107,6 +1107,19 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     assert not any("replaces the built-in" in r.action for r in recs if r.id != "spawn-claude-md")
     recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": big})), units=Units())
     assert not any("replaces the built-in" in r.action for r in recs)
+
+
+def test_the_folder_a_built_in_agents_card_names_is_the_one_its_fix_writes_to():
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == "general-purpose" and r.changes]
+    assert {r.id for r in recs} >= {"spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp", "spawn-claude-md"}
+    for rec in recs:
+        where = fixes.fix_file(rec, rec.changes[0])
+        assert where == "~/.claude/agents/general-purpose.md"
+        assert where in rec.action, rec.id
+    # The project prompt files the tools card under that same path.
+    assert "## ~/.claude/agents/general-purpose.md" in fixes.project_prompt(recs)["prompt"]
 
 
 def test_a_built_in_writer_is_told_to_carry_its_rules_into_the_new_file_first():

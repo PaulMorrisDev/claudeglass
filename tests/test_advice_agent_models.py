@@ -438,7 +438,7 @@ def test_the_cards_stay_through_finish_and_sort_advice_first():
 
 # -- built-in agent types -----------------------------------------------------------
 
-_BUILT_IN = " Or create Explore.md in .claude/agents/ (it replaces the built-in Explore) and set model: sonnet in it."
+_BUILT_IN = " Or create ~/.claude/agents/Explore.md (it replaces the built-in Explore) and set model: sonnet in it."
 
 
 def test_the_model_cards_for_a_built_in_agent_say_a_same_named_file_replaces_it():

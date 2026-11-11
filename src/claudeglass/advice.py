@@ -1254,10 +1254,15 @@ def _built_in_model_note(rec: Recommendation, ctx: _Context, workflow: bool) -> 
     """The sentence a built-in agent type's inherited-model card ends with, or
     nothing for a workflow, a custom agent or one with its own file. Not for
     the asked card: a model named in the call beats an agent file's."""
+    from .recommend import agent_file_path
+
     agent = rec.agent_type
-    if workflow or agent is None or agent == "workflow-subagent" or ctx.agent_scope(agent)[1]:
+    if workflow or agent is None or agent == "workflow-subagent":
         return ""
-    return f" Or create {agent}.md in .claude/agents/ (it replaces the built-in {agent}) and set model: sonnet in it."
+    scope, has_file = ctx.agent_scope(agent)
+    if has_file:
+        return ""
+    return f" Or create {agent_file_path(agent, scope)} (it replaces the built-in {agent}) and set model: sonnet in it."
 
 
 def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
