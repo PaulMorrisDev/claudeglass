@@ -13,7 +13,8 @@ ClaudeGlass knows on this machine:
 - the thresholds a cache rebuild is judged by (``rebuild``);
 - the coaching thresholds in force (the catalogue's, then yours from
   ``coaching.json`` and ``config.toml``, as the capture hook works them
-  out), the tips you muted or want once a session, and whether coaching is
+  out), the hints to leave out (the tips you muted, and the hints that are
+  off for everyone) or to show once a session, and whether coaching is
   on at all with the project filter the hook applies, so the mod coaches
   only where the hook would;
 - "your usual": the median session cost and the median context a session

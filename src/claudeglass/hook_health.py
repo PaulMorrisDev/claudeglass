@@ -1111,8 +1111,8 @@ def hook_command(script: Path, extra_args: str = "", python: str | None = None) 
 
 def _install_rank(name: str) -> int:
     """Where a hook file goes in an install: the catalogue, then the
-    module that reads it, then a capture script (the launcher), then the
-    rest; names of one rank keep the order they were given in."""
+    module that reads it, then the rest, and a capture script (the
+    launcher) last; names of one rank keep the order they were given in."""
     if name == capture_catalogue.CATALOGUE_FILE:
         return 0
     if name == capture_catalogue.HOOK_MODULE:
