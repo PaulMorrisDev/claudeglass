@@ -372,9 +372,9 @@ def test_a_heartbeat_rewritten_with_seen_zero_at_the_end_of_a_session_reads_as_a
     present.mkdir()
     now = 1_700_000_000.0
     (present / "s1.json").write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now}), encoding="utf-8")
-    assert capture_hook._mod_present(tmp_path, catalogue, "s1", now) is True
+    assert capture_hook._mod_file(tmp_path, catalogue, "s1", now) is not None
     # The engine cannot delete the file: at the end the mod writes it again with `seen` at 0.
     (present / "s1.json").write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": 0}), encoding="utf-8")
     os.utime(present / "s1.json", (now + 5, now + 5))
-    assert capture_hook._mod_present(tmp_path, catalogue, "s1", now) is False
+    assert capture_hook._mod_file(tmp_path, catalogue, "s1", now) is None
     assert capture_hook._moved(tmp_path, catalogue, "s1", now) == frozenset()

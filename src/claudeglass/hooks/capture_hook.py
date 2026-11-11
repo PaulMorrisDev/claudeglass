@@ -112,7 +112,7 @@ connect``):
   call go out as one note, the capture note first, so a tip is the last
   line. While the ClaudeGlass mod is running for the session (its file
   ``<config-dir>/mod/present/<session id>.json`` is under 10 minutes old:
-  :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
+  :func:`_mod_file`) it shows the hints in ``mod.moved`` itself, in its
   own UI (each when its file's ``shows`` lists the surface that serves it,
   ``"hint"`` or ``"status"``, or has no ``shows``: an older mod), so this hook neither works them out nor stamps them as shown
   (no run is recorded while ``split_run`` is off, :func:`keep_run`, and a
@@ -1046,12 +1046,6 @@ def _mod_file(config_dir: Path, catalogue: dict, session_id: str, now_ts: float)
         return None
     except Exception:  # noqa: BLE001 - a presence fault must leave every note as it was
         return None
-
-
-def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> bool:
-    """Whether the ClaudeGlass mod is running for this session
-    (:func:`_mod_file`)."""
-    return _mod_file(config_dir, catalogue, session_id, now_ts) is not None
 
 
 def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> frozenset:

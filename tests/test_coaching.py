@@ -3961,25 +3961,25 @@ def test_the_hook_reads_the_heartbeat_once_for_all_the_questions_of_a_call(tmp_p
     monkeypatch.setattr(HOOK, "_read_json", lambda path: reads.append(path.name) or real(path))
     now_ts = NOW.timestamp()
     config_dir = _config_dir(tmp_path)
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts)
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None and HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset(cat.MOVED_TO_MOD)
     assert reads.count("s1.json") == 1
     # A rewrite of the file is read again.
     _heartbeat(tmp_path, {"s1": 0, "s2": 0})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and reads.count("s1.json") == 2
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) and reads.count("s2.json") == 1
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None and reads.count("s1.json") == 2
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is not None and reads.count("s2.json") == 1
 
 
 def test_the_presence_check_never_raises(tmp_path):
     config_dir = _config_dir(tmp_path)
     now_ts = NOW.timestamp()
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
-    assert HOOK._mod_present(config_dir, {}, "s1", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
+    assert HOOK._mod_file(config_dir, {}, "s1", now_ts) is None
     # The file's place is a folder.
     _heartbeat_path(tmp_path).mkdir(parents=True)
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset()
-    assert HOOK._mod_present(config_dir, CATALOGUE, None, now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, None, now_ts) is None
 
 
 def test_two_sessions_each_have_their_own_heartbeat(tmp_path):
@@ -3987,13 +3987,13 @@ def test_two_sessions_each_have_their_own_heartbeat(tmp_path):
     now_ts = NOW.timestamp()
     # One session's heartbeat is stale, the other's is fresh: they do not touch each other.
     _heartbeat(tmp_path, {"s1": 0, "s2": cat.MOD_PRESENT_WINDOW_S + 1})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is True
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is None
     # A session's own file going doesn't take the other's.
     _heartbeat_path(tmp_path).unlink()
     _heartbeat(tmp_path, {"s2": 0})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is True
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is not None
 
 
 @pytest.mark.parametrize("session", ["../x", "a/b", "a.b", "s_1", "s 1", "", "s1\n", "..", "\\x"])
@@ -4006,7 +4006,7 @@ def test_a_session_id_that_is_not_a_plain_word_is_never_present(tmp_path, sessio
             (place / name).write_text(
                 json.dumps({"schema": 1, "session_id": session, "seen": NOW.timestamp()}), encoding="utf-8"
             )
-    assert HOOK._mod_present(config_dir, CATALOGUE, session, NOW.timestamp()) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, session, NOW.timestamp()) is None
     assert HOOK._moved(config_dir, CATALOGUE, session, NOW.timestamp()) == frozenset()
 
 
