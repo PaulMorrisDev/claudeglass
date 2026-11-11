@@ -1867,14 +1867,16 @@ def _cmd_check(args: argparse.Namespace) -> int:
         if not args.all_projects:
             snaps = snapshots.snapshots_for_projects(snaps, projects)
         snapshot = snapshots.with_every_project_agents(snaps, snapshots.canonical_project_keys(projects))
-        agents = snapshot.data.get("effective_agents") if snapshot is not None else None
+        effective_agents = snapshot.data.get("effective_agents") if snapshot is not None else None
+        agent_files = snapshot.data.get("agents") if snapshot is not None else None
         ctx = quick_actions.Context(
             model=model,
             units=model.units or Units(),
             period=_period_phrase(window),
             config_dir=Path(config_dir),
             effective=snapshots.effective_config_in_force(snapshot) if snapshot is not None else {},
-            effective_agents=agents if isinstance(agents, dict) else {},
+            effective_agents=effective_agents if isinstance(effective_agents, dict) else {},
+            agents=agent_files if isinstance(agent_files, dict) else {},
             only=_report_only(args, projects, config_dir),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,

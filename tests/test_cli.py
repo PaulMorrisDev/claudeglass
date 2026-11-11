@@ -2380,6 +2380,26 @@ def test_check_reads_the_settings_in_force_in_the_selected_project(tmp_path, cap
     assert [effective.get("model") for effective in seen] == ["opus", "haiku", "haiku"]
 
 
+def test_check_hands_the_checks_the_tools_lines_of_the_snapshots_agents_map(tmp_path, capsys, monkeypatch):
+    """The Tools check reads a line where the cards do: the merged snapshot's
+    ``agents`` map (``effective_agents`` never holds one)."""
+    from claudeglass import quick_actions
+
+    root, config_dir = _alternating_snapshots(tmp_path)
+    newest = sorted((config_dir / "snapshots").glob("*.json"))[-1]
+    data = json.loads(newest.read_text(encoding="utf-8"))
+    data["agents"] = {"reviewer": {"source": "user", "tools": ["Read", "Grep"]}}
+    data["effective_agents"] = {"reviewer": {"source": "user", "model": "haiku"}}
+    newest.write_text(json.dumps(data), encoding="utf-8")
+    seen = []
+    real = quick_actions.Context
+    monkeypatch.setattr(quick_actions, "Context", lambda **kwargs: seen.append(kwargs["agents"]) or real(**kwargs))
+
+    assert cli.main(["check", "tools", "--projects-root", str(root), "--all-projects", "--config-dir", str(config_dir)]) == 0
+    capsys.readouterr()
+    assert seen == [{"reviewer": {"source": "user", "tools": ["Read", "Grep"]}}]
+
+
 def test_review_claude_md_follows_the_selected_project(tmp_path, capsys):
     """As review skills does: the selected project's CLAUDE.md files and
     your own, never another project's."""

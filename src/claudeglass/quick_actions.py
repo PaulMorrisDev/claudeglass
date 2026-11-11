@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -39,6 +39,10 @@ class Context:
     config_dir: Path
     effective: dict
     effective_agents: dict
+    #: The config snapshot's ``agents`` map (each agent file's frontmatter as
+    #: the hook recorded it, ``tools`` among it): ``effective_agents`` holds
+    #: only the fields a settings layer can set, never a tools line.
+    agents: dict = field(default_factory=dict)
     #: Recommendations ignored on the dashboard (``ignores.py``): the
     #: drafted fixes leave their changes out.
     skip_keys: frozenset = frozenset()
@@ -551,8 +555,9 @@ def _tools(ctx: Context) -> dict:
         row = diet.get(agent_type)
         if row is None:
             return "none"
-        # Only what the agent's file still lists is sent, as the card counts it.
-        entry = ctx.effective_agents.get(agent_type)
+        # Only what the agent's file still lists is sent, as the card counts it:
+        # the line is in the snapshot's agents map, not in effective_agents.
+        entry = ctx.agents.get(agent_type)
         row = current_diet(row, entry.get("tools") if isinstance(entry, dict) else None)
         count = len([name for name in str(row.get("rare_tools") or "").split(", ") if name])
         left_out = sum(

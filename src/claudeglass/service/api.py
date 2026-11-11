@@ -3206,6 +3206,9 @@ def make_handler(
 
         model = _get_report_model(*window, project)
         effective, effective_agents, _env_set = _current_settings(project)
+        # The tools lines are in the snapshot's agents map, which the cards read.
+        snapshot = _config_snapshot_with_every_project_agents(project)
+        agent_files = snapshot.data.get("agents") if snapshot is not None else None
         window_days, since, until, _window_by = window
         since_dt, until_dt = _resolve_window(window_days, since, until)
         return quick_actions, quick_actions.Context(
@@ -3215,6 +3218,7 @@ def make_handler(
             config_dir=Path(options.config_dir),
             effective=effective,
             effective_agents=effective_agents,
+            agents=agent_files if isinstance(agent_files, dict) else {},
             skip_keys=_ignored_keys(model, query),
             only=_project_folders(project),
             since_ts=since_dt.timestamp() if since_dt else None,
