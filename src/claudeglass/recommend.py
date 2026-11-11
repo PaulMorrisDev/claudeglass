@@ -1895,7 +1895,8 @@ def read_agent_tools(tools, disallowed=None) -> AgentTools:
         allow=tuple(entry for entry, _cut in entries) if known else None,
         deny=tuple(entry for entry, cut in denied if not cut),
         cut=tuple(dict.fromkeys(_tool_name(entry) for entry, cut in entries if cut)) if known else (),
-        deny_whole=denied_whole and not any(cut for _entry, cut in denied),
+        # No line at all denies nothing; the unknown-snapshot marker says nothing.
+        deny_whole=(disallowed is None or denied_whole) and not any(cut for _entry, cut in denied),
     )
 
 

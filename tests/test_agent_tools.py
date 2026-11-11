@@ -102,6 +102,18 @@ def test_the_reader_reports_which_entries_were_cut_inside_their_parentheses():
     assert read_agent_tools(None).cut == ()
 
 
+def test_a_cut_deny_entry_is_left_out_and_the_deny_line_is_marked_partly_read():
+    line = read_agent_tools(None, [_CUT_BASH, "Write"])
+    assert line.deny == ("Write",) and line.deny_whole is False
+    whole = read_agent_tools(None, ["Bash(rm -rf /tmp/x)", "Write"])
+    assert whole.deny == ("Bash(rm -rf /tmp/x)", "Write") and whole.deny_whole is True
+    assert read_agent_tools("Read").deny_whole is True
+    # A comma line the hook cut off, and an entry it masked, are partly read too.
+    cut_line = "Write, Edit, NotebookEdit, MultiEdit, Bash, PowerShell, WebFetch, WebSearch"[:61] + "..."
+    assert read_agent_tools(None, cut_line).deny_whole is False
+    assert read_agent_tools(None, ["Write", "<redacted path/url, str(40)>"]).deny_whole is False
+
+
 # -- the first snapshot after the upgrade: a line stored cut, then whole --------
 
 _LONG_LINE = [
