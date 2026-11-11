@@ -1046,6 +1046,19 @@ def _mod_file(config_dir: Path, catalogue: dict, session_id: str, now_ts: float)
         return None
 
 
+#: The hints that are off live, for a catalogue that has no ``coaching.off_live``
+#: (an older one, beside this module after an install cut short): a test holds
+#: it equal to ``capture_catalogue.LIVE_OFF_HINTS``. An empty default would turn
+#: the hints that are off back on.
+_LIVE_OFF_FALLBACK = ("plan_fresh", "plan_fresh_early", "split_run", "quiet_output", "cold_return")
+
+
+def _off_live(coaching: dict):
+    """The hints that are off live: the catalogue's list, or
+    :data:`_LIVE_OFF_FALLBACK` when it has none."""
+    return coaching.get("off_live", _LIVE_OFF_FALLBACK)
+
+
 def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> frozenset:
     """The hints the mod delivers itself for this session
     (``capture_catalogue.MOVED_TO_MOD``, as the catalogue exports them),
@@ -1063,7 +1076,9 @@ def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) ->
     mod = catalogue["mod"]
     if shows is None:
         return frozenset(mod["moved"])
-    return frozenset(hint for hint in mod["moved"] if mod["moved_on"][hint] in shows)
+    # A catalogue without ``moved_on`` (an older one) names no surface: the hook keeps the hint.
+    moved_on = mod.get("moved_on", {})
+    return frozenset(hint for hint in mod["moved"] if moved_on.get(hint) in shows)
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
@@ -2479,7 +2494,7 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     if str(payload.get("agent_type") or "") in catalogue["skip_agent_types"]:
         return False
     coaching = catalogue["coaching"]
-    if "split_run" in coaching["off_live"]:
+    if "split_run" in _off_live(coaching):
         # Nothing reads the counts while the hint is off.
         return False
     personal = _read_json(config_dir / coaching["file"])
@@ -2650,7 +2665,7 @@ def _coaching_for(
     # the only one, and they are all there when the mod stops.
     moved = _moved(config_dir, catalogue, session_id, now_ts)
     # What is off live is neither worked out nor stamped either.
-    off = moved | set(coaching["off_live"])
+    off = moved | set(_off_live(coaching))
     # A run's counts used to be kept by agent id here; they are by session now.
     upkeep = state.pop("agents", None) is not None
 

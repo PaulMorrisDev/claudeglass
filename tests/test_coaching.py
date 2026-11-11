@@ -4290,6 +4290,53 @@ def test_live_off_a_hint_the_replay_found_more_often_wrong_than_right_gives_no_n
     assert _kind(case()) == hint
 
 
+def _older_catalogue() -> dict:
+    """The catalogue of a package from before ``off_live`` and ``moved_on`` were written: the hook module of
+    this package can end up beside it when an install is cut short."""
+    import copy
+
+    older = copy.deepcopy(CATALOGUE)
+    del older["coaching"]["off_live"]
+    del older["mod"]["moved_on"]
+    return older
+
+
+def test_the_hooks_own_off_list_is_the_catalogues():
+    assert tuple(HOOK._LIVE_OFF_FALLBACK) == cat.LIVE_OFF_HINTS
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_the_off_hint_off_and_the_live_hint_live(tmp_path):
+    older = _older_catalogue()
+    config_dir = _config_dir(tmp_path)
+
+    def note(payload, session):
+        return HOOK.coaching_note_for({"session_id": session, "cwd": "/work/app", **payload}, ON, older, config_dir, now=NOW)
+
+    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
+    assert note({**_prompt_payload(cold), "prompt": "add a settings page for the theme"}, "c1") == ""
+    assert _kind(note(_scene_big_paste(tmp_path), "b1")) == "big_paste"
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_what_the_mod_does_not_show(tmp_path):
+    older = _older_catalogue()
+    _heartbeat(tmp_path, shows=["hint"])
+    config_dir = _config_dir(tmp_path)
+    # No ``moved_on`` to say which surface serves a hint: none is taken from the hook, and nothing raises.
+    assert HOOK._moved(config_dir, older, "s1", NOW.timestamp()) == frozenset()
+    note = HOOK.coaching_note_for({"session_id": "s1", "cwd": "/work/app", **_scene_big_paste(tmp_path)}, ON, older, config_dir, now=NOW)
+    assert _kind(note) == "big_paste"
+    # A mod without ``shows`` (older still) moves the whole set, as it does with any catalogue.
+    _heartbeat(tmp_path)
+    assert HOOK._moved(config_dir, older, "s1", NOW.timestamp()) == frozenset(older["mod"]["moved"])
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_no_count_of_runs_for_the_hint_that_is_off(tmp_path):
+    older = _older_catalogue()
+    session, _ = _agent_run(tmp_path, [_prompt(), _SUMMARISED, _reply(1_000, message_id="m1")])
+    assert HOOK.keep_run(_agent_stop(session), ON, older, _config_dir(tmp_path), now=NOW) is False
+    assert not (_config_dir(tmp_path) / cat.COACH_STATE_FILE).exists()
+
+
 def test_a_claim_released_within_a_moment_is_waited_for(tmp_path):
     import threading
 
