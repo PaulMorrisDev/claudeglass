@@ -42,6 +42,7 @@ def _ctx(tmp_path, model=None, **kw):
         config_dir=config_dir,
         effective=kw.get("effective", {}),
         effective_agents=kw.get("effective_agents", {}),
+        agents=kw.get("agents", {}),
         skip_keys=kw.get("skip_keys", frozenset()),
         since_ts=kw.get("since_ts"),
         until_ts=kw.get("until_ts"),
@@ -2222,9 +2223,37 @@ def test_tools_leaves_out_of_the_count_the_tools_the_agents_file_no_longer_lists
     result = qa.run("tools", _ctx(tmp_path, model))
     assert {row[0]: row[-1] for row in result["table"]["rows"]}["reviewer"] == "3 (about 10,600 tokens)"
     # The file lists Read and NotebookEdit only: just NotebookEdit is left to take out.
-    agents = {"reviewer": {"tools": ["Read", "NotebookEdit"]}}
-    result = qa.run("tools", _ctx(tmp_path, model, effective_agents=agents))
+    # The snapshot's agents map holds the line (effective_agents never does).
+    agents = {"reviewer": {"source": "user", "tools": ["Read", "NotebookEdit"]}}
+    result = qa.run("tools", _ctx(tmp_path, model, agents=agents, effective_agents={"reviewer": {"model": "haiku"}}))
     assert {row[0]: row[-1] for row in result["table"]["rows"]}["reviewer"] == "1 (about 4,000 tokens)"
+
+
+def test_tools_counts_what_the_card_counts_for_a_line_in_the_snapshots_agents_map(tmp_path):
+    """The check and the spawn-tools-list card read the same line, from the
+    snapshot's own ``agents`` map, so the count in the table is the card's."""
+    from test_spawn_parts import _diet_acc, _recs, _report, _snapshot, _tools_rec
+
+    report = _report(_diet_acc("searcher", spawns=40))
+    agents = {"searcher": {"source": "user", "tools": ["Read", "Grep", "NotebookEdit", "WebFetch"]}}
+    card = _tools_rec(_recs(report, snapshot=_snapshot(agents), units=Units()), "searcher")
+    left_out = card.action.split("Rarely used, so left out")[1].split("Claude Code adds")[0]
+    assert "NotebookEdit" in left_out and "WebFetch" in left_out and "Bash" not in left_out
+    ctx = _ctx(tmp_path, report, agents=agents, effective_agents={"searcher": {"source": "user", "model": "haiku"}})
+    cell = {row[0]: row[-1] for row in qa.run("tools", ctx)["table"]["rows"]}["searcher"]
+    assert cell == "2 (about 6,000 tokens)"
+    # With no line recorded the check counts every rarely used tool, as the card does.
+    assert {row[0]: row[-1] for row in qa.run("tools", _ctx(tmp_path, report))["table"]["rows"]}["searcher"].startswith("3 ")
+
+
+def test_tools_counts_nothing_for_an_agent_whose_kept_tool_has_an_allowlist_the_hook_cut(tmp_path):
+    from test_spawn_parts import _CUT_AGENT_ENTRY, _orchestrator, _report
+
+    report = _report(_orchestrator())
+    line = [_CUT_AGENT_ENTRY, "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]
+    cell = lambda agents: {row[0]: row[-1] for row in qa.run("tools", _ctx(tmp_path, report, agents=agents))["table"]["rows"]}["orchestrator"]
+    assert cell({"orchestrator": {"source": "user", "tools": line}}) == "none"
+    assert cell({"orchestrator": {"source": "user", "tools": ["Agent(a, b)", *line[1:]]}}) != "none"
 
 
 def test_the_habits_saving_is_an_upper_bound_when_the_card_part_is_and_the_playbook_is_larger(tmp_path):

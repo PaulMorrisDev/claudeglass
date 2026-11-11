@@ -11,6 +11,7 @@ import shlex
 import pytest
 
 from claudeglass import cli, context_budget, fixes
+from claudeglass import recommend as recommend_mod
 from claudeglass.config import Config
 from claudeglass.elasticity import ElasticityStats, FitResult
 from claudeglass.model import (
@@ -386,6 +387,33 @@ def test_workflow_tools_that_write_or_run_commands_are_never_rare_once_any_spawn
     # Any other agent type is measured as before.
     other = card("searcher", other_family=True)
     assert {"Edit", "PowerShell"} <= set(other["rare_tools"].split(", "))
+
+
+def test_the_why_counts_the_tools_that_cleared_the_bar_not_the_ones_a_rule_added():
+    # Read and Grep were called in every spawn. Edit and PowerShell were called
+    # by one spawn on another model, which the workflow rule keeps on the line.
+    sonnet = "claude-sonnet-5"
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "PowerShell": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    acc = _diet_acc("workflow-subagent", spawns=20, uses={"Read": 20, "Grep": 20}, chars=chars)
+    acc.tool_uses[sonnet] = {"Edit": 1, "PowerShell": 1}
+    report = _report(acc)
+    rec = _tools_rec(_recs(report, units=Units()), "workflow-subagent")
+    assert "tools: Edit, Grep, PowerShell, Read" in rec.action
+    assert "called 2 of the tools it was offered in at least 10% of them" in rec.why
+    assert "Edit and PowerShell stay too because workflow agents called them" in rec.why
+    # An agent type the rule does not touch says nothing of the kind.
+    plain = _tools_rec(_recs(_report(_diet_acc("searcher")), units=Units()), "searcher")
+    assert "called 3 of the tools it was offered" in plain.why and "stay too" not in plain.why
+
+
+def test_the_why_counts_a_tool_called_often_that_the_known_line_lacks():
+    # Bash was called in 2 of 20 spawns, but the line the agent has now lacks it.
+    # The card never adds it, and it still cleared the bar, so the why counts it.
+    snap = _snapshot({"searcher": {"source": "user", "tools": ["Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]}})
+    rec = _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units()), "searcher")
+    assert rec.changes[0].value == ["Grep", "Read"]
+    assert "Bash isn't on its tools line, so it isn't added" in rec.action
+    assert "called 3 of the tools it was offered in at least 10% of them" in rec.why
 
 
 def test_the_model_with_the_most_tool_snapshots_is_the_one_a_tools_list_is_measured_on():
@@ -1069,9 +1097,9 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     recs = _recs(_report(builtin), units=Units())
     for rule in ("spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp"):
         (rec,) = [r for r in recs if r.id == rule and r.agent_type == "general-purpose"]
-        assert "A file named general-purpose.md in .claude/agents/ replaces the built-in" in rec.action, rule
+        assert "A file at ~/.claude/agents/general-purpose.md replaces the built-in" in rec.action, rule
     (rec,) = [r for r in recs if r.id == "spawn-claude-md" and r.agent_type == "general-purpose"]
-    assert "Create general-purpose.md in .claude/agents/ (it replaces the built-in general-purpose)" in rec.action
+    assert "Create ~/.claude/agents/general-purpose.md (it replaces the built-in general-purpose)" in rec.action
     assert rec.action.endswith("omitClaudeMd: true.")
     # A custom agent with a file, and a built-in with an override file, get no such sentence.
     snap = _snapshot({"general-purpose": {"source": "user"}})
@@ -1081,6 +1109,26 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     assert not any("replaces the built-in" in r.action for r in recs)
 
 
+@pytest.mark.parametrize("agent", sorted(recommend_mod._BUILTIN_AGENT_TYPES - recommend_mod._NOT_OVERRIDABLE))
+@pytest.mark.parametrize("writer", [False, True])
+def test_the_folder_a_built_in_agents_card_names_is_the_one_its_fix_writes_to(agent, writer):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    if writer:
+        builtin.edit_spawns = 8
+    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == agent and r.changes]
+    # Explore and Plan are not sent CLAUDE.md, so they get no card for it.
+    assert {r.id for r in recs} >= {"spawn-unused-skills", "spawn-unused-mcp"}
+    for rec in recs:
+        where = fixes.fix_file(rec, rec.changes[0])
+        assert where == f"~/.claude/agents/{agent}.md"
+        assert where in rec.action, rec.id
+    # The project prompt files the tools card (the diet leaves Explore, Plan and the guide alone) under that path.
+    tools = _tools_rec(recs, agent)
+    if tools is not None:
+        assert f"## ~/.claude/agents/{agent}.md" in fixes.project_prompt(recs)["prompt"]
+
+
 def test_a_built_in_writer_is_told_to_carry_its_rules_into_the_new_file_first():
     writer = _diet_acc("general-purpose", spawns=50, claude_md=6000.0)
     writer.edit_spawns = 8
@@ -1088,3 +1136,153 @@ def test_a_built_in_writer_is_told_to_carry_its_rules_into_the_new_file_first():
     assert rec.severity == "info"
     assert rec.action.index("the CLAUDE.md rules general-purpose needs") < rec.action.index("omitClaudeMd: true")
     assert "replaces the built-in general-purpose" in rec.action
+
+
+# -- the tools line: cut off by the hook, or naming a tool by an old name -------
+
+#: A tools line as an older hook stored it: cut at 64 characters, 61 and "...".
+_CUT_LINE = "Read, Grep, Skill, NotebookEdit, WebFetch, Glob, LS, TodoWrite, NotebookRead"[:61] + "..."
+
+
+def _orchestrator(**kwargs):
+    uses = {"Read": 20, "Grep": 20, "Agent": 4}
+    chars = {"Read": 1500, "Grep": 1200, "Agent": 2000, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000}
+    return _diet_acc("orchestrator", uses=uses, chars=chars, **kwargs)
+
+
+def test_a_tools_line_the_hook_cut_off_gives_the_card_of_no_line_at_all():
+    assert len(_CUT_LINE) == 64
+    report = _report(_diet_acc("searcher"))
+    cut = _tools_rec(_recs(report, snapshot=_snapshot({"searcher": {"source": "user", "tools": _CUT_LINE}}), units=Units()), "searcher")
+    bare = _tools_rec(_recs(report, snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units()), "searcher")
+    assert cut.changes[0].value == bare.changes[0].value == ["Bash", "Grep", "Read"]
+    assert cut.saving_usd == bare.saving_usd and cut.saving_usd > 0
+    assert (cut.action, cut.why, cut.estimated_saving) == (bare.action, bare.why, bare.estimated_saving)
+    # The price path agrees: a cut line leaves the diet row as it came.
+    row = _diet_row(report, "searcher")
+    assert recommend_mod.current_diet(row, _CUT_LINE) == row
+    assert recommend_mod.tools_list_offer("searcher", row, current=_CUT_LINE) == recommend_mod.tools_list_offer("searcher", row)
+
+
+def test_a_tools_line_that_names_task_keeps_it_on_the_suggested_line():
+    line = "Task, Read, Grep, Skill, NotebookEdit, WebFetch"
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(_orchestrator()), snapshot=snap, units=Units()), "orchestrator")
+    assert rec.changes[0].value == ["Task", "Grep", "Read"]
+    assert "tools: Task, Grep, Read" in rec.action and "Agent" not in rec.action.split("Rarely used")[0]
+    # Task is Agent under its old name, so the price is that of a line saying Agent.
+    named = _snapshot({"orchestrator": {"source": "user", "tools": line.replace("Task", "Agent")}})
+    other = _tools_rec(_recs(_report(_orchestrator()), snapshot=named, units=Units()), "orchestrator")
+    assert other.changes[0].value == ["Agent", "Grep", "Read"]
+    assert rec.saving_usd == other.saving_usd and rec.saving_usd > 0
+    row = _diet_row(_report(_orchestrator()), "orchestrator")
+    assert recommend_mod.current_diet(row, line)["saving_usd"] == recommend_mod.current_diet(row, line.replace("Task", "Agent"))["saving_usd"]
+
+
+def test_an_agent_entry_with_an_allowlist_is_not_widened_on_the_suggested_line():
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": ["Agent(worker, reviewer)", "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]}})
+    rec = _tools_rec(_recs(_report(_orchestrator()), snapshot=snap, units=Units()), "orchestrator")
+    assert rec.changes[0].value == ["Agent(worker, reviewer)", "Grep", "Read"]
+    assert "tools: Agent(worker, reviewer), Grep, Read" in rec.action
+
+
+def test_a_deleted_user_override_of_a_built_in_in_an_older_snapshot_does_not_drive_the_cards():
+    # general-purpose's override file was deleted. Another project's older
+    # snapshot still lists it, with a tools line, but the newest says it is gone.
+    from claudeglass import snapshots
+
+    def snap(slug, ts, agents):
+        data = {"schema": 2, "ts": ts, "project_slug": slug, "agents": agents, "effective": {}, "effective_agents": {}}
+        return Snapshot(path=None, ts=ts, data=data)
+
+    stale = snap("a", "20260920T000000Z", {"general-purpose": {"source": "user", "tools": ["Read"]}})
+    newest = snap("b", "20260923T000000Z", {})
+    report = _report(_diet_acc("general-purpose", spawns=50))
+    stale_only = _tools_rec(_recs(report, snapshot=stale, units=Units()), "general-purpose")
+    merged = snapshots.with_every_project_agents([stale, newest])
+    rec = _tools_rec(_recs(report, snapshot=merged, units=Units()), "general-purpose")
+    # The built-in is given every tool, so its card keeps the tools it called.
+    assert stale_only is None
+    assert rec is not None and rec.changes[0].value == ["Bash", "Grep", "Read"]
+    assert "replaces the built-in" in rec.action
+
+
+# -- an Agent entry the hook cut inside its parentheses -----------------------
+
+_CUT_AGENT_ENTRY = ("Agent(" + "worker-one, " * 8)[:61] + "..."
+
+
+def test_no_tools_card_is_given_when_a_kept_tools_only_entry_was_cut_inside_its_parentheses():
+    # Writing the base name back would let the agent start any agent type.
+    assert len(_CUT_AGENT_ENTRY) == 64
+    line = [_CUT_AGENT_ENTRY, "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    report = _report(_orchestrator())
+    recs = _recs(report, snapshot=snap, units=Units())
+    assert _tools_rec(recs, "orchestrator") is None
+    # The price path counts it nowhere: the row, the offer and the tuning amount.
+    row = _diet_row(report, "orchestrator")
+    diet = recommend_mod.current_diet(row, line)
+    assert diet["rare_tools"] == "" and not diet["saving_usd"]
+    assert recommend_mod.tools_list_offer("orchestrator", row, current=line) is None
+    from claudeglass import tuning
+
+    stats = context_budget.ContextBudgetStats()
+    stats.agents["orchestrator"] = _orchestrator()
+    assert tuning._startup_diet_usd(stats, {"orchestrator": line}) == {}
+    assert tuning._startup_diet_usd(stats)["custom"] > 0
+    # The skills card does not depend on the tools line being writable.
+    assert any(r.id == "spawn-unused-skills" and r.agent_type == "orchestrator" for r in recs)
+
+
+def test_a_cut_entry_for_a_tool_that_is_not_kept_changes_nothing():
+    cut = ("WebFetch(" + "domain:example.com, " * 6)[:61] + "..."
+    assert len(cut) == 64
+    report = _report(_diet_acc("searcher"))
+    plain = ["Read", "Grep", "Bash", "Skill", "NotebookEdit", "WebFetch"]
+    snap = _snapshot({"searcher": {"source": "user", "tools": plain}})
+    base = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    snap = _snapshot({"searcher": {"source": "user", "tools": [*plain[:-1], cut]}})
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    assert rec is not None
+    assert (rec.changes[0].value, rec.saving_usd, rec.action) == (base.changes[0].value, base.saving_usd, base.action)
+
+
+# -- calls recorded as Task and as Agent are one tool -------------------------
+
+_ROSTER_CHARS = {
+    "Read": 1500, "Grep": 1200, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000, "Task": 2000, "Agent": 2000,
+}
+_TASK_LINE = "Task, Read, Grep, Skill, NotebookEdit, WebFetch"
+
+
+def test_calls_recorded_as_task_keep_the_agent_the_line_names_and_it_is_not_also_left_out():
+    acc = _diet_acc("orchestrator", uses={"Read": 20, "Grep": 20, "Task": 4}, chars=_ROSTER_CHARS)
+    report = _report(acc)
+    row = _diet_row(report, "orchestrator")
+    assert "Agent" in row["keep_tools"].split(", ") and "Task" not in row["keep_tools"].split(", ")
+    assert not {"Agent", "Task"} & set(row["rare_tools"].split(", "))
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": _TASK_LINE}})
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "orchestrator")
+    assert sorted(rec.changes[0].value) == ["Grep", "Read", "Task"]
+    assert "Agent" not in rec.action.split("Rarely used")[1].split("Claude Code adds")[0]
+    # The removal is priced once: the same as the line without the spawning tool.
+    without = recommend_mod.current_diet(row, "Read, Grep, Skill, NotebookEdit, WebFetch")
+    assert rec.saving_usd == pytest.approx(without["saving_usd"])
+
+
+def test_task_and_agent_calls_together_clear_the_bar_that_neither_clears_alone():
+    uses = {"Read": 20, "Grep": 20, "Task": 1, "Agent": 1}
+    report = _report(_diet_acc("orchestrator", uses=uses, chars=_ROSTER_CHARS))
+    row = _diet_row(report, "orchestrator")
+    assert "Agent" in row["keep_tools"].split(", ")
+    assert not {"Agent", "Task"} & set(row["rare_tools"].split(", "))
+
+
+def test_calls_recorded_as_task_count_for_a_line_that_says_agent():
+    chars = {name: size for name, size in _ROSTER_CHARS.items() if name != "Agent"}
+    acc = _diet_acc("orchestrator", uses={"Read": 20, "Grep": 20, "Task": 4}, chars=chars)
+    line = "Agent, Read, Grep, Skill, NotebookEdit, WebFetch"
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(acc), snapshot=snap, units=Units()), "orchestrator")
+    assert sorted(rec.changes[0].value) == ["Agent", "Grep", "Read"]

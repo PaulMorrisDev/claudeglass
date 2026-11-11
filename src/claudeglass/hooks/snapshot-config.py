@@ -540,6 +540,29 @@ def redact_settings(settings: dict) -> dict:
     return {key: redact_settings_value(key, value) for key, value in settings.items()}
 
 
+#: Agent frontmatter keys that hold a line of tool names. A comma string is
+#: stored as the list of its entries, so each entry is cut on its own and a
+#: long line is kept whole (``Agent(a, b)`` is one entry).
+_AGENT_TOOL_LINE_KEYS = frozenset({"tools", "disallowedTools"})
+
+
+def _split_tool_line(text: str) -> list[str]:
+    """``text`` split at the commas outside parentheses, so
+    ``Agent(a, b), Read`` is two entries."""
+    parts: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
 def redact_agent_frontmatter(parsed: dict) -> dict:
     """Redact one agent's already-flattened frontmatter dict (see
     ``parse_frontmatter``). ``description`` always becomes ``str(len)``;
@@ -558,7 +581,9 @@ def redact_agent_frontmatter(parsed: dict) -> dict:
             # scalars the allowlist elsewhere is built for -- clip/mask
             # each one the same way every other recorded name now is,
             # rather than keeping it fully verbatim and uncapped.
-            if isinstance(value, str):
+            if isinstance(value, str) and key in _AGENT_TOOL_LINE_KEYS:
+                out[key] = [_clip_name(item) for item in _split_tool_line(value)]
+            elif isinstance(value, str):
                 out[key] = _clip_name(value)
             elif isinstance(value, list):
                 out[key] = [_clip_name(item) for item in value]
@@ -1310,18 +1335,22 @@ def _unscoped_rules_bytes(base: Path) -> int:
 def _rule_has_paths(text: str) -> bool:
     """Whether a rule's frontmatter has a top-level ``paths:`` key. Also
     true for a list whose items sit at column 0, which ``parse_frontmatter``
-    drops (its ``- item`` lines carry no ``key:`` to attach to)."""
+    drops (its ``- item`` lines carry no ``key:`` to attach to). An opening
+    ``---`` that is never closed is no frontmatter, as in Claude Code, so a
+    ``paths:`` line below it is body text."""
     if "paths" in parse_frontmatter(text):
         return True
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return False
-    for line in lines[1:]:
-        if line.strip() == "---":
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
             break
-        if re.match(r"paths\s*:", line):
-            return True
-    return False
+    if end is None:
+        return False
+    return any(re.match(r"paths\s*:", line) for line in lines[1:end])
 
 
 def _walk_nested_claude_md(root: Path) -> tuple[int, int]:

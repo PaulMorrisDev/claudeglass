@@ -322,6 +322,8 @@ def _changed_keys(before: snapshots_mod.Snapshot, after: snapshots_mod.Snapshot)
     changed = sorted(
         k for k in set(old) | set(new)
         if json.dumps(old.get(k), sort_keys=True, default=str) != json.dumps(new.get(k), sort_keys=True, default=str)
+        # A tools line an older hook cut off, written whole, is not an edit.
+        and not (snapshots_mod.is_tool_line_key(k) and snapshots_mod.same_tool_line(old.get(k), new.get(k)))
     )
     if any(k.startswith("effective.") for k in changed):
         changed = [k for k in changed if not k.startswith(("user_settings.", "project_settings."))]

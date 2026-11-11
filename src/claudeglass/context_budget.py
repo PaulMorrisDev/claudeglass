@@ -141,7 +141,7 @@ from . import desktop_servers
 from . import snapshots as snapshots_mod
 from . import tool_search
 from .calibration import Calibration, FirstCall, model_family
-from .capture_catalogue import AGENT_ANSWER_TOOLS
+from .capture_catalogue import AGENT_ANSWER_TOOLS, AGENT_TOOLS
 from .compaction_sim import CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS
 from .events import BUILT_IN_TOOLS, tool_server
 from .model import Column, Event, EventKind, Section, Table, TranscriptResult, Turn
@@ -796,6 +796,41 @@ class _AgentStartupAcc:
             family = max(sorted(named), key=lambda name: named[name])
         return family, [index for index, name in enumerate(self.models) if name == family]
 
+    def offered_tools(self, family: str) -> dict[str, _ToolOffer]:
+        """``tools`` on ``family`` with ``Task`` (the old name of ``Agent``,
+        :data:`~claudeglass.capture_catalogue.AGENT_TOOLS`) counted as
+        ``Agent``: a window that spans the rename offered one tool under two
+        names, and it is judged against the bar once. A spawn is offered it
+        under one name, so the spawns never come to more than were measured."""
+        offers = dict(self.tools.get(family, {}))
+        spawns = self.tool_spawns.get(family, 0)
+        current, *old = AGENT_TOOLS
+        for name in old:
+            gone = offers.pop(name, None)
+            if gone is None:
+                continue
+            held = offers.get(current)
+            if held is None:
+                offers[current] = gone
+                continue
+            offered = min(held.offered + gone.offered, spawns) if spawns else held.offered + gone.offered
+            offers[current] = _ToolOffer(
+                offered=offered, used=min(held.used + gone.used, offered), chars=held.chars + gone.chars
+            )
+        return offers
+
+    def called_tools(self, family: str) -> dict[str, int]:
+        """``tool_uses`` on ``family`` (spawns that called each tool) with
+        ``Task`` counted as ``Agent``, as :meth:`offered_tools` does."""
+        uses = dict(self.tool_uses.get(family, {}))
+        spawns = self.tool_spawns.get(family, 0)
+        current, *old = AGENT_TOOLS
+        for name in old:
+            if name in uses:
+                total = uses.get(current, 0) + uses.pop(name)
+                uses[current] = min(total, spawns) if spawns else total
+        return uses
+
     def removable_chars(self, family: str) -> tuple[float, list[tuple[str, int, int, float]]]:
         """Characters per spawn of the tools and MCP servers offered on
         ``family`` that fewer than :data:`REMOVABLE_USE_SHARE` of the spawns
@@ -805,13 +840,14 @@ class _AgentStartupAcc:
         spawns = self.tool_spawns.get(family, 0)
         if not spawns:
             return 0.0, []
+        offers = self.offered_tools(family)
         rows = [
             (key, offer.offered, offer.used, offer.chars / offer.offered)
-            for key, offer in self.tools.get(family, {}).items()
+            for key, offer in offers.items()
             if offer.offered and key not in ALWAYS_ADDED and rarely_used(offer.used, offer.offered)
         ]
         rows.sort(key=lambda row: (-row[3], row[0]))
-        total = sum(self.tools[family][key].chars for key, _o, _u, _c in rows) / spawns
+        total = sum(offers[key].chars for key, _o, _u, _c in rows) / spawns
         return total, rows
 
     def kept_tools(self, family: str) -> list[str]:
@@ -821,10 +857,10 @@ class _AgentStartupAcc:
         it was sent in full or loaded when asked for. Never the tools
         Claude Code adds whatever the list says. Built-in tools first."""
         spawns = self.tool_spawns.get(family, 0)
-        offers = self.tools.get(family, {})
+        offers = self.offered_tools(family)
         servers = self.servers.get(family, {})
         kept: list[str] = []
-        for key, called in self.tool_uses.get(family, {}).items():
+        for key, called in self.called_tools(family).items():
             if key in ALWAYS_ADDED:
                 continue
             if key.startswith("mcp__"):
@@ -2309,6 +2345,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         Column(key="saving_usd", label="Saving across these spawns", kind="money"),
         Column(key="window_days", label="Days in the window", kind="float"),
         Column(key="rare_sizes", label="Size of each rarely used tool", kind="str"),
+        Column(key="rule_kept_tools", label="Tools kept because a workflow spawn called them", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2323,16 +2360,18 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         _total, rare_rows = acc.removable_chars(family)
         builtin = [row for row in rare_rows if not row[0].startswith("mcp__")]
         keep = acc.kept_tools(family)
+        rule_kept: list[str] = []
         if agent_type == _WORKFLOW_AGENT:
             called = {key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
             builtin = [row for row in builtin if row[0] not in called]
+            rule_kept = sorted(called - set(keep))
             keep = sorted(
                 set(keep) | called, key=lambda key: (key.startswith("mcp__"), key)
             )
         servers = acc.rare_servers(family)
         if not builtin and not servers:
             continue
-        tools = acc.tools.get(family, {})
+        tools = acc.offered_tools(family)
         definition_chars = sum(tools[key].chars for key, _o, _u, _c in builtin) / snapped
         definitions = stats.calibration.tool_tokens(definition_chars, family or None) + sum(
             offer.definitions for _name, offer in servers
@@ -2384,6 +2423,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
                 usd or None,
                 stats.window_days,
                 ", ".join(sizes),
+                ", ".join(rule_kept),
             ]
         )
     return Table(

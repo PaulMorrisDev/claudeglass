@@ -1432,6 +1432,23 @@ def test_the_tools_list_saving_is_summed_by_built_in_type_with_every_other_type_
     assert tuning.validate(_put(_sample(), "agents.startup_diet_usd", saved)) == []
 
 
+def test_the_tools_list_saving_reads_the_tools_line_as_the_card_does():
+    from test_spawn_parts import _CUT_LINE, _orchestrator
+
+    stats = _diet_stats(_orchestrator())
+    bare = tuning._startup_diet_usd(stats)
+    assert bare["custom"] > 0
+    # A line the hook cut off is not known, so the amount is that of no line.
+    assert tuning._startup_diet_usd(stats, {"orchestrator": _CUT_LINE}) == bare
+    # Task is Agent under its old name: the line prices the same either way.
+    line = "{}, Read, Grep, Skill, NotebookEdit, WebFetch"
+    task = tuning._startup_diet_usd(stats, {"orchestrator": line.format("Task")})
+    assert task == tuning._startup_diet_usd(stats, {"orchestrator": line.format("Agent")})
+    # A line that already leaves a rarely used tool out is worth less.
+    partial = tuning._startup_diet_usd(stats, {"orchestrator": "Task, Read, Grep, Skill, NotebookEdit"})
+    assert 0 < partial["custom"] < bare["custom"]
+
+
 def test_the_tools_list_saving_follows_the_cards_own_rule_for_when_a_list_is_worth_giving():
     from test_spawn_parts import _diet_acc
 

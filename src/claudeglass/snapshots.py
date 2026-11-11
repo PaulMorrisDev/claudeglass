@@ -126,6 +126,40 @@ class Snapshot:
     data: dict = field(default_factory=dict)
 
 
+#: The longest name the config hook records, what it ends a longer one with
+#: (``hooks/snapshot-config.py`` ``_clip_name``: 61 characters plus ``...``),
+#: and the start of what it records for a name shaped like a path or a URL.
+#: Duplicated here, like the hook duplicates ``discovery.slug_for``.
+NAME_CAP = 64
+NAME_CUT = "..."
+NAME_REDACTED = "<redacted path/url"
+
+#: The agent frontmatter keys that hold a line of tool names.
+_TOOL_LINE_KEYS = ("tools", "disallowedTools")
+
+
+def split_tool_line(text: str) -> list[str]:
+    """``text`` split at the commas outside parentheses, so
+    ``Agent(a, b), Read`` is two entries."""
+    parts: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def cut_off_name(text: str) -> bool:
+    """Whether ``text`` is a name the hook cut at its cap."""
+    return len(text) == NAME_CAP and text.endswith(NAME_CUT)
+
+
 # -- loading ----------------------------------------------------------------
 
 
@@ -173,7 +207,60 @@ def load_snapshots(config_dir: Path | str) -> list[Snapshot]:
         result.append(Snapshot(path=path, ts=str(ts), data=data))
 
     result.sort(key=lambda snap: snap.ts)
+    _normalise_tool_lines(result)
     return result
+
+
+def _normalise_tool_lines(snaps: list[Snapshot]) -> None:
+    """Read an agent's ``tools`` and ``disallowedTools`` in the form the hook
+    stores today, a list of entries. An older hook stored a comma string, cut
+    at :data:`NAME_CAP` characters when it was longer: a whole string becomes
+    the list of its entries. This depends on the snapshot alone, so the
+    watcher's store and a read from disk agree whenever each file was read. A
+    cut string stays as it is (:func:`recommend.read_agent_tools` reads it as
+    an unknown line); :func:`same_tool_line` is what forgives it where two
+    snapshots are compared."""
+    for snap in snaps:
+        agents = snap.data.get("agents")
+        if not isinstance(agents, dict):
+            continue
+        for entry in agents.values():
+            if not isinstance(entry, dict):
+                continue
+            for key in _TOOL_LINE_KEYS:
+                value = entry.get(key)
+                if isinstance(value, str) and NAME_REDACTED not in value and not cut_off_name(value):
+                    entry[key] = split_tool_line(value)
+
+
+def is_tool_line_key(key: str) -> bool:
+    """Whether the flattened snapshot ``key`` is an agent's ``tools`` or
+    ``disallowedTools`` line (``agents.<name>.tools``)."""
+    return key.startswith("agents.") and key.endswith(tuple("." + k for k in _TOOL_LINE_KEYS))
+
+
+def same_tool_line(old, new) -> bool:
+    """Whether two stored values of an agent's tools line are the same line.
+    Equal values are. An older hook cut a long comma string at 64 characters
+    (:func:`cut_off_name`), and the hook now stores the whole line as a list,
+    so a cut string and a list whose entries, joined with ``", "``, start with
+    the string's first 61 characters are the same line (spacing aside):
+    writing it whole is not an edit. A change past those 61 characters can't
+    be seen in the cut one. Either may be the cut one."""
+    if _hashable(old) == _hashable(new):
+        return True
+    for cut, whole in ((old, new), (new, old)):
+        if isinstance(cut, str) and cut_off_name(cut) and isinstance(whole, (list, tuple)):
+            squash = functools.partial(re.sub, r"\s+", "")
+            return squash(", ".join(map(str, whole))).startswith(squash(cut[: -len(NAME_CUT)]))
+    return False
+
+
+def same_value(key: str, old, new) -> bool:
+    """Whether the flattened snapshot ``key`` has the same value in two
+    snapshots: equal, or (for a tools line) the same line
+    (:func:`same_tool_line`)."""
+    return same_tool_line(old, new) if is_tool_line_key(key) else _hashable(old) == _hashable(new)
 
 
 # -- timestamp parsing / join -------------------------------------------
@@ -669,7 +756,11 @@ def with_every_project_agents(
     unset, call them built into Claude Code and point ``apply`` at the
     user folder. A project agent wins over a user agent of the same name
     (Claude Code's own order); otherwise the newer snapshot wins.
-    Settings, provenance and managed keys stay the newest snapshot's.
+    Every session lists all of the user's own agent files, so the base
+    snapshot's agents map, when it has one, is the whole list of them:
+    another project's older snapshot cannot bring back a user agent deleted
+    since (a built-in it overrode would still read as overridden). Settings,
+    provenance and managed keys stay the newest snapshot's.
     ``None`` when ``snapshots`` is empty.
     """
     base = next((s for s in reversed(snapshots) if isinstance(s.data.get("effective"), dict)), None)
@@ -683,7 +774,16 @@ def with_every_project_agents(
             entries = snap.data.get(section)
             if not isinstance(entries, dict):
                 continue
+            listed = base.data.get(section)
             for name, entry in entries.items():
+                if (
+                    snap is not base
+                    and isinstance(listed, dict)
+                    and name not in listed
+                    and isinstance(entry, dict)
+                    and entry.get("source") == "user"
+                ):
+                    continue
                 held = into.get(name)
                 if (
                     isinstance(held, dict)
@@ -1238,7 +1338,7 @@ def diff_keys(snapshots: list[Snapshot]) -> dict[str, list]:
     result: dict[str, list] = {}
     for key in sorted(all_keys):
         values = [flat.get(key) for flat in flattened]
-        if len({_hashable(v) for v in values}) > 1:
+        if any(not same_value(key, before, after) for before, after in zip(values, values[1:])):
             result[key] = values
     return result
 
@@ -1266,7 +1366,7 @@ def co_changed_keys(snapshot_a: Snapshot, snapshot_b: Snapshot) -> list[str]:
     flat_b = flatten_snapshot(snapshot_b)
     changed = []
     for key in sorted(set(flat_a) | set(flat_b)):
-        if _hashable(flat_a.get(key)) != _hashable(flat_b.get(key)):
+        if not same_value(key, flat_a.get(key), flat_b.get(key)):
             changed.append(key)
     return changed
 
@@ -1506,7 +1606,14 @@ def build_config_section(
 
 
 __all__ = [
+    "NAME_CAP",
+    "NAME_CUT",
+    "NAME_REDACTED",
     "Snapshot",
+    "cut_off_name",
+    "is_tool_line_key",
+    "same_tool_line",
+    "same_value",
     "load_snapshots",
     "records_config",
     "snapshot_for",
@@ -1516,6 +1623,7 @@ __all__ = [
     "canonical_project_keys",
     "project_snapshots",
     "snapshots_for_projects",
+    "split_tool_line",
     "project_chains",
     "flatten_snapshot",
     "managed_keys",

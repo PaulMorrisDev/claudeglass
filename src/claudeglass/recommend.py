@@ -160,6 +160,7 @@ from . import (
     waste,
     whatif,
 )
+from .capture_catalogue import AGENT_TOOLS
 from .config import Config
 from .context_budget import (
     DIET_EXCLUDED,
@@ -170,9 +171,18 @@ from .context_budget import (
     diet_usd,
     mcp_tool_key,
 )
-from .fixes import CRITIQUE_PLAN_LINE
+from .fixes import _SCOPE_WHERE, CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
-from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
+from .snapshots import (
+    NAME_CUT,
+    NAME_REDACTED,
+    Snapshot,
+    cut_off_name,
+    effective_config,
+    effective_provenance,
+    managed_keys,
+    split_tool_line,
+)
 from .units import NO_LIMIT_SHARE_HINT, Units
 
 #: The one purpose ``classify.classify_purpose`` returns that counts as light
@@ -239,11 +249,17 @@ def _agent_has_frontmatter(agent_type: str, snapshot: Snapshot | None) -> bool:
     return agent_type not in _BUILTIN_AGENT_TYPES
 
 
-def _built_in_note(agent_type: str) -> str:
+def agent_file_path(agent_type: str, scope: str) -> str:
+    """Where the agent's file goes, as the card's fix writes it: the same path
+    :func:`fixes.fix_file` names (``~/.claude/agents/<agent>.md`` for a
+    built-in with no file)."""
+    return _SCOPE_WHERE.get(scope, _SCOPE_WHERE["user"])[0].format(agent=agent_type)
+
+
+def _built_in_note(agent_type: str, scope: str) -> str:
     """The sentence a built-in agent type's card ends with: the built-in has
-    no file, but a same-named one in ``.claude/agents/`` replaces it, so the
-    change goes there."""
-    return f"A file named {agent_type}.md in .claude/agents/ replaces the built-in {agent_type}, so make the change there."
+    no file, but a same-named one replaces it, so the change goes there."""
+    return f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
 
 
 # -- thresholds --------------------------------------------------------------
@@ -1761,46 +1777,134 @@ def _name_list(names: list[str], shown: int = _TOOLS_SHOWN) -> str:
     return f"{head}, and {extra} more" if extra > 0 else head
 
 
-def _split_line(text: str) -> list[str]:
-    """``text`` split at the commas outside parentheses, so
-    ``Agent(a, b), Read`` is two entries."""
-    parts: list[str] = []
-    depth, start = 0, 0
-    for i, ch in enumerate(text):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth = max(0, depth - 1)
-        elif ch == "," and depth == 0:
-            parts.append(text[start:i])
-            start = i + 1
-    parts.append(text[start:])
-    return [part.strip() for part in parts if part.strip()]
+def _join_names(names: list[str]) -> str:
+    """``names`` as "A", "A and B" or "A, B and C"."""
+    return f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else "".join(names)
+
+
+def _tool_name(entry: str) -> str:
+    """The tool an entry of a ``tools:`` line names: the text before its
+    parentheses, with ``Task`` (the old name of ``Agent``) as ``Agent``."""
+    base = entry.split("(", 1)[0].strip()
+    return AGENT_TOOLS[0] if base in AGENT_TOOLS else base
+
+
+def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
+    """The entries of a stored ``tools`` or ``disallowedTools`` value, each
+    with whether the hook cut it inside its parentheses (it is then its base
+    name, ``Agent`` for ``Agent(worker-one, ...``), and whether they are the
+    whole line. A list is the whole line, as the hook stores it: each entry
+    was cut or masked on its own, so one cut before any parenthesis, or
+    masked as a path or URL, is a tool that cannot be read. A string comes
+    from a hook that cut the whole line at 64 characters: one that ends in
+    ``...`` at that length, or holds the masked-path marker, is not the whole
+    line."""
+    if isinstance(value, str) and value != _CURRENT_UNKNOWN:
+        if NAME_REDACTED in value:
+            return [], False
+        if cut_off_name(value):
+            body = value[: -len(NAME_CUT)]
+            entries = split_tool_line(body)
+            # The last entry may be cut short; one that ended at a comma was not.
+            if entries and not body.rstrip().endswith(","):
+                entries.pop()
+            return [(entry, False) for entry in entries], False
+        return [(entry, False) for entry in split_tool_line(value)], True
+    if isinstance(value, (list, tuple)):
+        entries: list[tuple[str, bool]] = []
+        whole = True
+        for item in value:
+            text = str(item).strip()
+            if not text:
+                continue
+            if NAME_REDACTED in text:
+                whole = False
+            elif cut_off_name(text):
+                if "(" in text:
+                    entries.append((text.split("(", 1)[0].strip(), True))
+                else:
+                    whole = False
+            else:
+                entries.append((text, False))
+        return entries, whole
+    return [], False
+
+
+def _entry_covers(entry: str, name: str) -> bool:
+    """Whether a line's ``entry`` names the tool ``name`` (``mcp__server__*``
+    for a whole server). An MCP entry matches by its server: ``mcp__X``,
+    ``mcp__X__*`` and ``mcp__X__tool`` all mean server X."""
+    base, want = _tool_name(entry), _tool_name(name)
+    if want.startswith("mcp__"):
+        prefix = want.removesuffix("__*")
+        return base == prefix or base.startswith(prefix + "__")
+    return base == want
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTools:
+    """What an agent file says about its tools, as :func:`read_agent_tools`
+    reads it from the config snapshot: ``allow``, the entries of its
+    ``tools:`` line (``None`` when they are not known, which means every
+    tool), and ``deny``, the entries of its ``disallowedTools:`` line. An
+    entry keeps its parentheses (``Agent(a, b)``)."""
+
+    allow: tuple[str, ...] | None = None
+    deny: tuple[str, ...] = ()
+    #: The tools of ``allow`` with an entry the hook cut inside its parentheses
+    #: (``Agent(worker-one, ...``): their allowlist is lost, so a line can't be
+    #: written with that entry.
+    cut: tuple[str, ...] = ()
+    #: Whether ``deny`` is the whole ``disallowedTools`` line. A cut deny entry
+    #: is left out of it rather than widened to its base name, and a deny line
+    #: the hook cut off or masked is only partly read, so a rule that drops a
+    #: denied tool must not trust it.
+    deny_whole: bool = True
+
+    def offered(self, name: str) -> bool:
+        """Whether the tool ``name`` (``mcp__server__*`` for a whole server)
+        is on a known ``tools:`` line, or the line is not known. Only the
+        ``tools:`` line is read so far: ``deny`` is carried, not yet applied."""
+        return self.allow is None or any(_entry_covers(entry, name) for entry in self.allow)
+
+    def entries_for(self, name: str) -> list[str]:
+        """The line's own entries for the tool ``name``, as a suggested line
+        writes it: ``Task`` or ``Agent(a, b)`` as the file has them, and
+        ``mcp__X__*`` only when the line names the whole server or is not
+        known. None when a known line does not have the tool."""
+        if self.allow is None:
+            return [name]
+        found = [entry for entry in self.allow if _entry_covers(entry, name)]
+        if _tool_name(name).startswith("mcp__"):
+            server = _tool_name(name).removesuffix("__*")
+            whole = [entry for entry in found if _tool_name(entry) in (server, server + "__*")]
+            found = whole or found
+        return list(dict.fromkeys(found))
+
+
+def read_agent_tools(tools, disallowed=None) -> AgentTools:
+    """An agent's tools from the ``tools`` and ``disallowedTools`` values the
+    config snapshot stores: a list, or a string from a hook that stored the
+    line whole. ``allow`` is ``None`` (every tool) when the line is not known:
+    no config snapshot, no ``tools:`` line (the agent gets every tool), an
+    empty one, or one the hook cut off (:func:`_read_entries`)."""
+    entries, whole = _read_entries(tools)
+    denied, denied_whole = _read_entries(disallowed)
+    known = whole and bool(entries)
+    return AgentTools(
+        allow=tuple(entry for entry, _cut in entries) if known else None,
+        deny=tuple(entry for entry, cut in denied if not cut),
+        cut=tuple(dict.fromkeys(_tool_name(entry) for entry, cut in entries if cut)) if known else (),
+        # No line at all denies nothing; the unknown-snapshot marker says nothing.
+        deny_whole=(disallowed is None or denied_whole) and not any(cut for _entry, cut in denied),
+    )
 
 
 def known_tools_line(current) -> list[str] | None:
     """The entries of an agent's current ``tools:`` line, or ``None`` when
-    the line is not known: no config snapshot, no ``tools:`` line (the agent
-    gets every tool), or an empty one. An entry keeps its parentheses
-    (``Agent(a, b)``)."""
-    if isinstance(current, str) and current != _CURRENT_UNKNOWN:
-        entries = _split_line(current)
-    elif isinstance(current, (list, tuple)):
-        entries = [str(item).strip() for item in current if str(item).strip()]
-    else:
-        return None
-    return entries or None
-
-
-def _on_line(name: str, line: list[str]) -> bool:
-    """Whether the tool ``name`` (``mcp__server__*`` for a whole server) is
-    on a known ``tools:`` line. An MCP entry matches by its server:
-    ``mcp__X``, ``mcp__X__*`` and ``mcp__X__tool`` all mean server X."""
-    bases = {entry.split("(", 1)[0].strip() for entry in line}
-    if name.startswith("mcp__"):
-        prefix = name[: -len("__*")] if name.endswith("__*") else name
-        return any(base == prefix or base.startswith(prefix + "__") for base in bases)
-    return name in bases
+    the line is not known (:func:`read_agent_tools`)."""
+    allow = read_agent_tools(current).allow
+    return list(allow) if allow is not None else None
 
 
 def _diet_sizes(text) -> dict[str, tuple[float, float, float]]:
@@ -1822,15 +1926,22 @@ def current_diet(diet: dict, current) -> dict:
     ``tools:`` line is ``current``: only the rarely used tools still on a
     known line are left out, the amounts are worked out again from each
     one's size, and a tool to keep that the line lacks is dropped (a card
-    never adds one). The row as it is when the line is not known
-    (:func:`known_tools_line`) or the row has no sizes."""
-    line = known_tools_line(current)
+    never adds one). Nothing is left out when a kept tool's only entry on the
+    line was cut inside its parentheses (:attr:`AgentTools.cut`): no line
+    can be written for it. The row as it is when the line is not known
+    (:func:`read_agent_tools`) or the row has no sizes."""
+    line = read_agent_tools(current)
     sizes = _diet_sizes(diet.get("rare_sizes"))
-    if line is None or not sizes:
+    if line.allow is None or not sizes:
         return diet
-    rare = [name for name in _split_names(diet.get("rare_tools")) if name in sizes and _on_line(name, line)]
+    rare = [name for name in _split_names(diet.get("rare_tools")) if name in sizes and line.offered(name)]
     row = dict(diet)
-    row["keep_tools"] = ", ".join(name for name in _split_names(diet.get("keep_tools")) if _on_line(name, line))
+    kept = [name for name in _split_names(diet.get("keep_tools")) if line.offered(name)]
+    row["keep_tools"] = ", ".join(kept)
+    if any(_tool_name(name) in line.cut for name in kept):
+        # A kept tool the file gives an allowlist the hook cut off can't be written
+        # back as the file has it, and its bare name would widen it: no list to give.
+        rare = []
     row["rare_tools"] = ", ".join(rare)
     definitions = sum(sizes[name][0] for name in rare)
     deferred = sum(sizes[name][1] for name in rare)
@@ -1879,11 +1990,14 @@ def tools_list_offer(
     measured = diet.get("spawns")
     if not isinstance(measured, int) or measured < th.spawn_parts_min_spawns:
         return None
-    keep = _split_names(diet.get("keep_tools"))
+    kept = _split_names(diet.get("keep_tools"))
     rare = _split_names(diet.get("rare_tools"))
     dropped = sum(diet[column] for column, _label in _DIET_PARTS if _is_number(diet.get(column)))
-    if not keep or not rare or dropped < th.spawn_tools_list_tokens:
+    if not kept or not rare or dropped < th.spawn_tools_list_tokens:
         return None
+    # Each kept tool as the line writes it, so a suggested line never changes an entry.
+    line = read_agent_tools(current)
+    keep = list(dict.fromkeys(entry for name in kept for entry in line.entries_for(name)))
     return keep, rare, dropped
 
 
@@ -1906,7 +2020,8 @@ def _tools_list_card(
     diet = current_diet(row, current)
     keep, rare, dropped = offer
     # A card never adds a tool: one the diet keeps that a known line lacks.
-    not_added = [name for name in _split_names(row["keep_tools"]) if name not in keep]
+    on_line = _split_names(diet["keep_tools"])
+    not_added = [name for name in _split_names(row["keep_tools"]) if name not in on_line]
     measured = diet["spawns"]
     sizes = [(label, diet.get(column)) for column, label in _DIET_PARTS]
 
@@ -1946,16 +2061,22 @@ def _tools_list_card(
         action = f"Limit {agent_type}'s tools to the ones it calls: {line}. {left_out} {check}"
         category = "settings"
         if not has_file:
-            action += " " + _built_in_note(agent_type)
+            action += " " + _built_in_note(agent_type, scope)
         if general:
             action += " " + _GENERAL_PURPOSE_WARNING
 
     why_parts = [f"{value:,.0f} of {label}" for label, value in sizes if _is_number(value) and value >= 1]
+    # The tools that cleared the bar, from the row as the report gave it: a rule's additions did not, and
+    # a tool a known line lacks did.
+    rule_kept = _split_names(row.get("rule_kept_tools"))
+    cleared = [name for name in _split_names(row["keep_tools"]) if name not in rule_kept]
     why = (
-        f"In {measured} spawns, {agent_type} called {len(keep)} of the tools it was offered in at least "
+        f"In {measured} spawns, {agent_type} called {len(cleared)} of the tools it was offered in at least "
         f"{pct}% of them. Leaving out the rest takes about {dropped:,.0f} tokens out of each start: "
         f"{', '.join(why_parts)}."
     )
+    if rule_kept:
+        why += f" {_join_names(rule_kept)} stay too because workflow agents called them."
     evidence = [_evidence("Spawns with tools recorded", measured, "agent_startup", "agent_startup_diet", agent_type)]
     definitions = diet.get("dropped_definitions")
     if _is_number(definitions):
@@ -2070,6 +2191,7 @@ def _rule_spawn_parts(
         # once it is given or a tools line is already in place.
         tools_card = _tools_list_card(report, th, agent_type, snapshot, units)
         current_tools = _agent_current(agent_type, "tools", snapshot)
+        tools_line = read_agent_tools(current_tools)
         known_line = known_tools_line(current_tools)
         if tools_card is not None:
             out.append(tools_card)
@@ -2153,10 +2275,10 @@ def _rule_spawn_parts(
                         else f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
                         "sending it CLAUDE.md (omitClaudeMd: true)."
                         if has_file
-                        else f"Create {agent_type}.md in .claude/agents/ (it replaces the built-in {agent_type}) with the "
+                        else f"Create {agent_file_path(agent_type, scope)} (it replaces the built-in {agent_type}) with the "
                         f"same job and the CLAUDE.md rules {agent_type} needs, then give it omitClaudeMd: true."
                         if writer_first
-                        else f"Create {agent_type}.md in .claude/agents/ (it replaces the built-in {agent_type}) with the "
+                        else f"Create {agent_file_path(agent_type, scope)} (it replaces the built-in {agent_type}) with the "
                         "same job, and give it omitClaudeMd: true."
                     ),
                     lever="omitClaudeMd" if has_file else None,
@@ -2201,7 +2323,7 @@ def _rule_spawn_parts(
             and skills_used == 0
             and overridable
             # A known tools line without Skill already leaves the skills list out.
-            and (known_line is None or _on_line(SKILLS_TOOL, known_line))
+            and tools_line.offered(SKILLS_TOOL)
         ):
             # Whether the tools list above leaves Skill out, which takes the
             # skills list with it: this card is then a part of that saving.
@@ -2225,7 +2347,7 @@ def _rule_spawn_parts(
                         else f"Give {agent_type} a tools list that leaves Skill out, or, to change nothing else, "
                         "add Skill to its disallowedTools."
                     )
-                    + ("" if has_file else " " + _built_in_note(agent_type))
+                    + ("" if has_file else " " + _built_in_note(agent_type, scope))
                     + undocumented,
                     lever=None,
                     scope=scope,
@@ -2280,7 +2402,7 @@ def _rule_spawn_parts(
                 continue
             if server_offered < th.spawn_parts_min_spawns:
                 continue
-            if known_line is not None and not _on_line(mcp_tool_key(str(values.get("server"))), known_line):
+            if not tools_line.offered(mcp_tool_key(str(values.get("server")))):
                 # A known tools line with no mcp__<server> entry never gets the server.
                 continue
             if "__" in str(values.get("server")):
@@ -2327,7 +2449,7 @@ def _rule_spawn_parts(
                     action=(
                         f"Add {_name_list(entries)} to the disallowedTools of {agent_type}, so its spawns no "
                         f"longer get these servers: {_name_list(names)}."
-                        + ("" if has_file else " " + _built_in_note(agent_type))
+                        + ("" if has_file else " " + _built_in_note(agent_type, scope))
                     ),
                     lever=None,
                     scope=scope,
@@ -3300,5 +3422,6 @@ __all__ = [
     "render_patch_set",
     "current_diet",
     "known_tools_line",
+    "read_agent_tools",
     "tools_list_offer",
 ]
