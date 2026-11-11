@@ -88,6 +88,7 @@ var document = {
       command: command, tag: area.tagName, value: area.value,
       selected: document.selected === area && area.selectionStart === 0 && area.selectionEnd === area.value.length,
       attached: !!area.parentNode, parent: area.parentNode ? area.parentNode.tagName : null,
+      hidden: "aria-hidden" in area.attrs,
     });
     if (scenario.exec === "throws") throw new Error("not allowed");
     return scenario.exec;
@@ -172,7 +173,8 @@ def _press(scenario: dict) -> dict:
         " buttons[0].action();"
         " return new Promise(function (done) { setTimeout(done, 0); }).then(function () {"
         "  var pre = slot.firstChild && slot.firstChild.firstChild;"
-        "  return { toasts: log.toasts, shown: pre ? pre.textContent : null,"
+        "  return { toasts: log.toasts, shown: pre ? pre.textContent : null, name: pre ? pre.attrs['aria-label'] : null,"
+        "   role: pre ? pre.attrs.role : null,"
         "   focused: !!pre && document.activeElement === pre,"
         "   selected: !!pre && !!selection.range && selection.range.node === pre,"
         "   written: log.written, exec: log.exec, label: buttons[0].label }; });"
@@ -189,7 +191,7 @@ def test_a_refused_clipboard_api_falls_back_to_copying_a_selected_textarea(clipb
     got = _copy({"clipboard": clipboard, "exec": True})
     assert got["ok"] is True
     [call] = got["log"]["exec"]
-    assert call == {"command": "copy", "tag": "TEXTAREA", "value": PROMPT, "selected": True, "attached": True, "parent": "BODY"}
+    assert call == {"command": "copy", "tag": "TEXTAREA", "value": PROMPT, "selected": True, "attached": True, "parent": "BODY", "hidden": False}
 
 
 @pytest.mark.parametrize("clipboard", ["rejects", "throws", "missing"])
@@ -255,8 +257,10 @@ def test_when_both_tries_fail_the_prompt_is_shown_selected_and_focused_and_the_t
     got = _press({"clipboard": clipboard, "exec": False})
     assert got["shown"] == PROMPT
     assert got["focused"] is True and got["selected"] is True
+    # The focused block is named, as the button that opens it is.
+    assert got["name"] == "Prompt for every open fix in proj" and got["role"] == "group"
     assert got["toasts"] == [
-        {"message": "Couldn't copy. The prompt is shown below: select it and copy it.", "tone": "warning"}
+        {"message": "Couldn't copy. The prompt is selected below: copy it from there.", "tone": "warning"}
     ]
 
 
@@ -312,3 +316,9 @@ def _line(files: list[int], several: int, other: int) -> str:
 )
 def test_the_bundle_note_counts_files_apart_from_prompts_that_span_several(files, several, other, line) -> None:
     assert _line(files, several, other) == line
+
+
+def test_the_shown_prompt_keeps_no_padding_for_a_copy_button_it_does_not_have() -> None:
+    css = _static_text("app.css")
+    rule = re.search(r"\.bundle-prompt \.code-block pre \{([^}]*)\}", css)
+    assert rule and "padding-right: var(--space-5);" in rule.group(1)

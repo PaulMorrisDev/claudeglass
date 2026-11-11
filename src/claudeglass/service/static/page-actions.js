@@ -695,7 +695,7 @@ function shortSaving(text) {
 }
 
 // The toast when the bundle's copy is refused: the prompt is on the page.
-var BUNDLE_COPY_REFUSED = "Couldn't copy. The prompt is shown below: select it and copy it.";
+var BUNDLE_COPY_REFUSED = "Couldn't copy. The prompt is selected below: copy it from there.";
 
 // The note beside the bundle's Copy prompt. The first number is every open
 // fix; the rest say which of them are the fixes in M files (data.files), the
@@ -734,18 +734,18 @@ function bundleBlock(data, name) {
       refused: BUNDLE_COPY_REFUSED,
       after: function (ok) {
         if (ok) clear(shown);
-        else showBundlePrompt(shown, data.prompt);
+        else showBundlePrompt(shown, data.prompt, name);
       },
     }),
   ]);
   return el("div", null, [row, shown]);
 }
 
-// The prompt in the page's code-block style, focused and selected, so a
-// press of Ctrl+C or Cmd+C copies it.
-function showBundlePrompt(slot, prompt) {
+// The prompt in the page's code-block style, named, focused and selected,
+// so a press of Ctrl+C or Cmd+C copies it.
+function showBundlePrompt(slot, prompt, name) {
   clear(slot);
-  var pre = el("pre", { text: prompt, tabIndex: -1 });
+  var pre = el("pre", { text: prompt, tabIndex: -1, role: "group", "aria-label": "Prompt for every open fix in " + name });
   slot.appendChild(el("div", { class: "code-block" }, [pre]));
   pre.focus();
   var range = document.createRange();

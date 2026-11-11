@@ -144,7 +144,6 @@ function copyBySelection(text) {
   try {
     area = document.createElement("textarea");
     area.value = text;
-    area.setAttribute("aria-hidden", "true");
     area.style.position = "fixed";
     area.style.top = "0";
     area.style.left = "0";
