@@ -201,8 +201,10 @@ fields a TTL/model/effort recommendation keys off:
 An agent's `tools` and `disallowedTools` are stored as a list of tool
 names. A comma string (`tools: Read, Agent(a, b)`) is split at the commas
 outside parentheses, so a long line is kept whole; each entry then goes
-through the `_clip_name` every other name gets (cut at 64 characters, a
-path or URL masked), the same as the items of a YAML list always did.
+through the `_clip_name` every other name gets (cut at 64 characters; an
+entry that itself starts like a path or a URL is replaced by a marker, while
+a path inside an entry is kept as written), the same as the items of a YAML
+list always did.
 A snapshot written before this kept the comma string cut at 64 characters
 (61 and `...`). `load_snapshots` reads a whole string as the list of its
 entries (it depends on that snapshot alone, so the dashboard's store and a

@@ -34,8 +34,10 @@ artefacts — see [docs/deploy.md](docs/deploy.md).
   (including `.claude/settings.local.json`), the platform's system-wide
   `managed-settings.json` (if present), agent frontmatter
   (`.claude/agents/*.md`; an agent's `tools` and `disallowedTools` are kept as
-  a list of tool names, each cut at 64 characters, with a path or URL
-  masked, like every other name), MCP server names, and enabled plugin
+  a list of entries as written, each cut at 64 characters. An entry that
+  itself starts like a path or a URL is replaced by a marker, like every
+  other name; a path inside an entry such as `Bash(cat /home/u/x.txt)` is
+  kept as written up to the cut), MCP server names, and enabled plugin
   names.
 - Environment variable **names** matching `ANTHROPIC_*` / `CLAUDE_*` /
   `OTEL_*` (plus a short fixed list of irregularly-named levers) —
