@@ -11,6 +11,7 @@ import shlex
 import pytest
 
 from claudeglass import cli, context_budget, fixes
+from claudeglass import recommend as recommend_mod
 from claudeglass.config import Config
 from claudeglass.elasticity import ElasticityStats, FitResult
 from claudeglass.model import (
@@ -1115,3 +1116,51 @@ def test_a_built_in_writer_is_told_to_carry_its_rules_into_the_new_file_first():
     assert rec.severity == "info"
     assert rec.action.index("the CLAUDE.md rules general-purpose needs") < rec.action.index("omitClaudeMd: true")
     assert "replaces the built-in general-purpose" in rec.action
+
+
+# -- the tools line: cut off by the hook, or naming a tool by an old name -------
+
+#: A tools line as an older hook stored it: cut at 64 characters, 61 and "...".
+_CUT_LINE = "Read, Grep, Skill, NotebookEdit, WebFetch, Glob, LS, TodoWrite, NotebookRead"[:61] + "..."
+
+
+def _orchestrator(**kwargs):
+    uses = {"Read": 20, "Grep": 20, "Agent": 4}
+    chars = {"Read": 1500, "Grep": 1200, "Agent": 2000, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000}
+    return _diet_acc("orchestrator", uses=uses, chars=chars, **kwargs)
+
+
+def test_a_tools_line_the_hook_cut_off_gives_the_card_of_no_line_at_all():
+    assert len(_CUT_LINE) == 64
+    report = _report(_diet_acc("searcher"))
+    cut = _tools_rec(_recs(report, snapshot=_snapshot({"searcher": {"source": "user", "tools": _CUT_LINE}}), units=Units()), "searcher")
+    bare = _tools_rec(_recs(report, snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units()), "searcher")
+    assert cut.changes[0].value == bare.changes[0].value == ["Bash", "Grep", "Read"]
+    assert cut.saving_usd == bare.saving_usd and cut.saving_usd > 0
+    assert (cut.action, cut.why, cut.estimated_saving) == (bare.action, bare.why, bare.estimated_saving)
+    # The price path agrees: a cut line leaves the diet row as it came.
+    row = _diet_row(report, "searcher")
+    assert recommend_mod.current_diet(row, _CUT_LINE) == row
+    assert recommend_mod.tools_list_offer("searcher", row, current=_CUT_LINE) == recommend_mod.tools_list_offer("searcher", row)
+
+
+def test_a_tools_line_that_names_task_keeps_it_on_the_suggested_line():
+    line = "Task, Read, Grep, Skill, NotebookEdit, WebFetch"
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(_orchestrator()), snapshot=snap, units=Units()), "orchestrator")
+    assert rec.changes[0].value == ["Task", "Grep", "Read"]
+    assert "tools: Task, Grep, Read" in rec.action and "Agent" not in rec.action.split("Rarely used")[0]
+    # Task is Agent under its old name, so the price is that of a line saying Agent.
+    named = _snapshot({"orchestrator": {"source": "user", "tools": line.replace("Task", "Agent")}})
+    other = _tools_rec(_recs(_report(_orchestrator()), snapshot=named, units=Units()), "orchestrator")
+    assert other.changes[0].value == ["Agent", "Grep", "Read"]
+    assert rec.saving_usd == other.saving_usd and rec.saving_usd > 0
+    row = _diet_row(_report(_orchestrator()), "orchestrator")
+    assert recommend_mod.current_diet(row, line)["saving_usd"] == recommend_mod.current_diet(row, line.replace("Task", "Agent"))["saving_usd"]
+
+
+def test_an_agent_entry_with_an_allowlist_is_not_widened_on_the_suggested_line():
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": ["Agent(worker, reviewer)", "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]}})
+    rec = _tools_rec(_recs(_report(_orchestrator()), snapshot=snap, units=Units()), "orchestrator")
+    assert rec.changes[0].value == ["Agent(worker, reviewer)", "Grep", "Read"]
+    assert "tools: Agent(worker, reviewer), Grep, Read" in rec.action
