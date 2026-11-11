@@ -584,14 +584,20 @@ phase, label, description or path:
   as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
   back for a command that was blocked or denied. A count only, never a
   path.
-- ``Turn.shell_code_write_count: int = 0`` -- the part of
+- ``Turn.shell_code_write_count: int | None = None`` -- the part of
   ``shell_write_count`` aimed at code: not a document (a
   ``capture_catalogue.DOC_SUFFIXES`` file, a ``.json``, ``.csv``,
   ``.html`` or ``.log`` file under ``plans/``, ``reports/`` or ``docs/``,
   a report or ledger ``.json``/``.jsonl``) and
   not under ``scratchpad/``. Taken back like ``shell_write_count``. Only
-  the ``agent-decide-apply`` verdict reads it.
-- ``Turn.edit_code_count: int = 0`` -- how many of this turn's edit-tool
+  the ``agent-decide-apply`` verdict reads it. ``None`` in a digest an
+  older parser wrote: not measured, which is not 0. Nothing can measure
+  it once the transcript is gone, so the verdict leaves that run out.
+  The rule for every field a parser version adds: a default of ``None``
+  where the key is missing, and a reader that leaves the run out of that
+  figure (a field a version redefines needs the digest's parser version
+  as well).
+- ``Turn.edit_code_count: int | None = None`` -- how many of this turn's edit-tool
   calls (Edit, Write, MultiEdit, NotebookEdit) were aimed at code: outside
   the temp dir and not a document, by the same test as
   ``shell_code_write_count``. Counted whether or not the path is under a
@@ -1334,8 +1340,10 @@ class Turn:
     #: this turn's Bash/PowerShell commands named outside the temp dir (a
     #: file written twice counts twice). A count only, never a path.
     shell_write_count: int = 0
-    shell_code_write_count: int = 0
-    edit_code_count: int = 0
+    #: ``None`` in a digest from before ``PARSER_VERSION`` 47: not measured,
+    #: never 0 (the key is missing there, so the default shows).
+    shell_code_write_count: int | None = None
+    edit_code_count: int | None = None
     #: Quality-signals addition (see module docstring): the preceding
     #: human message looks like a correction. Flag only.
     human_correction: bool = False

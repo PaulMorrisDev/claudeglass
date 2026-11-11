@@ -460,12 +460,16 @@ __version__ = "0.16.0"
 #: ``Turn.edit_code_count``, the shell writes and edit-tool calls aimed at
 #: code (not documents, reports, ledgers or scratch files), which
 #: ``agent-decide-apply`` counts instead of every write. A pre-47 digest has
-#: none, so every transcript is re-read.
+#: none (``None``: not measured). A transcript still on disk is re-read; one
+#: Claude Code deleted keeps its old digest, and that run is left out of
+#: ``agent-decide-apply``.
 #: Bumped to 48: ``Turn.coach_tips``, the hints whose own tip words the
-#: reply holds. A pre-48 digest has none, so every transcript is re-read.
+#: reply holds. A pre-48 digest has none; a transcript still on disk is
+#: re-read, and one Claude Code deleted keeps its old digest.
 #: Bumped to 49: ``Turn.coach_disowned``, a reply that calls a ClaudeGlass
 #: note a misfire with no tip in it (the mute of ``quiet_output``). A
-#: pre-49 digest has none, so every transcript is re-read.
+#: pre-49 digest has none; a transcript still on disk is re-read, and one
+#: Claude Code deleted keeps its old digest.
 PARSER_VERSION = 49
 
 #: Bump when the model.py contract changes in a way that invalidates the
