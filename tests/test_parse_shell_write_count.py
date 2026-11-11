@@ -25,14 +25,16 @@ def _ts(second: int) -> str:
     return f"2026-09-18T12:{second // 60:02d}:{second % 60:02d}.000Z"
 
 
-def _turn(tmp_path, blocks, results, cwd=REPO):
+def _turn(tmp_path, blocks, results, cwd=REPO, first_cwd=None):
+    """The one reply that makes ``blocks``, on a line whose ``cwd`` is ``cwd``;
+    ``first_cwd`` is the working folder of the session's first line."""
     path = tmp_path / "t.jsonl"
     reply = turn_line(content=list(blocks), timestamp=_ts(1), cwd=cwd)
     reply["message"]["stop_reason"] = "tool_use"
     final = turn_line(content=[{"type": "text", "text": "done"}], timestamp=_ts(3))
     final["message"]["stop_reason"] = "end_turn"
     write_jsonl(path, [
-        user_str_line("go", timestamp=_ts(0)),
+        user_str_line("go", timestamp=_ts(0), **({"cwd": first_cwd} if first_cwd else {})),
         reply,
         user_block_line(list(results), timestamp=_ts(2)),
         final,
@@ -442,6 +444,30 @@ def test_the_projects_own_document_folders_still_hold_documents_wherever_it_sits
     assert turn.shell_write_count == 1 and turn.shell_code_write_count == 0
 
 
+def test_a_report_a_worktree_agent_writes_into_the_main_checkouts_doc_folders_is_not_a_code_write(tmp_path, salt):
+    worktree = "/home/ana/shop/.claude/worktrees/fix-1"
+    turn = _turn(tmp_path, [
+        _bash("echo '{}' > /home/ana/shop/docs/api/spec.json"),
+        tool_use_block("Write", "t2", {"file_path": "/home/ana/shop/reports/2026/q3.json"}),
+        tool_use_block("Edit", "t3", {"file_path": "/home/ana/shop/src/app.py"}),
+    ], [_ok(), _ok("t2"), _ok("t3")], cwd=worktree)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 0
+    assert turn.edit_code_count == 1
+
+
+def test_a_report_written_after_the_session_moved_into_reports_is_still_a_document(tmp_path, salt):
+    # Claude Code carries a `cd` in the main session: later lines record the new folder, but the folders
+    # that make a file a document are measured from where the session began.
+    root = "/home/ana/shop"
+    turn = _turn(tmp_path, [
+        _bash("echo '{}' > summary.json"),
+        tool_use_block("Write", "t2", {"file_path": root + "/reports/out.json"}),
+        tool_use_block("Write", "t3", {"file_path": root + "/reports/sub/app.py"}),
+    ], [_ok(), _ok("t2"), _ok("t3")], cwd=root + "/reports", first_cwd=root)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 0
+    assert turn.edit_code_count == 1  # reports/sub/app.py: code; the json is a report
+
+
 def test_an_edit_into_the_projects_own_reports_folder_is_not_a_code_edit(tmp_path, salt):
     turn = _turn(tmp_path, [
         tool_use_block("Write", "t1", {"file_path": "/home/ana/docs/shop/reports/out.json"}),
@@ -466,11 +492,26 @@ def test_an_edit_into_the_projects_own_reports_folder_is_not_a_code_edit(tmp_pat
     ("package.json", "/home/ana/docs/shop", True),
     ("docs/a.json", None, False),
     ("package.json", None, True),
-    # Outside the working folder, or with none: the folder the file sits in decides, nothing above it.
+    # Outside the working folder: the folders below the deepest one it shares with the working folder decide.
     ("/srv/docs/notes.json", "/home/ana/work", False),
-    ("/srv/docs/shop/package.json", "/home/ana/work", True),
-    ("/srv/docs/notes.json", None, False),
+    ("/home/ana/shop/docs/api/spec.json", "/home/ana/shop/.claude/worktrees/x", False),
+    ("/home/ana/shop/reports/2026/q3.json", "/home/ana/shop/.claude/worktrees/x", False),
+    ("/home/ana/shop/src/app.py", "/home/ana/shop/.claude/worktrees/x", True),
+    ("/home/ana/shop/package.json", "/home/ana/shop/.claude/worktrees/x", True),
+    ("C:\\Dev\\shop\\reports\\2026\\q3.json", "C:\\Dev\\shop\\.claude\\worktrees\\x", False),
+    ("c:/dev/shop/docs/api/spec.json", "C:/Dev/Shop/.claude/worktrees/x", False),
+    ("/home/x/scratchpad/build/a.py", "/home/ana/shop", False),
+    ("/srv/other/reports/2026/q3.json", "/home/ana/shop", False),
+    ("/home/ana/docs/other/package.json", "/home/ana/docs/shop", True),
+    ("/home/ana/other/src/app.py", "/home/ana/shop", True),
+    # The accepted leftover: a project under a docs-named folder that shares no parent with the working
+    # folder reads as a document (a missed card, not a false alarm).
+    ("/srv/docs/shop/package.json", "/home/ana/work", False),
+    # With no absolute working folder, the folder the file sits in decides, nothing above it.
     ("/srv/docs/shop/package.json", None, True),
+    ("/srv/docs/shop/package.json", "", True),
+    ("/srv/docs/shop/package.json", 7, True),
+    ("/srv/docs/notes.json", None, False),
     ("/srv/plans/api/app.py", None, True),
     ("/srv/scratchpad/a.py", None, False),
     ("/srv/scratchpad/job/a.py", None, True),

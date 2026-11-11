@@ -680,23 +680,34 @@ _ABSOLUTE_RE = re.compile(r"^(?:/|[a-z]:/)")
 
 def _folders_below(normal: str, cwd: str | None) -> set[str]:
     """The folder names that can make ``normal`` (a normalised target) a
-    document or scratch file. Only folders below the session's working
-    folder count when the target is inside it, since the path the project
-    itself sits at says nothing about what its files are (a repository in
-    ``~/docs/shop``). A relative target is below the working folder by
-    being relative: all its folders count. A target outside the working
-    folder, or any absolute one when no working folder is known, has no
-    project root to measure from, so only the folder it sits in counts."""
+    document or scratch file: the folders below the deepest folder it
+    shares with the working folder ``cwd``. Inside the working folder that
+    is the folders below it, since the path the project itself sits at says
+    nothing about what its files are (a repository in ``~/docs/shop``).
+    Outside it, a file in another checkout of the same project (a worktree
+    agent writing the main checkout's ``docs/api/spec.json``) is still
+    judged by the folders below the project's own root, and one with
+    nothing in common counts every folder it sits under. The case this
+    gets wrong, and is allowed to: a project under a ``docs``-named folder
+    that shares no parent with the working folder reads as a document, a
+    missed card and not a false alarm. A relative target is below the
+    working folder by being relative: all its folders count. An absolute
+    target with no absolute working folder to measure from is judged by
+    the folder it sits in alone."""
     folders = normal.rpartition("/")[0]
     if not _ABSOLUTE_RE.match(normal):
         return set(folders.split("/"))
-    if isinstance(cwd, str) and cwd:
-        root = _normalize_path_for_hash(cwd)
-        if _ABSOLUTE_RE.match(root):
-            root = root.rstrip("/") + "/"
-            if normal.startswith(root):
-                return set(normal[len(root):].rpartition("/")[0].split("/"))
-    return {folders.rpartition("/")[2]}
+    root = _normalize_path_for_hash(cwd) if isinstance(cwd, str) and cwd else ""
+    if not _ABSOLUTE_RE.match(root):
+        return {folders.rpartition("/")[2]}
+    # The folders both paths start with, taken by name so that a UNC path's
+    # leading "//" and a drive on one side only need no special case.
+    mine, shared = folders.split("/"), 0
+    for ours, theirs in zip(mine, root.split("/")):
+        if ours != theirs:
+            break
+        shared += 1
+    return set(mine[shared:])
 
 
 def _is_code_write_target(target: str, prefixes: tuple[str, ...], cwd: str | None = None) -> bool:
@@ -1326,10 +1337,14 @@ def _merge_content_blocks(
     tool_use_names: dict[str, str],
     cwd: str | None = None,
     blocked_calls: dict[int, str] | None = None,
+    root_cwd: str | None = None,
 ) -> None:
     """Fold one line's tool_use blocks into ``pending``. ``cwd`` is the
-    line's own working directory, used only to resolve a shell command's
-    relative write targets before they are hashed. ``blocked_calls`` maps
+    line's own working directory, used to resolve a shell command's
+    relative write targets before they are hashed. ``root_cwd`` is the
+    transcript's first working directory: the folders below it decide
+    whether a write is to code (:func:`_is_code_write_target`), so a ``cd``
+    into ``reports`` does not turn its files into code. ``blocked_calls`` maps
     the key of each call a hook blocked earlier in the transcript to that
     hook's label: a call here with the same key is an unchanged re-send."""
     if not isinstance(content, list):
@@ -1386,7 +1401,7 @@ def _merge_content_blocks(
                     pending.edit_real_found = True
                     # Counted before the .claude split, as the shell side
                     # counts it: a worktree under .claude holds code.
-                    if _is_code_write_target(path_value, temp_prefixes, cwd):
+                    if _is_code_write_target(path_value, temp_prefixes, root_cwd):
                         pending.edit_code_count += 1
                         if isinstance(tool_use_id, str) and tool_use_id:
                             pending.edit_code_by_tool_use[tool_use_id] = 1
@@ -1481,7 +1496,7 @@ def _merge_content_blocks(
                     # keeps no path.
                     if not _is_temp_target(target, temp_prefixes):
                         outside_temp += 1
-                        if _is_code_write_target(target, temp_prefixes, cwd):
+                        if _is_code_write_target(target, temp_prefixes, root_cwd):
                             code_targets += 1
                         if prompt_shape.is_config_path(target):
                             config_targets += 1
@@ -1546,7 +1561,10 @@ def _merge_content_blocks(
 
 
 def _new_pending(
-    d: dict, tool_use_names: dict[str, str], blocked_calls: dict[int, str] | None = None
+    d: dict,
+    tool_use_names: dict[str, str],
+    blocked_calls: dict[int, str] | None = None,
+    root_cwd: str | None = None,
 ) -> _PendingTurn:
     message = d.get("message")
     message = message if isinstance(message, dict) else {}
@@ -1590,7 +1608,9 @@ def _new_pending(
         _apply_usage(pending, usage)
     _apply_cache_miss(pending, message)
 
-    _merge_content_blocks(pending, message.get("content"), tool_use_names, d.get("cwd"), blocked_calls)
+    _merge_content_blocks(
+        pending, message.get("content"), tool_use_names, d.get("cwd"), blocked_calls, root_cwd
+    )
     _merge_stop_reason(pending, message)
     return pending
 
@@ -1743,7 +1763,11 @@ def _merge_stop_reason(pending: _PendingTurn, message) -> None:
 
 
 def _merge_into_pending(
-    pending: _PendingTurn, d: dict, tool_use_names: dict[str, str], blocked_calls: dict[int, str] | None = None
+    pending: _PendingTurn,
+    d: dict,
+    tool_use_names: dict[str, str],
+    blocked_calls: dict[int, str] | None = None,
+    root_cwd: str | None = None,
 ) -> None:
     if not pending.is_synthetic:
         message = d.get("message")
@@ -1764,7 +1788,7 @@ def _merge_into_pending(
         _apply_usage(pending, usage)
     _apply_cache_miss(pending, message)
     content = message.get("content") if isinstance(message, dict) else None
-    _merge_content_blocks(pending, content, tool_use_names, d.get("cwd"), blocked_calls)
+    _merge_content_blocks(pending, content, tool_use_names, d.get("cwd"), blocked_calls, root_cwd)
     _merge_stop_reason(pending, message)
 
 
@@ -3205,6 +3229,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: the summary that follows it is inherited too.
     inherited_boundary = False
 
+    #: The first working directory any line names: where the session began,
+    #: whatever a later ``cd`` makes of a line's own ``cwd``.
+    first_cwd: str | None = None
     current: _PendingTurn | None = None
     current_key: str | None = None
     plan_watch = _PlanWatch()
@@ -3239,6 +3266,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             if line_at is not None and (latest_at is None or line_at > latest_at):
                 latest_at, latest_ts = line_at, line_ts
 
+        if first_cwd is None:
+            cwd_raw = d.get("cwd")
+            if isinstance(cwd_raw, str) and cwd_raw:
+                first_cwd = cwd_raw
         if first_entrypoint is None:
             entrypoint_raw = d.get("entrypoint")
             if isinstance(entrypoint_raw, str) and entrypoint_raw:
@@ -3257,7 +3288,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                 recent_messages[-1]["answered"] = True
             key = _turn_key(d)
             if current is not None and key == current_key:
-                _merge_into_pending(current, d, tool_use_names, blocked_calls)
+                _merge_into_pending(current, d, tool_use_names, blocked_calls, first_cwd)
                 plan_watch.see_call(current)
                 continue
             if key in finalized_keys:
@@ -3286,7 +3317,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             attachments_for_current = attachments_since_current
             events_since_current = []
             attachments_since_current = []
-            current = _new_pending(d, tool_use_names, blocked_calls)
+            current = _new_pending(d, tool_use_names, blocked_calls, first_cwd)
             current.after_challenge = last_human_challenge
             plan_watch.see_call(current)
             (
