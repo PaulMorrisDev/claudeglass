@@ -929,9 +929,10 @@ def _claimed(path: Path):
     several sessions, share the state file; the one that holds the claim
     reads it, decides and writes it whole, and the others skip their
     decision (yield ``False``). A claim being deleted on Windows (a
-    ``PermissionError``) reads as held. A claim that cannot be made for any
-    other reason (no folder yet) yields ``True``, so coaching is never
-    silenced by it. The claim is released at the end, an error ignored."""
+    ``PermissionError``) reads as held and is waited for the same way,
+    without the stale check. A claim that cannot be made for any other
+    reason (no folder yet) yields ``True``, so coaching is never silenced
+    by it. The claim is released at the end, an error ignored."""
     claim = path.with_name(path.name + ".claim")
     held = False
     attempt = 0
@@ -941,8 +942,8 @@ def _claimed(path: Path):
             os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
             held = True
             break
-        except FileExistsError:
-            if attempt == 0:
+        except (FileExistsError, PermissionError) as error:
+            if attempt == 0 and isinstance(error, FileExistsError):
                 attempt = 1
                 if _take_stale(claim):
                     continue
@@ -952,9 +953,6 @@ def _claimed(path: Path):
                 yield False
                 return
             time.sleep(_CLAIM_POLL_S)
-        except PermissionError:
-            yield False
-            return
         except OSError:
             yield True
             return

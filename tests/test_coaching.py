@@ -3843,6 +3843,41 @@ def test_a_claim_that_windows_refuses_to_make_reads_as_held(tmp_path, monkeypatc
         assert held is False
 
 
+def test_a_claim_that_windows_refuses_for_a_moment_is_waited_for(tmp_path, monkeypatch):
+    import time
+
+    real = HOOK.os.open
+    refusing_until = time.monotonic() + 0.01
+
+    def refuse_then_pass(*args, **kwargs):
+        # Windows refuses a create while the previous claim is still being deleted.
+        if time.monotonic() < refusing_until:
+            raise PermissionError("being deleted")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(HOOK.os, "open", refuse_then_pass)
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with HOOK._claimed(state_path) as held:
+        assert held is True
+        assert state_path.with_name(state_path.name + ".claim").exists()
+    assert not state_path.with_name(state_path.name + ".claim").exists()
+
+
+def test_a_claim_that_windows_always_refuses_is_given_up_on_after_the_wait(tmp_path, monkeypatch):
+    import time
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("being deleted")
+
+    monkeypatch.setattr(HOOK.os, "open", refuse)
+    started = time.monotonic()
+    with HOOK._claimed(_config_dir(tmp_path) / cat.COACH_STATE_FILE) as held:
+        assert held is False
+    elapsed = time.monotonic() - started
+    assert HOOK._CLAIM_WAIT_S * 0.9 <= elapsed < 2.0
+
+
 def _stale(base):
     return _heartbeat(base, {"s1": cat.MOD_PRESENT_WINDOW_S + 1})
 
