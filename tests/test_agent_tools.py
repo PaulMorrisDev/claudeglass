@@ -88,6 +88,20 @@ def test_the_reader_carries_the_deny_entries_a_string_or_a_list_holds():
     assert read_agent_tools(None, cut).deny == ("Write", "Edit", "NotebookEdit", "MultiEdit", "Bash", "PowerShell")
 
 
+#: A permission-bearing entry the hook cut inside its parentheses.
+_CUT_AGENT = ("Agent(" + "worker-one, " * 8)[:61] + "..."
+_CUT_BASH = ("Bash(" + "rm -rf /tmp/build-cache && " * 4)[:61] + "..."
+
+
+def test_the_reader_reports_which_entries_were_cut_inside_their_parentheses():
+    assert len(_CUT_AGENT) == len(_CUT_BASH) == 64
+    line = read_agent_tools([_CUT_AGENT, "Read", "Bash"])
+    assert line.allow == ("Agent", "Read", "Bash")
+    assert line.cut == ("Agent",)
+    assert read_agent_tools(["Agent(a, b)", "Read"]).cut == ()
+    assert read_agent_tools(None).cut == ()
+
+
 # -- the first snapshot after the upgrade: a line stored cut, then whole --------
 
 _LONG_LINE = [

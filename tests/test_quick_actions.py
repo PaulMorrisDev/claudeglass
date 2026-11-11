@@ -2246,6 +2246,16 @@ def test_tools_counts_what_the_card_counts_for_a_line_in_the_snapshots_agents_ma
     assert {row[0]: row[-1] for row in qa.run("tools", _ctx(tmp_path, report))["table"]["rows"]}["searcher"].startswith("3 ")
 
 
+def test_tools_counts_nothing_for_an_agent_whose_kept_tool_has_an_allowlist_the_hook_cut(tmp_path):
+    from test_spawn_parts import _CUT_AGENT_ENTRY, _orchestrator, _report
+
+    report = _report(_orchestrator())
+    line = [_CUT_AGENT_ENTRY, "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]
+    cell = lambda agents: {row[0]: row[-1] for row in qa.run("tools", _ctx(tmp_path, report, agents=agents))["table"]["rows"]}["orchestrator"]
+    assert cell({"orchestrator": {"source": "user", "tools": line}}) == "none"
+    assert cell({"orchestrator": {"source": "user", "tools": ["Agent(a, b)", *line[1:]]}}) != "none"
+
+
 def test_the_habits_saving_is_an_upper_bound_when_the_card_part_is_and_the_playbook_is_larger(tmp_path):
     model = _full_model()
     model.recommendations = [Recommendation(

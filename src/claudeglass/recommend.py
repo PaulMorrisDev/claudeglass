@@ -1789,15 +1789,16 @@ def _tool_name(entry: str) -> str:
     return AGENT_TOOLS[0] if base in AGENT_TOOLS else base
 
 
-def _read_entries(value) -> tuple[list[str], bool]:
-    """The entries of a stored ``tools`` or ``disallowedTools`` value, and
-    whether they are the whole line. A list is the whole line, as the hook
-    stores it: each entry was cut or masked on its own, so one cut before any
-    parenthesis, or masked as a path or URL, is a tool that cannot be read,
-    and an ``Agent(...`` cut inside its parentheses keeps its base name. A
-    string comes from a hook that cut the whole line at 64 characters: one
-    that ends in ``...`` at that length, or holds the masked-path marker, is
-    not the whole line."""
+def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
+    """The entries of a stored ``tools`` or ``disallowedTools`` value, each
+    with whether the hook cut it inside its parentheses (it is then its base
+    name, ``Agent`` for ``Agent(worker-one, ...``), and whether they are the
+    whole line. A list is the whole line, as the hook stores it: each entry
+    was cut or masked on its own, so one cut before any parenthesis, or
+    masked as a path or URL, is a tool that cannot be read. A string comes
+    from a hook that cut the whole line at 64 characters: one that ends in
+    ``...`` at that length, or holds the masked-path marker, is not the whole
+    line."""
     if isinstance(value, str) and value != _CURRENT_UNKNOWN:
         if NAME_REDACTED in value:
             return [], False
@@ -1807,10 +1808,10 @@ def _read_entries(value) -> tuple[list[str], bool]:
             # The last entry may be cut short; one that ended at a comma was not.
             if entries and not body.rstrip().endswith(","):
                 entries.pop()
-            return entries, False
-        return split_tool_line(value), True
+            return [(entry, False) for entry in entries], False
+        return [(entry, False) for entry in split_tool_line(value)], True
     if isinstance(value, (list, tuple)):
-        entries: list[str] = []
+        entries: list[tuple[str, bool]] = []
         whole = True
         for item in value:
             text = str(item).strip()
@@ -1820,11 +1821,11 @@ def _read_entries(value) -> tuple[list[str], bool]:
                 whole = False
             elif cut_off_name(text):
                 if "(" in text:
-                    entries.append(text.split("(", 1)[0].strip())
+                    entries.append((text.split("(", 1)[0].strip(), True))
                 else:
                     whole = False
             else:
-                entries.append(text)
+                entries.append((text, False))
         return entries, whole
     return [], False
 
@@ -1850,6 +1851,15 @@ class AgentTools:
 
     allow: tuple[str, ...] | None = None
     deny: tuple[str, ...] = ()
+    #: The tools of ``allow`` with an entry the hook cut inside its parentheses
+    #: (``Agent(worker-one, ...``): their allowlist is lost, so a line can't be
+    #: written with that entry.
+    cut: tuple[str, ...] = ()
+    #: Whether ``deny`` is the whole ``disallowedTools`` line. A cut deny entry
+    #: is left out of it rather than widened to its base name, and a deny line
+    #: the hook cut off or masked is only partly read, so a rule that drops a
+    #: denied tool must not trust it.
+    deny_whole: bool = True
 
     def offered(self, name: str) -> bool:
         """Whether the tool ``name`` (``mcp__server__*`` for a whole server)
@@ -1879,8 +1889,14 @@ def read_agent_tools(tools, disallowed=None) -> AgentTools:
     no config snapshot, no ``tools:`` line (the agent gets every tool), an
     empty one, or one the hook cut off (:func:`_read_entries`)."""
     entries, whole = _read_entries(tools)
-    denied, _whole = _read_entries(disallowed)
-    return AgentTools(allow=tuple(entries) if whole and entries else None, deny=tuple(denied))
+    denied, denied_whole = _read_entries(disallowed)
+    known = whole and bool(entries)
+    return AgentTools(
+        allow=tuple(entry for entry, _cut in entries) if known else None,
+        deny=tuple(entry for entry, cut in denied if not cut),
+        cut=tuple(dict.fromkeys(_tool_name(entry) for entry, cut in entries if cut)) if known else (),
+        deny_whole=denied_whole and not any(cut for _entry, cut in denied),
+    )
 
 
 def known_tools_line(current) -> list[str] | None:
@@ -1909,7 +1925,9 @@ def current_diet(diet: dict, current) -> dict:
     ``tools:`` line is ``current``: only the rarely used tools still on a
     known line are left out, the amounts are worked out again from each
     one's size, and a tool to keep that the line lacks is dropped (a card
-    never adds one). The row as it is when the line is not known
+    never adds one). Nothing is left out when a kept tool's only entry on the
+    line was cut inside its parentheses (:attr:`AgentTools.cut`): no line
+    can be written for it. The row as it is when the line is not known
     (:func:`read_agent_tools`) or the row has no sizes."""
     line = read_agent_tools(current)
     sizes = _diet_sizes(diet.get("rare_sizes"))
@@ -1917,7 +1935,12 @@ def current_diet(diet: dict, current) -> dict:
         return diet
     rare = [name for name in _split_names(diet.get("rare_tools")) if name in sizes and line.offered(name)]
     row = dict(diet)
-    row["keep_tools"] = ", ".join(name for name in _split_names(diet.get("keep_tools")) if line.offered(name))
+    kept = [name for name in _split_names(diet.get("keep_tools")) if line.offered(name)]
+    row["keep_tools"] = ", ".join(kept)
+    if any(_tool_name(name) in line.cut for name in kept):
+        # A kept tool the file gives an allowlist the hook cut off can't be written
+        # back as the file has it, and its bare name would widen it: no list to give.
+        rare = []
     row["rare_tools"] = ", ".join(rare)
     definitions = sum(sizes[name][0] for name in rare)
     deferred = sum(sizes[name][1] for name in rare)

@@ -1198,3 +1198,44 @@ def test_a_deleted_user_override_of_a_built_in_in_an_older_snapshot_does_not_dri
     assert stale_only is None
     assert rec is not None and rec.changes[0].value == ["Bash", "Grep", "Read"]
     assert "replaces the built-in" in rec.action
+
+
+# -- an Agent entry the hook cut inside its parentheses -----------------------
+
+_CUT_AGENT_ENTRY = ("Agent(" + "worker-one, " * 8)[:61] + "..."
+
+
+def test_no_tools_card_is_given_when_a_kept_tools_only_entry_was_cut_inside_its_parentheses():
+    # Writing the base name back would let the agent start any agent type.
+    assert len(_CUT_AGENT_ENTRY) == 64
+    line = [_CUT_AGENT_ENTRY, "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    report = _report(_orchestrator())
+    recs = _recs(report, snapshot=snap, units=Units())
+    assert _tools_rec(recs, "orchestrator") is None
+    # The price path counts it nowhere: the row, the offer and the tuning amount.
+    row = _diet_row(report, "orchestrator")
+    diet = recommend_mod.current_diet(row, line)
+    assert diet["rare_tools"] == "" and not diet["saving_usd"]
+    assert recommend_mod.tools_list_offer("orchestrator", row, current=line) is None
+    from claudeglass import tuning
+
+    stats = context_budget.ContextBudgetStats()
+    stats.agents["orchestrator"] = _orchestrator()
+    assert tuning._startup_diet_usd(stats, {"orchestrator": line}) == {}
+    assert tuning._startup_diet_usd(stats)["custom"] > 0
+    # The skills card does not depend on the tools line being writable.
+    assert any(r.id == "spawn-unused-skills" and r.agent_type == "orchestrator" for r in recs)
+
+
+def test_a_cut_entry_for_a_tool_that_is_not_kept_changes_nothing():
+    cut = ("WebFetch(" + "domain:example.com, " * 6)[:61] + "..."
+    assert len(cut) == 64
+    report = _report(_diet_acc("searcher"))
+    plain = ["Read", "Grep", "Bash", "Skill", "NotebookEdit", "WebFetch"]
+    snap = _snapshot({"searcher": {"source": "user", "tools": plain}})
+    base = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    snap = _snapshot({"searcher": {"source": "user", "tools": [*plain[:-1], cut]}})
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    assert rec is not None
+    assert (rec.changes[0].value, rec.saving_usd, rec.action) == (base.changes[0].value, base.saving_usd, base.action)
