@@ -52,10 +52,29 @@ FakeNode.prototype.removeChild = function (child) {
   return child;
 };
 FakeNode.prototype.setAttribute = function (key, value) { this.attrs[key] = value; };
-FakeNode.prototype.focus = function () { document.activeElement = this; };
-FakeNode.prototype.select = function () { document.selected = this; };
+FakeNode.prototype.closest = function (tag) {
+  for (var node = this; node; node = node.parentNode) if (node.tagName === tag.toUpperCase()) return node;
+  return null;
+};
+// While a modal dialog is open (the drawer), everything outside it is
+// inert and cannot take focus; "focus": "never" refuses it everywhere.
+FakeNode.prototype.focus = function () {
+  if (scenario.focus === "never" && this.tagName === "TEXTAREA") return;
+  if (scenario.dialog && !this.closest("dialog") && this.tagName !== "BODY") return;
+  document.activeElement = this;
+};
+FakeNode.prototype.select = function () {
+  document.selected = this;
+  this.selectionStart = 0;
+  this.selectionEnd = this.value.length;
+};
 var page = new FakeNode("body");
 var field = new FakeNode("input");
+var drawer = new FakeNode("dialog");
+if (scenario.dialog) {
+  page.appendChild(drawer);
+  drawer.appendChild(field);
+}
 var document = {
   body: page,
   activeElement: field,
@@ -65,7 +84,11 @@ var document = {
   createRange: function () { return { selectNodeContents: function (node) { this.node = node; } }; },
   execCommand: function (command) {
     var area = document.activeElement;
-    log.exec.push({ command: command, tag: area.tagName, value: area.value, selected: document.selected === area, attached: area.parentNode === page });
+    log.exec.push({
+      command: command, tag: area.tagName, value: area.value,
+      selected: document.selected === area && area.selectionStart === 0 && area.selectionEnd === area.value.length,
+      attached: !!area.parentNode, parent: area.parentNode ? area.parentNode.tagName : null,
+    });
     if (scenario.exec === "throws") throw new Error("not allowed");
     return scenario.exec;
   },
@@ -166,7 +189,7 @@ def test_a_refused_clipboard_api_falls_back_to_copying_a_selected_textarea(clipb
     got = _copy({"clipboard": clipboard, "exec": True})
     assert got["ok"] is True
     [call] = got["log"]["exec"]
-    assert call == {"command": "copy", "tag": "TEXTAREA", "value": PROMPT, "selected": True, "attached": True}
+    assert call == {"command": "copy", "tag": "TEXTAREA", "value": PROMPT, "selected": True, "attached": True, "parent": "BODY"}
 
 
 @pytest.mark.parametrize("clipboard", ["rejects", "throws", "missing"])
@@ -189,6 +212,33 @@ def test_a_working_clipboard_api_does_not_touch_the_page() -> None:
     assert got["ok"] is True
     assert got["log"]["written"] == PROMPT
     assert got["log"]["exec"] == [] and got["log"]["removed"] == 0
+
+
+# -- a drawer (a modal dialog) makes the rest of the page inert --------------
+
+
+def test_in_a_drawer_the_textarea_goes_inside_the_dialog_and_the_copy_works() -> None:
+    got = _copy({"clipboard": "rejects", "exec": True, "dialog": True})
+    assert got["ok"] is True
+    [call] = got["log"]["exec"]
+    assert call["tag"] == "TEXTAREA" and call["selected"] is True and call["parent"] == "DIALOG"
+    assert got["log"]["removed"] == 1 and got["active"] is True
+
+
+def test_a_copy_is_not_claimed_when_the_textarea_cannot_take_focus() -> None:
+    """``execCommand`` returns true when there is nothing to copy, so the
+    textarea must be the focused, selected element before it is asked."""
+    for scenario in ({"focus": "never"}, {"focus": "never", "dialog": True}):
+        got = _copy({"clipboard": "rejects", "exec": True, **scenario})
+        assert got["ok"] is False, scenario
+        assert got["log"]["exec"] == [], scenario
+        assert got["log"]["removed"] == 1 and got["active"] is True, scenario
+
+
+def test_a_copy_with_no_clipboard_api_in_a_drawer_works_the_same() -> None:
+    got = _copy({"clipboard": "missing", "exec": True, "dialog": True})
+    assert got["ok"] is True
+    assert got["log"]["exec"][0]["tag"] == "TEXTAREA" and got["log"]["exec"][0]["parent"] == "DIALOG"
 
 
 # -- the project bundle's Copy prompt -----------------------------------------

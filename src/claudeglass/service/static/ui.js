@@ -133,7 +133,10 @@ export function copyToClipboard(text) {
 
 // The second try: the text in a temporary textarea that is focused and
 // selected, copied, then removed, with the focus back where it was.
-// True only when the browser says the copy happened.
+// Inside a drawer (a modal <dialog>) the rest of the page is inert and
+// cannot take focus, so the textarea joins the open dialog. True only
+// when the textarea held the focus and the selection, and the browser
+// says the copy happened (it says so for an empty selection too).
 function copyBySelection(text) {
   var area = null;
   var before = document.activeElement;
@@ -146,10 +149,14 @@ function copyBySelection(text) {
     area.style.top = "0";
     area.style.left = "0";
     area.style.opacity = "0";
-    document.body.appendChild(area);
+    ((before && before.closest && before.closest("dialog")) || document.body).appendChild(area);
     area.focus({ preventScroll: true });
     area.select();
-    copied = document.execCommand("copy") === true;
+    copied =
+      document.activeElement === area &&
+      area.selectionStart === 0 &&
+      area.selectionEnd === area.value.length &&
+      document.execCommand("copy") === true;
   } catch (err) {
     copied = false;
   }
