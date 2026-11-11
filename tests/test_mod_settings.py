@@ -282,7 +282,7 @@ def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
         "exclude_projects": [],
         "plan_fresh": True,
         "thresholds": capture_catalogue.COACHING_THRESHOLDS,
-        "muted": [],
+        "muted": sorted(capture_catalogue.LIVE_OFF_HINTS),
         "once": [],
     }
     (folder / "coaching.json").write_text(
@@ -292,10 +292,35 @@ def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
     coaching = mod_settings.build(folder, now=NOW)["coaching"]
     assert coaching["thresholds"]["cold_min_tokens"] == 50_000
     assert coaching["thresholds"]["cold_rest_hours"] == capture_catalogue.COACHING_THRESHOLDS["cold_rest_hours"]
-    assert coaching["muted"] == ["a", "b"]
+    # What you muted, and the hints that are off live: a mod from before it knew the off list filters by this.
+    assert coaching["muted"] == sorted({"a", "b"} | set(capture_catalogue.LIVE_OFF_HINTS))
     assert coaching["once"] == ["c"]
     # The rating reminder is the capture hook's own, so its piece size is not a setting of the mod.
     assert "typical_piece_tokens" not in coaching
+
+
+def test_the_muted_list_holds_every_hint_that_is_off_live_once_each(tmp_path):
+    folder = _config(tmp_path)
+    assert set(mod_settings.build(folder, now=NOW)["coaching"]["muted"]) >= set(capture_catalogue.LIVE_OFF_HINTS)
+    # A hint you muted that is also off is listed once; a mute of an off hint adds nothing.
+    (folder / "coaching.json").write_text(json.dumps({"muted": ["cold_return", "big_paste"]}), encoding="utf-8")
+    muted = mod_settings.build(folder, now=NOW)["coaching"]["muted"]
+    assert muted == sorted(set(capture_catalogue.LIVE_OFF_HINTS) | {"big_paste"})
+    assert muted.count("cold_return") == 1
+
+
+def test_a_mod_that_lists_no_surface_is_silent_for_the_off_hints_and_the_hook_still_moves_the_set(tmp_path):
+    # Mod 0.16.0 or older with this package: its file has no ``shows`` and it knows no off list.
+    folder = _config(tmp_path)
+    muted = mod_settings.build(folder, now=NOW)["coaching"]["muted"]
+    for hint in ("cold_return", "plan_fresh"):
+        assert hint in muted
+    present = folder / capture_catalogue.MOD_DIR / capture_catalogue.MOD_PRESENT_DIR
+    present.mkdir(parents=True)
+    now_ts = NOW.timestamp()
+    (present / "s1.json").write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now_ts}), encoding="utf-8")
+    catalogue = capture_hook.load_catalogue()
+    assert capture_hook._moved(folder, catalogue, "s1", now_ts) == frozenset(capture_catalogue.MOVED_TO_MOD)
 
 
 def test_coaching_is_off_until_coaching_notes_is_in_capture_coaching(tmp_path):

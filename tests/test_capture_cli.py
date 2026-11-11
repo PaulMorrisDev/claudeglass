@@ -275,6 +275,45 @@ def test_check_capture_python_version_is_off_by_default_and_bounded_when_asked(t
     assert calls == [hook_health.stable_python()]  # one interpreter shared by every entry: checked once
 
 
+def _run_launcher(config_dir, payload=None) -> tuple[int, str, str]:
+    """The installed launcher run the way Claude Code runs it (``python -I -S``), in the data folder, on
+    ``payload`` as JSON (nothing on stdin when there is none)."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR")}
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", str(config_dir / "hooks" / cat.HOOK_SCRIPT), "--config-dir", str(config_dir)],
+        input=json.dumps(payload).encode("utf-8") if payload is not None else b"",
+        capture_output=True,
+        env=env,
+        cwd=config_dir,
+        timeout=30,
+    )
+    return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
+
+
+def _big_paste_payload(config_dir) -> dict:
+    """A message that brings a ``big_paste`` note, with the transcript it is judged on (coaching is switched on
+    in the data folder's ``config.toml``)."""
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    moment = (datetime.now(timezone.utc) - timedelta(seconds=100)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    usage = {"input_tokens": 10, "cache_read_input_tokens": 19_990, "cache_creation_input_tokens": 0, "output_tokens": 0}
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant", "timestamp": moment, "message": {"id": "m1", "usage": usage, "content": [{"type": "text", "text": "ok"}]}},
+    ]
+    transcript = config_dir.parent / "s.jsonl"
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s1",
+        "cwd": str(config_dir.parent),
+        "transcript_path": str(transcript),
+        "prompt": "Why does this fail?\n" + "log line\n" * 5_000,
+    }
+
+
 def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypatch):
     config_dir = _claude(tmp_path, {})
     real_replace = os.replace
@@ -286,9 +325,69 @@ def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypat
 
     monkeypatch.setattr(hook_health.os, "replace", _boom)
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    # No catalogue is on disk to disagree with the module, so the module and the launcher are written: a
+    # launcher that is missing makes every hook call exit 2.
     assert [p.name for p in written] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
     assert not (config_dir / "hooks" / cat.CATALOGUE_FILE).exists()
     assert not list((config_dir / "hooks").glob("*.tmp"))
+    assert _run_launcher(config_dir) == (0, "", "")
+
+
+def test_install_hook_files_keeps_the_old_module_and_its_stamp_when_the_catalogue_cannot_be_written(
+    tmp_path, monkeypatch
+):
+    import hashlib
+
+    config_dir = _claude(tmp_path, {})
+    files = hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT]
+    hook_health.install_hook_files(config_dir, files)
+    hooks = config_dir / "hooks"
+    # An earlier install: each file differs from the packaged one but works, and is stamped as this tool's own.
+    older = {
+        cat.CATALOGUE_FILE: json.dumps({**json.loads(_packaged(cat.CATALOGUE_FILE)), "older_copy": True}).encode("utf-8"),
+        cat.HOOK_MODULE: _packaged(cat.HOOK_MODULE) + b"\n# an older copy\n",
+        cat.HOOK_SCRIPT: _packaged(cat.HOOK_SCRIPT) + b"\n# an older copy\n",
+    }
+    manifest = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
+    for name, data in older.items():
+        (hooks / name).write_bytes(data)
+        manifest[name] = hashlib.sha256(data).hexdigest()
+    (hooks / ".manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if Path(dst).name == cat.CATALOGUE_FILE:
+            raise PermissionError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _boom)
+    written = hook_health.install_hook_files(config_dir, files)
+    # Not a new module beside an old catalogue: both stay as they were, with their stamps. The launcher is
+    # still rewritten, and it only starts the module that is there.
+    assert [p.name for p in written] == [cat.HOOK_SCRIPT]
+    assert (hooks / cat.HOOK_MODULE).read_bytes() == older[cat.HOOK_MODULE]
+    assert (hooks / cat.CATALOGUE_FILE).read_bytes() == older[cat.CATALOGUE_FILE]
+    assert (hooks / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    after = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
+    assert after[cat.HOOK_MODULE] == hashlib.sha256(older[cat.HOOK_MODULE]).hexdigest()
+    assert after[cat.CATALOGUE_FILE] == hashlib.sha256(older[cat.CATALOGUE_FILE]).hexdigest()
+    assert after[cat.HOOK_SCRIPT] == hashlib.sha256(_packaged(cat.HOOK_SCRIPT)).hexdigest()
+    assert not list(hooks.glob("*.tmp"))
+    # The older pair still works together under the new launcher.
+    rc, out, err = _run_launcher(config_dir, _big_paste_payload(config_dir))
+    assert (rc, err) == (0, "")
+    assert "big_paste" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_install_hook_files_writes_the_catalogue_before_the_module_whatever_order_it_is_asked_in(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    written = hook_health.install_hook_files(
+        config_dir, [cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE]
+    )
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE, cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    # A module asked for alone does not wait on a catalogue that is not part of this install.
+    again = hook_health.install_hook_files(config_dir, [cat.HOOK_MODULE])
+    assert [p.name for p in again] == [cat.HOOK_MODULE]
 
 
 def test_install_hook_files_writes_the_launcher_its_module_and_the_catalogue(tmp_path):

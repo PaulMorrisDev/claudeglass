@@ -3843,6 +3843,131 @@ def test_a_claim_that_windows_refuses_to_make_reads_as_held(tmp_path, monkeypatc
         assert held is False
 
 
+class _Claim:
+    """Counts what ``_claimed`` does to a claim that Windows refuses: the ``os.open`` calls of the claim file (the
+    first ``refuse`` of them raise ``PermissionError``), the ``time.sleep`` calls between them, and the
+    ``_take_stale`` calls. Counted, not timed: the Windows clock ticks every 15.6 ms."""
+
+    def __init__(self, monkeypatch, refuse):
+        self.refuse, self.opens, self.refused, self.sleeps, self.stale = refuse, 0, 0, 0, 0
+        real_open, real_sleep = os.open, HOOK.time.sleep
+
+        def opened(path, *args, **kwargs):
+            if not str(path).endswith(".claim"):
+                return real_open(path, *args, **kwargs)
+            self.opens += 1
+            if self.opens <= self.refuse:
+                self.refused += 1
+                raise PermissionError("being deleted")
+            return real_open(path, *args, **kwargs)
+
+        def slept(seconds):
+            self.sleeps += 1
+            return real_sleep(seconds)
+
+        def taken(claim):
+            self.stale += 1
+            return False
+
+        monkeypatch.setattr(HOOK.os, "open", opened)
+        monkeypatch.setattr(HOOK.time, "sleep", slept)
+        monkeypatch.setattr(HOOK, "_take_stale", taken)
+
+
+def test_a_claim_that_windows_refuses_for_a_moment_is_waited_for(tmp_path, monkeypatch):
+    seen = _Claim(monkeypatch, refuse=3)
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    claim = state_path.with_name(state_path.name + ".claim")
+    with HOOK._claimed(state_path) as held:
+        assert held is True
+        assert claim.exists()
+    assert not claim.exists()
+    # Three refusals, each waited out; the fourth try made the claim. A refusal is no sign of a dead call's claim.
+    assert (seen.refused, seen.opens, seen.sleeps, seen.stale) == (3, 4, 3, 0)
+
+
+def test_a_claim_that_windows_always_refuses_is_given_up_on_after_the_wait(tmp_path, monkeypatch):
+    import time
+
+    seen = _Claim(monkeypatch, refuse=10**9)
+    started = time.monotonic()
+    with HOOK._claimed(_config_dir(tmp_path) / cat.COACH_STATE_FILE) as held:
+        assert held is False
+    elapsed = time.monotonic() - started
+    # Both ends are read from the clock the deadline is, so the wait cannot come out shorter.
+    assert HOOK._CLAIM_WAIT_S * 0.9 <= elapsed < 2.0
+    # It waited between tries rather than spinning, and never took a refused claim for a stale one.
+    assert seen.opens > 1 and seen.sleeps >= seen.opens - 1 and seen.stale == 0
+
+
+def _delete_pending(path):
+    """Marks ``path`` for deletion the way a call that is deleting its claim does, so that the name stays, refusing
+    a create, until the handle closes: returns the function that closes it. (A plain delete removes the name
+    at once on current Windows, so it cannot show this.)"""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.HANDLE]
+    k32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    generic_read, delete, share_all, open_existing, disposition = 0x80000000, 0x00010000, 0x7, 3, 4
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    handle = k32.CreateFileW(str(path), generic_read | delete, share_all, None, open_existing, 0, None)
+    assert handle not in (None, wintypes.HANDLE(-1).value), ctypes.get_last_error()
+    flag = ctypes.c_ubyte(1)
+    assert k32.SetFileInformationByHandle(handle, disposition, ctypes.byref(flag), 1), ctypes.get_last_error()
+    return lambda: k32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a claim that is delete-pending is a Windows state")
+def test_a_claim_that_is_delete_pending_is_waited_for_and_then_taken(tmp_path, monkeypatch):
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    claim = state_path.with_name(state_path.name + ".claim")
+    close = _delete_pending(claim)
+    seen = {"refused": 0, "sleeps": 0}
+    real_open, real_sleep = os.open, HOOK.time.sleep
+
+    def opened(path, *args, **kwargs):
+        try:
+            return real_open(path, *args, **kwargs)
+        except PermissionError:
+            seen["refused"] += 1
+            raise
+
+    def slept(seconds):
+        # The call deleting the claim lets go while this one waits: not on a timer, so a slow machine cannot
+        # make it late.
+        seen["sleeps"] += 1
+        if seen["sleeps"] == 1:
+            close()
+        return real_sleep(seconds)
+
+    monkeypatch.setattr(HOOK.os, "open", opened)
+    monkeypatch.setattr(HOOK.time, "sleep", slept)
+    with HOOK._claimed(state_path) as held:
+        assert held is True
+        assert claim.exists()
+    assert not claim.exists()
+    # Windows itself refused the create while the claim was pending, as the patched tests assume.
+    assert seen["refused"] >= 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a claim that is delete-pending is a Windows state")
+def test_a_claim_that_stays_delete_pending_is_given_up_on(tmp_path):
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    close = _delete_pending(state_path.with_name(state_path.name + ".claim"))
+    try:
+        with HOOK._claimed(state_path) as held:
+            assert held is False
+    finally:
+        close()
+
+
 def _stale(base):
     return _heartbeat(base, {"s1": cat.MOD_PRESENT_WINDOW_S + 1})
 
@@ -3961,25 +4086,25 @@ def test_the_hook_reads_the_heartbeat_once_for_all_the_questions_of_a_call(tmp_p
     monkeypatch.setattr(HOOK, "_read_json", lambda path: reads.append(path.name) or real(path))
     now_ts = NOW.timestamp()
     config_dir = _config_dir(tmp_path)
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts)
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None and HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset(cat.MOVED_TO_MOD)
     assert reads.count("s1.json") == 1
     # A rewrite of the file is read again.
     _heartbeat(tmp_path, {"s1": 0, "s2": 0})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and reads.count("s1.json") == 2
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) and reads.count("s2.json") == 1
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None and reads.count("s1.json") == 2
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is not None and reads.count("s2.json") == 1
 
 
 def test_the_presence_check_never_raises(tmp_path):
     config_dir = _config_dir(tmp_path)
     now_ts = NOW.timestamp()
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
-    assert HOOK._mod_present(config_dir, {}, "s1", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
+    assert HOOK._mod_file(config_dir, {}, "s1", now_ts) is None
     # The file's place is a folder.
     _heartbeat_path(tmp_path).mkdir(parents=True)
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset()
-    assert HOOK._mod_present(config_dir, CATALOGUE, None, now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, None, now_ts) is None
 
 
 def test_two_sessions_each_have_their_own_heartbeat(tmp_path):
@@ -3987,13 +4112,13 @@ def test_two_sessions_each_have_their_own_heartbeat(tmp_path):
     now_ts = NOW.timestamp()
     # One session's heartbeat is stale, the other's is fresh: they do not touch each other.
     _heartbeat(tmp_path, {"s1": 0, "s2": cat.MOD_PRESENT_WINDOW_S + 1})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is True
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is None
     # A session's own file going doesn't take the other's.
     _heartbeat_path(tmp_path).unlink()
     _heartbeat(tmp_path, {"s2": 0})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is True
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is not None
 
 
 @pytest.mark.parametrize("session", ["../x", "a/b", "a.b", "s_1", "s 1", "", "s1\n", "..", "\\x"])
@@ -4006,7 +4131,7 @@ def test_a_session_id_that_is_not_a_plain_word_is_never_present(tmp_path, sessio
             (place / name).write_text(
                 json.dumps({"schema": 1, "session_id": session, "seen": NOW.timestamp()}), encoding="utf-8"
             )
-    assert HOOK._mod_present(config_dir, CATALOGUE, session, NOW.timestamp()) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, session, NOW.timestamp()) is None
     assert HOOK._moved(config_dir, CATALOGUE, session, NOW.timestamp()) == frozenset()
 
 
@@ -4253,6 +4378,53 @@ def test_live_off_a_hint_the_replay_found_more_often_wrong_than_right_gives_no_n
     monkeypatch.setitem(CATALOGUE["coaching"], "off_live", [])
     (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).unlink(missing_ok=True)
     assert _kind(case()) == hint
+
+
+def _older_catalogue() -> dict:
+    """The catalogue of a package from before ``off_live`` and ``moved_on`` were written: the hook module of
+    this package can end up beside it when an install is cut short."""
+    import copy
+
+    older = copy.deepcopy(CATALOGUE)
+    del older["coaching"]["off_live"]
+    del older["mod"]["moved_on"]
+    return older
+
+
+def test_the_hooks_own_off_list_is_the_catalogues():
+    assert tuple(HOOK._LIVE_OFF_FALLBACK) == cat.LIVE_OFF_HINTS
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_the_off_hint_off_and_the_live_hint_live(tmp_path):
+    older = _older_catalogue()
+    config_dir = _config_dir(tmp_path)
+
+    def note(payload, session):
+        return HOOK.coaching_note_for({"session_id": session, "cwd": "/work/app", **payload}, ON, older, config_dir, now=NOW)
+
+    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
+    assert note({**_prompt_payload(cold), "prompt": "add a settings page for the theme"}, "c1") == ""
+    assert _kind(note(_scene_big_paste(tmp_path), "b1")) == "big_paste"
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_what_the_mod_does_not_show(tmp_path):
+    older = _older_catalogue()
+    _heartbeat(tmp_path, shows=["hint"])
+    config_dir = _config_dir(tmp_path)
+    # No ``moved_on`` to say which surface serves a hint: none is taken from the hook, and nothing raises.
+    assert HOOK._moved(config_dir, older, "s1", NOW.timestamp()) == frozenset()
+    note = HOOK.coaching_note_for({"session_id": "s1", "cwd": "/work/app", **_scene_big_paste(tmp_path)}, ON, older, config_dir, now=NOW)
+    assert _kind(note) == "big_paste"
+    # A mod without ``shows`` (older still) moves the whole set, as it does with any catalogue.
+    _heartbeat(tmp_path)
+    assert HOOK._moved(config_dir, older, "s1", NOW.timestamp()) == frozenset(older["mod"]["moved"])
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_no_count_of_runs_for_the_hint_that_is_off(tmp_path):
+    older = _older_catalogue()
+    session, _ = _agent_run(tmp_path, [_prompt(), _SUMMARISED, _reply(1_000, message_id="m1")])
+    assert HOOK.keep_run(_agent_stop(session), ON, older, _config_dir(tmp_path), now=NOW) is False
+    assert not (_config_dir(tmp_path) / cat.COACH_STATE_FILE).exists()
 
 
 def test_a_claim_released_within_a_moment_is_waited_for(tmp_path):

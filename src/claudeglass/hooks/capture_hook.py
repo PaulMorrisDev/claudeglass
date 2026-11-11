@@ -112,7 +112,7 @@ connect``):
   call go out as one note, the capture note first, so a tip is the last
   line. While the ClaudeGlass mod is running for the session (its file
   ``<config-dir>/mod/present/<session id>.json`` is under 10 minutes old:
-  :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
+  :func:`_mod_file`) it shows the hints in ``mod.moved`` itself, in its
   own UI (each when its file's ``shows`` lists the surface that serves it,
   ``"hint"`` or ``"status"``, or has no ``shows``: an older mod), so this hook neither works them out nor stamps them as shown
   (no run is recorded while ``split_run`` is off, :func:`keep_run`, and a
@@ -929,9 +929,10 @@ def _claimed(path: Path):
     several sessions, share the state file; the one that holds the claim
     reads it, decides and writes it whole, and the others skip their
     decision (yield ``False``). A claim being deleted on Windows (a
-    ``PermissionError``) reads as held. A claim that cannot be made for any
-    other reason (no folder yet) yields ``True``, so coaching is never
-    silenced by it. The claim is released at the end, an error ignored."""
+    ``PermissionError``) reads as held and is waited for the same way,
+    without the stale check. A claim that cannot be made for any other
+    reason (no folder yet) yields ``True``, so coaching is never silenced
+    by it. The claim is released at the end, an error ignored."""
     claim = path.with_name(path.name + ".claim")
     held = False
     attempt = 0
@@ -941,8 +942,8 @@ def _claimed(path: Path):
             os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
             held = True
             break
-        except FileExistsError:
-            if attempt == 0:
+        except (FileExistsError, PermissionError) as error:
+            if attempt == 0 and isinstance(error, FileExistsError):
                 attempt = 1
                 if _take_stale(claim):
                     continue
@@ -952,9 +953,6 @@ def _claimed(path: Path):
                 yield False
                 return
             time.sleep(_CLAIM_POLL_S)
-        except PermissionError:
-            yield False
-            return
         except OSError:
             yield True
             return
@@ -1048,10 +1046,17 @@ def _mod_file(config_dir: Path, catalogue: dict, session_id: str, now_ts: float)
         return None
 
 
-def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> bool:
-    """Whether the ClaudeGlass mod is running for this session
-    (:func:`_mod_file`)."""
-    return _mod_file(config_dir, catalogue, session_id, now_ts) is not None
+#: The hints that are off live, for a catalogue that has no ``coaching.off_live``
+#: (an older one, beside this module after an install cut short): a test holds
+#: it equal to ``capture_catalogue.LIVE_OFF_HINTS``. An empty default would turn
+#: the hints that are off back on.
+_LIVE_OFF_FALLBACK = ("plan_fresh", "plan_fresh_early", "split_run", "quiet_output", "cold_return")
+
+
+def _off_live(coaching: dict):
+    """The hints that are off live: the catalogue's list, or
+    :data:`_LIVE_OFF_FALLBACK` when it has none."""
+    return coaching.get("off_live", _LIVE_OFF_FALLBACK)
 
 
 def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> frozenset:
@@ -1071,7 +1076,9 @@ def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) ->
     mod = catalogue["mod"]
     if shows is None:
         return frozenset(mod["moved"])
-    return frozenset(hint for hint in mod["moved"] if mod["moved_on"][hint] in shows)
+    # A catalogue without ``moved_on`` (an older one) names no surface: the hook keeps the hint.
+    moved_on = mod.get("moved_on", {})
+    return frozenset(hint for hint in mod["moved"] if moved_on.get(hint) in shows)
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
@@ -2487,7 +2494,7 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     if str(payload.get("agent_type") or "") in catalogue["skip_agent_types"]:
         return False
     coaching = catalogue["coaching"]
-    if "split_run" in coaching["off_live"]:
+    if "split_run" in _off_live(coaching):
         # Nothing reads the counts while the hint is off.
         return False
     personal = _read_json(config_dir / coaching["file"])
@@ -2658,7 +2665,7 @@ def _coaching_for(
     # the only one, and they are all there when the mod stops.
     moved = _moved(config_dir, catalogue, session_id, now_ts)
     # What is off live is neither worked out nor stamped either.
-    off = moved | set(coaching["off_live"])
+    off = moved | set(_off_live(coaching))
     # A run's counts used to be kept by agent id here; they are by session now.
     upkeep = state.pop("agents", None) is not None
 
