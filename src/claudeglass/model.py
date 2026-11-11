@@ -1726,6 +1726,14 @@ class TranscriptResult:
     #: MCP-servers addition: MCP server -> the last connection problem
     #: reported for it: "pending", "needs sign-in" or "failed to connect".
     mcp_connection_status: dict = field(default_factory=dict)
+    #: The ``PARSER_VERSION`` that wrote this digest (from 50). ``None`` in a
+    #: digest from before the stamp: its parser is not known. The store's
+    #: ``transcripts.parser_version`` column does not say, since a rate-card
+    #: change sets it to 0 on every row, including a current one whose
+    #: transcript is gone. Only a reader that leaves out what a newer parser
+    #: added or redefined needs this (a field a version only adds is
+    #: ``None`` where its key is missing).
+    parser_version: int | None = None
 
 
 @dataclass(slots=True)

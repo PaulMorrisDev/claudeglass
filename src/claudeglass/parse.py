@@ -306,7 +306,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import capture_tags
+from . import PARSER_VERSION, capture_tags
 from . import events as events_mod
 from . import jsonl
 from . import known_savers
@@ -3635,6 +3635,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         upfront_tool_chars=upfront_tools,
         upfront_request_tools=upfront_requested,
         mcp_connection_status=dict(mcp_servers.status),
+        parser_version=PARSER_VERSION,
     )
 
 

@@ -475,7 +475,9 @@ __version__ = "0.16.0"
 #: ``.tsv`` or ``.jsonl`` file is a document wherever it sits and the folders
 #: that make a ``.json`` or ``.html`` file one are those below the working
 #: folder (``Turn.shell_code_write_count``, ``Turn.edit_code_count``); and
-#: those two counts are ``None`` where a digest has none. A pre-50 digest
+#: those two counts are ``None`` where a digest has none; a digest carries
+#: the parser version that wrote it (``TranscriptResult.parser_version``,
+#: ``None`` before 50). A pre-50 digest
 #: has the older readings of each. A transcript still on disk is re-read; one
 #: Claude Code deleted keeps its old digest.
 PARSER_VERSION = 50

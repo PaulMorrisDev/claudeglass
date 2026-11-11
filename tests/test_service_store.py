@@ -851,6 +851,35 @@ def test_demote_parsed_marks_this_builds_rows_and_leaves_a_newer_builds(store: S
     assert store.change_token() == token
 
 
+def test_the_parser_version_stamped_in_a_digest_survives_the_store_and_a_demote(store: Store) -> None:
+    from claudeglass import PARSER_VERSION
+    from claudeglass.cache import encode_result
+    from claudeglass.model import TranscriptResult
+
+    _seed(store)
+    old = TranscriptResult(parser_version=None)
+    store.upsert_transcript(
+        session_id="session-a", path=_FAKE_PATH, kind="top-level",
+        mtime_ns=1, size_bytes=2, parser_version=PARSER_VERSION,
+        digest_json=json.dumps(encode_result(TranscriptResult(parser_version=PARSER_VERSION))),
+    )
+    store.upsert_transcript(
+        session_id="session-a", path=_FAKE_SUB_PATH, kind="top-level",
+        mtime_ns=3, size_bytes=4, parser_version=PARSER_VERSION - 1,
+        digest_json=json.dumps(encode_result(old)),
+    )
+
+    def stamped() -> dict:
+        rows = store._connection().execute("SELECT path, digest_blob FROM transcripts").fetchall()
+        return {row["path"]: Store._decode_digest(row).parser_version for row in rows}
+
+    assert stamped() == {_FAKE_PATH: PARSER_VERSION, _FAKE_SUB_PATH: None}
+    # A rate-card change marks every row's column 0; the digest still says who wrote it.
+    store.demote_parsed()
+    assert store.known_files()[_FAKE_PATH][2] == 0
+    assert stamped() == {_FAKE_PATH: PARSER_VERSION, _FAKE_SUB_PATH: None}
+
+
 def test_meta_values_round_trip(store: Store) -> None:
     assert store.get_meta("turns_priced_with") is None
     store.set_meta("turns_priced_with", "abc")
