@@ -213,49 +213,54 @@ def load_snapshots(config_dir: Path | str) -> list[Snapshot]:
 
 def _normalise_tool_lines(snaps: list[Snapshot]) -> None:
     """Read an agent's ``tools`` and ``disallowedTools`` in the form the hook
-    stores today, a list of entries, whichever form a snapshot was written in.
-    An older hook stored a comma string, cut at :data:`NAME_CAP` characters
-    when it was longer. A whole string becomes the list of its entries. A cut
-    one becomes the whole list of the next snapshot of the same project that
-    holds it, when that list starts the same way, so the first snapshot after
-    the hook was upgraded is not a change to the line. One with no such list
-    after it stays as it is, and :func:`recommend.read_agent_tools` reads it as
-    unknown. Snapshots are ascending by ``ts``."""
-    following: dict[tuple[str, str, str], list[str]] = {}
-    for snap in reversed(snaps):
+    stores today, a list of entries. An older hook stored a comma string, cut
+    at :data:`NAME_CAP` characters when it was longer: a whole string becomes
+    the list of its entries. This depends on the snapshot alone, so the
+    watcher's store and a read from disk agree whenever each file was read. A
+    cut string stays as it is (:func:`recommend.read_agent_tools` reads it as
+    an unknown line); :func:`same_tool_line` is what forgives it where two
+    snapshots are compared."""
+    for snap in snaps:
         agents = snap.data.get("agents")
         if not isinstance(agents, dict):
             continue
-        project = _project_label(snap)
-        for name, entry in agents.items():
+        for entry in agents.values():
             if not isinstance(entry, dict):
                 continue
             for key in _TOOL_LINE_KEYS:
-                value, slot = entry.get(key), (project, name, key)
-                if isinstance(value, str):
-                    if NAME_REDACTED in value:
-                        following.pop(slot, None)
-                        continue
-                    if cut_off_name(value):
-                        later = following.get(slot)
-                        if later is not None and _starts_with_cut(later, value):
-                            entry[key] = value = list(later)
-                        else:
-                            following.pop(slot, None)
-                            continue
-                    else:
-                        entry[key] = value = split_tool_line(value)
-                if isinstance(value, list):
-                    following[slot] = value
-                else:
-                    following.pop(slot, None)
+                value = entry.get(key)
+                if isinstance(value, str) and NAME_REDACTED not in value and not cut_off_name(value):
+                    entry[key] = split_tool_line(value)
 
 
-def _starts_with_cut(entries: list, cut: str) -> bool:
-    """Whether the line ``entries`` begins with the text of ``cut``, a string
-    the hook cut off (whatever its spacing)."""
-    squash = functools.partial(re.sub, r"\s+", "")
-    return squash(", ".join(map(str, entries))).startswith(squash(cut[: -len(NAME_CUT)]))
+def is_tool_line_key(key: str) -> bool:
+    """Whether the flattened snapshot ``key`` is an agent's ``tools`` or
+    ``disallowedTools`` line (``agents.<name>.tools``)."""
+    return key.startswith("agents.") and key.endswith(tuple("." + k for k in _TOOL_LINE_KEYS))
+
+
+def same_tool_line(old, new) -> bool:
+    """Whether two stored values of an agent's tools line are the same line.
+    Equal values are. An older hook cut a long comma string at 64 characters
+    (:func:`cut_off_name`), and the hook now stores the whole line as a list,
+    so a cut string and a list whose entries, joined with ``", "``, start with
+    the string's first 61 characters are the same line (spacing aside):
+    writing it whole is not an edit. A change past those 61 characters can't
+    be seen in the cut one. Either may be the cut one."""
+    if _hashable(old) == _hashable(new):
+        return True
+    for cut, whole in ((old, new), (new, old)):
+        if isinstance(cut, str) and cut_off_name(cut) and isinstance(whole, (list, tuple)):
+            squash = functools.partial(re.sub, r"\s+", "")
+            return squash(", ".join(map(str, whole))).startswith(squash(cut[: -len(NAME_CUT)]))
+    return False
+
+
+def same_value(key: str, old, new) -> bool:
+    """Whether the flattened snapshot ``key`` has the same value in two
+    snapshots: equal, or (for a tools line) the same line
+    (:func:`same_tool_line`)."""
+    return same_tool_line(old, new) if is_tool_line_key(key) else _hashable(old) == _hashable(new)
 
 
 # -- timestamp parsing / join -------------------------------------------
@@ -1333,7 +1338,7 @@ def diff_keys(snapshots: list[Snapshot]) -> dict[str, list]:
     result: dict[str, list] = {}
     for key in sorted(all_keys):
         values = [flat.get(key) for flat in flattened]
-        if len({_hashable(v) for v in values}) > 1:
+        if any(not same_value(key, before, after) for before, after in zip(values, values[1:])):
             result[key] = values
     return result
 
@@ -1361,7 +1366,7 @@ def co_changed_keys(snapshot_a: Snapshot, snapshot_b: Snapshot) -> list[str]:
     flat_b = flatten_snapshot(snapshot_b)
     changed = []
     for key in sorted(set(flat_a) | set(flat_b)):
-        if _hashable(flat_a.get(key)) != _hashable(flat_b.get(key)):
+        if not same_value(key, flat_a.get(key), flat_b.get(key)):
             changed.append(key)
     return changed
 
@@ -1606,6 +1611,9 @@ __all__ = [
     "NAME_REDACTED",
     "Snapshot",
     "cut_off_name",
+    "is_tool_line_key",
+    "same_tool_line",
+    "same_value",
     "load_snapshots",
     "records_config",
     "snapshot_for",

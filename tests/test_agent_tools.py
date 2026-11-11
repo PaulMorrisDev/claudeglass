@@ -5,6 +5,7 @@ suggested line writes a kept tool."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -108,9 +109,63 @@ def test_a_line_stored_cut_then_stored_whole_is_not_an_edit_you_made(tmp_path):
     _write_snapshot(tmp_path, "20260901T100000Z", _STORED_CUT)
     _write_snapshot(tmp_path, "20260902T100000Z", _LONG_LINE)
     assert change_points.change_points(tmp_path) == []
-    # The earlier record is read as the whole line it was a cut of.
+    # The comparison forgives the cut; the record itself is not rewritten from a later file.
     first, second = snapshots.load_snapshots(tmp_path)
-    assert first.data["agents"]["overseer"]["tools"] == _LONG_LINE == second.data["agents"]["overseer"]["tools"]
+    assert first.data["agents"]["overseer"]["tools"] == _STORED_CUT
+    assert second.data["agents"]["overseer"]["tools"] == _LONG_LINE
+    assert snapshots.changed_keys([first, second]) == []
+    assert snapshots.co_changed_keys(first, second) == []
+    assert snapshots.diff_keys([first, second]) == {}
+
+
+def _watch(tmp_path):
+    from claudeglass.service.contracts import ServeOptions
+    from claudeglass.service.store import Store
+    from claudeglass.service.watcher import FileWatcher
+
+    config_dir = tmp_path / "cfg"
+    (tmp_path / "projects").mkdir()
+    store = Store(":memory:")
+    store.open()
+    watcher = FileWatcher(store, ServeOptions(projects_root=tmp_path / "projects", config_dir=config_dir))
+    return config_dir, store, watcher
+
+
+def _store_snapshots(store):
+    out = []
+    for row in store.snapshots():
+        data = json.loads(row["digest_json"])
+        if snapshots.records_config(data):
+            data.setdefault("project_slug", row.get("project_slug"))
+            out.append(snapshots.Snapshot(path=Path(""), ts=row["ts"], data=data))
+    return sorted(out, key=lambda snap: snap.ts)
+
+
+def test_the_store_and_the_disk_agree_that_a_cut_line_then_the_whole_list_is_no_change(tmp_path):
+    """The watcher ingests the cut snapshot while it is the newest and never
+    reads it again, so what the store holds can't depend on a later file."""
+    config_dir, store, watcher = _watch(tmp_path)
+    _write_snapshot(config_dir, "20260901T100000Z", _STORED_CUT)
+    watcher.run_once()
+    _write_snapshot(config_dir, "20260902T100000Z", _LONG_LINE)
+    watcher.run_once()
+    from_store, from_disk = _store_snapshots(store), snapshots.load_snapshots(config_dir)
+    assert snapshots.changed_keys(from_store) == snapshots.changed_keys(from_disk) == []
+    assert change_points.change_points(config_dir) == []
+    assert [snap.data["agents"]["overseer"]["tools"] for snap in from_store] == [snap.data["agents"]["overseer"]["tools"] for snap in from_disk]
+
+
+def test_a_real_edit_inside_the_first_61_characters_is_reported_from_the_store_and_from_disk(tmp_path):
+    config_dir, store, watcher = _watch(tmp_path)
+    edited = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebFetch", "MultiEdit"] + _LONG_LINE[8:]
+    assert ", ".join(edited)[:61] != ", ".join(_LONG_LINE)[:61]
+    _write_snapshot(config_dir, "20260901T100000Z", _STORED_CUT)
+    watcher.run_once()
+    _write_snapshot(config_dir, "20260902T100000Z", edited)
+    watcher.run_once()
+    assert snapshots.changed_keys(_store_snapshots(store)) == ["agents.overseer.tools"]
+    assert snapshots.changed_keys(snapshots.load_snapshots(config_dir)) == ["agents.overseer.tools"]
+    assert [p.keys for p in change_points.change_points(config_dir)] == [["agents.overseer.tools"]]
 
 
 def test_a_short_comma_line_then_the_same_list_is_not_an_edit_either(tmp_path):
