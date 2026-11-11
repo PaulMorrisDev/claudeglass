@@ -661,8 +661,11 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
             cycle.append(turn)
         found.append((kind, cycle, _message_of(turns, at)))
     # How many notes came with each message, whichever reply of it they
-    # arrived on: a lone one owns the message's tip.
-    together = Counter(message for _kind, cycle, message in found if cycle)
+    # arrived on: a lone one owns the message's tip. A note that asks for no
+    # tip is not counted: the bare label can only be another note's.
+    together = Counter(
+        message for kind, cycle, message in found if cycle and kind not in catalogue.CLAUDE_ONLY_HINTS
+    )
     for kind, cycle, message in found:
         if kind in catalogue.CLAUDE_ONLY_HINTS:
             # No tip asked: only Claude's words that the note misfired count,

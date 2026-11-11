@@ -1075,6 +1075,18 @@ def test_two_notes_in_one_message_each_tip_in_the_text_counts(tmp_path):
     assert session.tips == {"drip_feed": 1, "cold_return": 1}, dict(session.tips)
 
 
+def test_a_quiet_output_note_does_not_take_the_bare_label_from_the_note_that_asked_for_a_tip(tmp_path):
+    # quiet_output asks for no tip, so the one label in the message can only be drip_feed's.
+    session = _session(tmp_path, [
+        *_START,
+        _said("go", 2), _note_line("drip_feed", 2),
+        _call(3, "Read", {"file_path": "a.py"}, say="Reading."), _came_back(3.5, 3), _note_line("quiet_output", 3.6),
+        _reply_blocks(4, [{"type": "text", "text": f"Done.\n\n{_TIP}"}]),
+    ])
+    assert session.notes == {"drip_feed": 1, "quiet_output": 1}
+    assert session.tips == {"drip_feed": 1}, dict(session.tips)
+
+
 def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_path):
     # drip_feed asks for its tip every time: shown twice in three (one of them
     # called a misfire). big_paste leaves it to Claude's judgement; cold_return asks for its tip every time.
