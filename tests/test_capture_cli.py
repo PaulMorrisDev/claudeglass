@@ -275,6 +275,45 @@ def test_check_capture_python_version_is_off_by_default_and_bounded_when_asked(t
     assert calls == [hook_health.stable_python()]  # one interpreter shared by every entry: checked once
 
 
+def _run_launcher(config_dir, payload=None) -> tuple[int, str, str]:
+    """The installed launcher run the way Claude Code runs it (``python -I -S``), in the data folder, on
+    ``payload`` as JSON (nothing on stdin when there is none)."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR")}
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", str(config_dir / "hooks" / cat.HOOK_SCRIPT), "--config-dir", str(config_dir)],
+        input=json.dumps(payload).encode("utf-8") if payload is not None else b"",
+        capture_output=True,
+        env=env,
+        cwd=config_dir,
+        timeout=30,
+    )
+    return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
+
+
+def _big_paste_payload(config_dir) -> dict:
+    """A message that brings a ``big_paste`` note, with the transcript it is judged on (coaching is switched on
+    in the data folder's ``config.toml``)."""
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    moment = (datetime.now(timezone.utc) - timedelta(seconds=100)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    usage = {"input_tokens": 10, "cache_read_input_tokens": 19_990, "cache_creation_input_tokens": 0, "output_tokens": 0}
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant", "timestamp": moment, "message": {"id": "m1", "usage": usage, "content": [{"type": "text", "text": "ok"}]}},
+    ]
+    transcript = config_dir.parent / "s.jsonl"
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s1",
+        "cwd": str(config_dir.parent),
+        "transcript_path": str(transcript),
+        "prompt": "Why does this fail?\n" + "log line\n" * 5_000,
+    }
+
+
 def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypatch):
     config_dir = _claude(tmp_path, {})
     real_replace = os.replace
@@ -286,11 +325,12 @@ def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypat
 
     monkeypatch.setattr(hook_health.os, "replace", _boom)
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
-    # The module reads the catalogue, so without it the module is left out, and the launcher with it.
-    assert written == []
+    # No catalogue is on disk to disagree with the module, so the module and the launcher are written: a
+    # launcher that is missing makes every hook call exit 2.
+    assert [p.name for p in written] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
     assert not (config_dir / "hooks" / cat.CATALOGUE_FILE).exists()
-    assert not (config_dir / "hooks" / cat.HOOK_MODULE).exists()
     assert not list((config_dir / "hooks").glob("*.tmp"))
+    assert _run_launcher(config_dir) == (0, "", "")
 
 
 def test_install_hook_files_keeps_the_old_module_and_its_stamp_when_the_catalogue_cannot_be_written(

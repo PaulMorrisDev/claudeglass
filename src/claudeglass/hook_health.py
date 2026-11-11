@@ -1132,8 +1132,10 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     whole install failing -- and it keeps its old manifest stamp, so
     :func:`check_capture` still reports it accurately. The catalogue is
     written before the module that reads it, and the module is left out
-    when the catalogue could not be written, so an install cut short never
-    leaves a new module beside an old catalogue. A capture script (the
+    when the catalogue could not be written and an older one is on disk,
+    so an install cut short never leaves a new module beside an old
+    catalogue (with none on disk the module is written: there is nothing
+    for it to disagree with, and the launcher needs it). A capture script (the
     launcher) is written last, and only once the module it imports is
     there: it is the file that starts using the others, so an install cut
     short never leaves one pointing at nothing. Returns the paths actually
@@ -1145,7 +1147,11 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     changed = False
     unwritten = set()
     for name in sorted(names, key=_install_rank):
-        if name == capture_catalogue.HOOK_MODULE and capture_catalogue.CATALOGUE_FILE in unwritten:
+        if (
+            name == capture_catalogue.HOOK_MODULE
+            and capture_catalogue.CATALOGUE_FILE in unwritten
+            and (dest_dir / capture_catalogue.CATALOGUE_FILE).is_file()
+        ):
             continue
         if name in CAPTURE_SCRIPTS and not (dest_dir / capture_catalogue.HOOK_MODULE).is_file():
             continue
