@@ -976,7 +976,8 @@ class _PendingTurn:
     #: Prompting-habits addition: the reply's last text block holds a
     #: ClaudeGlass tip (``Turn.coach_tip``).
     last_text_tip: bool = False
-    #: The hints whose own tip words it holds (``Turn.coach_tips``).
+    #: The hints whose own tip words any block of it holds, in the order
+    #: met (``Turn.coach_tips``).
     last_text_tips: tuple[str, ...] = ()
     #: Parser-signals addition (see model.py's ``Turn.reply_asked``/
     #: ``admit_candidate``/``admit_caught``/``tip_disowned``): what the
@@ -1282,6 +1283,12 @@ def _plan_stats(plan: str) -> PlanStats:
     return PlanStats(steps=steps, files=events_mod.path_count(plan), chars=len(plan))
 
 
+def _with_tips(seen: tuple[str, ...], found: tuple[str, ...]) -> tuple[str, ...]:
+    """``seen`` with the hints of ``found`` it lacks added after it: every
+    block of one reply keeps its tips, in the order met and each once."""
+    return seen + tuple(hint for hint in found if hint not in seen)
+
+
 def _merge_content_blocks(
     pending: _PendingTurn,
     content,
@@ -1304,7 +1311,7 @@ def _merge_content_blocks(
             text = block["text"]
             pending.last_text_tail = text[-_TAG_TAIL_CHARS:]
             pending.last_text_tip = _TIP_TEXT in text
-            pending.last_text_tips = tips_in(text)
+            pending.last_text_tips = _with_tips(pending.last_text_tips, tips_in(text))
             pending.last_text_reminder = capture_tags.carries_reminder(text)
             # Parser-signals addition: what the block says, kept as yes/no.
             pending.last_text_asked = prompt_shape.ends_on_question(text)
@@ -1499,7 +1506,7 @@ def _merge_content_blocks(
                     # The tip a ``plan_fresh_early`` note asked to end the
                     # plan with: the plan is the reply that shows it.
                     pending.last_text_tip = pending.tip_carried = True
-                    pending.last_text_tips = tips_in(plan)
+                    pending.last_text_tips = _with_tips(pending.last_text_tips, tips_in(plan))
         elif name == "AskUserQuestion" and isinstance(tool_use_id, str) and tool_use_id:
             if capture_tags.asks_for_feedback(tool_input):
                 pending.feedback_asks.append(tool_use_id)

@@ -619,6 +619,20 @@ def _relayed(kind: str, turn, alone: bool = False) -> bool:
     return turn.coach_tip
 
 
+def _message_of(turns, at: datetime | None) -> int | None:
+    """Which message a note belongs to: the first reply at or after the
+    message you typed, from the first reply at or after the note back
+    to the one that holds your words. ``id`` of that turn."""
+    if at is None:
+        return None
+    first = next((n for n, turn in enumerate(turns) if (_moment(turn.ts) or at) >= at), None)
+    if first is None:
+        return None
+    while first and turns[first].human_prompt_chars is None:
+        first -= 1
+    return id(turns[first])
+
+
 def _tips(top) -> tuple[Counter, Counter, Counter]:
     """Coaching notes that asked for a tip, by hint, and of those, the ones
     whose message Claude answered with a tip, and the ones where it said
@@ -645,16 +659,18 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
             if n and turn.human_prompt_chars is not None:
                 break
             cycle.append(turn)
-        found.append((kind, cycle))
-    # How many notes came with each message: a lone one owns the cycle's tip.
-    together = Counter(id(cycle[0]) for _kind, cycle in found if cycle)
-    for kind, cycle in found:
+        found.append((kind, cycle, _message_of(turns, at)))
+    # How many notes came with each message, whichever reply of it they
+    # arrived on: a lone one owns the message's tip.
+    together = Counter(message for _kind, cycle, message in found if cycle)
+    for kind, cycle, message in found:
         if kind in catalogue.CLAUDE_ONLY_HINTS:
-            # No tip asked: only Claude's words that the note misfired count.
-            if any(turn.coach_disowned for turn in cycle):
+            # No tip asked: only Claude's words that the note misfired count,
+            # and a tip it disowned belongs to the note that asked for it.
+            if any(turn.coach_disowned and not turn.tip_disowned for turn in cycle):
                 misfires[kind] += 1
             continue
-        alone = bool(cycle) and together[id(cycle[0])] == 1
+        alone = bool(cycle) and together[message] == 1
         if any(_relayed(kind, turn, alone) for turn in cycle):
             tips[kind] += 1
         if any(turn.tip_disowned for turn in cycle):
