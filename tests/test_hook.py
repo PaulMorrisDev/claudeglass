@@ -1573,6 +1573,25 @@ def test_content_layers_rules_record_unscoped_bytes_apart_from_paths_scoped(home
     assert rules["unscoped_bytes"] == len("always on")
 
 
+def test_content_layers_rules_with_an_unclosed_frontmatter_count_as_unscoped(home, project):
+    """An opening ``---`` with no closing one is no frontmatter to Claude Code, so a
+    column-0 ``paths:`` line below it is body text and the rule loads at the start."""
+    config_dir = home / ".claude" / "claudeglass"
+    rules_dir = project / ".claude" / "rules"
+    rules_dir.mkdir(parents=True)
+    forgotten = "---\npaths:\n  - src/**\nbody that follows"
+    rule_in_body = "---\nA rule that opens with a rule line\npaths: src/** is where it applies\n"
+    (rules_dir / "forgotten.md").write_text(forgotten, encoding="utf-8", newline="\n")
+    (rules_dir / "body.md").write_text(rule_in_body, encoding="utf-8", newline="\n")
+    (rules_dir / "scoped.md").write_text("---\npaths: [a/**]\n---\nx", encoding="utf-8")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    result = _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin)
+    assert result.returncode == 0
+    rules = _latest_snapshot(config_dir)["content_layers"]["rules"]
+    assert rules["count"] == 3
+    assert rules["unscoped_bytes"] == len(forgotten) + len(rule_in_body)
+
+
 def test_content_layers_absent_content_degrades_to_zero_counts(home, project):
     config_dir = home / ".claude" / "claudeglass"
     stdin = json.dumps({"session_id": "s", "cwd": str(project)})

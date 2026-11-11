@@ -1310,18 +1310,22 @@ def _unscoped_rules_bytes(base: Path) -> int:
 def _rule_has_paths(text: str) -> bool:
     """Whether a rule's frontmatter has a top-level ``paths:`` key. Also
     true for a list whose items sit at column 0, which ``parse_frontmatter``
-    drops (its ``- item`` lines carry no ``key:`` to attach to)."""
+    drops (its ``- item`` lines carry no ``key:`` to attach to). An opening
+    ``---`` that is never closed is no frontmatter, as in Claude Code, so a
+    ``paths:`` line below it is body text."""
     if "paths" in parse_frontmatter(text):
         return True
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return False
-    for line in lines[1:]:
-        if line.strip() == "---":
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
             break
-        if re.match(r"paths\s*:", line):
-            return True
-    return False
+    if end is None:
+        return False
+    return any(re.match(r"paths\s*:", line) for line in lines[1:end])
 
 
 def _walk_nested_claude_md(root: Path) -> tuple[int, int]:
