@@ -1109,6 +1109,17 @@ def hook_command(script: Path, extra_args: str = "", python: str | None = None) 
     return command + extra_args if command is not None else None
 
 
+def _install_rank(name: str) -> int:
+    """Where a hook file goes in an install: the catalogue, then the
+    module that reads it, then a capture script (the launcher), then the
+    rest; names of one rank keep the order they were given in."""
+    if name == capture_catalogue.CATALOGUE_FILE:
+        return 0
+    if name == capture_catalogue.HOOK_MODULE:
+        return 1
+    return 3 if name in CAPTURE_SCRIPTS else 2
+
+
 def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     """Copy the packaged ``hooks/<name>`` files into
     ``<config_dir>/hooks/``, replacing older copies, and stamp each in
@@ -1119,8 +1130,11 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     final rename fails (ROB-P7: a locked file on Windows, say), that one
     file is skipped -- its previous copy is left running rather than the
     whole install failing -- and it keeps its old manifest stamp, so
-    :func:`check_capture` still reports it accurately. A capture script
-    (the launcher) is written last, and only once the module it imports is
+    :func:`check_capture` still reports it accurately. The catalogue is
+    written before the module that reads it, and the module is left out
+    when the catalogue could not be written, so an install cut short never
+    leaves a new module beside an old catalogue. A capture script (the
+    launcher) is written last, and only once the module it imports is
     there: it is the file that starts using the others, so an install cut
     short never leaves one pointing at nothing. Returns the paths actually
     written."""
@@ -1129,7 +1143,10 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     written = []
     manifest = _load_manifest(config_dir)
     changed = False
-    for name in sorted(names, key=lambda name: name in CAPTURE_SCRIPTS):
+    unwritten = set()
+    for name in sorted(names, key=_install_rank):
+        if name == capture_catalogue.HOOK_MODULE and capture_catalogue.CATALOGUE_FILE in unwritten:
+            continue
         if name in CAPTURE_SCRIPTS and not (dest_dir / capture_catalogue.HOOK_MODULE).is_file():
             continue
         data = (importlib.resources.files("claudeglass") / "hooks" / name).read_bytes()
@@ -1143,6 +1160,7 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
                 tmp.unlink()
             except OSError:
                 pass
+            unwritten.add(name)
             continue
         manifest[name] = _sha256(data)
         changed = True

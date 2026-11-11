@@ -286,9 +286,54 @@ def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypat
 
     monkeypatch.setattr(hook_health.os, "replace", _boom)
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
-    assert [p.name for p in written] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    # The module reads the catalogue, so without it the module is left out, and the launcher with it.
+    assert written == []
     assert not (config_dir / "hooks" / cat.CATALOGUE_FILE).exists()
+    assert not (config_dir / "hooks" / cat.HOOK_MODULE).exists()
     assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_install_hook_files_keeps_the_old_module_and_its_stamp_when_the_catalogue_cannot_be_written(
+    tmp_path, monkeypatch
+):
+    import hashlib
+
+    config_dir = _claude(tmp_path, {})
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    hooks = config_dir / "hooks"
+    old_module = b"# an older module\n"
+    (hooks / cat.HOOK_MODULE).write_bytes(old_module)
+    manifest = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
+    manifest[cat.HOOK_MODULE] = hashlib.sha256(old_module).hexdigest()
+    (hooks / ".manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    old_catalogue = (hooks / cat.CATALOGUE_FILE).read_bytes()
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if Path(dst).name == cat.CATALOGUE_FILE:
+            raise PermissionError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _boom)
+    written = hook_health.install_hook_files(config_dir, [cat.HOOK_MODULE, cat.CATALOGUE_FILE])
+    assert written == []
+    # Not a new module beside an old catalogue: both stay as they were, and so does the module's stamp.
+    assert (hooks / cat.HOOK_MODULE).read_bytes() == old_module
+    assert (hooks / cat.CATALOGUE_FILE).read_bytes() == old_catalogue
+    after = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
+    assert after[cat.HOOK_MODULE] == hashlib.sha256(old_module).hexdigest()
+    assert not list(hooks.glob("*.tmp"))
+
+
+def test_install_hook_files_writes_the_catalogue_before_the_module_whatever_order_it_is_asked_in(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    written = hook_health.install_hook_files(
+        config_dir, [cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE]
+    )
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE, cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    # A module asked for alone does not wait on a catalogue that is not part of this install.
+    again = hook_health.install_hook_files(config_dir, [cat.HOOK_MODULE])
+    assert [p.name for p in again] == [cat.HOOK_MODULE]
 
 
 def test_install_hook_files_writes_the_launcher_its_module_and_the_catalogue(tmp_path):
