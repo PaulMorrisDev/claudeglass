@@ -2451,8 +2451,12 @@ def test_the_summary_says_what_the_typical_piece_is_or_that_it_is_not_known_yet(
     unknown = "Your typical piece of work isn't known yet: it needs a few more sessions."
     for data in ({"plan_fresh": True}, {"typical_piece_tokens": 0}, {"typical_piece_tokens": "many"}, {"typical_piece_tokens": -3}):
         assert coaching.describe(data)[-1] == unknown, data
-    # No file yet has its own line: nothing was worked out, the typical piece included.
-    assert coaching.describe({}) == ["No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
+    # No file yet has its own line: nothing was worked out, the typical piece included. The hints
+    # that are off for everyone are said first: that does not depend on the file.
+    off = [f"Off for everyone (the replay found them more often wrong than right): {coaching._hint_name(hint)}."
+           for hint in cat.LIVE_OFF_HINTS]
+    assert coaching.describe({}) == [
+        *off, "No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
 
 
 def test_the_service_job_writes_the_typical_piece_beside_the_other_numbers(tmp_path):
@@ -3043,7 +3047,9 @@ def test_the_summary_says_which_tips_are_left_out_wait_for_more_or_show_once():
     assert not any("called them wrong" in line or "knew" in line for line in quiet)
 
 
-def test_the_summary_names_a_muted_note_to_claude_apart_from_the_tips_you_called_wrong():
+def test_the_summary_names_a_muted_note_to_claude_apart_from_the_tips_you_called_wrong(monkeypatch):
+    # quiet_output is off for everyone while the switch is shut, and a hint that never speaks is not "left out".
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", ())
     lines = coaching.describe({"muted": ["quiet_output"], "typical_piece_tokens": 0})
     assert "Notes to Claude left out because Claude called them misfires: reading a saved output whole." in lines
     assert not any("you called them wrong" in line for line in lines)
@@ -3056,6 +3062,40 @@ def test_the_summary_says_which_hints_are_off_for_everyone_and_gives_no_reason_a
     off = [line[len(prefix):] for line in lines if line.startswith(prefix)]
     assert off == [f"{coaching._hint_name(hint)}." for hint in cat.LIVE_OFF_HINTS]
     assert "building a plan in a fresh session." in off and "reading a saved output whole." in off
+
+
+def test_the_summary_leaves_a_hint_that_is_off_or_gone_out_of_what_you_called_wrong(monkeypatch):
+    # split_run, quiet_output and cold_return are off for everyone and report_reread no longer speaks:
+    # an old coaching.json that mutes or raises them says nothing of it, so nothing here is left out "because of you".
+    data = {
+        "typical_piece_tokens": 0,
+        "muted": ["split_run", "quiet_output", "report_reread", "status_poll"],
+        "once": ["cold_return", "report_reread", "big_paste"],
+        "thresholds": {"report_reread_tokens": 900_000, "cold_min_tokens": 900_000, "drip_count": 9},
+    }
+    lines = " ".join(coaching.describe(data))
+    for hint in (*cat.LIVE_OFF_HINTS, *cat.NO_TRIGGER_HINTS):
+        title = coaching._hint_name(hint)
+        assert not any(title in line for line in coaching.describe(data) if not line.startswith("Off for everyone")), hint
+    assert "asking how background work is going." in lines and "pasting a lot of text." in lines
+    assert "sending small requests one at a time." in lines
+    # With every switch open the live ones come back; the one with no trigger stays out.
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", ())
+    open_lines = " ".join(coaching.describe(data))
+    for hint in ("split_run", "quiet_output", "cold_return"):
+        assert coaching._hint_name(hint) in open_lines, hint
+    assert coaching._hint_name("report_reread") not in open_lines
+    assert not any(line.startswith("Off for everyone") for line in coaching.describe(data))
+
+
+def test_the_daily_run_writes_nothing_for_a_hint_that_no_longer_speaks(tmp_path):
+    report = _tips_report(("report_reread", 0, 3, 5, 5), ("drip_feed", 0, 0, 2, 0))
+    data = coaching.from_report(report, tmp_path, now=NOW)
+    assert "report_reread_tokens" not in data["thresholds"] and "report_reread" not in data["muted"]
+    assert "report_reread" not in data["once"]
+    assert data["thresholds"]["drip_count"] == _rearmed("drip_count")
+    assert coaching.tip_rules(report, 2.0) == ([], [], {"drip_count": 6})
+    assert "report_reread" not in cat.TIP_THRESHOLD_KEYS and "report_reread" not in coaching._MUTABLE
 
 
 def _as_the_daily_run_writes_it(tmp_path, report) -> Path:

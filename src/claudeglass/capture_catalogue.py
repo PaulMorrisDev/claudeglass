@@ -2881,7 +2881,6 @@ TIP_THRESHOLD_KEYS: dict[str, str] = {
     "drip_feed": "drip_count",
     "big_paste": "big_paste_tokens",
     "cold_return": "cold_min_tokens",
-    "report_reread": "report_reread_tokens",
 }
 
 
