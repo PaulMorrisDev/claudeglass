@@ -622,6 +622,19 @@ def test_blocks_partly_sent_again_name_the_ones_that_were_not():
     assert "before them" not in rec.why
 
 
+def test_one_block_not_sent_again_is_named_in_the_singular():
+    turns = []
+    for i in range(1, 25, 2):
+        turns.append(_turn(i, cache_read_tokens=1_000, hook_blocks={"guard.ps1": 1}, tool_calls_by_tool={"Read": 1}))
+        resent = {"guard.ps1": 1} if i < 23 else {}
+        turns.append(_turn(i + 1, cache_read_tokens=1_000_000, hook_resends=resent))
+    [rec] = _rules(_report([_result(turns)]))
+    assert "1 blocked call was not sent again" in rec.why
+    assert "1 blocked calls" not in rec.why
+    assert "would let that one run too" in rec.why
+    assert "the saving shown does not subtract it" in rec.why
+
+
 def test_blocks_that_change_the_call_are_not_a_card():
     turns = []
     for i in range(1, 25, 2):
