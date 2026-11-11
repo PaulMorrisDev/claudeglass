@@ -530,8 +530,9 @@ that order, each as a heading with a one-line answer beside it.
    its card is Worth considering, and only where the model lever has no
    saving for that agent type (`agentModelItems`): a workflow agent's,
    which has no lever, is a share of all the spend. The other two
-   agent-model cards add nothing. The total is still "at most", and
-   never above the spend.
+   agent-model cards add nothing. A card at For your information level
+   adds nothing either: the headline counts only the changes worth
+   making. The total is still "at most", and never above the spend.
    The previous period comes from `/api/summary?previous=1` for the same
    window and project, so a change compares a summary with a summary.
    The service works the period out in its own days, and `previousPhrase`
@@ -827,8 +828,14 @@ detail scrolls) and the one picked.
   ignored cards, cards whose fix has landed (the "fixed" variant),
   information-only cards, unconfirmed changes and managed settings. The
   prompt states its closing (show me the diff, restart) once, and the
-  note beside the button counts files and prompts that touch no file
-  apart. With no project picked there
+  note beside the button gives the number of open fixes, then how many
+  files they edit, plus the fixes that span several files or set a
+  standing rule and the ones that touch no file. If the browser refuses
+  to copy (the Claude Desktop browser pane refuses the Clipboard API, and
+  a page served over plain http has none), the copy is tried again
+  through a selected text field;
+  if that fails too, the prompt is shown under the button, selected, for
+  you to copy. With no project picked there
   is no button.
 - A notice above the inbox says the figures are provisional while a
   baseline capture window is open. An id the window doesn't have opens

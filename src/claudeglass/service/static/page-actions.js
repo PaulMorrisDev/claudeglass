@@ -479,26 +479,7 @@ export function renderRecommendations(panel) {
     fetchJson(withWindow("/api/recommendations/prompt")).then(function (result) {
       var data = result.body && result.body.ok === true ? result.body.data : null;
       if (!data || !data.prompt || !container.isConnected) return;
-      var name = projectName(state.project);
-      var files = data.files.length;
-      var other = data.other || 0;
-      // Fixes are counted in the same unit throughout: the prompts in files, then the ones with no file.
-      var inFiles = data.files.reduce(function (n, f) {
-        return n + f.fixes;
-      }, 0);
-      var fixes = function (n) {
-        return n + (n === 1 ? " open fix" : " open fixes");
-      };
-      var text = files
-        ? fixes(inFiles) + " for " + name + ", in " + files + (files === 1 ? " file" : " files") +
-          (other ? ", plus " + other + " with no file to edit" : "") + "."
-        : fixes(other) + " for " + name + ", with no file to edit.";
-      bundleContainer.appendChild(
-        el("div", { class: "bundle-row" }, [
-          el("p", { class: "notes", text: text }),
-          copyPromptButton(data.prompt, null, "Copy prompt", "Copy one prompt for every open fix in " + name),
-        ])
-      );
+      bundleContainer.appendChild(bundleBlock(data, projectName(state.project)));
     });
   }
 
@@ -713,7 +694,71 @@ function shortSaving(text) {
   return String(text).replace(/\s+(over|across) the (period|spawns) in this report\.?$/, "");
 }
 
-function copyPromptButton(prompt, agent, text, label) {
+// The toast when the bundle's copy is refused: the prompt is on the page.
+var BUNDLE_COPY_REFUSED = "Couldn't copy. The prompt is selected below: copy it from there.";
+
+// The note beside the bundle's Copy prompt. The first number is every open
+// fix; the rest say which of them are the fixes in M files (data.files), the
+// ones that span several files or set a standing rule (data.several) and the
+// ones with no file to edit (data.other). Each counts fixes, as the prompt
+// states them.
+function bundleLine(data, name) {
+  var files = data.files.length;
+  var several = data.several || 0;
+  var other = data.other || 0;
+  var total =
+    data.files.reduce(function (n, f) {
+      return n + f.fixes;
+    }, 0) +
+    several +
+    other;
+  var head = total + (total === 1 ? " open fix" : " open fixes") + " for " + name;
+  if (!files && !several) return head + ", with no file to edit.";
+  var text = head + ":";
+  if (files) text += " " + files + (files === 1 ? " file" : " files") + " to edit";
+  if (several) {
+    text += (files ? ", plus " : " ") + several + (several === 1 ? " that spans several files or sets a standing rule" : " that span several files or set a standing rule");
+  }
+  if (other) text += " and " + other + " with no file to edit";
+  return text + ".";
+}
+
+// The bundle's row (its note and Copy prompt) and, under it, the room for
+// the prompt itself: shown only when the browser refused every way of
+// copying it, and cleared when a later press works.
+function bundleBlock(data, name) {
+  var shown = el("div", { class: "bundle-prompt" });
+  var row = el("div", { class: "bundle-row" }, [
+    el("p", { class: "notes", text: bundleLine(data, name) }),
+    copyPromptButton(data.prompt, null, "Copy prompt", "Copy prompt for every open fix in " + name, {
+      refused: BUNDLE_COPY_REFUSED,
+      after: function (ok) {
+        if (ok) clear(shown);
+        else showBundlePrompt(shown, data.prompt, name);
+      },
+    }),
+  ]);
+  return el("div", null, [row, shown]);
+}
+
+// The prompt in the page's code-block style, named, focused and selected,
+// so a press of Ctrl+C or Cmd+C copies it.
+function showBundlePrompt(slot, prompt, name) {
+  clear(slot);
+  var pre = el("pre", { text: prompt, tabIndex: -1, role: "group", "aria-label": "Prompt for every open fix in " + name });
+  slot.appendChild(el("div", { class: "code-block" }, [pre]));
+  pre.focus();
+  var range = document.createRange();
+  range.selectNodeContents(pre);
+  var selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+// handling, when given, is for a prompt that is not in the detail pane:
+// refused is the toast's sentence when the copy fails, and after(ok) runs
+// once the result is known.
+function copyPromptButton(prompt, agent, text, label, handling) {
   return button(text || "Copy", {
     variant: "quiet",
     icon: "prompt",
@@ -721,7 +766,9 @@ function copyPromptButton(prompt, agent, text, label) {
     label: label || "Copy prompt for " + agentName(agent),
     action: function () {
       copyToClipboard(prompt).then(function (ok) {
-        toast(ok ? "Prompt copied. Paste it into Claude Code." : "Couldn't copy. Open the change below and copy it from there.", { tone: ok ? "success" : "warning" });
+        if (handling) handling.after(ok);
+        var refused = handling ? handling.refused : "Couldn't copy. Open the change below and copy it from there.";
+        toast(ok ? "Prompt copied. Paste it into Claude Code." : refused, { tone: ok ? "success" : "warning" });
       });
     },
   });

@@ -6478,13 +6478,20 @@ def test_project_files_route_is_empty_without_any_read_file(server):
     assert payload["data"]["files"] == [] and payload["data"]["total"] == 0 and payload["data"]["named"] == 0
 
 
+def _seed_agent_model_project(handle):
+    """The store knows the project the agent-model corpus lives in, as a
+    real store does once its sessions have been read."""
+    handle.store.upsert_session(session_id="session-0", project_slug="proj-b", slug="proj-b")
+
+
 def test_recommendations_prompt_bundles_the_open_fixes_and_leaves_out_ignored_ones(tmp_path, monkeypatch):
     handle = _start_agent_model_server(tmp_path, monkeypatch)
     try:
-        resp, body = handle.get_json("/api/recommendations/prompt")
+        _seed_agent_model_project(handle)
+        resp, body = handle.get_json("/api/recommendations/prompt?project=proj-b")
         assert resp.status == 200 and body["ok"] is True
         data = body["data"]
-        assert set(data) == {"prompt", "files", "other", "cards", "left_out"}
+        assert set(data) == {"prompt", "files", "several", "other", "cards", "left_out"}
         _resp, rows = handle.get_json("/api/recommendations")
         [card] = [row for row in rows["data"] if row["id"] == "agent-model-inherited"]
         prompt = card["fixes"][0]["prompt"]
@@ -6495,8 +6502,26 @@ def test_recommendations_prompt_bundles_the_open_fixes_and_leaves_out_ignored_on
         assert "\n## " in data["prompt"]
 
         handle.post_json("/api/recommendations/ignore", {"keys": [card["key"]], "ignored": True})
-        _resp, body = handle.get_json("/api/recommendations/prompt")
+        _resp, body = handle.get_json("/api/recommendations/prompt?project=proj-b")
         assert body_text not in body["data"]["prompt"]
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_recommendations_prompt_needs_a_project(tmp_path, monkeypatch):
+    """Without ``project`` the prompt would hold every project's fixes under
+    an opening that says "this project"."""
+    handle = _start_agent_model_server(tmp_path, monkeypatch)
+    try:
+        _seed_agent_model_project(handle)
+        resp, body = handle.get_json("/api/recommendations/prompt")
+        assert resp.status == 400
+        assert body["error"]["code"] == "bad_request"
+        assert body["error"]["message"] == "'project' is required"
+        resp, body = handle.get_json("/api/recommendations/prompt?project=nope")
+        assert resp.status == 400
+        assert body["error"]["message"] == "'project' does not match a known project"
     finally:
         handle.close()
         handle.store.close()

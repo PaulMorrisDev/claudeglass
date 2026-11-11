@@ -352,6 +352,18 @@ def test_an_agent_model_saving_joins_only_where_nothing_else_counts_it() -> None
     assert _available([], groups, agents) == 0
 
 
+def test_an_info_card_adds_nothing_to_the_headline() -> None:
+    """For-your-information cards are not changes worth making: the
+    Overview's sentence leaves their saving out, as its count and its
+    checklist do. The card keeps its saving, which sorts the list."""
+    member = {"id": "spawn-claude-md", "key": "spawn-claude-md:w", "agent_type": "w", "saving_usd": 38.26}
+    info = {"id": "spawn-claude-md", "severity": "info", "members": [member]}
+    advice = {"id": "spawn-claude-md", "severity": "advice", "members": [member]}
+    assert _available([], [info], []) == 0
+    assert abs(_available([], [advice], []) - 38.26) < 1e-9
+    assert _available([], [info, advice], []) == _available([], [advice], [])
+
+
 # -- every model id finds its prices ------------------------------------------
 
 #: A report's meta as report.py writes it: rates keyed by the rate

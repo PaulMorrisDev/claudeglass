@@ -895,11 +895,12 @@ carry no ignore fields.
 
 ### `GET /api/recommendations/prompt`
 
-One prompt for a project's open fixes. Query: the same window and
-`project` as `GET /api/recommendations`.
+One prompt for a project's open fixes. Query: the same window as
+`GET /api/recommendations`, and `project`, which is required (`400` when
+it is missing or matches no project).
 
-`data`: `{"prompt", "files": [{"file", "fixes"}, ...], "other", "cards",
-"left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
+`data`: `{"prompt", "files": [{"file", "fixes"}, ...], "several", "other",
+"cards", "left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
 one opening line, then each fix's own `prompt` (as in
 `/api/recommendations`) minus its own closing (the "show me the diff"
 and restart lines, or the question about where a standing rule applies)
@@ -907,9 +908,16 @@ under a `## <file>` header line per file, files in the order the cards
 come, then one shared closing that states those once. A prompt two cards
 share appears once, and a workflow card whose files are "A or B" sits
 under the matching exact file when there is one. Groups that are no file
-(`## No file`, `## Other`) come last. `files` lists only the groups that
-are a file, with the number of prompts under each; `other` counts the
-prompts under the rest. `cards` counts the cards that contributed.
+(`## No file`, `## Other`) come last. Fixes are counted in one
+unit throughout: a fix is one prompt as the bundle states it (a prompt
+two cards share is one fix). `files` lists only the groups that name one
+file (a path, or an "A or B" pair of paths), with the number of fixes
+under each. `several` counts the fixes under the groups that span several
+files (a kind of file, such as the hook scripts) or set a standing rule
+(the CLAUDE.md that Claude asks about); `other` counts the fixes under
+the group with no file to edit. The three do not overlap: every fix in
+the prompt is in exactly one of them. `cards` counts the cards that
+contributed.
 `left_out` counts the cards with at least one fix left out for each
 reason, so a card can count in both `cards` and `left_out`: its fix has
 landed (the `fixed` variant, which the browser never sees), it is shown

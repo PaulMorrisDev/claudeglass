@@ -277,6 +277,7 @@ function availableSaving(levers, groups, tables) {
     }
   });
   groups.forEach(function (group) {
+    if (group.severity !== "action" && group.severity !== "advice") return;
     if (LEVER_RULES[group.id]) return;
     if (AGENT_MODEL_RULES[group.id]) {
       agentModelItems(group, agents).forEach(function (item) {

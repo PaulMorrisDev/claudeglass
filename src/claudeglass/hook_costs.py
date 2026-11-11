@@ -650,10 +650,12 @@ def _rule_hook_block_resent(report: ReportModel, th: HookThresholds) -> list[Rec
         label = str(r["hook"])
         block_usd = _num(r.get("block_usd"))
         saving = block_usd * min(1.0, resent / blocks)
+        left = blocks - resent
         not_resent = (
-            f" {blocks - resent:,} blocked calls were not sent again; letting calls through with "
-            "additionalContext would let those run too, and the saving shown does not subtract them."
-            if blocks > resent
+            f" {left:,} blocked {'call was' if left == 1 else 'calls were'} not sent again; letting calls "
+            f"through with additionalContext would let {'that one' if left == 1 else 'those'} run too, and "
+            f"the saving shown does not subtract {'it' if left == 1 else 'them'}."
+            if left > 0
             else ""
         )
         out.append(
