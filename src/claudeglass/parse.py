@@ -1015,7 +1015,7 @@ class _PendingTurn:
     #: last text block, parsed for tags when the turn is finalised and
     #: then dropped (see model.py's ``Turn.result_marker``/``Turn.cap``).
     last_text_tail: str | None = None
-    #: Prompting-habits addition: the reply's last text block holds a
+    #: Prompting-habits addition: a text block of the reply holds a
     #: ClaudeGlass tip (``Turn.coach_tip``).
     last_text_tip: bool = False
     #: The hints whose own tip words any block of it holds, in the order
@@ -1356,7 +1356,9 @@ def _merge_content_blocks(
             # was quoted, not reported.
             text = block["text"]
             pending.last_text_tail = text[-_TAG_TAIL_CHARS:]
-            pending.last_text_tip = _TIP_TEXT in text
+            # The tip label is kept from any block: a reply's tip does not
+            # have to be in its last one (``tips_in`` reads every block too).
+            pending.last_text_tip = pending.last_text_tip or _TIP_TEXT in text
             pending.last_text_tips = _with_tips(pending.last_text_tips, tips_in(text))
             pending.last_text_reminder = capture_tags.carries_reminder(text)
             # Parser-signals addition: what the block says, kept as yes/no.

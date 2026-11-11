@@ -1087,6 +1087,26 @@ def test_a_quiet_output_note_does_not_take_the_bare_label_from_the_note_that_ask
     assert session.tips == {"drip_feed": 1}, dict(session.tips)
 
 
+def test_the_bare_label_in_an_earlier_text_block_of_the_reply_counts_for_a_lone_note(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("go", 2), _note_line("drip_feed", 2),
+        _reply_blocks(3, [{"type": "text", "text": f"Done.\n\n{_TIP}"}, {"type": "text", "text": "One more thing."}]),
+    ])
+    assert session.tips == {"drip_feed": 1}, dict(session.tips)
+
+
+def test_a_tip_written_in_the_text_and_again_in_the_plan_is_kept_once(tmp_path):
+    tip = _own_tip("plan_fresh_early")
+    plan = tool_use_block("ExitPlanMode", "toolu_plan", {"plan": f"1. do it\n\n{tip}"})
+    parsed = _parse(tmp_path, [
+        *_START,
+        _said("plan the next bit", 2), _note_line("plan_fresh_early", 2),
+        _reply_blocks(3, [{"type": "text", "text": f"Here is the plan.\n\n{tip}"}, plan]),
+    ])
+    assert [turn.coach_tips for turn in parsed.turns if turn.coach_tips] == [("plan_fresh_early",)]
+
+
 def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_path):
     # drip_feed asks for its tip every time: shown twice in three (one of them
     # called a misfire). big_paste leaves it to Claude's judgement; cold_return asks for its tip every time.
