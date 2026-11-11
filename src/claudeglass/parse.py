@@ -715,8 +715,8 @@ def _is_code_write_target(target: str, prefixes: tuple[str, ...], cwd: str | Non
     a document (a ``DOC_SUFFIXES`` file, a log, table or ``.jsonl`` ledger,
     a ``.json``, ``.html`` or ``.htm`` file under ``plans/``, ``reports/``
     or ``docs/``, or a report or ledger in ``.json``). ``cwd`` is the
-    working folder of the line that made the call: the folders that count
-    are those below it (:func:`_folders_below`).
+    transcript's first working folder: the folders that count are those
+    below the deepest one the target shares with it (:func:`_folders_below`).
     ``Turn.shell_code_write_count`` and ``Turn.edit_code_count`` count only
     these."""
     normal = _normalize_path_for_hash(target)

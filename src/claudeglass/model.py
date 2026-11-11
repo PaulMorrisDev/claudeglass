@@ -590,18 +590,21 @@ phase, label, description or path:
   or ``.jsonl`` file wherever it is, a ``.json``, ``.html`` or ``.htm``
   file under ``plans/``, ``reports/`` or ``docs/``, a report or ledger
   ``.json``) and not under ``scratchpad/``. Those folders are the ones
-  below the working folder of the line that made the call (the target is
-  inside it; a repository kept under a folder named ``docs`` is not a
-  ``docs`` folder of its own). A target outside the working folder, or any
-  absolute one when the line names none, is judged by the folder it sits
-  in alone. Taken back like ``shell_write_count``. Only
+  below the deepest folder the target shares with the transcript's first
+  ``cwd`` (inside it, the folders below it: a repository kept under a
+  folder named ``docs`` has no ``docs`` folder of its own; outside it, a
+  worktree agent's write into the main checkout's ``docs/`` is still a
+  document). The known miss: a project under a ``docs``-named folder that
+  shares no parent with the working folder reads as a document. With no
+  absolute ``cwd`` the folder the target sits in decides alone. Taken back
+  like ``shell_write_count``. Only
   the ``agent-decide-apply`` verdict reads it. ``None`` in a digest an
   older parser wrote: not measured, which is not 0. Nothing can measure
   it once the transcript is gone, so the verdict leaves that run out.
   The rule for every field a parser version adds: a default of ``None``
   where the key is missing, and a reader that leaves the run out of that
-  figure (a field a version redefines needs the digest's parser version
-  as well).
+  figure (a field a version redefines needs the digest's
+  ``TranscriptResult.parser_version`` as well).
 - ``Turn.edit_code_count: int | None = None`` -- how many of this turn's edit-tool
   calls (Edit, Write, MultiEdit, NotebookEdit) were aimed at code: outside
   the temp dir and not a document, by the same test as

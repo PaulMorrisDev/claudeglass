@@ -473,8 +473,10 @@ __version__ = "0.16.0"
 #: Bumped to 50: a reply keeps the tips of every text block and plan it
 #: wrote (``Turn.coach_tips``), not only the last one's; a log, ``.csv``,
 #: ``.tsv`` or ``.jsonl`` file is a document wherever it sits and the folders
-#: that make a ``.json`` or ``.html`` file one are those below the working
-#: folder (``Turn.shell_code_write_count``, ``Turn.edit_code_count``); and
+#: that make a ``.json`` or ``.html`` file one are those below the deepest
+#: folder the file shares with the transcript's first ``cwd``
+#: (``Turn.shell_code_write_count``, ``Turn.edit_code_count``);
+#: ``Turn.coach_tip`` is true when any text block holds the label; and
 #: those two counts are ``None`` where a digest has none; a digest carries
 #: the parser version that wrote it (``TranscriptResult.parser_version``,
 #: ``None`` before 50). A pre-50 digest
