@@ -6,6 +6,7 @@ the ``capture`` command around them.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
@@ -4285,10 +4286,30 @@ def test_live_off_the_catalogue_names_the_hints_the_replay_found_more_often_wron
     assert set(cat.LIVE_OFF_HINTS) <= set(cat.COACHING_HINTS)
 
 
-def test_a_hint_nothing_in_the_hook_raises_is_listed_once_and_keeps_its_words_for_old_notes():
+def _hints_the_source_names(source: str) -> set[str]:
+    """The hints a Python source names as a string of their own: code, not a comment or a docstring."""
+    return {
+        node.value for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant) and node.value in cat.COACHING_HINTS
+    }
+
+
+def test_the_hints_a_source_names_are_its_string_constants_not_its_comments_or_prose():
+    source = '"""status_poll and report_reread are described here."""\n# report_reread was retired\nHINT = "drip_feed"\n'
+    assert _hints_the_source_names(source) == {"drip_feed"}
     hook = MODULE.read_text(encoding="utf-8")
+    assert "status_poll" in _hints_the_source_names(hook)
+    # A trigger taken out of the hook shows, though its docstring mention stays.
+    without = hook.replace('"status_poll"', '"__gone__"')
+    assert "status_poll" in without and "status_poll" not in _hints_the_source_names(without)
+    # A comment that names a retired hint is not a trigger.
+    commented = hook + "\n# report_reread was retired: nothing here raises it.\n"
+    assert _hints_the_source_names(commented) == _hints_the_source_names(hook)
+
+
+def test_a_hint_nothing_in_the_hook_raises_is_listed_once_and_keeps_its_words_for_old_notes():
     # The hook names every hint that can speak, switched on or off, and none that has no trigger left.
-    named = {hint for hint in cat.COACHING_HINTS if re.search(rf"\b{hint}\b", hook)}
+    named = _hints_the_source_names(MODULE.read_text(encoding="utf-8"))
     assert set(cat.NO_TRIGGER_HINTS) == set(cat.COACHING_HINTS) - named
     for hint in cat.NO_TRIGGER_HINTS:
         # Not retired: old notes keep their words, their tip and their row of the tips table.
