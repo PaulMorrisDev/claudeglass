@@ -1761,6 +1761,11 @@ def _name_list(names: list[str], shown: int = _TOOLS_SHOWN) -> str:
     return f"{head}, and {extra} more" if extra > 0 else head
 
 
+def _join_names(names: list[str]) -> str:
+    """``names`` as "A", "A and B" or "A, B and C"."""
+    return f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else "".join(names)
+
+
 def _split_line(text: str) -> list[str]:
     """``text`` split at the commas outside parentheses, so
     ``Agent(a, b), Read`` is two entries."""
@@ -1951,11 +1956,17 @@ def _tools_list_card(
             action += " " + _GENERAL_PURPOSE_WARNING
 
     why_parts = [f"{value:,.0f} of {label}" for label, value in sizes if _is_number(value) and value >= 1]
+    # The tools that cleared the bar, from the row as the report gave it: a rule's additions did not, and
+    # a tool a known line lacks did.
+    rule_kept = _split_names(row.get("rule_kept_tools"))
+    cleared = [name for name in _split_names(row["keep_tools"]) if name not in rule_kept]
     why = (
-        f"In {measured} spawns, {agent_type} called {len(keep)} of the tools it was offered in at least "
+        f"In {measured} spawns, {agent_type} called {len(cleared)} of the tools it was offered in at least "
         f"{pct}% of them. Leaving out the rest takes about {dropped:,.0f} tokens out of each start: "
         f"{', '.join(why_parts)}."
     )
+    if rule_kept:
+        why += f" {_join_names(rule_kept)} stay too because workflow agents called them."
     evidence = [_evidence("Spawns with tools recorded", measured, "agent_startup", "agent_startup_diet", agent_type)]
     definitions = diet.get("dropped_definitions")
     if _is_number(definitions):

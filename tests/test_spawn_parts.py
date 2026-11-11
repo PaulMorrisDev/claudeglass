@@ -388,6 +388,33 @@ def test_workflow_tools_that_write_or_run_commands_are_never_rare_once_any_spawn
     assert {"Edit", "PowerShell"} <= set(other["rare_tools"].split(", "))
 
 
+def test_the_why_counts_the_tools_that_cleared_the_bar_not_the_ones_a_rule_added():
+    # Read and Grep were called in every spawn. Edit and PowerShell were called
+    # by one spawn on another model, which the workflow rule keeps on the line.
+    sonnet = "claude-sonnet-5"
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "PowerShell": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    acc = _diet_acc("workflow-subagent", spawns=20, uses={"Read": 20, "Grep": 20}, chars=chars)
+    acc.tool_uses[sonnet] = {"Edit": 1, "PowerShell": 1}
+    report = _report(acc)
+    rec = _tools_rec(_recs(report, units=Units()), "workflow-subagent")
+    assert "tools: Edit, Grep, PowerShell, Read" in rec.action
+    assert "called 2 of the tools it was offered in at least 10% of them" in rec.why
+    assert "Edit and PowerShell stay too because workflow agents called them" in rec.why
+    # An agent type the rule does not touch says nothing of the kind.
+    plain = _tools_rec(_recs(_report(_diet_acc("searcher")), units=Units()), "searcher")
+    assert "called 3 of the tools it was offered" in plain.why and "stay too" not in plain.why
+
+
+def test_the_why_counts_a_tool_called_often_that_the_known_line_lacks():
+    # Bash was called in 2 of 20 spawns, but the line the agent has now lacks it.
+    # The card never adds it, and it still cleared the bar, so the why counts it.
+    snap = _snapshot({"searcher": {"source": "user", "tools": ["Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]}})
+    rec = _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units()), "searcher")
+    assert rec.changes[0].value == ["Grep", "Read"]
+    assert "Bash isn't on its tools line, so it isn't added" in rec.action
+    assert "called 3 of the tools it was offered in at least 10% of them" in rec.why
+
+
 def test_the_model_with_the_most_tool_snapshots_is_the_one_a_tools_list_is_measured_on():
     haiku, sonnet = "claude-haiku-4-5", "claude-sonnet-5"
     acc = _diet_acc("searcher", spawns=40, uses={"Read": 8, "Grep": 8}, family=sonnet, snapshots=8)

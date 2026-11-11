@@ -2309,6 +2309,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         Column(key="saving_usd", label="Saving across these spawns", kind="money"),
         Column(key="window_days", label="Days in the window", kind="float"),
         Column(key="rare_sizes", label="Size of each rarely used tool", kind="str"),
+        Column(key="rule_kept_tools", label="Tools kept because a workflow spawn called them", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2323,9 +2324,11 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         _total, rare_rows = acc.removable_chars(family)
         builtin = [row for row in rare_rows if not row[0].startswith("mcp__")]
         keep = acc.kept_tools(family)
+        rule_kept: list[str] = []
         if agent_type == _WORKFLOW_AGENT:
             called = {key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
             builtin = [row for row in builtin if row[0] not in called]
+            rule_kept = sorted(called - set(keep))
             keep = sorted(
                 set(keep) | called, key=lambda key: (key.startswith("mcp__"), key)
             )
@@ -2384,6 +2387,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
                 usd or None,
                 stats.window_days,
                 ", ".join(sizes),
+                ", ".join(rule_kept),
             ]
         )
     return Table(
