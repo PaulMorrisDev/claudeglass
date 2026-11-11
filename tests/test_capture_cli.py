@@ -339,14 +339,20 @@ def test_install_hook_files_keeps_the_old_module_and_its_stamp_when_the_catalogu
     import hashlib
 
     config_dir = _claude(tmp_path, {})
-    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    files = hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT]
+    hook_health.install_hook_files(config_dir, files)
     hooks = config_dir / "hooks"
-    old_module = b"# an older module\n"
-    (hooks / cat.HOOK_MODULE).write_bytes(old_module)
+    # An earlier install: each file differs from the packaged one but works, and is stamped as this tool's own.
+    older = {
+        cat.CATALOGUE_FILE: json.dumps({**json.loads(_packaged(cat.CATALOGUE_FILE)), "older_copy": True}).encode("utf-8"),
+        cat.HOOK_MODULE: _packaged(cat.HOOK_MODULE) + b"\n# an older copy\n",
+        cat.HOOK_SCRIPT: _packaged(cat.HOOK_SCRIPT) + b"\n# an older copy\n",
+    }
     manifest = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
-    manifest[cat.HOOK_MODULE] = hashlib.sha256(old_module).hexdigest()
+    for name, data in older.items():
+        (hooks / name).write_bytes(data)
+        manifest[name] = hashlib.sha256(data).hexdigest()
     (hooks / ".manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    old_catalogue = (hooks / cat.CATALOGUE_FILE).read_bytes()
     real_replace = os.replace
 
     def _boom(src, dst):
@@ -355,14 +361,22 @@ def test_install_hook_files_keeps_the_old_module_and_its_stamp_when_the_catalogu
         return real_replace(src, dst)
 
     monkeypatch.setattr(hook_health.os, "replace", _boom)
-    written = hook_health.install_hook_files(config_dir, [cat.HOOK_MODULE, cat.CATALOGUE_FILE])
-    assert written == []
-    # Not a new module beside an old catalogue: both stay as they were, and so does the module's stamp.
-    assert (hooks / cat.HOOK_MODULE).read_bytes() == old_module
-    assert (hooks / cat.CATALOGUE_FILE).read_bytes() == old_catalogue
+    written = hook_health.install_hook_files(config_dir, files)
+    # Not a new module beside an old catalogue: both stay as they were, with their stamps. The launcher is
+    # still rewritten, and it only starts the module that is there.
+    assert [p.name for p in written] == [cat.HOOK_SCRIPT]
+    assert (hooks / cat.HOOK_MODULE).read_bytes() == older[cat.HOOK_MODULE]
+    assert (hooks / cat.CATALOGUE_FILE).read_bytes() == older[cat.CATALOGUE_FILE]
+    assert (hooks / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
     after = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
-    assert after[cat.HOOK_MODULE] == hashlib.sha256(old_module).hexdigest()
+    assert after[cat.HOOK_MODULE] == hashlib.sha256(older[cat.HOOK_MODULE]).hexdigest()
+    assert after[cat.CATALOGUE_FILE] == hashlib.sha256(older[cat.CATALOGUE_FILE]).hexdigest()
+    assert after[cat.HOOK_SCRIPT] == hashlib.sha256(_packaged(cat.HOOK_SCRIPT)).hexdigest()
     assert not list(hooks.glob("*.tmp"))
+    # The older pair still works together under the new launcher.
+    rc, out, err = _run_launcher(config_dir, _big_paste_payload(config_dir))
+    assert (rc, err) == (0, "")
+    assert "big_paste" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
 def test_install_hook_files_writes_the_catalogue_before_the_module_whatever_order_it_is_asked_in(tmp_path):
