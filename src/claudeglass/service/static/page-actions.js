@@ -697,28 +697,30 @@ function shortSaving(text) {
 // The toast when the bundle's copy is refused: the prompt is on the page.
 var BUNDLE_COPY_REFUSED = "Couldn't copy. The prompt is shown below: select it and copy it.";
 
-// The note beside the bundle's Copy prompt. Fixes are counted in one unit
-// throughout: the prompts under a file, then the ones that span several
-// files or set a standing rule, then the ones with no file to edit.
+// The note beside the bundle's Copy prompt. The first number is every open
+// fix; the rest say which of them are the fixes in M files (data.files), the
+// ones that span several files or set a standing rule (data.several) and the
+// ones with no file to edit (data.other). Each counts fixes, as the prompt
+// states them.
 function bundleLine(data, name) {
   var files = data.files.length;
   var several = data.several || 0;
   var other = data.other || 0;
-  var inFiles = data.files.reduce(function (n, f) {
-    return n + f.fixes;
-  }, 0);
-  var fixes = function (n) {
-    return n + (n === 1 ? " open fix" : " open fixes");
-  };
-  if (!files) {
-    return several
-      ? fixes(several + other) + " for " + name + ", none in a single file."
-      : fixes(other) + " for " + name + ", with no file to edit.";
+  var total =
+    data.files.reduce(function (n, f) {
+      return n + f.fixes;
+    }, 0) +
+    several +
+    other;
+  var head = total + (total === 1 ? " open fix" : " open fixes") + " for " + name;
+  if (!files && !several) return head + ", with no file to edit.";
+  var text = head + ":";
+  if (files) text += " " + files + (files === 1 ? " file" : " files") + " to edit";
+  if (several) {
+    text += (files ? ", plus " : " ") + several + (several === 1 ? " that spans several files or sets a standing rule" : " that span several files or set a standing rule");
   }
-  var more = [];
-  if (several) more.push(several + (several === 1 ? " that spans several files or sets a standing rule" : " that span several files or set a standing rule"));
-  if (other) more.push(other + " with no file to edit");
-  return fixes(inFiles) + " for " + name + ", in " + files + (files === 1 ? " file" : " files") + (more.length ? ", plus " + more.join(" and ") : "") + ".";
+  if (other) text += " and " + other + " with no file to edit";
+  return text + ".";
 }
 
 // The bundle's row (its note and Copy prompt) and, under it, the room for

@@ -828,11 +828,12 @@ detail scrolls) and the one picked.
   ignored cards, cards whose fix has landed (the "fixed" variant),
   information-only cards, unconfirmed changes and managed settings. The
   prompt states its closing (show me the diff, restart) once, and the
-  note beside the button counts the prompts that name one file, the ones
-  that span several files or set a standing rule, and the ones that touch
-  no file, apart. If the browser refuses to copy (the Claude Desktop
-  browser pane refuses the Clipboard API, and a page served over plain
-  http has none), the copy is tried again through a selected text field;
+  note beside the button gives the number of open fixes, then how many
+  files they edit, plus the fixes that span several files or set a
+  standing rule and the ones that touch no file. If the browser refuses
+  to copy (the Claude Desktop browser pane refuses the Clipboard API, and
+  a page served over plain http has none), the copy is tried again
+  through a selected text field;
   if that fails too, the prompt is shown under the button, selected, for
   you to copy. With no project picked there
   is no button.

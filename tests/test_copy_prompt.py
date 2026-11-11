@@ -293,18 +293,20 @@ def _line(files: list[int], several: int, other: int) -> str:
 @pytest.mark.parametrize(
     ("files", "several", "other", "line"),
     [
-        ([2, 1], 0, 0, "3 open fixes for proj, in 2 files."),
-        ([1], 0, 0, "1 open fix for proj, in 1 file."),
-        ([2, 1], 3, 0, "3 open fixes for proj, in 2 files, plus 3 that span several files or set a standing rule."),
-        ([2], 1, 0, "2 open fixes for proj, in 1 file, plus 1 that spans several files or sets a standing rule."),
-        ([2], 0, 1, "2 open fixes for proj, in 1 file, plus 1 with no file to edit."),
+        ([2, 1], 0, 0, "3 open fixes for proj: 2 files to edit."),
+        ([1], 0, 0, "1 open fix for proj: 1 file to edit."),
+        ([2, 1], 3, 0, "6 open fixes for proj: 2 files to edit, plus 3 that span several files or set a standing rule."),
+        ([2], 1, 0, "3 open fixes for proj: 1 file to edit, plus 1 that spans several files or sets a standing rule."),
+        ([2], 0, 1, "3 open fixes for proj: 1 file to edit and 1 with no file to edit."),
         (
             [2],
             2,
             1,
-            "2 open fixes for proj, in 1 file, plus 2 that span several files or set a standing rule and 1 with no file to edit.",
+            "5 open fixes for proj: 1 file to edit, plus 2 that span several files or set a standing rule"
+            " and 1 with no file to edit.",
         ),
-        ([], 2, 1, "3 open fixes for proj, none in a single file."),
+        ([], 2, 1, "3 open fixes for proj: 2 that span several files or set a standing rule and 1 with no file to edit."),
+        ([], 1, 0, "1 open fix for proj: 1 that spans several files or sets a standing rule."),
         ([], 0, 2, "2 open fixes for proj, with no file to edit."),
     ],
 )

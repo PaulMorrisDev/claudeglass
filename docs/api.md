@@ -908,12 +908,15 @@ under a `## <file>` header line per file, files in the order the cards
 come, then one shared closing that states those once. A prompt two cards
 share appears once, and a workflow card whose files are "A or B" sits
 under the matching exact file when there is one. Groups that are no file
-(`## No file`, `## Other`) come last. `files` lists only the groups that
-name one file (a path, or an "A or B" pair of paths), with the number of
-prompts under each. `several` counts the prompts under a group that spans
-several files (a kind of file, such as the hook scripts) or sets a
-standing rule (the CLAUDE.md that Claude asks about); `other` counts the
-prompts under a group with no file to edit. `cards` counts the cards that
+(`## No file`, `## Other`) come last. Fixes are counted in one
+unit throughout: a fix is one prompt as the bundle states it (a prompt
+two cards share is one fix). `files` lists only the groups that name one
+file (a path, or an "A or B" pair of paths), with the number of fixes
+under each. `several` counts the fixes under the groups that span several
+files (a kind of file, such as the hook scripts) or set a standing rule
+(the CLAUDE.md that Claude asks about); `other` counts the fixes under
+the group with no file to edit. The three do not overlap: every fix in
+the prompt is in exactly one of them. `cards` counts the cards that
 contributed.
 `left_out` counts the cards with at least one fix left out for each
 reason, so a card can count in both `cards` and `left_out`: its fix has
