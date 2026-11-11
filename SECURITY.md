@@ -33,7 +33,10 @@ artefacts — see [docs/deploy.md](docs/deploy.md).
   (`hooks/snapshot-config.py`): user and project `settings*.json` files
   (including `.claude/settings.local.json`), the platform's system-wide
   `managed-settings.json` (if present), agent frontmatter
-  (`.claude/agents/*.md`), MCP server names, and enabled plugin names.
+  (`.claude/agents/*.md`; an agent's `tools` and `disallowedTools` are kept as
+  a list of tool names, each cut at 64 characters, with a path or URL
+  masked, like every other name), MCP server names, and enabled plugin
+  names.
 - Environment variable **names** matching `ANTHROPIC_*` / `CLAUDE_*` /
   `OTEL_*` (plus a short fixed list of irregularly-named levers) —
   never their values, with one exception: `MAX_THINKING_TOKENS`,

@@ -540,6 +540,29 @@ def redact_settings(settings: dict) -> dict:
     return {key: redact_settings_value(key, value) for key, value in settings.items()}
 
 
+#: Agent frontmatter keys that hold a line of tool names. A comma string is
+#: stored as the list of its entries, so each entry is cut on its own and a
+#: long line is kept whole (``Agent(a, b)`` is one entry).
+_AGENT_TOOL_LINE_KEYS = frozenset({"tools", "disallowedTools"})
+
+
+def _split_tool_line(text: str) -> list[str]:
+    """``text`` split at the commas outside parentheses, so
+    ``Agent(a, b), Read`` is two entries."""
+    parts: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
 def redact_agent_frontmatter(parsed: dict) -> dict:
     """Redact one agent's already-flattened frontmatter dict (see
     ``parse_frontmatter``). ``description`` always becomes ``str(len)``;
@@ -558,7 +581,9 @@ def redact_agent_frontmatter(parsed: dict) -> dict:
             # scalars the allowlist elsewhere is built for -- clip/mask
             # each one the same way every other recorded name now is,
             # rather than keeping it fully verbatim and uncapped.
-            if isinstance(value, str):
+            if isinstance(value, str) and key in _AGENT_TOOL_LINE_KEYS:
+                out[key] = [_clip_name(item) for item in _split_tool_line(value)]
+            elif isinstance(value, str):
                 out[key] = _clip_name(value)
             elif isinstance(value, list):
                 out[key] = [_clip_name(item) for item in value]

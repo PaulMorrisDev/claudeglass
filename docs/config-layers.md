@@ -198,6 +198,19 @@ resolution order). `effective_agents[name]` reduces this to exactly the
 fields a TTL/model/effort recommendation keys off:
 `{source, experimental_cache_ttl, model, effort, max_turns}`.
 
+An agent's `tools` and `disallowedTools` are stored as a list of tool
+names. A comma string (`tools: Read, Agent(a, b)`) is split at the commas
+outside parentheses, so a long line is kept whole; each entry then goes
+through the `_clip_name` every other name gets (cut at 64 characters, a
+path or URL masked), the same as the items of a YAML list always did.
+A snapshot written before this kept the comma string cut at 64 characters
+(61 and `...`). `load_snapshots` reads a whole string as the list of its
+entries, and completes a cut one from the next snapshot of the same project
+that holds the whole line, when that list starts the same way, so the first
+snapshot after the upgrade is not a change to the line. A cut string with no
+such snapshot after it is an unknown line, which the readers take to mean
+every tool, never the whole line.
+
 ## `claude_json` — the `~/.claude.json` cross-check
 
 `~/.claude.json` is the CLI's own per-machine state file — distinct from

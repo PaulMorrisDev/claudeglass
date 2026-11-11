@@ -4,8 +4,11 @@ suggested line writes a kept tool."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from claudeglass import change_points, snapshots
 from claudeglass.recommend import known_tools_line, read_agent_tools
 
 #: What the snapshot hook stored before it kept a line whole: the string cut at
@@ -82,3 +85,51 @@ def test_the_reader_carries_the_deny_entries_a_string_or_a_list_holds():
     assert len(cut) == 64
     # The entry the cut falls in may be short, so it is not counted.
     assert read_agent_tools(None, cut).deny == ("Write", "Edit", "NotebookEdit", "MultiEdit", "Bash", "PowerShell")
+
+
+# -- the first snapshot after the upgrade: a line stored cut, then whole --------
+
+_LONG_LINE = [
+    "Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite", "Agent(a, b)",
+]
+#: The string an older hook stored for the line above.
+_STORED_CUT = ", ".join(_LONG_LINE)[:61] + "..."
+
+
+def _write_snapshot(config_dir, ts, tools, *, slug="slug:abc", agent="overseer"):
+    folder = config_dir / "snapshots"
+    folder.mkdir(parents=True, exist_ok=True)
+    doc = {"ts": ts, "schema": 2, "project_slug": slug, "agents": {agent: {"source": "user", "tools": tools}}}
+    (folder / f"{ts}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_a_line_stored_cut_then_stored_whole_is_not_an_edit_you_made(tmp_path):
+    assert len(_STORED_CUT) == 64
+    _write_snapshot(tmp_path, "20260901T100000Z", _STORED_CUT)
+    _write_snapshot(tmp_path, "20260902T100000Z", _LONG_LINE)
+    assert change_points.change_points(tmp_path) == []
+    # The earlier record is read as the whole line it was a cut of.
+    first, second = snapshots.load_snapshots(tmp_path)
+    assert first.data["agents"]["overseer"]["tools"] == _LONG_LINE == second.data["agents"]["overseer"]["tools"]
+
+
+def test_a_short_comma_line_then_the_same_list_is_not_an_edit_either(tmp_path):
+    _write_snapshot(tmp_path, "20260901T100000Z", "Read, Grep")
+    _write_snapshot(tmp_path, "20260902T100000Z", ["Read", "Grep"])
+    assert change_points.change_points(tmp_path) == []
+
+
+def test_a_cut_line_then_a_different_whole_line_is_still_an_edit(tmp_path):
+    changed = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebFetch", "Agent(c)"]
+    _write_snapshot(tmp_path, "20260901T100000Z", _STORED_CUT)
+    _write_snapshot(tmp_path, "20260902T100000Z", changed)
+    [point] = change_points.change_points(tmp_path)
+    assert point.keys == ["agents.overseer.tools"]
+    assert snapshots.load_snapshots(tmp_path)[0].data["agents"]["overseer"]["tools"] == _STORED_CUT
+
+
+def test_a_line_that_changes_is_an_edit_whether_stored_as_a_string_or_a_list(tmp_path):
+    _write_snapshot(tmp_path, "20260901T100000Z", ["Read", "Grep"])
+    _write_snapshot(tmp_path, "20260902T100000Z", ["Read", "Grep", "Bash"])
+    [point] = change_points.change_points(tmp_path)
+    assert point.keys == ["agents.overseer.tools"]

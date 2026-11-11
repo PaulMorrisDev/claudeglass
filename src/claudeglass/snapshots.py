@@ -126,6 +126,40 @@ class Snapshot:
     data: dict = field(default_factory=dict)
 
 
+#: The longest name the config hook records, what it ends a longer one with
+#: (``hooks/snapshot-config.py`` ``_clip_name``: 61 characters plus ``...``),
+#: and the start of what it records for a name shaped like a path or a URL.
+#: Duplicated here, like the hook duplicates ``discovery.slug_for``.
+NAME_CAP = 64
+NAME_CUT = "..."
+NAME_REDACTED = "<redacted path/url"
+
+#: The agent frontmatter keys that hold a line of tool names.
+_TOOL_LINE_KEYS = ("tools", "disallowedTools")
+
+
+def split_tool_line(text: str) -> list[str]:
+    """``text`` split at the commas outside parentheses, so
+    ``Agent(a, b), Read`` is two entries."""
+    parts: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def cut_off_name(text: str) -> bool:
+    """Whether ``text`` is a name the hook cut at its cap."""
+    return len(text) == NAME_CAP and text.endswith(NAME_CUT)
+
+
 # -- loading ----------------------------------------------------------------
 
 
@@ -173,7 +207,55 @@ def load_snapshots(config_dir: Path | str) -> list[Snapshot]:
         result.append(Snapshot(path=path, ts=str(ts), data=data))
 
     result.sort(key=lambda snap: snap.ts)
+    _normalise_tool_lines(result)
     return result
+
+
+def _normalise_tool_lines(snaps: list[Snapshot]) -> None:
+    """Read an agent's ``tools`` and ``disallowedTools`` in the form the hook
+    stores today, a list of entries, whichever form a snapshot was written in.
+    An older hook stored a comma string, cut at :data:`NAME_CAP` characters
+    when it was longer. A whole string becomes the list of its entries. A cut
+    one becomes the whole list of the next snapshot of the same project that
+    holds it, when that list starts the same way, so the first snapshot after
+    the hook was upgraded is not a change to the line. One with no such list
+    after it stays as it is, and :func:`recommend.read_agent_tools` reads it as
+    unknown. Snapshots are ascending by ``ts``."""
+    following: dict[tuple[str, str, str], list[str]] = {}
+    for snap in reversed(snaps):
+        agents = snap.data.get("agents")
+        if not isinstance(agents, dict):
+            continue
+        project = _project_label(snap)
+        for name, entry in agents.items():
+            if not isinstance(entry, dict):
+                continue
+            for key in _TOOL_LINE_KEYS:
+                value, slot = entry.get(key), (project, name, key)
+                if isinstance(value, str):
+                    if NAME_REDACTED in value:
+                        following.pop(slot, None)
+                        continue
+                    if cut_off_name(value):
+                        later = following.get(slot)
+                        if later is not None and _starts_with_cut(later, value):
+                            entry[key] = value = list(later)
+                        else:
+                            following.pop(slot, None)
+                            continue
+                    else:
+                        entry[key] = value = split_tool_line(value)
+                if isinstance(value, list):
+                    following[slot] = value
+                else:
+                    following.pop(slot, None)
+
+
+def _starts_with_cut(entries: list, cut: str) -> bool:
+    """Whether the line ``entries`` begins with the text of ``cut``, a string
+    the hook cut off (whatever its spacing)."""
+    squash = functools.partial(re.sub, r"\s+", "")
+    return squash(", ".join(map(str, entries))).startswith(squash(cut[: -len(NAME_CUT)]))
 
 
 # -- timestamp parsing / join -------------------------------------------
@@ -1506,7 +1588,11 @@ def build_config_section(
 
 
 __all__ = [
+    "NAME_CAP",
+    "NAME_CUT",
+    "NAME_REDACTED",
     "Snapshot",
+    "cut_off_name",
     "load_snapshots",
     "records_config",
     "snapshot_for",
@@ -1516,6 +1602,7 @@ __all__ = [
     "canonical_project_keys",
     "project_snapshots",
     "snapshots_for_projects",
+    "split_tool_line",
     "project_chains",
     "flatten_snapshot",
     "managed_keys",

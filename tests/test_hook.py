@@ -298,7 +298,8 @@ def test_hook_flattens_nested_agent_frontmatter(home, project):
     assert verifier["model"] == "sonnet"
     assert verifier["effort"] == "medium"
     assert verifier["maxTurns"] == 80
-    assert verifier["disallowedTools"] == "Write, Edit, NotebookEdit"
+    # A comma line is kept as the list of its entries.
+    assert verifier["disallowedTools"] == ["Write", "Edit", "NotebookEdit"]
     # description is redacted to a length marker, never the raw text.
     assert verifier["description"].startswith("str(")
     assert "Read-only source verifier" not in json.dumps(snapshot)
@@ -306,6 +307,47 @@ def test_hook_flattens_nested_agent_frontmatter(home, project):
     implementer = agents["claude-implementer"]
     assert implementer["model"] == "sonnet"
     assert "experimental.cacheTtl" not in implementer
+
+
+def _write_agent(home, name, *frontmatter):
+    """An agent file under the user's agents folder with these frontmatter lines."""
+    lines = ["---", f"name: {name}", *frontmatter, "---", "Body.", ""]
+    (home / ".claude" / "agents" / f"{name}.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
+
+
+def test_a_long_comma_tools_line_is_kept_whole_as_a_list_of_entries_each_cut_on_its_own(home, project):
+    config_dir = home / ".claude" / "claudeglass"
+    names = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite"]
+    entries = names + ["Agent(worker-one, worker-two, worker-three, worker-four, worker-five, worker-six)"]
+    entries += [f"mcp__{'x' * 70}__tool", "mcp__github__create_issue", "/a/path/tool", "mcp__sentry__*"]
+    line = ", ".join(entries)
+    assert len(line) > 199
+    _write_agent(home, "overseer", f"tools: {line}", "disallowedTools: Write, mcp__sentry")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    assert _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin).returncode == 0
+    overseer = _latest_snapshot(config_dir)["agents"]["overseer"]
+    stored = overseer["tools"]
+    assert isinstance(stored, list) and len(stored) == len(entries)
+    assert stored[: len(names)] == names
+    # One cap for every recorded name: an entry over it is cut, a path is masked.
+    assert max(len(item) for item in stored) <= 64
+    assert stored[len(names)].endswith("...") and stored[len(names)].startswith("Agent(worker-one")
+    assert stored[len(names) + 1].endswith("...") and stored[len(names) + 1].startswith("mcp__xxx")
+    assert stored[len(names) + 2] == "mcp__github__create_issue"
+    assert stored[len(names) + 3] == f"<redacted path/url, str({len('/a/path/tool')})>"
+    assert stored[-1] == "mcp__sentry__*"
+    assert overseer["disallowedTools"] == ["Write", "mcp__sentry"]
+
+
+def test_a_short_comma_tools_line_and_a_yaml_list_are_stored_the_same_way(home, project):
+    config_dir = home / ".claude" / "claudeglass"
+    _write_agent(home, "plain", "tools: Read, Grep")
+    _write_agent(home, "listed", "tools:", "  - Read", "  - Grep")
+    _write_agent(home, "inline", "tools: [Read, Grep]")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    assert _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin).returncode == 0
+    agents = _latest_snapshot(config_dir)["agents"]
+    assert agents["plain"]["tools"] == agents["listed"]["tools"] == agents["inline"]["tools"] == ["Read", "Grep"]
 
 
 def test_env_names_only_never_values(home, project):

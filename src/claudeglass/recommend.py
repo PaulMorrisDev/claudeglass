@@ -173,7 +173,16 @@ from .context_budget import (
 )
 from .fixes import CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
-from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
+from .snapshots import (
+    NAME_CUT,
+    NAME_REDACTED,
+    Snapshot,
+    cut_off_name,
+    effective_config,
+    effective_provenance,
+    managed_keys,
+    split_tool_line,
+)
 from .units import NO_LIMIT_SHARE_HINT, Units
 
 #: The one purpose ``classify.classify_purpose`` returns that counts as light
@@ -1767,32 +1776,6 @@ def _join_names(names: list[str]) -> str:
     return f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else "".join(names)
 
 
-def _split_line(text: str) -> list[str]:
-    """``text`` split at the commas outside parentheses, so
-    ``Agent(a, b), Read`` is two entries."""
-    parts: list[str] = []
-    depth, start = 0, 0
-    for i, ch in enumerate(text):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth = max(0, depth - 1)
-        elif ch == "," and depth == 0:
-            parts.append(text[start:i])
-            start = i + 1
-    parts.append(text[start:])
-    return [part.strip() for part in parts if part.strip()]
-
-
-#: The longest name the config-snapshot hook records, what it ends a longer
-#: one with (``hooks/snapshot-config.py`` ``_clip_name``: 61 characters plus
-#: ``...``), and the start of what it records for a name shaped like a path or
-#: a URL.
-_SNAPSHOT_NAME_CAP = 64
-_SNAPSHOT_CUT = "..."
-_SNAPSHOT_REDACTED = "<redacted path/url"
-
-
 def _tool_name(entry: str) -> str:
     """The tool an entry of a ``tools:`` line names: the text before its
     parentheses, with ``Task`` (the old name of ``Agent``) as ``Agent``."""
@@ -1810,16 +1793,16 @@ def _read_entries(value) -> tuple[list[str], bool]:
     that ends in ``...`` at that length, or holds the masked-path marker, is
     not the whole line."""
     if isinstance(value, str) and value != _CURRENT_UNKNOWN:
-        if _SNAPSHOT_REDACTED in value:
+        if NAME_REDACTED in value:
             return [], False
-        if len(value) == _SNAPSHOT_NAME_CAP and value.endswith(_SNAPSHOT_CUT):
-            body = value[: -len(_SNAPSHOT_CUT)]
-            entries = _split_line(body)
+        if cut_off_name(value):
+            body = value[: -len(NAME_CUT)]
+            entries = split_tool_line(body)
             # The last entry may be cut short; one that ended at a comma was not.
             if entries and not body.rstrip().endswith(","):
                 entries.pop()
             return entries, False
-        return _split_line(value), True
+        return split_tool_line(value), True
     if isinstance(value, (list, tuple)):
         entries: list[str] = []
         whole = True
@@ -1827,9 +1810,9 @@ def _read_entries(value) -> tuple[list[str], bool]:
             text = str(item).strip()
             if not text:
                 continue
-            if _SNAPSHOT_REDACTED in text:
+            if NAME_REDACTED in text:
                 whole = False
-            elif len(text) == _SNAPSHOT_NAME_CAP and text.endswith(_SNAPSHOT_CUT):
+            elif cut_off_name(text):
                 if "(" in text:
                     entries.append(text.split("(", 1)[0].strip())
                 else:
