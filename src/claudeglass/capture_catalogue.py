@@ -689,6 +689,20 @@ LIVE_OFF_HINTS = (
     "cold_return",
 )
 
+#: Hints of :data:`COACHING_HINTS` that nothing in the hook raises any
+#: more, whether the switch is open or not: ``report_reread`` no longer
+#: speaks and its rule is gone from the hook, though its tag stays known.
+#: They are not in :data:`RETIRED_COACHING_HINTS` because that
+#: list drops a hint's words, tip and tip-table row, and the notes
+#: already in transcripts still count as the hint they were: their tip is
+#: still told from the others in the same message, and the table keeps
+#: their row. So they stay in :data:`COACHING_HINTS`, and everything that
+#: asks which hints can speak, are off, or take a threshold leaves these
+#: out.
+NO_TRIGGER_HINTS = (
+    "report_reread",
+)
+
 #: Hints that no longer show live. Their notes are still in old
 #: transcripts, so the parser still knows the words and keeps those notes
 #: as the hint they were instead of ``other``. ``clear_context`` is now a

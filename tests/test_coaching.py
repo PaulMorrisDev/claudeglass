@@ -4245,6 +4245,19 @@ def test_live_off_the_catalogue_names_the_hints_the_replay_found_more_often_wron
     assert set(cat.LIVE_OFF_HINTS) <= set(cat.COACHING_HINTS)
 
 
+def test_a_hint_nothing_in_the_hook_raises_is_listed_once_and_keeps_its_words_for_old_notes():
+    hook = MODULE.read_text(encoding="utf-8")
+    # The hook names every hint that can speak, switched on or off, and none that has no trigger left.
+    named = {hint for hint in cat.COACHING_HINTS if re.search(rf"\b{hint}\b", hook)}
+    assert set(cat.NO_TRIGGER_HINTS) == set(cat.COACHING_HINTS) - named
+    for hint in cat.NO_TRIGGER_HINTS:
+        # Not retired: old notes keep their words, their tip and their row of the tips table.
+        assert hint in cat.COACHING_HINTS and hint not in cat.RETIRED_COACHING_HINTS, hint
+        assert hint in cat.COACHING_TEXT and hint in cat.TIP_HINT_TITLES, hint
+        assert hint not in cat.LIVE_OFF_HINTS, hint
+    assert not set(cat.NO_TRIGGER_HINTS) & set(cat.LIVE_OFF_HINTS)
+
+
 @pytest.mark.parametrize("hint", _LIVE_OFF)
 def test_live_off_a_hint_the_replay_found_more_often_wrong_than_right_gives_no_note(tmp_path, monkeypatch, hint):
     case = _live_off_cases(tmp_path)[hint]
