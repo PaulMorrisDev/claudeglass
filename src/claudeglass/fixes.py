@@ -65,12 +65,6 @@ SCOPE_NOTE = (
 #: habits table's help asks for the same in its own words).
 CRITIQUE_PLAN_LINE = "Before you show me a plan, critique it for gaps and doubts, then fix them"
 
-#: Appended to every "from now on" workflow prompt (one that asks Claude
-#: to work differently going forward, rather than to edit a specific
-#: setting): a pasted "from now on" rule isn't picked up by a restart --
-#: unlike a setting, it only lasts as long as Claude is told to keep it,
-#: so this asks Claude to check with you where it should live before
-#: acting on it.
 #: The closing every setting-change prompt ends with. A project's bundle
 #: strips it from each prompt and states it once (:func:`_bundle_body`).
 _SETTING_TAIL = (
@@ -78,6 +72,12 @@ _SETTING_TAIL = (
     "permission to edit files under .claude; that is expected. Change nothing else. " + PROMPT_RESTART
 )
 
+#: Appended to every "from now on" workflow prompt (one that asks Claude
+#: to work differently going forward, rather than to edit a specific
+#: setting): a pasted "from now on" rule isn't picked up by a restart --
+#: unlike a setting, it only lasts as long as Claude is told to keep it,
+#: so this asks Claude to check with you where it should live before
+#: acting on it.
 PROMPT_SCOPE = (
     "Before you start, use AskUserQuestion to ask me where this should apply: this session only, this "
     "project (one line in its CLAUDE.md), or all my projects (one line in ~/.claude/CLAUDE.md). For a "

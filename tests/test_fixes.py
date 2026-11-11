@@ -129,6 +129,29 @@ def test_no_workflow_prompt_repeats_its_title():
         assert "{title" not in fix["prompt"], template_key
 
 
+def test_each_documented_constant_has_its_own_comment_directly_above_it():
+    """The ``#:`` block above an assignment describes that assignment:
+    ``PROMPT_SCOPE``'s is about the "from now on" suffix, not the closing
+    ``_SETTING_TAIL`` carries."""
+    import inspect
+
+    from claudeglass import fixes as fixes_mod
+
+    lines = inspect.getsource(fixes_mod).splitlines()
+
+    def comment_above(name):
+        at = next(i for i, line in enumerate(lines) if line.startswith(name + " = "))
+        block = []
+        while at > 0 and lines[at - 1].startswith("#:"):
+            at -= 1
+            block.insert(0, lines[at])
+        return " ".join(block)
+
+    assert "from now on" in comment_above("PROMPT_SCOPE")
+    assert "closing every setting-change prompt" not in comment_above("PROMPT_SCOPE")
+    assert "closing every setting-change prompt" in comment_above("_SETTING_TAIL")
+
+
 def test_scope_ids_get_the_prompt_scope_suffix_and_the_scope_note():
     """The seven "from now on" ids get ``PROMPT_SCOPE`` appended to their
     prompt and ``note: "scope"`` on the fix, so the render layer shows
