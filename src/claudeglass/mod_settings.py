@@ -163,7 +163,9 @@ def _coaching_block(config_dir: Path) -> dict:
     """What the capture hook's coaching would use, worked out by the hook's
     own functions: whether it is on at all (``coaching_notes`` in ``[capture]
     coaching``), the project filter it applies, the thresholds, the muted and
-    once-a-session tips, and the plan tip's opt-out.
+    once-a-session tips, and the plan tip's opt-out. ``muted`` also holds
+    the hints that are off live (the catalogue's ``coaching.off_live``): a
+    mod that does not know the off list yet filters by ``muted`` alone.
 
     ``projects`` and ``exclude_projects`` mirror the user's own config as
     written (slug patterns): this file is a local mirror of that config, not
@@ -185,7 +187,7 @@ def _coaching_block(config_dir: Path) -> dict:
         # ``coaching.json``'s ``plan_fresh: false`` switches the plan tip off.
         "plan_fresh": personal.get("plan_fresh", True) is not False,
         "thresholds": capture_hook.coaching_thresholds(coaching, config, personal),
-        "muted": sorted(capture_hook._hint_names(personal.get("muted"))),
+        "muted": sorted(capture_hook._hint_names(personal.get("muted")) | set(coaching["off_live"])),
         "once": sorted(capture_hook._hint_names(personal.get("once"))),
     }
 
