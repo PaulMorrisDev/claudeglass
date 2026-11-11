@@ -3843,39 +3843,129 @@ def test_a_claim_that_windows_refuses_to_make_reads_as_held(tmp_path, monkeypatc
         assert held is False
 
 
+class _Claim:
+    """Counts what ``_claimed`` does to a claim that Windows refuses: the ``os.open`` calls of the claim file (the
+    first ``refuse`` of them raise ``PermissionError``), the ``time.sleep`` calls between them, and the
+    ``_take_stale`` calls. Counted, not timed: the Windows clock ticks every 15.6 ms."""
+
+    def __init__(self, monkeypatch, refuse):
+        self.refuse, self.opens, self.refused, self.sleeps, self.stale = refuse, 0, 0, 0, 0
+        real_open, real_sleep = os.open, HOOK.time.sleep
+
+        def opened(path, *args, **kwargs):
+            if not str(path).endswith(".claim"):
+                return real_open(path, *args, **kwargs)
+            self.opens += 1
+            if self.opens <= self.refuse:
+                self.refused += 1
+                raise PermissionError("being deleted")
+            return real_open(path, *args, **kwargs)
+
+        def slept(seconds):
+            self.sleeps += 1
+            return real_sleep(seconds)
+
+        def taken(claim):
+            self.stale += 1
+            return False
+
+        monkeypatch.setattr(HOOK.os, "open", opened)
+        monkeypatch.setattr(HOOK.time, "sleep", slept)
+        monkeypatch.setattr(HOOK, "_take_stale", taken)
+
+
 def test_a_claim_that_windows_refuses_for_a_moment_is_waited_for(tmp_path, monkeypatch):
-    import time
-
-    real = HOOK.os.open
-    refusing_until = time.monotonic() + 0.01
-
-    def refuse_then_pass(*args, **kwargs):
-        # Windows refuses a create while the previous claim is still being deleted.
-        if time.monotonic() < refusing_until:
-            raise PermissionError("being deleted")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(HOOK.os, "open", refuse_then_pass)
+    seen = _Claim(monkeypatch, refuse=3)
     state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    claim = state_path.with_name(state_path.name + ".claim")
     with HOOK._claimed(state_path) as held:
         assert held is True
-        assert state_path.with_name(state_path.name + ".claim").exists()
-    assert not state_path.with_name(state_path.name + ".claim").exists()
+        assert claim.exists()
+    assert not claim.exists()
+    # Three refusals, each waited out; the fourth try made the claim. A refusal is no sign of a dead call's claim.
+    assert (seen.refused, seen.opens, seen.sleeps, seen.stale) == (3, 4, 3, 0)
 
 
 def test_a_claim_that_windows_always_refuses_is_given_up_on_after_the_wait(tmp_path, monkeypatch):
     import time
 
-    def refuse(*args, **kwargs):
-        raise PermissionError("being deleted")
-
-    monkeypatch.setattr(HOOK.os, "open", refuse)
+    seen = _Claim(monkeypatch, refuse=10**9)
     started = time.monotonic()
     with HOOK._claimed(_config_dir(tmp_path) / cat.COACH_STATE_FILE) as held:
         assert held is False
     elapsed = time.monotonic() - started
+    # Both ends are read from the clock the deadline is, so the wait cannot come out shorter.
     assert HOOK._CLAIM_WAIT_S * 0.9 <= elapsed < 2.0
+    # It waited between tries rather than spinning, and never took a refused claim for a stale one.
+    assert seen.opens > 1 and seen.sleeps >= seen.opens - 1 and seen.stale == 0
+
+
+def _delete_pending(path):
+    """Marks ``path`` for deletion the way a call that is deleting its claim does, so that the name stays, refusing
+    a create, until the handle closes: returns the function that closes it. (A plain delete removes the name
+    at once on current Windows, so it cannot show this.)"""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.HANDLE]
+    k32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    generic_read, delete, share_all, open_existing, disposition = 0x80000000, 0x00010000, 0x7, 3, 4
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    handle = k32.CreateFileW(str(path), generic_read | delete, share_all, None, open_existing, 0, None)
+    assert handle not in (None, wintypes.HANDLE(-1).value), ctypes.get_last_error()
+    flag = ctypes.c_ubyte(1)
+    assert k32.SetFileInformationByHandle(handle, disposition, ctypes.byref(flag), 1), ctypes.get_last_error()
+    return lambda: k32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a claim that is delete-pending is a Windows state")
+def test_a_claim_that_is_delete_pending_is_waited_for_and_then_taken(tmp_path, monkeypatch):
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    claim = state_path.with_name(state_path.name + ".claim")
+    close = _delete_pending(claim)
+    seen = {"refused": 0, "sleeps": 0}
+    real_open, real_sleep = os.open, HOOK.time.sleep
+
+    def opened(path, *args, **kwargs):
+        try:
+            return real_open(path, *args, **kwargs)
+        except PermissionError:
+            seen["refused"] += 1
+            raise
+
+    def slept(seconds):
+        # The call deleting the claim lets go while this one waits: not on a timer, so a slow machine cannot
+        # make it late.
+        seen["sleeps"] += 1
+        if seen["sleeps"] == 1:
+            close()
+        return real_sleep(seconds)
+
+    monkeypatch.setattr(HOOK.os, "open", opened)
+    monkeypatch.setattr(HOOK.time, "sleep", slept)
+    with HOOK._claimed(state_path) as held:
+        assert held is True
+        assert claim.exists()
+    assert not claim.exists()
+    # Windows itself refused the create while the claim was pending, as the patched tests assume.
+    assert seen["refused"] >= 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a claim that is delete-pending is a Windows state")
+def test_a_claim_that_stays_delete_pending_is_given_up_on(tmp_path):
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    close = _delete_pending(state_path.with_name(state_path.name + ".claim"))
+    try:
+        with HOOK._claimed(state_path) as held:
+            assert held is False
+    finally:
+        close()
 
 
 def _stale(base):
