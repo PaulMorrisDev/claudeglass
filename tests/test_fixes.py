@@ -562,7 +562,8 @@ def test_project_prompt_states_identical_scope_prompts_once():
     assert out["prompt"].count(body) == 1
     assert out["prompt"].startswith(fixes_mod._BUNDLE_OPEN)
     assert "\n\n## CLAUDE.md (Claude asks which)\n\n" in out["prompt"]
-    assert out["files"] == [{"file": "CLAUDE.md (Claude asks which)", "fixes": 1}]
+    assert out["files"] == []
+    assert out["several"] == 1
     assert out["cards"] == 2
 
 
@@ -624,6 +625,47 @@ def test_project_prompt_does_not_count_no_file_cards_as_files():
     assert out["prompt"].index("## No file") > out["prompt"].index("## ~/.claude/settings.json")
 
 
+def test_project_prompt_counts_only_a_concrete_file_as_a_file():
+    """A path, or an "A or B" pair of paths, is a file. A header that names
+    a kind of file ("Hook scripts and settings.json"), the CLAUDE.md that
+    Claude asks about and a standing rule each span several files or set a
+    rule: they are counted apart, by prompt, and are not in ``files``."""
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    setting = _bundle_rec("c", [SettingChange(key="model", value="sonnet")])
+    pair = _bundle_rec("pair", rec_id="compaction-churn")
+    hooks = _bundle_rec("hooks", rec_id="hook-failures")
+    hooks_again = _bundle_rec("hooks2", rec_id="hook-block-resent")
+    mcp = _bundle_rec("mcp", rec_id="baseline-bloat")
+    shared = _bundle_rec("shared", rec_id="spawn-shared-claude-md")
+    rule = _bundle_rec("rule", rec_id="wasted-turns")
+    plan = _bundle_rec("plan", rec_id="plan-handoff")
+    limit = _bundle_rec("limit", rec_id="limit-pressure")
+    out = project_prompt([setting, pair, hooks, hooks_again, mcp, shared, rule, plan, limit])
+    assert out["files"] == [
+        {"file": "~/.claude/settings.json", "fixes": 2},
+        {"file": "~/.claude/CLAUDE.md", "fixes": 1},
+    ]
+    assert out["several"] == 5
+    assert out["other"] == 1
+    for header in (
+        "## Hook scripts and settings.json",
+        "## CLAUDE.md (Claude asks which)",
+        "## CLAUDE.md files and agent files",
+    ):
+        assert header in out["prompt"], header
+
+
+def test_project_prompt_counts_an_a_or_b_pair_as_a_file():
+    from claudeglass.fixes import project_prompt
+
+    pair = _bundle_rec("pair", rec_id="compaction-churn")
+    out = project_prompt([pair])
+    assert out["files"] == [{"file": "~/.claude/settings.json or .claude/settings.json", "fixes": 1}]
+    assert out["several"] == 0
+
+
 def test_project_prompt_counts_a_partly_included_card():
     from claudeglass import fixes as fixes_mod
     from claudeglass.fixes import project_prompt
@@ -644,6 +686,7 @@ def test_project_prompt_is_empty_without_open_fixes():
     assert project_prompt([]) == {
         "prompt": "",
         "files": [],
+        "several": 0,
         "other": 0,
         "cards": 0,
         "left_out": {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0},

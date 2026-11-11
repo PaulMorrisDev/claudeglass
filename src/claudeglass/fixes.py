@@ -1316,25 +1316,50 @@ _FIX_FILE: dict[str, str] = {
 }
 
 
-def fix_file(rec: Recommendation, change: SettingChange | None) -> str | None:
-    """The file a fix works in, as the header :func:`project_prompt` groups
-    it under; ``None`` when it belongs in no file group (a managed setting,
-    where Claude only drafts a note to your administrator)."""
+#: What a workflow prompt's header is, when it is not a file: ``several``
+#: names a kind of file or a set of them, ``none`` names no file at all.
+#: Every id and variant left out names one path, or an "A or B" pair of
+#: them (``file``). A scope prompt (:data:`_NOTE_OVERRIDES`) is a ``rule``.
+_FIX_KIND: dict[str, str] = {
+    "spawn-shared-claude-md": "several",
+    "baseline-bloat": "several",
+    "mcp-unused-server": "several",
+    "hook-failures": "several",
+    "hook-block-resent": "several",
+    "hook-context-carry": "several",
+    "spawn-tools-list:workflow-script": "several",
+    "agent-model-asked": "several",
+    "discovery-share": "none",
+    "limit-pressure": "none",
+}
+
+
+def fix_group(rec: Recommendation, change: SettingChange | None) -> tuple[str | None, str]:
+    """The header :func:`project_prompt` groups a fix under and what that
+    header is: ``file`` (a path, or an "A or B" pair), ``several`` (a kind
+    of file), ``rule`` (a standing rule, whose CLAUDE.md Claude asks
+    about) or ``none`` (no file to edit). The header is ``None`` when the
+    fix belongs in no group (a managed setting, where Claude only drafts a
+    note to your administrator)."""
     if change is not None:
         if (change.scope or rec.scope) == "managed":
-            return None
-        return _where(change, rec.scope)[0].removesuffix(" (env block)")
+            return None, "none"
+        return _where(change, rec.scope)[0].removesuffix(" (env block)"), "file"
     variant_id = f"{rec.id}:{rec.variant}" if rec.variant else rec.id
     if _NOTE_OVERRIDES.get(rec.id) == "scope":
-        return "CLAUDE.md (Claude asks which)"
+        return "CLAUDE.md (Claude asks which)", "rule"
     label = _FIX_FILE.get(variant_id, _FIX_FILE.get(rec.id))
     if label is None:
-        return "Other"
-    return label.format(agent=rec.agent_type or "this agent")
+        return "Other", "none"
+    return label.format(agent=rec.agent_type or "this agent"), _FIX_KIND.get(variant_id, _FIX_KIND.get(rec.id, "file"))
 
 
-#: Groups that are not a file: they are listed last and not counted as files.
-_NO_FILE = frozenset({"No file", "Other"})
+def fix_file(rec: Recommendation, change: SettingChange | None) -> str | None:
+    """The file a fix works in, as the header :func:`project_prompt` groups
+    it under (see :func:`fix_group`); ``None`` when it belongs in no file
+    group."""
+    return fix_group(rec, change)[0]
+
 
 _BUNDLE_OPEN = (
     "ClaudeGlass, which tracks my token use, found these open fixes for this project. "
@@ -1366,9 +1391,12 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
     variant), information-only cards, unconfirmed changes and managed
     settings; ``left_out`` counts the cards with at least one fix left
     out for each reason (a card can count in both ``cards`` and
-    ``left_out``). ``other`` counts the prompts under a group that is not
-    a file."""
+    ``left_out``). ``files`` lists the groups that name one file;
+    ``several`` counts the prompts under a group that spans several files
+    or sets a standing rule, and ``other`` those under a group with no
+    file to edit."""
     groups: dict[str, list[str]] = {}
+    kinds: dict[str, str] = {}
     left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0}
     cards = 0
     scoped = False
@@ -1395,12 +1423,13 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             if change is not None and change.unconfirmed:
                 reasons.add("unconfirmed")
                 continue
-            file = fix_file(rec, change)
+            file, kind = fix_group(rec, change)
             if file is None:
                 reasons.add("managed")
                 continue
             body, stripped_scope = _bundle_body(fix["prompt"])
             scoped = scoped or stripped_scope
+            kinds.setdefault(file, kind)
             prompts = groups.setdefault(file, [])
             if body not in prompts:
                 prompts.append(body)
@@ -1417,11 +1446,12 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             target = next((a for a in alts if a in groups), None)
             if target:
                 groups[target].extend(p for p in groups.pop(label) if p not in groups[target])
-    ordered = [f for f in groups if f not in _NO_FILE] + [f for f in groups if f in _NO_FILE]
+    ordered = [f for f in groups if kinds[f] != "none"] + [f for f in groups if kinds[f] == "none"]
     if not ordered:
         return {
             "prompt": "",
             "files": [],
+            "several": 0,
             "other": 0,
             "cards": cards,
             "left_out": left_out,
@@ -1438,8 +1468,9 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
         )
     return {
         "prompt": "\n\n".join(parts),
-        "files": [{"file": f, "fixes": len(groups[f])} for f in ordered if f not in _NO_FILE],
-        "other": sum(len(groups[f]) for f in ordered if f in _NO_FILE),
+        "files": [{"file": f, "fixes": len(groups[f])} for f in ordered if kinds[f] == "file"],
+        "several": sum(len(groups[f]) for f in ordered if kinds[f] in ("several", "rule")),
+        "other": sum(len(groups[f]) for f in ordered if kinds[f] == "none"),
         "cards": cards,
         "left_out": left_out,
     }
@@ -1465,6 +1496,7 @@ __all__ = [
     "command_for",
     "explainer_for",
     "fix_file",
+    "fix_group",
     "fix_note",
     "profile_change_where",
     "profile_prompt",

@@ -2268,8 +2268,11 @@ def test_recommendations_offer_one_prompt_per_project() -> None:
     assert 'id: "recommendations-bundle"' in body
     assert "if (state.project)" in body
     assert 'withWindow("/api/recommendations/prompt")' in body
-    assert "Copy one prompt for every open fix in" in body
-    assert '" open fix"' in body and '" file"' in body and "data.other" in body
+    assert "bundleBlock(data, projectName(state.project))" in body
+    block = _function_source(_app_js(), "bundleBlock")
+    assert '"Copy prompt for every open fix in "' in block
+    line = _function_source(_app_js(), "bundleLine")
+    assert '" open fix"' in line and '" file"' in line and "data.several" in line and "data.other" in line
 
 
 def test_tables_say_which_actions_they_feed() -> None:
@@ -2891,7 +2894,8 @@ def test_copy_button_only_claims_success_when_the_clipboard_write_succeeded() ->
     app_js = _app_js()
     copy_fn = _function_source(app_js, "copyToClipboard")
     assert "return navigator.clipboard.writeText(text).then(" in copy_fn
-    assert "return Promise.resolve(false)" in copy_fn
+    assert "return Promise.resolve(copyBySelection(text))" in copy_fn
+    assert 'document.execCommand("copy") === true' in _function_source(app_js, "copyBySelection")
 
     code_block = _function_source(app_js, "codeBlockWithCopy")
     assert "copyToClipboard(text || \"\").then(function (ok) {" in code_block
