@@ -470,7 +470,15 @@ __version__ = "0.16.0"
 #: note a misfire with no tip in it (the mute of ``quiet_output``). A
 #: pre-49 digest has none; a transcript still on disk is re-read, and one
 #: Claude Code deleted keeps its old digest.
-PARSER_VERSION = 49
+#: Bumped to 50: a reply keeps the tips of every text block and plan it
+#: wrote (``Turn.coach_tips``), not only the last one's; a log, ``.csv``,
+#: ``.tsv`` or ``.jsonl`` file is a document wherever it sits and the folders
+#: that make a ``.json`` or ``.html`` file one are those below the working
+#: folder (``Turn.shell_code_write_count``, ``Turn.edit_code_count``); and
+#: those two counts are ``None`` where a digest has none. A pre-50 digest
+#: has the older readings of each. A transcript still on disk is re-read; one
+#: Claude Code deleted keeps its old digest.
+PARSER_VERSION = 50
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract
