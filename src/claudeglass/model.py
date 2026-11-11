@@ -584,14 +584,28 @@ phase, label, description or path:
   as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
   back for a command that was blocked or denied. A count only, never a
   path.
-- ``Turn.shell_code_write_count: int = 0`` -- the part of
+- ``Turn.shell_code_write_count: int | None = None`` -- the part of
   ``shell_write_count`` aimed at code: not a document (a
-  ``capture_catalogue.DOC_SUFFIXES`` file, a ``.json``, ``.csv``,
-  ``.html`` or ``.log`` file under ``plans/``, ``reports/`` or ``docs/``,
-  a report or ledger ``.json``/``.jsonl``) and
-  not under ``scratchpad/``. Taken back like ``shell_write_count``. Only
-  the ``agent-decide-apply`` verdict reads it.
-- ``Turn.edit_code_count: int = 0`` -- how many of this turn's edit-tool
+  ``capture_catalogue.DOC_SUFFIXES`` file, a ``.log``, ``.csv``, ``.tsv``
+  or ``.jsonl`` file wherever it is, a ``.json``, ``.html`` or ``.htm``
+  file under ``plans/``, ``reports/`` or ``docs/``, a report or ledger
+  ``.json``) and not under ``scratchpad/``. Those folders are the ones
+  below the deepest folder the target shares with the transcript's first
+  ``cwd`` (inside it, the folders below it: a repository kept under a
+  folder named ``docs`` has no ``docs`` folder of its own; outside it, a
+  worktree agent's write into the main checkout's ``docs/`` is still a
+  document). The known miss: a project under a ``docs``-named folder that
+  shares no parent with the working folder reads as a document. With no
+  absolute ``cwd`` the folder the target sits in decides alone. Taken back
+  like ``shell_write_count``. Only
+  the ``agent-decide-apply`` verdict reads it. ``None`` in a digest an
+  older parser wrote: not measured, which is not 0. Nothing can measure
+  it once the transcript is gone, so the verdict leaves that run out.
+  The rule for every field a parser version adds: a default of ``None``
+  where the key is missing, and a reader that leaves the run out of that
+  figure (a field a version redefines needs the digest's
+  ``TranscriptResult.parser_version`` as well).
+- ``Turn.edit_code_count: int | None = None`` -- how many of this turn's edit-tool
   calls (Edit, Write, MultiEdit, NotebookEdit) were aimed at code: outside
   the temp dir and not a document, by the same test as
   ``shell_code_write_count``. Counted whether or not the path is under a
@@ -1334,8 +1348,10 @@ class Turn:
     #: this turn's Bash/PowerShell commands named outside the temp dir (a
     #: file written twice counts twice). A count only, never a path.
     shell_write_count: int = 0
-    shell_code_write_count: int = 0
-    edit_code_count: int = 0
+    #: ``None`` in a digest from before ``PARSER_VERSION`` 47: not measured,
+    #: never 0 (the key is missing there, so the default shows).
+    shell_code_write_count: int | None = None
+    edit_code_count: int | None = None
     #: Quality-signals addition (see module docstring): the preceding
     #: human message looks like a correction. Flag only.
     human_correction: bool = False
@@ -1426,7 +1442,8 @@ class Turn:
     reply_asked: bool = False
     coach_tip: bool = False
     #: The hints whose own tip words (``capture_catalogue.TIP_FRAGMENTS``)
-    #: that reply's last text block, or the plan it submitted, holds.
+    #: any text block of that reply, or the plan it submitted, holds, in
+    #: the order met and each once.
     coach_tips: tuple[str, ...] = ()
     #: Parser-signals addition (see module docstring): how the preceding
     #: message you typed reads, and the messages you typed while Claude
@@ -1712,6 +1729,14 @@ class TranscriptResult:
     #: MCP-servers addition: MCP server -> the last connection problem
     #: reported for it: "pending", "needs sign-in" or "failed to connect".
     mcp_connection_status: dict = field(default_factory=dict)
+    #: The ``PARSER_VERSION`` that wrote this digest (from 50). ``None`` in a
+    #: digest from before the stamp: its parser is not known. The store's
+    #: ``transcripts.parser_version`` column does not say, since a rate-card
+    #: change sets it to 0 on every row, including a current one whose
+    #: transcript is gone. Only a reader that leaves out what a newer parser
+    #: added or redefined needs this (a field a version only adds is
+    #: ``None`` where its key is missing).
+    parser_version: int | None = None
 
 
 @dataclass(slots=True)

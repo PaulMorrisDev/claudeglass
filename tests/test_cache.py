@@ -54,6 +54,26 @@ def _meta_for(path: Path, mtime_ns: int = _OLD_NS) -> TranscriptMeta:
     return TranscriptMeta(path=str(path), kind="top-level", session_id=path.stem, mtime_ns=mtime_ns, size_bytes=size)
 
 
+# -- which parser wrote a digest ------------------------------------------
+
+
+def test_a_fresh_parse_carries_the_parser_version_through_the_cache(tmp_path):
+    path = _write_transcript(tmp_path)
+    meta = _meta_for(path)
+    result = parse_transcript(path, meta)
+    assert result.parser_version == PARSER_VERSION
+    cache = DigestCache(tmp_path / "config")
+    cache.put(path, meta, result)
+    assert cache.get(path, meta).parser_version == PARSER_VERSION
+
+
+def test_a_digest_written_before_the_stamp_reads_none(tmp_path):
+    # Not 0 and not the current version: a digest whose transcript is gone can't be asked again.
+    data = encode_result(parse_transcript(*(lambda p: (p, _meta_for(p)))(_write_transcript(tmp_path))))
+    del data["parser_version"]
+    assert result_from_jsonable(json.loads(json.dumps(data))).parser_version is None
+
+
 # -- basic put/get hit --------------------------------------------------
 
 

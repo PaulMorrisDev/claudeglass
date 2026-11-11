@@ -1012,6 +1012,101 @@ def test_a_lone_cold_return_note_answered_with_a_composed_receipt_and_the_marker
     assert session.notes == {"cold_return": 1} and session.tips == {"cold_return": 1}
 
 
+def _reply_blocks(minute: float, blocks: list[dict]) -> dict:
+    """A reply made of the given content blocks, in that order."""
+    return turn_line(timestamp=_at(minute), content=blocks, cache_read_input_tokens=40_000, output_tokens=200)
+
+
+def test_a_later_notes_tip_is_not_credited_to_an_earlier_note_of_the_same_message(tmp_path):
+    # cold_return comes with the message; report_reread comes after the Agent call; only report_reread's tip is written.
+    session = _session(tmp_path, [
+        *_START,
+        _said("back again", 2), _note_line("cold_return", 2),
+        _call(3, "Agent", {"prompt": "look", "description": "look"}, say="Starting."),
+        _came_back(3.5, 3), _note_line("report_reread", 3.6),
+        _reply_blocks(4, [{"type": "text", "text": f"Done.\n\n{_own_tip('report_reread')}"}]),
+    ])
+    assert session.notes == {"cold_return": 1, "report_reread": 1}
+    assert session.tips == {"report_reread": 1}, dict(session.tips)
+
+
+def test_a_disowned_tip_is_not_a_misfire_of_a_quiet_output_note_in_the_same_message(tmp_path):
+    # drip_feed's tip is relayed and called a false alarm; the quiet_output note after the Read was never called anything.
+    disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_own_tip('drip_feed')}"
+    session = _session(tmp_path, [
+        *_START,
+        _said("and one more", 2), _note_line("drip_feed", 2),
+        _call(3, "Read", {"file_path": "a.py"}, say="Reading."),
+        _came_back(3.5, 3), _note_line("quiet_output", 3.6),
+        _reply_blocks(4, [{"type": "text", "text": disowned}]),
+    ])
+    assert session.notes == {"drip_feed": 1, "quiet_output": 1}
+    assert session.misfires == {"drip_feed": 1}, dict(session.misfires)
+
+
+def _plan_and_text(tmp_path, text_first: bool, name: str):
+    text = {"type": "text", "text": f"Here is the plan.\n\n{_own_tip('drip_feed')}"}
+    plan = tool_use_block("ExitPlanMode", "toolu_plan", {"plan": f"1. do it\n\n{_own_tip('plan_fresh_early')}"})
+    return _session(tmp_path, [
+        *_START,
+        _said("plan the next bit", 2), _note_line("drip_feed", 2), _note_line("plan_fresh_early", 2),
+        _reply_blocks(3, [text, plan] if text_first else [plan, text]),
+    ], name)
+
+
+def test_a_plans_tip_does_not_drop_the_tip_written_in_the_replys_text(tmp_path):
+    session = _plan_and_text(tmp_path, True, "a.jsonl")
+    assert session.notes == {"drip_feed": 1, "plan_fresh_early": 1}
+    assert session.tips == {"drip_feed": 1, "plan_fresh_early": 1}, dict(session.tips)
+
+
+def test_the_replys_text_does_not_drop_the_tip_the_plan_ended_with(tmp_path):
+    session = _plan_and_text(tmp_path, False, "b.jsonl")
+    assert session.tips == {"drip_feed": 1, "plan_fresh_early": 1}, dict(session.tips)
+
+
+def test_two_notes_in_one_message_each_tip_in_the_text_counts(tmp_path):
+    both = f"Done.\n\n{_own_tip('drip_feed')}\n\n{_own_tip('cold_return')}"
+    session = _session(tmp_path, [
+        *_START,
+        _said("back", 2), _note_line("drip_feed", 2), _note_line("cold_return", 2),
+        _reply_blocks(3, [{"type": "text", "text": both}]),
+    ])
+    assert session.tips == {"drip_feed": 1, "cold_return": 1}, dict(session.tips)
+
+
+def test_a_quiet_output_note_does_not_take_the_bare_label_from_the_note_that_asked_for_a_tip(tmp_path):
+    # quiet_output asks for no tip, so the one label in the message can only be drip_feed's.
+    session = _session(tmp_path, [
+        *_START,
+        _said("go", 2), _note_line("drip_feed", 2),
+        _call(3, "Read", {"file_path": "a.py"}, say="Reading."), _came_back(3.5, 3), _note_line("quiet_output", 3.6),
+        _reply_blocks(4, [{"type": "text", "text": f"Done.\n\n{_TIP}"}]),
+    ])
+    assert session.notes == {"drip_feed": 1, "quiet_output": 1}
+    assert session.tips == {"drip_feed": 1}, dict(session.tips)
+
+
+def test_the_bare_label_in_an_earlier_text_block_of_the_reply_counts_for_a_lone_note(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("go", 2), _note_line("drip_feed", 2),
+        _reply_blocks(3, [{"type": "text", "text": f"Done.\n\n{_TIP}"}, {"type": "text", "text": "One more thing."}]),
+    ])
+    assert session.tips == {"drip_feed": 1}, dict(session.tips)
+
+
+def test_a_tip_written_in_the_text_and_again_in_the_plan_is_kept_once(tmp_path):
+    tip = _own_tip("plan_fresh_early")
+    plan = tool_use_block("ExitPlanMode", "toolu_plan", {"plan": f"1. do it\n\n{tip}"})
+    parsed = _parse(tmp_path, [
+        *_START,
+        _said("plan the next bit", 2), _note_line("plan_fresh_early", 2),
+        _reply_blocks(3, [{"type": "text", "text": f"Here is the plan.\n\n{tip}"}, plan]),
+    ])
+    assert [turn.coach_tips for turn in parsed.turns if turn.coach_tips] == [("plan_fresh_early",)]
+
+
 def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_path):
     # drip_feed asks for its tip every time: shown twice in three (one of them
     # called a misfire). big_paste leaves it to Claude's judgement; cold_return asks for its tip every time.

@@ -291,10 +291,14 @@ A run gets a verdict only when its dominant model is above Sonnet:
   (`Turn.shell_code_write_count` above 0) or an edit-tool call aimed at
   code (`Turn.edit_code_count` above 0), whichever tool did the writing and
   whether or not the path is under `.claude`. Code is not a document (`.md`,
-  `.rst`, `.txt`, `.adoc`), not a data, web or log file under `plans/`,
-  `reports/` or `docs/`, not a file under `scratchpad/` or temp, and not a
-  report or ledger `.json`/`.jsonl`. An agent that
-  only wrote its review and a ledger isn't flagged.
+  `.rst`, `.txt`, `.adoc`), not a log, `.csv`, `.tsv` or `.jsonl` file
+  anywhere, not a `.json`, `.html` or `.htm` file under `plans/`, `reports/`
+  or `docs/`, not a file under `scratchpad/` or temp, and not a report or
+  ledger `.json`. Those folders are the ones below the folder the session
+  began in and the file shares with it, so a repository that sits under a
+  folder named `docs` keeps its code writes. An agent that only wrote its
+  review and a ledger isn't flagged. A run whose stored digest came from a
+  parser that did not count these (its transcript is gone) is left out.
 
 A writer chosen by `file` gets none. Neither does an `integrates`
 agent, a decider with fewer write turns, or any agent on Sonnet,

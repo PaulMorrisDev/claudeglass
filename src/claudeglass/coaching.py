@@ -132,7 +132,11 @@ def _rearm_factor(config_thresholds: dict | None) -> float:
 
 #: The hints a daily run may mute: the tips, and the hints only Claude sees
 #: (``CLAUDE_ONLY_HINTS``), which Claude can call a misfire too.
-_MUTABLE = (*capture_catalogue.TIP_HINT_TITLES, *capture_catalogue.CLAUDE_ONLY_HINTS)
+_MUTABLE = tuple(
+    hint
+    for hint in (*capture_catalogue.TIP_HINT_TITLES, *capture_catalogue.CLAUDE_ONLY_HINTS)
+    if hint not in capture_catalogue.NO_TRIGGER_HINTS
+)
 
 
 def tip_rules(report, factor: float) -> tuple[list[str], list[str], dict[str, int]]:
@@ -217,20 +221,27 @@ def _raised(data: dict, key: str) -> bool:
 
 
 def describe(data: dict) -> list[str]:
-    """``coaching.json`` in words, for ``capture status``."""
-    if not data:
-        return ["No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
+    """``coaching.json`` in words, for ``capture status``. The hints that
+    are off for everyone (:data:`capture_catalogue.LIVE_OFF_HINTS`) come
+    first, file or no file; they, and a hint that no longer speaks
+    (:data:`capture_catalogue.NO_TRIGGER_HINTS`), are left out of what
+    your answers muted, raised or limited to once: nothing of theirs is
+    shown whatever the file says."""
     lines = []
     off = capture_catalogue.LIVE_OFF_HINTS
+    silent = {*off, *capture_catalogue.NO_TRIGGER_HINTS}
     if data.get("plan_fresh") is False and "plan_fresh" not in off:
         lines.append("The fresh-session hint after a plan is off: you ignored its tip, or said builds need the discussion.")
     # One short line each: the summary keeps its sentences short.
     for hint in off:
         lines.append(f"Off for everyone (the replay found them more often wrong than right): {_hint_name(hint)}.")
-    muted = [hint for hint in data.get("muted") or () if hint in capture_catalogue.TIP_HINT_TITLES]
+    if not data:
+        lines.append("No coaching numbers yet: the dashboard's service works them out from your sessions once a day.")
+        return lines
+    muted = [hint for hint in data.get("muted") or () if hint in capture_catalogue.TIP_HINT_TITLES and hint not in silent]
     if muted:
         lines.append("Tips left out because you called them wrong: " + ", ".join(_hint_name(hint) for hint in muted) + ".")
-    claude = [hint for hint in data.get("muted") or () if hint in capture_catalogue.CLAUDE_ONLY_HINTS]
+    claude = [hint for hint in data.get("muted") or () if hint in capture_catalogue.CLAUDE_ONLY_HINTS and hint not in silent]
     if claude:
         lines.append(
             "Notes to Claude left out because Claude called them misfires: "
@@ -239,11 +250,11 @@ def describe(data: dict) -> list[str]:
     raised = [
         _hint_name(hint)
         for hint, key in capture_catalogue.TIP_THRESHOLD_KEYS.items()
-        if _raised(data, key)
+        if hint not in silent and _raised(data, key)
     ]
     if raised:
         lines.append("Tips that now wait for more because you called them wrong: " + ", ".join(raised) + ".")
-    once = [hint for hint in data.get("once") or () if hint in capture_catalogue.TIP_HINT_TITLES]
+    once = [hint for hint in data.get("once") or () if hint in capture_catalogue.TIP_HINT_TITLES and hint not in silent]
     if once:
         lines.append("Tips shown once a session because you already knew them: " + ", ".join(_hint_name(hint) for hint in once) + ".")
     typical = data.get("typical_piece_tokens")

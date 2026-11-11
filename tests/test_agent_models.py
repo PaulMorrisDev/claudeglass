@@ -22,6 +22,7 @@ import pytest
 
 from claudeglass import agent_models, ignores, model_swap, recommend
 from claudeglass.agent_models import AgentModelThresholds, compute_agent_models
+from claudeglass.cache import encode_result, result_from_jsonable
 from claudeglass.model import ReportModel, Section, TranscriptMeta, TranscriptResult, Turn
 from claudeglass.pricing import load_pricing
 
@@ -110,6 +111,9 @@ def _result_from_agent(agent: dict, group_fields: list[str]) -> TranscriptResult
                     cache_creation_tokens=fields["cache_creation_tokens"] if first else 0,
                     cc_5m=fields["cc_5m"] if first else 0,
                     cc_1h=fields["cc_1h"] if first else 0,
+                    # Counted by the current parser: a turn that wrote no code is a 0.
+                    shell_code_write_count=0,
+                    edit_code_count=0,
                 )
             )
     edits = agent["real_edit_turns"]
@@ -484,6 +488,40 @@ def test_a_decider_that_wrote_code_is_decide_apply_beside_its_documents():
 
     (card,) = advice.finish([rec], report, Snapshot(path=None, ts="2026-10-02T00:00:00Z", data={"agents": {}}), Units())
     assert "edited code in 3 replies" in card.why
+
+
+def _old_digest(result: TranscriptResult) -> TranscriptResult:
+    """``result`` as a parser from before the two code-write counts stored
+    it and the store hands it back: the keys are not in the digest."""
+    data = encode_result(result)
+    for turn in data["turns"]:
+        del turn["shell_code_write_count"], turn["edit_code_count"]
+    return result_from_jsonable(json.loads(json.dumps(data)))
+
+
+def test_a_digest_from_before_the_code_write_counts_reads_them_as_not_measured():
+    run = _old_digest(_agent(role_word="review", turns=6, real_edits=3))
+    assert {t.shell_code_write_count for t in run.turns} == {None}
+    assert {t.edit_code_count for t in run.turns} == {None}
+    # A digest that stored them keeps what it stored, zeros included.
+    kept = result_from_jsonable(json.loads(json.dumps(encode_result(_agent(role_word="review", turns=6, real_edits=3)))))
+    assert [t.edit_code_count for t in kept.turns[:4]] == [1, 1, 1, 0]
+    assert {t.shell_code_write_count for t in kept.turns} == {0}
+
+
+def test_a_decider_from_an_old_digest_is_left_out_of_decide_apply_whatever_the_threshold():
+    # Its transcript is gone, so the counts can't be had again; the count the
+    # edit calls would give is no stand-in (it was right in 0 of 11 flagged runs).
+    decider = dict(role_word="review", turns=6, real_edits=3)
+    assert _verdicts([_old_digest(_agent(**decider))]) == {}
+    free = AgentModelThresholds(decide_apply_min_edit_turns=0)
+    assert _verdicts([_old_digest(_agent(**decider))], thresholds=free) == {}
+    # Counted zeros are a measurement: at that threshold they flag, as before.
+    assert set(_verdicts([_agent(role_word="review", turns=6, doc_edits=3)], thresholds=free)) == {
+        ("general-purpose", "decide-apply")
+    }
+    # Only decide-apply needs the counts: an old digest's writer is judged as ever.
+    assert set(_verdicts([_old_digest(_agent(role_word="fix", real_edits=2))])) == {("general-purpose", "inherited")}
 
 
 def _parsed_decider(tmp_path, paths):

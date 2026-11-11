@@ -460,13 +460,29 @@ __version__ = "0.16.0"
 #: ``Turn.edit_code_count``, the shell writes and edit-tool calls aimed at
 #: code (not documents, reports, ledgers or scratch files), which
 #: ``agent-decide-apply`` counts instead of every write. A pre-47 digest has
-#: none, so every transcript is re-read.
+#: none (``None``: not measured). A transcript still on disk is re-read; one
+#: Claude Code deleted keeps its old digest, and that run is left out of
+#: ``agent-decide-apply``.
 #: Bumped to 48: ``Turn.coach_tips``, the hints whose own tip words the
-#: reply holds. A pre-48 digest has none, so every transcript is re-read.
+#: reply holds. A pre-48 digest has none; a transcript still on disk is
+#: re-read, and one Claude Code deleted keeps its old digest.
 #: Bumped to 49: ``Turn.coach_disowned``, a reply that calls a ClaudeGlass
 #: note a misfire with no tip in it (the mute of ``quiet_output``). A
-#: pre-49 digest has none, so every transcript is re-read.
-PARSER_VERSION = 49
+#: pre-49 digest has none; a transcript still on disk is re-read, and one
+#: Claude Code deleted keeps its old digest.
+#: Bumped to 50: a reply keeps the tips of every text block and plan it
+#: wrote (``Turn.coach_tips``), not only the last one's; a log, ``.csv``,
+#: ``.tsv`` or ``.jsonl`` file is a document wherever it sits and the folders
+#: that make a ``.json`` or ``.html`` file one are those below the deepest
+#: folder the file shares with the transcript's first ``cwd``
+#: (``Turn.shell_code_write_count``, ``Turn.edit_code_count``);
+#: ``Turn.coach_tip`` is true when any text block holds the label; and
+#: those two counts are ``None`` where a digest has none; a digest carries
+#: the parser version that wrote it (``TranscriptResult.parser_version``,
+#: ``None`` before 50). A pre-50 digest
+#: has the older readings of each. A transcript still on disk is re-read; one
+#: Claude Code deleted keeps its old digest.
+PARSER_VERSION = 50
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

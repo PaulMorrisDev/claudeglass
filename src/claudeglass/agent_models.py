@@ -15,7 +15,9 @@ verdicts, each at its own severity (see :data:`RULES`):
   ceiling for information; never added to the ``inherited`` figure.
 - ``decide-apply`` -- an agent whose role is to decide (review, audit, ...)
   that also edited code on a larger model. Cost and edit counts only: its
-  fix is a split into two agents, not a swap, so there is no saving.
+  fix is a split into two agents, not a swap, so there is no saving. A
+  run whose digest an older parser wrote has no code-write counts
+  (``None``, not measured) and is left out.
 
 Whether the model was chosen is read, never inferred: a ``.meta.json`` of
 the newer shape (``TranscriptMeta.model_recorded``) leaves ``model`` out
@@ -223,8 +225,9 @@ class _Run:
     role: str
     model: str
     write_turns: int
-    #: The replies that wrote code, which decide-apply counts instead.
-    code_write_turns: int
+    #: The replies that wrote code, which decide-apply counts instead;
+    #: None when the digest has no such count (see model.py).
+    code_write_turns: int | None
     workflow_run_id: str | None
     first_ts: datetime | None
     date: str
@@ -303,7 +306,13 @@ def _analyse(
     write_turns = sum(1 for t in result.turns if t.edit_kind == "real" or t.shell_write_count > 0)
     # A decider that only wrote its report or a ledger did not change code:
     # decide-apply counts shell writes and edit-tool calls aimed at code.
-    code_write_turns = sum(1 for t in result.turns if t.shell_code_write_count > 0 or t.edit_code_count > 0)
+    # A digest an older parser wrote has no such counts (None, not 0), and its
+    # transcript may be gone: that run is left out of decide-apply.
+    code_write_turns = (
+        None
+        if any(t.shell_code_write_count is None or t.edit_code_count is None for t in result.turns)
+        else sum(1 for t in result.turns if t.shell_code_write_count > 0 or t.edit_code_count > 0)
+    )
     role_class = agent_roles.role_class(meta.role_word)
     writer = (role_class == "writer" and write_turns >= 1) or (
         role_class is None and write_turns >= th.unknown_min_edit_turns
@@ -318,7 +327,11 @@ def _analyse(
             # no verdict here. model-tier prices such a run only when it is a
             # direct Agent-tool run; a workflow agent's is left alone.
             verdict = {"inherited": "inherited", "call": "asked"}.get(chosen_by)
-        elif role_class == "decider" and code_write_turns >= th.decide_apply_min_edit_turns:
+        elif (
+            role_class == "decider"
+            and code_write_turns is not None
+            and code_write_turns >= th.decide_apply_min_edit_turns
+        ):
             verdict = "decide-apply"
 
     return _Run(
