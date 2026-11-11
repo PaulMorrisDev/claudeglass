@@ -1239,3 +1239,43 @@ def test_a_cut_entry_for_a_tool_that_is_not_kept_changes_nothing():
     rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
     assert rec is not None
     assert (rec.changes[0].value, rec.saving_usd, rec.action) == (base.changes[0].value, base.saving_usd, base.action)
+
+
+# -- calls recorded as Task and as Agent are one tool -------------------------
+
+_ROSTER_CHARS = {
+    "Read": 1500, "Grep": 1200, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000, "Task": 2000, "Agent": 2000,
+}
+_TASK_LINE = "Task, Read, Grep, Skill, NotebookEdit, WebFetch"
+
+
+def test_calls_recorded_as_task_keep_the_agent_the_line_names_and_it_is_not_also_left_out():
+    acc = _diet_acc("orchestrator", uses={"Read": 20, "Grep": 20, "Task": 4}, chars=_ROSTER_CHARS)
+    report = _report(acc)
+    row = _diet_row(report, "orchestrator")
+    assert "Agent" in row["keep_tools"].split(", ") and "Task" not in row["keep_tools"].split(", ")
+    assert not {"Agent", "Task"} & set(row["rare_tools"].split(", "))
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": _TASK_LINE}})
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "orchestrator")
+    assert sorted(rec.changes[0].value) == ["Grep", "Read", "Task"]
+    assert "Agent" not in rec.action.split("Rarely used")[1].split("Claude Code adds")[0]
+    # The removal is priced once: the same as the line without the spawning tool.
+    without = recommend_mod.current_diet(row, "Read, Grep, Skill, NotebookEdit, WebFetch")
+    assert rec.saving_usd == pytest.approx(without["saving_usd"])
+
+
+def test_task_and_agent_calls_together_clear_the_bar_that_neither_clears_alone():
+    uses = {"Read": 20, "Grep": 20, "Task": 1, "Agent": 1}
+    report = _report(_diet_acc("orchestrator", uses=uses, chars=_ROSTER_CHARS))
+    row = _diet_row(report, "orchestrator")
+    assert "Agent" in row["keep_tools"].split(", ")
+    assert not {"Agent", "Task"} & set(row["rare_tools"].split(", "))
+
+
+def test_calls_recorded_as_task_count_for_a_line_that_says_agent():
+    chars = {name: size for name, size in _ROSTER_CHARS.items() if name != "Agent"}
+    acc = _diet_acc("orchestrator", uses={"Read": 20, "Grep": 20, "Task": 4}, chars=chars)
+    line = "Agent, Read, Grep, Skill, NotebookEdit, WebFetch"
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(acc), snapshot=snap, units=Units()), "orchestrator")
+    assert sorted(rec.changes[0].value) == ["Agent", "Grep", "Read"]
