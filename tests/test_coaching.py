@@ -2918,7 +2918,8 @@ def test_a_tip_the_reply_disowns_is_marked_and_a_plain_misfire_mention_is_not(tm
         _human("again", 4), _said_back("Fixed.\n\n" + tip, 5),
     ])
     assert [t.tip_disowned for t in result.turns] == [True, False, False]
-    assert [t.coach_tip for t in result.turns] == [False, False, True]
+    # The label counts from any block of the reply, a disowned tip's included: it was shown, then called wrong.
+    assert [t.coach_tip for t in result.turns] == [True, False, True]
 
 
 def test_a_plan_that_ends_with_the_tip_the_note_asked_for_counts_as_a_relayed_tip(tmp_path):
