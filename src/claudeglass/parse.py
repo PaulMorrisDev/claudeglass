@@ -2994,6 +2994,9 @@ def _compaction_turn(replies: list[Turn], event: Event, summary_chars: int | Non
         speed=previous.speed,
         estimated="compaction",
         compaction_precomputed=precomputed,
+        # Made by this parser, so measured: a summary writes no code.
+        shell_code_write_count=0,
+        edit_code_count=0,
     )
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -486,6 +487,15 @@ def test_an_edit_into_the_projects_own_reports_folder_is_not_a_code_edit(tmp_pat
 ])
 def test_the_folders_that_make_a_json_or_html_file_a_document_are_those_below_the_working_folder(target, cwd, code):
     assert parse._is_code_write_target(target, parse._temp_prefixes(), cwd) is code
+
+
+def test_a_fresh_parse_measures_every_turn_the_synthetic_ones_included():
+    # None is for a digest an older parser wrote. A turn this parser made, such as the one a compaction
+    # summary adds, wrote no code: 0.
+    path = Path(__file__).parent / "fixtures" / "real" / "session-a" / "55176945d92374c103c39f0aa42a1fffc37c.jsonl"
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert any(turn.is_synthetic for turn in result.turns)
+    assert all(type(turn.shell_code_write_count) is int and type(turn.edit_code_count) is int for turn in result.turns)
 
 
 # -- the edit-tool side of it (``Turn.edit_code_count``) ---------------------------------
