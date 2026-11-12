@@ -219,7 +219,7 @@ def _meta_lines(model: ReportModel) -> list[str]:
     gone = covered.gone_sentence(meta.sessions, meta.sessions + meta.sessions_left_out)
     if gone:
         lines.insert(3, gone)
-    thresholds =", ".join(f"{k}={v}" for k, v in meta.thresholds.items()) or "-"
+    thresholds = ", ".join(f"{k}={v}" for k, v in meta.thresholds.items()) or "-"
     lines.append(f"Thresholds: {thresholds}")
     return lines
 
