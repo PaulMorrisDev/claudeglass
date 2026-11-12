@@ -1867,6 +1867,27 @@ def _launching_agent(launch: str, run: str, **kw) -> habits.AgentFact:
     return habits.AgentFact("s1", kw.pop("agent_type", "Explore"), "2026-W38", kw.pop("cost", 0.5), launch=launch, run=run, **kw)
 
 
+def test_the_tuning_export_counts_probes_from_measured_agents_only(tmp_path):
+    # An agent a digest from an older parser read has no single-lookup figures
+    # (None): it is out of the count and out of the base alike.
+    older = dict(calls=50, probe_calls=None, probe_shell_calls=None, probe_runs=None, probe_batch_cost=None)
+    block = _agents_block(
+        tmp_path,
+        agents=[
+            _launching_agent("background", "r1", calls=20, probe_calls=8, probe_shell_calls=3, probe_runs=2),
+            _launching_agent("background", "r2", calls=10, probe_calls=1, probe_shell_calls=1),
+            _launching_agent("background", "r3", **older),
+        ],
+    )
+    assert block["probes"] == {"calls": 30, "single": 9, "by_shell": 4, "runs": 2}
+    # The replies of the group still count every agent; its single lookups only the measured ones.
+    assert block["launches"]["background"]["replies"] == 80
+    assert block["launches"]["background"]["single"] == 9
+    # With every agent older there is nothing to report, not a block of zeros.
+    block = _agents_block(tmp_path, agents=[_launching_agent("background", "r3", **older)])
+    assert "probes" not in block
+
+
 def test_the_agents_block_counts_the_runs_by_how_they_started(tmp_path):
     block = _agents_block(
         tmp_path,

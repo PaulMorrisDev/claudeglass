@@ -70,6 +70,7 @@ from . import classify
 from . import events as events_mod
 from . import known_savers
 from . import limits
+from . import measured
 from . import model_gate
 from . import pieces as pieces_mod
 from . import quality
@@ -625,12 +626,14 @@ class CycleFact:
     #: them were a single read-only probe (:func:`_is_probe`), how many of
     #: those a shell command, how many runs of two or more such replies in
     #: a row came, and what the replies after the first of each run paid to
-    #: read the cache (:func:`_probe_counts`).
+    #: read the cache (:func:`_probe_counts`). The four probe figures are
+    #: ``None`` when the message's digest is from a parser before 46: its
+    #: shell reads are counted in an older meaning, so it is not measured.
     calls: int = 0
-    probe_calls: int = 0
-    probe_shell_calls: int = 0
-    probe_runs: int = 0
-    probe_batch_cost: float = 0.0
+    probe_calls: int | None = 0
+    probe_shell_calls: int | None = 0
+    probe_runs: int | None = 0
+    probe_batch_cost: float | None = 0.0
     #: How many of its replies came before the first one that changed your
     #: files (:func:`_calls_before_edit`); ``None`` when none did.
     calls_before_edit: int | None = None
@@ -739,15 +742,17 @@ class AgentFact:
     retry: str | None = None
     spawn: str | None = None
     #: The run's model calls (replies, one per message id), and how many of
-    #: them were a single read-only probe (:func:`_is_probe`).
+    #: them were a single read-only probe (:func:`_is_probe`). ``None`` for
+    #: the four probe figures when the run's digest is from a parser before
+    #: 46 (its shell reads are counted in an older meaning: not measured).
     calls: int = 0
-    probe_calls: int = 0
+    probe_calls: int | None = 0
     #: How many of those were a shell command, the runs of two or more in a
     #: row, and what the replies after the first of each run paid to read
     #: the cache (:func:`_probe_counts`).
-    probe_shell_calls: int = 0
-    probe_runs: int = 0
-    probe_batch_cost: float = 0.0
+    probe_shell_calls: int | None = 0
+    probe_runs: int | None = 0
+    probe_batch_cost: float | None = 0.0
     #: How many calls came before the first one that changed your files
     #: (:func:`_calls_before_edit`); ``None`` when the run changed none.
     calls_before_edit: int | None = None
@@ -1220,7 +1225,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     for cycle in work:
         facts.append(
             _cycle_fact(
-                bundle.session_id, cycle, carry, index_of, rates, baseline, rated, session_rating, denied, out.tz
+                bundle.session_id, cycle, carry, index_of, rates, baseline, rated, session_rating, denied, out.tz,
+                probes_measured=measured.measures(bundle.top, "shell_read_count"),
             )
         )
     captured = capture_mod.is_captured(top)
@@ -1594,7 +1600,8 @@ def _piece(fb: Feedback, cycles, rates: _Rates, source: str) -> Piece:
 
 
 def _cycle_fact(
-    session_id, cycle, carry: _CarryCost, index_of, rates: _Rates, baseline, rated, session_rating, denied, tz=None
+    session_id, cycle, carry: _CarryCost, index_of, rates: _Rates, baseline, rated, session_rating, denied, tz=None,
+    probes_measured: bool = True,
 ):
     first = cycle.turns[0]
     moment = _moment(first.ts)
@@ -1677,9 +1684,12 @@ def _cycle_fact(
     if fact.tag is not None and fact.tag.plan in ("made", "following", "deviated"):
         fact.planned = True
     fact.calls = len(cycle.turns)
-    fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost = _probe_counts(
-        cycle.turns, [carry.read_cost(i) for i in idx]
-    )
+    if probes_measured:
+        fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost = _probe_counts(
+            cycle.turns, [carry.read_cost(i) for i in idx]
+        )
+    else:
+        fact.probe_calls = fact.probe_shell_calls = fact.probe_runs = fact.probe_batch_cost = None
     fact.calls_before_edit = _calls_before_edit(cycle.turns)
     return fact
 
@@ -1770,9 +1780,12 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
                 fact.brief = fact.brief or cap.brief
                 fact.missing = fact.missing or tuple(cap.missing)
         fact.calls = len(priced)
-        (fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost) = _probe_counts(
-            priced, [sub_carry.read_cost(k) for k in range(len(priced))]
-        )
+        if measured.measures(sub, "shell_read_count"):
+            (fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost) = _probe_counts(
+                priced, [sub_carry.read_cost(k) for k in range(len(priced))]
+            )
+        else:
+            fact.probe_calls = fact.probe_shell_calls = fact.probe_runs = fact.probe_batch_cost = None
         fact.calls_before_edit = _calls_before_edit(priced)
         fact.compactions, fact.auto_compactions = compaction_mod.compactions_in(sub)
         _place_in_run(fact, sub, launches, main_spawn)
@@ -2068,6 +2081,12 @@ def _mean(values) -> float | None:
 
 def _pct(part: int, whole: int) -> float | None:
     return 100.0 * part / whole if whole else None
+
+
+def _probed(facts) -> list:
+    """The facts whose single lookups were measured (``probe_calls`` not
+    None: a digest an older parser wrote has them in an older meaning)."""
+    return [f for f in facts if f.probe_calls is not None]
 
 
 def _sources(reported: bool, inferred: bool, feedback: bool = False) -> tuple[str, ...]:
@@ -2434,8 +2453,9 @@ def _item_name_files(h: Habits) -> Item | None:
         f"Asks that named a file ran {reads_named:.1f} reads and searches on average; the {len(unnamed)} that "
         f"didn't ran {reads_unnamed:.1f}."
     )
-    lone_named = _pct(sum(c.probe_calls for c in named), sum(c.calls for c in named))
-    lone_unnamed = _pct(sum(c.probe_calls for c in unnamed), sum(c.calls for c in unnamed))
+    probed_named, probed_unnamed = _probed(named), _probed(unnamed)
+    lone_named = _pct(sum(c.probe_calls for c in probed_named), sum(c.calls for c in probed_named))
+    lone_unnamed = _pct(sum(c.probe_calls for c in probed_unnamed), sum(c.calls for c in probed_unnamed))
     if lone_named is not None and lone_unnamed is not None and lone_unnamed > lone_named:
         evidence += (
             f" {lone_unnamed:.0f}% of the replies to those that didn't made one lookup and nothing else, "
@@ -2491,9 +2511,10 @@ def _item_explore_research(h: Habits) -> Item | None:
     not_found = sum(1 for c in heavy if c.tag is not None and c.tag.found == "no")
     if not_found:
         parts.append(f"Claude said it didn't find what it looked for {not_found} times")
-    lone = sum(c.probe_calls for c in heavy)
+    probed = _probed(heavy)
+    lone = sum(c.probe_calls for c in probed)
     if lone:
-        parts.append(f"{lone} of their {sum(c.calls for c in heavy)} replies made one lookup and nothing else")
+        parts.append(f"{lone} of their {sum(c.calls for c in probed)} replies made one lookup and nothing else")
     return Item(
         "explore_research", saving, len(heavy), _sources(confirmed > 0, confirmed < saving), _clauses(parts),
         example=EXPLORE_RESEARCH_TOKENSAVE_EXAMPLE if tokensave else "",
@@ -3708,12 +3729,13 @@ def _agents_table(h: Habits) -> Table:
     levels = [c for c in h.cycles if c.tag is not None and c.tag.level]
     if levels:
         cost = sum(c.cost for c in h.cycles)
-        calls = sum(c.calls for c in h.cycles)
+        probed = _probed(h.cycles)
+        calls = sum(c.calls for c in probed)
         edited = [c.calls_before_edit for c in h.cycles if c.calls_before_edit is not None]
         rows.append([
             "top-level", len(h.cycles), cost, None, None, None, None, None,
-            _pct(sum(c.probe_calls for c in h.cycles), calls),
-            _pct(sum(c.probe_shell_calls for c in h.cycles), calls),
+            _pct(sum(c.probe_calls for c in probed), calls),
+            _pct(sum(c.probe_shell_calls for c in probed), calls),
             statistics.median(edited) if edited else None,
             None, None,
             _pct(sum(c.tag.level == "easy" for c in levels), len(levels)),
@@ -3729,6 +3751,7 @@ def _agents_table(h: Habits) -> Table:
         leveled = [a for a in runs if a.level]
         edited = [a.calls_before_edit for a in runs if a.calls_before_edit is not None]
         rules = Counter(a.rules for a in runs if a.rules)
+        probed = _probed(runs)
         rows.append([
             agent_type,
             len(runs),
@@ -3738,8 +3761,8 @@ def _agents_table(h: Habits) -> Table:
             _pct(sum(a.result == "done" for a in results), len(results)),
             sum(1 for a in runs if a.retry),
             sum(1 for a in runs if a.retry == "model"),
-            _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
-            _pct(sum(a.probe_shell_calls for a in runs), sum(a.calls for a in runs)),
+            _pct(sum(a.probe_calls for a in probed), sum(a.calls for a in probed)),
+            _pct(sum(a.probe_shell_calls for a in probed), sum(a.calls for a in probed)),
             statistics.median(edited) if edited else None,
             rules.get("used", 0),
             rules.get("unused", 0),
@@ -3823,16 +3846,18 @@ def _probes_table(h: Habits) -> Table:
     for a in h.agents:
         groups.setdefault(a.agent_type, []).append(a)
     rows = []
-    if h.cycles:
+    cycles = _probed(h.cycles)
+    if cycles:
         rows.append([
             "top-level",
-            sum(c.calls for c in h.cycles),
-            sum(c.probe_calls for c in h.cycles),
-            sum(c.probe_shell_calls for c in h.cycles),
-            sum(c.probe_runs for c in h.cycles),
-            sum(c.probe_batch_cost for c in h.cycles),
+            sum(c.calls for c in cycles),
+            sum(c.probe_calls for c in cycles),
+            sum(c.probe_shell_calls for c in cycles),
+            sum(c.probe_runs for c in cycles),
+            sum(c.probe_batch_cost for c in cycles),
         ])
-    for agent_type, runs in groups.items():
+    for agent_type, found in groups.items():
+        runs = _probed(found)
         rows.append([
             agent_type,
             sum(a.calls for a in runs),
@@ -3878,12 +3903,13 @@ def _run_receipts_table(h: Habits) -> Table:
     for word, agents in agent_run_groups(h).items():
         runs = {a.run or id(a) for a in agents}
         calls = sum(a.calls for a in agents)
+        probed = _probed(agents)
         rows.append([
             word,
             len(runs),
             len(agents),
             calls,
-            _pct(sum(a.probe_calls for a in agents), calls),
+            _pct(sum(a.probe_calls for a in probed), sum(a.calls for a in probed)),
             sum(a.start_tokens * a.calls for a in agents),
             sum(a.compactions for a in agents),
             sum(1 for a in agents if a.compactions),
@@ -4055,6 +4081,7 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
             results = [a for a in runs if a.result]
             leveled = [a for a in runs if a.level]
             edited = [a.calls_before_edit for a in runs if a.calls_before_edit is not None]
+            probed = _probed(runs)
             alt = None
             task_row = {
                 "runs": len(runs),
@@ -4069,8 +4096,8 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
                 len(runs),
                 _mean(a.cost for a in runs),
                 _pct(sum(a.result == "done" for a in results), len(results)),
-                _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
-                _pct(sum(a.probe_shell_calls for a in runs), sum(a.calls for a in runs)),
+                _pct(sum(a.probe_calls for a in probed), sum(a.calls for a in probed)),
+                _pct(sum(a.probe_shell_calls for a in probed), sum(a.calls for a in probed)),
                 statistics.median(edited) if edited else None,
                 alt[0] if alt else None,
                 alt[1] if alt else None,

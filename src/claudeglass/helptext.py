@@ -1410,7 +1410,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "one message holding them all would cost one. Replies are counted by message, so calls already sent "
             "together count once. The last column prices only those re-reads, because a batched message still "
             "writes the tool results. It is an upper bound. It takes the lookups to be independent, and "
-            "some aren't, such as a read that needs the name a search found first.",
+            "some aren't, such as a read that needs the name a search found first. Replies an older version read "
+            "are left out.",
             act="This is a measurement, not a recommendation. A shell command that chains several reads is already "
             "a batch, so it is not counted as a single lookup.",
         ),

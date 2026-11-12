@@ -1482,7 +1482,8 @@ def _agents(ctx: _Ctx) -> dict:
     diet = _startup_diet_usd(ctx.startup, ctx.agent_tools)
     if diet:
         block["startup_diet_usd"] = diet
-    agents = ctx.habits.agents
+    # An agent whose digest an older parser wrote has no single-lookup figures: out of the count and its base.
+    agents = habits_mod._probed(ctx.habits.agents)
     if any(fact.probe_calls for fact in agents):
         block["probes"] = {
             "calls": sum(fact.calls for fact in agents),
@@ -1497,7 +1498,7 @@ def _agents(ctx: _Ctx) -> dict:
             "runs": len({a.run or id(a) for a in group}),
             "agents": len(group),
             "replies": sum(a.calls for a in group),
-            "single": sum(a.probe_calls for a in group),
+            "single": sum(a.probe_calls for a in habits_mod._probed(group)),
             "start_reads": sum(a.start_tokens * a.calls for a in group),
             "compactions": sum(a.compactions for a in group),
             "compacted": sum(1 for a in group if a.compactions),
