@@ -1039,6 +1039,28 @@ def test_an_agent_whose_tools_line_names_a_file_tool_is_a_writer_even_before_any
     assert "edited files" not in rec.why
 
 
+def test_a_file_tool_the_disallowed_tools_line_withholds_does_not_make_an_agent_a_writer():
+    withheld = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Edit", "Write"],
+                                       "disallowedTools": ["Edit", "Write"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer", read_only=10)), snapshot=withheld) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+    assert "move the rules it needs" not in rec.why
+    # One file tool left on the line is still a way to edit.
+    left = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Edit", "Write"], "disallowedTools": ["Edit"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer")), snapshot=left, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert "move the rules it needs into its agent file first, then omitClaudeMd" in rec.why
+
+
+def test_an_agent_with_no_tools_line_whose_spawns_edited_is_a_writer_whatever_its_deny_line_says():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 8
+    snap = _snapshot({"reviewer": {"source": "user", "disallowedTools": ["Edit", "Write", "MultiEdit", "NotebookEdit"]}})
+    rec = next(r for r in _recs(_report(acc), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert rec.why.startswith("8 of its 10 spawns edited files")
+
+
 def test_a_read_only_agent_keeps_its_severity():
     snap = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Grep"]}})
     rec = next(r for r in _recs(_report(_acc("reviewer", read_only=10)), snapshot=snap) if r.id == "spawn-claude-md")

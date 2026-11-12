@@ -1635,7 +1635,8 @@ def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Reco
 #: (its sub-agents docs), so omitClaudeMd means nothing for them.
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
 
-#: Tools that change files: an agent whose ``tools:`` line names one is a writer.
+#: Tools that change files: an agent whose ``tools:`` line names one, and whose
+#: ``disallowedTools:`` line does not withhold it, is a writer.
 _FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 #: The share of an agent type's task prompt tokens one run must hold for
 #: the spawn-task-prompt card to name it.
@@ -2268,7 +2269,9 @@ def _rule_spawn_parts(
             # saying it didn't, the card stays but asks for the rules to move first.
             edited = used(agent_type, "edit_spawns")
             edited = edited if isinstance(edited, int) else 0
-            writer = bool(set(known_line) & _FILE_TOOLS) if known_line is not None else edited > 0
+            # A known tools line decides, less the tools the deny line withholds (offered); with no
+            # line, the spawns that edited files do.
+            writer = any(tools_line.offered(name) for name in _FILE_TOOLS) if known_line is not None else edited > 0
             writer_first = writer and rules_unused == 0
             why = f"Each {agent_type} spawn starts with about {claude_md:,.0f} tokens of CLAUDE.md files and memory."
             if writer_first:
