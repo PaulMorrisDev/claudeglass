@@ -925,9 +925,10 @@ column-by-column detail: [`docs/exports.md`](docs/exports.md).
 figures that show how you work with Claude, to take to another machine, and
 `claudeglass tuning summary FILE` reads one back. Export works over the same
 in-memory corpus every other subcommand does, and `summary` reads one local
-file and nothing else. Export also reads your dashboard ratings and tip-card
-answers from `<config-dir>/service.db`, read-only, as `report` does; only
-their counts reach the file. Neither makes a network call. Export writes only
+file and nothing else. Export also reads `<config-dir>/service.db`, read-only:
+your dashboard ratings and tip-card answers, as `report` does, and the digests
+of the window's sessions whose transcripts Claude Code has deleted, which it
+counts like the rest; only counts reach the file. Neither makes a network call. Export writes only
 to the terminal or the single file `--out` names. The properties below are the
 ones the code enforces, not promises about intent:
 

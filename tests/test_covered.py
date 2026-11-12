@@ -13,6 +13,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from claudeglass import covered, discovery, parse
+from claudeglass.corpus import load_corpus
 from claudeglass.model import ReportMeta, ReportModel
 from claudeglass.render.html import render_html
 from claudeglass.render.markdown import render_markdown
@@ -123,3 +124,31 @@ def test_the_markdown_and_html_meta_say_what_the_report_covers_only_when_some_ar
     for none_gone in (model(), model(sessions_known=1, kept_days=30)):
         assert "These figures cover" not in render_markdown(none_gone)
         assert "These figures cover" not in render_html(none_gone)
+
+
+def test_open_read_only_keeps_the_config_dir(tmp_path):
+    _projects, config_dir, _claude = three_sessions(tmp_path)
+    with_dir = Store.open_read_only(config_dir / "service.db", config_dir=config_dir)
+    without = Store.open_read_only(config_dir / "service.db")
+    try:
+        assert with_dir.config_dir == config_dir
+        assert without.config_dir is None
+    finally:
+        with_dir.close()
+        without.close()
+
+
+def test_add_stored_sessions_adds_only_what_disk_lacks_in_load_corpus_order(tmp_path):
+    projects, config_dir, _claude = three_sessions(tmp_path)
+    disk = load_corpus([projects / "proj-a"], salt=b"d" * 32, config_dir=config_dir)
+    assert [b.session_id for b in disk.sessions] == ["keep"]
+    store = Store.open_read_only(config_dir / "service.db", config_dir=config_dir)
+    try:
+        merged = rebuild.add_stored_sessions(disk, store, ["gone-b", "keep", "gone-a", "nope"])
+        # First reply, oldest first: the order load_corpus gives.
+        assert [b.session_id for b in merged.sessions] == ["gone-b", "gone-a", "keep"]
+        assert merged.sessions[2] is disk.sessions[0]
+        assert merged.total_files == disk.total_files + 2
+        assert rebuild.add_stored_sessions(disk, store, []) is disk
+    finally:
+        store.close()

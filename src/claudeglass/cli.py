@@ -1513,14 +1513,23 @@ def _store_slugs_selected(slugs, args: argparse.Namespace, config: Config, proje
 
 
 def _store_coverage(
-    args: argparse.Namespace, config: Config, config_dir: Path, project_dirs: list[Path], corpus: Corpus
-) -> covered_mod.Coverage | None:
-    """What ``corpus`` (read from transcripts on disk for ``args``' window)
-    covers of the sessions the dashboard's store holds for the same window
-    and projects, read from ``<config-dir>/service.db`` without writing to it.
-    ``None`` when there is no store, it can't be read, none of its sessions
-    is missing from ``corpus``, or the window is one the store can't tell
-    (``--window-by`` other than ``last-reply``, or ``--limit``)."""
+    args: argparse.Namespace,
+    config: Config,
+    config_dir: Path,
+    project_dirs: list[Path],
+    corpus: Corpus,
+    *,
+    add: bool = False,
+) -> tuple[covered_mod.Coverage | None, Corpus]:
+    """``(coverage, corpus)``: what ``corpus`` (read from transcripts on disk
+    for ``args``' window) covers of the sessions the dashboard's store holds
+    for the same window and projects, read from ``<config-dir>/service.db``
+    without writing to it. With ``add``, also ``corpus`` with those sessions
+    read from the store's digests (``rebuild.add_stored_sessions``), so it
+    covers what the dashboard covers. ``(None, corpus)`` when there is no
+    store, it can't be read, none of its sessions is missing from ``corpus``,
+    or the window is one the store can't tell (``--window-by`` other than
+    ``last-reply``, or ``--limit``)."""
     import sqlite3
     import zlib
 
@@ -1528,22 +1537,27 @@ def _store_coverage(
     from .service.store import Store
 
     if args.window_by != "last-reply" or args.limit is not None:
-        return None
-    store = Store.open_read_only(config_dir / STORE_FILENAME)
+        return None, corpus
+    store = Store.open_read_only(config_dir / STORE_FILENAME, config_dir=config_dir)
     if store is None:
-        return None
+        return None, corpus
     try:
         held = store.window_session_ids(since=_window_since(args, config), until=args.until)
         slugs = _store_slugs_selected(set(held.values()), args, config, project_dirs)
         known = {sid for sid, slug in held.items() if slug in slugs}
         read = {b.session_id for b in corpus.sessions if b.top is not None}
         if not known - read:
-            return None
-        return covered_mod.Coverage(
-            len(known | read), len(read), 0, covered_mod.kept_days(snapshots.load_snapshots(config_dir))
-        )
+            return None, corpus
+        days = covered_mod.kept_days(snapshots.load_snapshots(config_dir))
+        if not add:
+            return covered_mod.Coverage(len(known | read), len(read), 0, days), corpus
+        from .service import rebuild
+
+        merged = rebuild.add_stored_sessions(corpus, store, sorted(known - read))
+        stored = sum(1 for b in merged.sessions if b.top is not None) - len(read)
+        return covered_mod.Coverage(len(known | read), len(read), stored, days), merged
     except (sqlite3.Error, ValueError, zlib.error):
-        return None
+        return None, corpus
     finally:
         store.close()
 
@@ -1748,7 +1762,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             file=sys.stderr,
         )
         return 1
-    coverage = _store_coverage(args, config, config_dir, project_dirs, corpus)
+    coverage, _corpus = _store_coverage(args, config, config_dir, project_dirs, corpus)
 
     snaps = snapshots.load_snapshots(config_dir) or None
     projects = tuple(p.name for p in project_dirs)
@@ -2400,7 +2414,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    coverage = _store_coverage(args, config, config_dir, project_dirs, corpus)
+    coverage, _corpus = _store_coverage(args, config, config_dir, project_dirs, corpus)
 
     if args.aggregate:
         from . import team as team_mod
@@ -2630,8 +2644,9 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     the file is written whole or not at all; without it the JSON is printed.
     Your dashboard ratings and tip-card answers are read from its store
     without writing to it, as ``report`` reads them. When the dashboard's
-    store holds sessions of the window whose transcripts are gone, the file's
-    ``coverage`` block and a line on stderr say what it covers."""
+    store holds sessions of the window whose transcripts are gone, they are
+    read from its digests, so the file covers what the dashboard covers; its
+    ``coverage`` block and a line on stderr say how many."""
     from . import tuning as tuning_mod
 
     if args.path:
@@ -2664,10 +2679,10 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
         print(f"claudeglass {command}: no matching project directories under {root}", file=sys.stderr)
         return 1
     corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
+    coverage, corpus = _store_coverage(args, config, config_dir, project_dirs, corpus, add=True)
     if not corpus.sessions:
         print(f"claudeglass {command}: no sessions found under {root} for window {window!r}", file=sys.stderr)
         return 1
-    coverage = _store_coverage(args, config, config_dir, project_dirs, corpus)
 
     _overrides, ratings = _merge_dashboard_marks(config_dir, {})
     today = discovery.to_local(datetime.now(timezone.utc), config.tz).date()

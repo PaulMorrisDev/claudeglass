@@ -485,12 +485,13 @@ class Store:
             self._local.conn = None
 
     @classmethod
-    def open_read_only(cls, path: str | Path) -> "Store | None":
+    def open_read_only(cls, path: str | Path, config_dir: str | Path | None = None) -> "Store | None":
         """A store over the file at ``path`` that only reads, for the CLI's
         own use beside a running dashboard: nothing is created, migrated or
         written, so it never waits on the dashboard's writes. ``None``
         when there is no store file or it can't be opened. Only the read
-        methods work on it."""
+        methods work on it. ``config_dir`` is the data folder beside it, for
+        what :func:`rebuild.corpus_from_store` reads there (Haiku's tags)."""
         path = Path(path)
         if not path.is_file():
             return None
@@ -499,7 +500,7 @@ class Store:
         except sqlite3.Error:
             return None
         conn.row_factory = sqlite3.Row
-        store = cls(path)
+        store = cls(path, config_dir)
         store._local.conn = conn
         return store
 

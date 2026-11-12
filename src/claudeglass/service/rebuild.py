@@ -268,4 +268,24 @@ def corpus_from_store(
     return corpus
 
 
-__all__ = ["corpus_from_store"]
+def add_stored_sessions(corpus: Corpus, store: Store, session_ids: Collection[str]) -> Corpus:
+    """``corpus`` (read from transcripts on disk) with the sessions of
+    ``session_ids`` rebuilt from ``store``'s digests added: the sessions whose
+    transcripts Claude Code's cleanup deleted. A session already in
+    ``corpus`` stays as it was read from disk; an id the store can't build is
+    skipped. Sorted as ``load_corpus`` sorts."""
+    have = {bundle.session_id for bundle in corpus.sessions}
+    stored = corpus_from_store(store, session_ids=[sid for sid in session_ids if sid not in have])
+    if not stored.sessions:
+        return corpus
+    return Corpus(
+        sessions=sorted([*corpus.sessions, *stored.sessions], key=_session_sort_key),
+        total_files=corpus.total_files + stored.total_files,
+        total_bytes=corpus.total_bytes + stored.total_bytes,
+        cache_hits=corpus.cache_hits,
+        cache_misses=corpus.cache_misses,
+        elapsed_s=corpus.elapsed_s,
+    )
+
+
+__all__ = ["add_stored_sessions", "corpus_from_store"]

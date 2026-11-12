@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from claudeglass import cli, parse
+from claudeglass import cli, discovery, parse, tuning
+from claudeglass.config import load_config
+from claudeglass.pricing import load_pricing
+from claudeglass.service import rebuild
+from claudeglass.service.store import Store
 
 from helpers import fallback_read_session, store_with_gone_sessions
 
@@ -82,22 +86,66 @@ def report(world, *extra, capsys):
     return code, captured.out, captured.err
 
 
-def test_tuning_export_says_it_covers_1_of_3_when_the_store_holds_two_gone_sessions(tmp_path, capsys):
+STORED_2 = (
+    "2 of 3 sessions in this window are read from what the dashboard kept, "
+    "because Claude Code keeps transcripts for 30 days here."
+)
+
+
+def test_tuning_export_covers_all_3_and_says_2_were_read_from_what_the_dashboard_kept(tmp_path, capsys):
     world = three_sessions(tmp_path)
-    config_dir = world[1]
+    projects, config_dir, claude_root = world
     out = tmp_path / "figures.json"
     before = (config_dir / "service.db").read_bytes()
     code, _stdout, err = tuning_export(world, out, capsys=capsys)
     assert code == 0
     doc = json.loads(out.read_text(encoding="utf-8"))
-    assert doc["coverage"] == {"sessions": 3, "read": 1, "stored": 0, "older": 0, "kept_days": 30}
+    assert doc["coverage"] == {"sessions": 3, "read": 1, "stored": 2, "older": 0, "kept_days": 30}
     assert list(doc).index("coverage") == 6
-    assert doc["compactions"]["sessions"] == 1
-    assert err == f"claudeglass tuning export: {ONE}\n"
+    assert doc["compactions"]["sessions"] == 3
+    assert doc["pieces"]["total"] == 3
+    assert doc["prompting"]["totals"]["typed"] == 3
+    assert err == f"claudeglass tuning export: {STORED_2}\n"
     assert (config_dir / "service.db").read_bytes() == before
     capsys.readouterr()
     assert cli.main(["tuning", "summary", str(out)]) == 0
-    assert capsys.readouterr().out.splitlines()[1] == ONE
+    assert capsys.readouterr().out.splitlines()[1] == STORED_2
+    # The dashboard's own corpus gives the same figures.
+    config = load_config(config_dir)
+    since = discovery.window_start_iso(30, config.tz)
+    store = Store.open_read_only(config_dir / "service.db", config_dir=config_dir)
+    try:
+        dash = tuning.build(
+            rebuild.corpus_from_store(store, since=since),
+            config,
+            load_pricing(config_dir=config_dir),
+            config_dir=config_dir,
+            days=30,
+            today=date.fromisoformat(doc["generated_on"]),
+            claude_root=claude_root,
+        )
+    finally:
+        store.close()
+    assert {k: v for k, v in doc.items() if k != "coverage"} == dash
+
+
+def test_the_export_marks_the_gone_sessions_an_older_version_read(tmp_path, capsys):
+    world = three_sessions(tmp_path, older={"gone-a", "gone-b"})
+    out = tmp_path / "figures.json"
+    code, _stdout, err = tuning_export(world, out, capsys=capsys)
+    assert code == 0
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["coverage"]["older"] == 2 and doc["coverage"]["stored"] == 2
+    older = (
+        "2 of 3 sessions in this window were read by an older version and their transcripts are gone, "
+        "so the newer figures leave them out."
+    )
+    assert err == f"claudeglass tuning export: {STORED_2}\nclaudeglass tuning export: {older}\n"
+    # A figure no version changed counts them.
+    assert doc["prompting"]["totals"]["typed"] == 3
+    capsys.readouterr()
+    assert cli.main(["tuning", "summary", str(out)]) == 0
+    assert capsys.readouterr().out.splitlines()[1:3] == [STORED_2, older]
 
 
 def test_no_store_or_nothing_gone_leaves_the_export_as_it_was(tmp_path, capsys):
@@ -154,15 +202,31 @@ def test_only_gone_sessions_in_the_window_and_the_picked_projects_count(tmp_path
         assert code == 0
         return json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
 
-    doc = export("--days", "30")
-    assert (doc["coverage"]["sessions"], doc["coverage"]["read"]) == (3, 2)
-    doc = export("--days", "45")
-    assert (doc["coverage"]["sessions"], doc["coverage"]["read"]) == (4, 2)
+    doc30 = export("--days", "30")
+    assert doc30["coverage"] == {"sessions": 3, "read": 2, "stored": 1, "older": 0, "kept_days": 30}
+    doc45 = export("--days", "45")
+    assert doc45["coverage"] == {"sessions": 4, "read": 2, "stored": 2, "older": 0, "kept_days": 30}
+    # The 365-day window holds the same 4 sessions: it differs from the 30-day export and covers the 40-day one.
+    doc365 = export("--days", "365")
+    assert doc365["compactions"]["sessions"] == 4 != doc30["compactions"]["sessions"]
+    for doc in (doc45, doc365):
+        doc.pop("window_days"), doc.pop("generated_on")
+    assert doc45 == doc365
     assert "coverage" not in export("--project", "proj-b")
     (world[1] / "config.toml").write_text('exclude_projects = ["proj-a"]\n', encoding="utf-8")
     doc = export()
     assert "coverage" not in doc
     assert doc["compactions"]["sessions"] == 1
+
+
+def test_a_window_whose_transcripts_are_all_gone_still_exports(tmp_path, capsys):
+    world = store_with_gone_sessions(
+        tmp_path, {"proj-a": {"keep": S("keep", 40), "gone-a": S("gone-a", 2)}}, {"gone-a"}
+    )
+    code, _stdout, _err = tuning_export(world, tmp_path / "figures.json", "--days", "30", capsys=capsys)
+    assert code == 0
+    doc = json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
+    assert doc["coverage"] == {"sessions": 1, "read": 0, "stored": 1, "older": 0, "kept_days": 30}
 
 
 def test_the_cli_report_says_it_covers_1_of_3_and_carries_the_counts(tmp_path, capsys):
