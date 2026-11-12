@@ -2689,7 +2689,13 @@ def _load_snapshot_hook_module():
     exec(code, module.__dict__)
     # The script's own install_hook copies its __file__, which is not a
     # real file inside a zipapp; copy it out of the package instead.
-    module.install_hook = lambda config_dir: hook_health.install_hook_files(config_dir, (hook_health.HOOK_SCRIPT_NAME,))[0]
+    def install_hook(config_dir):
+        written = hook_health.install_hook_files(config_dir, (hook_health.HOOK_SCRIPT_NAME,))
+        if not written:
+            raise OSError(hook_health.SNAPSHOT_HOOK_FILE_TEXT)
+        return written[0]
+
+    module.install_hook = install_hook
     return module
 
 
@@ -2702,7 +2708,11 @@ def _cmd_snapshot_config(args: argparse.Namespace) -> int:
         return 0
 
     if args.install_hook:
-        dest = hook.install_hook(config_dir)
+        try:
+            dest = hook.install_hook(config_dir)
+        except OSError:
+            print(f"{hook_health.SNAPSHOT_HOOK_FILE_TEXT}. Run 'claudeglass snapshot-config --install-hook' again.", file=sys.stderr)
+            return 2
         print(f"Installed snapshot-config hook to {dest}")
         print(
             "This does not edit settings.json - add the SessionStart fragment "
@@ -3395,7 +3405,7 @@ def _cmd_update_finish(
         except OSError:
             refreshed = []
         if refreshed:
-            stdout.write(f"Refreshed {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''} this version changed.\n")
+            stdout.write(f"Updated {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''}.\n")
         _write_mod_settings(
             config_dir, mod_settings_mod.dashboard_url(args.bind, args.port), address_known=not args.no_service
         )
@@ -3914,6 +3924,17 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
     return 0
 
 
+#: The feedback items ``capture remove`` turns off, with the words its line uses: those that do nothing without
+#: the hook entries it takes out.
+_REMOVED_FEEDBACK_ITEMS = {
+    "plan_check": "plan check",
+    "feedback_reminder": "rating reminder",
+}
+assert set(_REMOVED_FEEDBACK_ITEMS) == set(capture_catalogue.FEEDBACK_MESSAGE_IDS) - set(
+    capture_catalogue.FEEDBACK_WORKS_WITHOUT_HOOK
+)
+
+
 def _capture_metric_changes(action: str, values: list[str], current: CaptureConfig) -> dict:
     """``set_capture`` arguments for ``enable``/``disable``. Raises
     ``ValueError`` naming an id it doesn't know."""
@@ -3967,6 +3988,10 @@ def _capture_settings_step(
         for script in hook_health.CAPTURE_SCRIPTS:
             hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[script])
         load_or_create_salt(config_dir)
+        if hook_health.missing_capture_scripts(config_dir, wanted):
+            # An entry for a script that is not there makes every hook call exit 2, a blocking error.
+            stdout.write(f"{hook_health.HOOK_FILES_INCOMPLETE_TEXT}\n")
+            return False
     commands = _capture_hook_commands(config_dir)
     if any(commands[spec.script] is None for spec in wanted):
         # ROB-P9: the Python or a hook script's own path can't be safely
@@ -4428,6 +4453,9 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             if action == "remove" and current.coaching_notes_on:
                 # Coaching notes run through the hook entries remove takes out.
                 changes["coaching"] = [i for i in current.coaching if i != "coaching_notes"]
+            if action == "remove" and any(i in current.feedback for i in _REMOVED_FEEDBACK_ITEMS):
+                # So do the plan check and the rating reminder; the skill and its note work without them.
+                changes["feedback"] = [i for i in current.feedback if i not in _REMOVED_FEEDBACK_ITEMS]
         elif action in _SKILL_SWITCHES:
             if len(args.values) != 1 or args.values[0] not in ("on", "off"):
                 raise ValueError(f"'capture {action}' needs on or off")
@@ -4476,6 +4504,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                     stdout.write(f"{exc}\n")
                     return 2
                 stdout.write("Saved to config.toml.\n")
+                mod_settings_mod.refresh_coaching(config_dir)
         else:
             stdout.write(f"{title} {'are' if action == 'brief' else 'is'} already {'on' if on else 'off'}.\n")
         _capture_skill_step(
@@ -4507,6 +4536,14 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 "Deep also turns on the /cg-feedback survey with its facts line, the plan check, and Claude's "
                 "one-line reminder to run the survey. 'claudeglass capture feedback off' turns them off.\n"
             )
+        if action == "remove":
+            off_too = [name for i, name in _REMOVED_FEEDBACK_ITEMS.items() if i in current.feedback and i not in preview.feedback]
+            if off_too:
+                verb, pronoun = ("are", "they") if len(off_too) > 1 else ("is", "it")
+                stdout.write(
+                    f"The {' and the '.join(off_too)} {verb} off too: {pronoun} run{'' if len(off_too) > 1 else 's'} through "
+                    "the hook entries this took out.\n"
+                )
         if action == "disable":
             also = [m for m in current.active_metrics() if m not in preview.active_metrics() and m not in args.values]
             if also:
@@ -4548,6 +4585,9 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 stdout.write(f"{exc}\n")
                 return 2
             stdout.write("Saved to config.toml. It takes effect in new sessions and subagents.\n")
+            # Whether coaching is on and the project filter are in the mod's settings file: say so now, as
+            # the dashboard's route does, so the mod hears of it within its settings reload.
+            mod_settings_mod.refresh_coaching(config_dir)
     elif action != "connect":
         stdout.write(f"Metrics capture is already {capture_view.describe(current)}.\n")
 

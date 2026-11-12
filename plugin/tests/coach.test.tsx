@@ -293,6 +293,20 @@ test('a big paste shows after the cache expired, and the line is empty again whe
   expect((await hint($, world)).tail).toBeUndefined()
 })
 
+test('with coaching off the mod draws no hint, and its present file lists nothing, so neither a new nor a 0.16.0 hook is left without its note', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { enabled: false } }) })
+  const state = rig(on)
+  await started($, world)
+  await world.clock.advance(400 * 1000)
+  await put($, state, 'x'.repeat(60_000))
+  expect((await hint($, world)).tail).toBeUndefined()
+  // A reply after the hint line was drawn writes the present file again: it must still list nothing.
+  await reply($, world, { gap: MINUTE, ...AGAIN })
+  const present = JSON.parse(String(world.files.get(`/cfg/claudeglass/mod/present/${SESSION}.json`))) as { shows: string[] }
+  expect(present.shows).toEqual([])
+  expect(faults(world)).toEqual([])
+})
+
 test('a drip goes before the cold-cache warning', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
@@ -336,7 +350,8 @@ test('a hint rests half an hour after it shows, and shows again after', async ($
   expect(String((await hint($, world)).tail)).toMatch(/^Large paste/)
 })
 
-test('a kind marked once shows once, however long it rests', async ($, on) => {
+// Forty-eight hours of timer beats take about 4.5 s, near the 5 s a test is given; three times that leaves room.
+test('a kind marked once shows once, however long it rests', { timeoutMs: 15_000 }, async ($, on) => {
   const world = prepare(on, { settings: settingsFile({ coaching: { once: ['big_paste'] } }) })
   const state = rig(on)
   await started($, world)

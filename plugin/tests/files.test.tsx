@@ -4,12 +4,13 @@ import { SENSOR_VOCAB } from '../hooks/generated/coaching.js'
 import { VERSION } from '../hooks/generated/version.js'
 import { emptySnap } from '../hooks/live'
 import { addEvent, MAX_EVENTS, sensorFile } from '../hooks/sensor'
-import { faults, prepare, reply, SDK_START, SESSION, START, T0 } from './support'
+import { faults, prepare, reply, SDK_START, SESSION, settingsFile, START, T0 } from './support'
 import type { World } from './support'
 
 const PRESENT = `/cfg/claudeglass/mod/present/${SESSION}.json`
 const SENSOR = `/cfg/claudeglass/mod/sensor/${SESSION}.json`
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
+const AGAIN = { steps: [{ input: 500, cacheRead: 120000, cacheWrite: 500, output: 100 }], usd: 0.1 }
 const COLD = { steps: [{ input: 1000, cacheRead: 0, cacheWrite: 120000, output: 200 }], usd: 0.45 }
 
 type Dollar = Parameters<typeof reply>[0]
@@ -102,6 +103,129 @@ test('the desktop hint line lists "hint" only: it has no status line', async ($,
   await mounted.unmount()
   await reply($, world, FIRST)
   expect(json(world, PRESENT).shows).toEqual(['hint'])
+})
+
+// -- R5: the heartbeat lists what the mod shows only while coaching applies ---------------------------------------
+
+test('a hint line drawn while coaching is off in the settings lists nothing: the capture hook keeps the hints', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { enabled: false } }) })
+  await $.session.start(START)
+  await hint($)
+  await reply($, world, FIRST)
+  expect(json(world, PRESENT).shows).toEqual([])
+  await world.clock.advance(61 * 1000)
+  expect(json(world, PRESENT).shows).toEqual([])
+  expect(faults(world)).toEqual([])
+})
+
+test('a hint line drawn while coaching is on lists "hint" and "status"', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { enabled: true } }) })
+  await $.session.start(START)
+  expect(json(world, PRESENT).shows).toEqual([])
+  await hint($)
+  await reply($, world, FIRST)
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
+  expect(faults(world)).toEqual([])
+})
+
+test('a missing settings file, or one from before the key was written, lists nothing', async ($, on) => {
+  const missing = prepare(on, { settings: null })
+  await $.session.start(START)
+  await hint($)
+  await reply($, missing, FIRST)
+  expect(json(missing, PRESENT).shows).toEqual([])
+  expect(faults(missing)).toEqual([])
+
+  // A stale file: a coaching block without the `enabled` key.
+  missing.files.set('/cfg/claudeglass/mod/settings.json', JSON.stringify({ schema: 1, coaching: { projects: [] } }))
+  await $.session.start(START)
+  await hint($)
+  await reply($, missing, AGAIN)
+  expect(json(missing, PRESENT).shows).toEqual([])
+})
+
+test('coaching on but this project left out lists nothing', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { enabled: true, exclude_projects: ['project'] } }) })
+  await $.session.start(START)
+  await hint($)
+  await reply($, world, FIRST)
+  expect(json(world, PRESENT).shows).toEqual([])
+})
+
+test('turning coaching off in the settings rewrites the file at the next message, not a minute later', async ($, on) => {
+  const world = prepare(on)
+  on('prompt.submit', (_$, e) => e as never)
+  await $.session.start(START)
+  await hint($)
+  await reply($, world, FIRST)
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
+
+  // Ten minutes in, the timer has just written the file and the settings are about to be read again.
+  await world.clock.advance(10 * 60 * 1000)
+  world.files.set('/cfg/claudeglass/mod/settings.json', settingsFile({ coaching: { enabled: false } }))
+  world.files.set(PRESENT, 'kept')
+  // Half a minute on, a message: the list changes, so the file is written although a minute has not passed.
+  await world.clock.advance(30 * 1000)
+  await $.prompt.submit({ text: 'next message', wait: false, origin: { kind: 'composer' } } as never)
+  expect(world.files.get(PRESENT)).not.toBe('kept')
+  expect(json(world, PRESENT).shows).toEqual([])
+  expect(faults(world)).toEqual([])
+})
+
+test('turning coaching on in the settings lists what has been drawn at the next message', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { enabled: false } }) })
+  on('prompt.submit', (_$, e) => e as never)
+  await $.session.start(START)
+  await hint($)
+  await reply($, world, FIRST)
+  expect(json(world, PRESENT).shows).toEqual([])
+
+  await world.clock.advance(10 * 60 * 1000)
+  world.files.set('/cfg/claudeglass/mod/settings.json', settingsFile({ coaching: { enabled: true } }))
+  world.files.set(PRESENT, 'kept')
+  await world.clock.advance(30 * 1000)
+  await $.prompt.submit({ text: 'next message', wait: false, origin: { kind: 'composer' } } as never)
+  expect(world.files.get(PRESENT)).not.toBe('kept')
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
+  expect(faults(world)).toEqual([])
+})
+
+test('a session that has drawn nothing lists nothing whether coaching is on or off', async ($, on) => {
+  const world = prepare(on)
+  await $.session.start(START)
+  await reply($, world, FIRST)
+  await world.clock.advance(61 * 1000)
+  expect(json(world, PRESENT).shows).toEqual([])
+})
+
+test('a present file whose write fails is tried again at the next minute, not at every message', async ($, on) => {
+  const world = prepare(on)
+  on('prompt.submit', (_$, e) => e as never)
+  let failing = false
+  let attempts = 0
+  // The world refuses a write of the present file while `failing`.
+  world.failWrite = path => {
+    if (!failing || !path.includes('/present/')) return false
+    attempts += 1
+    return true
+  }
+  await $.session.start(START)
+  await hint($)
+  failing = true
+  // The list changes (the hint line was drawn), so the next message tries to write it and fails.
+  await world.clock.advance(10 * 1000)
+  await $.prompt.submit({ text: 'one', wait: false, origin: { kind: 'composer' } } as never)
+  expect(attempts).toBe(1)
+  // Further messages inside the minute do not try again.
+  await world.clock.advance(10 * 1000)
+  await $.prompt.submit({ text: 'two', wait: false, origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'three', wait: false, origin: { kind: 'composer' } } as never)
+  expect(attempts).toBe(1)
+  // The timer's next beat does, and when the write works the file says what is shown.
+  failing = false
+  await world.clock.advance(61 * 1000)
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
+  expect(faults(world)).toEqual([])
 })
 
 test('a session id the capture hook would not look for (an underscore) gets a sensor file but no heartbeat', async ($, on) => {
