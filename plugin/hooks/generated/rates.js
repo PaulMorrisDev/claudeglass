@@ -57,17 +57,26 @@ export const RATES = {
       "output": 50.0
     },
     "claude-fable-5-1": {
-      "aliases": [
-        "best",
-        "fable",
-        "fable[1m]"
-      ],
+      "aliases": [],
       "cache_read": 0.25,
       "cache_write_1h": 20.0,
       "cache_write_5m": 12.5,
       "context_window_tokens": 1000000,
       "input": 10.0,
       "output": 50.0
+    },
+    "claude-fable-5-2": {
+      "aliases": [
+        "best",
+        "fable",
+        "fable[1m]"
+      ],
+      "cache_read": 0.2,
+      "cache_write_1h": 16.0,
+      "cache_write_5m": 10.0,
+      "context_window_tokens": 1000000,
+      "input": 8.0,
+      "output": 40.0
     },
     "claude-haiku-4-5-20251001": {
       "aliases": [
@@ -109,6 +118,15 @@ export const RATES = {
       "context_window_tokens": 1000000,
       "input": 10.0,
       "output": 50.0
+    },
+    "claude-mythos-5-2": {
+      "aliases": [],
+      "cache_read": 0.2,
+      "cache_write_1h": 16.0,
+      "cache_write_5m": 10.0,
+      "context_window_tokens": 1000000,
+      "input": 8.0,
+      "output": 40.0
     },
     "claude-opus-4": {
       "aliases": [],
@@ -234,5 +252,5 @@ export const RATES = {
       "output": 10.0
     }
   },
-  "version": "2026-10-30"
+  "version": "2026-11-12"
 };

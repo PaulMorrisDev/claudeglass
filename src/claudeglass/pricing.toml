@@ -1,4 +1,4 @@
-version = "2026-10-30"
+version = "2026-11-12"
 currency = "USD"
 source_url = "https://platform.claude.com/docs/en/about-claude/pricing"
 retrieved = "2026-10-30"
@@ -20,7 +20,8 @@ them for anything other than relative comparisons.
 # below) deliberately carry no [models.<id>.geo_multipliers] table —
 # that's the asymmetry documented here, not an omission to fix.
 
-# Context-window rule (D2/D4/COV-12): Mythos 5.1, Fable 5.1, Fable 5,
+# Context-window rule (D2/D4/COV-12): Mythos 5.2, Mythos 5.1, Fable 5.2,
+# Fable 5.1, Fable 5,
 # Sonnet 5.5, Sonnet 5, Sonnet 4.6, Haiku 5.5 and Opus 4.6+ have a
 # native 1M token context window (docs/en/model-config; the 4.6 models
 # need no beta header). Those models set context_window_tokens =
@@ -34,6 +35,25 @@ them for anything other than relative comparisons.
 # second hard-coded constant.
 
 # --- Mythos -----------------------------------------------------------
+
+# Mythos 5.2 is listed at Fable 5.2's rates ($8 / $40 per million in/out,
+# $10 / $16 cache writes, $0.20 cache reads), read from the pricing page
+# on 2026-11-12, and at twice those rates in fast mode. It carries no
+# alias: no Claude Code model shortcut points at it.
+[models."claude-mythos-5-2"]
+aliases = []
+input = 8.0
+output = 40.0
+cache_write_5m = 10.0
+cache_write_1h = 16.0
+cache_read = 0.2
+context_window_tokens = 1000000
+
+[models."claude-mythos-5-2".geo_multipliers]
+us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
+
+[models."claude-mythos-5-2".fast]
+multiplier = 2.0 # fast-mode rate is $16/$80 in/out, 2x standard
 
 # Mythos 5.1 is listed at Fable 5.1's rates ($10 / $50 per million
 # in/out, $12.50 / $20 cache writes, $0.25 cache reads). It carries no
@@ -52,8 +72,25 @@ us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
 
 # --- Fable ------------------------------------------------------------
 
-[models."claude-fable-5-1"]
+# Fable 5.2 (2026-11-12 pricing page) took the bare aliases from Fable
+# 5.1, as Opus 5.5 and Sonnet 5.5 took theirs from the models before them.
+[models."claude-fable-5-2"]
 aliases = ["fable", "fable[1m]", "best"]
+input = 8.0
+output = 40.0
+cache_write_5m = 10.0
+cache_write_1h = 16.0
+cache_read = 0.2
+context_window_tokens = 1000000
+
+[models."claude-fable-5-2".geo_multipliers]
+us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
+
+[models."claude-fable-5-2".fast]
+multiplier = 2.0 # fast-mode rate is $16/$80 in/out, 2x standard
+
+[models."claude-fable-5-1"]
+aliases = []
 input = 10.0
 output = 50.0
 cache_write_5m = 12.5
@@ -92,10 +129,11 @@ context_window_tokens = 1000000
 # Fast mode ([models.<id>.fast]): an optional per-model speed tier,
 # priced by a flat multiplier over every one of the five standard rates
 # (input/output/cache_write_5m/cache_write_1h/cache_read), applied when
-# a turn's own usage.speed == "fast". Documented for exactly three
-# models today (this one, claude-opus-5, claude-opus-4-8); every other
-# model deliberately carries no [.fast] table, so a fast-flagged turn on
-# one of them is priced at its standard rate (see pricing.py's
+# a turn's own usage.speed == "fast". Documented for exactly five
+# models today (this one, claude-opus-5, claude-opus-4-8, claude-fable-5-2
+# and claude-mythos-5-2, both above); every other model deliberately
+# carries no [.fast] table, so a fast-flagged turn on one of them is
+# priced at its standard rate (see pricing.py's
 # price_turn and PricingCoverage.fast_priced_as_standard). Cache-write/
 # read and data-residency multipliers stack on top of the fast rate
 # (documented on the pricing page), not the other way around.
