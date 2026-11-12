@@ -23,9 +23,10 @@ from types import SimpleNamespace as NS
 import pytest
 
 from claudeglass import (
-    capture, capture_catalogue as cat, cli, coaching, habits, hook_health, ignores, installer, parse, prompt_shape,
-    prompting,
+    PARSER_VERSION, capture, capture_catalogue as cat, cli, coaching, habits, hook_health, ignores, installer, parse,
+    prompt_shape, prompting,
 )
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.habits import Habits, Piece, SessionShape
 from claudeglass.config import load_config
 from claudeglass.model import Recommendation, TranscriptMeta, TranscriptResult, Turn
@@ -4328,6 +4329,25 @@ def test_quiet_output_has_its_own_mute_entry_and_is_no_question_of_the_tip_surve
     coaching.write(config_dir, coaching.from_report(report, config_dir, now=NOW))
     assert coaching.read(config_dir)["muted"] == ["quiet_output"]
     assert _coach(tmp_path, _saved_read()) == ""
+
+
+def test_coaching_does_not_mute_quiet_output_on_misfires_an_older_digest_cannot_measure(tmp_path, _salt):
+    # Claude calls the note a misfire in words, in transcripts whose digests an older parser wrote
+    # (their transcripts are gone): the words are not measured there, so they don't mute the hint.
+    lines = []
+    for n in range(cat.TIP_WRONG_MIN):
+        second = 3 * n
+        lines += [_ask(second), _note_line(_coach_text("quiet_output"), "PostToolUse", second + 1),
+                  _says(second + 2, "That ClaudeGlass note doesn't apply: I needed the whole file.")]
+
+    def rules(stamp):
+        top = _session(tmp_path, lines)
+        top.parser_version = stamp
+        session = prompting.session_prompting(NS(top=top, session_id="q"), prompting._Prices(load_pricing()))
+        return coaching.tip_rules(NS(sections=[prompting.build_section([session])]), 2.0)
+
+    assert rules(PARSER_VERSION) == (["quiet_output"], [], {})
+    assert rules(BEFORE_STAMP) == ([], [], {})
 
 
 def test_report_reread_is_off_live_but_its_tag_stays_known(tmp_path):

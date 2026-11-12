@@ -1698,7 +1698,13 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   said it was useful (empty with neither). Two wrong answers or misfires
   raise or mute a hint, and two `known` answers, more than `useful`,
   show it once a session (`coaching.tip_rules`, written to
-  `coaching.json` by the daily run).
+  `coaching.json` by the daily run). `shown` and its share count the
+  sessions this version read: a digest an older parser wrote, whose
+  transcript is gone, holds the tip fields in an older meaning, so its
+  session is left out of `shown`, `shown_pct`, the `relay` text and the
+  `quiet_output` misfires, while `notes` still counts every session.
+  Misfires of a hint that asks for a tip come from `Turn.tip_disowned`,
+  which no version changed, and still count.
 
   `prompting_glass` — only once the mod's sensor files hold a session of
   the report: a single row with `sessions` (your sessions with a message of

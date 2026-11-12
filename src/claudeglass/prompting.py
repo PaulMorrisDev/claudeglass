@@ -100,6 +100,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
 from . import events as events_mod
+from . import measured
 from . import pieces as pieces_mod
 from .context_files import _parse_ts
 from .habits import _week
@@ -327,6 +328,10 @@ class SessionPrompting:
     notes: Counter = field(default_factory=Counter)
     tips: Counter = field(default_factory=Counter)
     misfires: Counter = field(default_factory=Counter)
+    #: False when the digest has the tip fields in an older meaning
+    #: (``measured.TIP_FIELDS``): its tips and its quiet-output misfires are
+    #: not counted.
+    tips_measured: bool = True
     #: Your answers to the tip question, by ``(hint, word)``: ``useful``,
     #: ``known`` or ``wrong``.
     tip_answers: Counter = field(default_factory=Counter)
@@ -633,10 +638,14 @@ def _message_of(turns, at: datetime | None) -> int | None:
     return id(turns[first])
 
 
-def _tips(top) -> tuple[Counter, Counter, Counter]:
+def _tips(top) -> tuple[Counter, Counter, Counter, bool]:
     """Coaching notes that asked for a tip, by hint, and of those, the ones
     whose message Claude answered with a tip, and the ones where it said
-    the tip misfired."""
+    the tip misfired; and whether the digest measured the tip fields
+    (``measured.TIP_FIELDS``). A digest that did not has no tips and no
+    misfire for a hint that asks for no tip; a tip Claude called a misfire
+    is read from ``tip_disowned``, which no version changed."""
+    ok = measured.measures(top, *measured.TIP_FIELDS)
     notes: Counter = Counter()
     tips: Counter = Counter()
     misfires: Counter = Counter()
@@ -670,15 +679,15 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
         if kind in catalogue.CLAUDE_ONLY_HINTS:
             # No tip asked: only Claude's words that the note misfired count,
             # and a tip it disowned belongs to the note that asked for it.
-            if any(turn.coach_disowned and not turn.tip_disowned for turn in cycle):
+            if ok and any(turn.coach_disowned and not turn.tip_disowned for turn in cycle):
                 misfires[kind] += 1
             continue
         alone = bool(cycle) and together[message] == 1
-        if any(_relayed(kind, turn, alone) for turn in cycle):
+        if ok and any(_relayed(kind, turn, alone) for turn in cycle):
             tips[kind] += 1
         if any(turn.tip_disowned for turn in cycle):
             misfires[kind] += 1
-    return notes, tips, misfires
+    return notes, tips, misfires, ok
 
 
 def session_prompting(bundle, prices: _Prices, rating: dict | None = None) -> SessionPrompting | None:
@@ -698,7 +707,7 @@ def session_prompting(bundle, prices: _Prices, rating: dict | None = None) -> Se
     messages = messages_of(top, prices, cycles, spans)
     if not messages:
         return None
-    notes, tips, misfires = _tips(top)
+    notes, tips, misfires, tips_measured = _tips(top)
     return SessionPrompting(
         session_id=bundle.session_id,
         start=messages[0].at,
@@ -707,6 +716,7 @@ def session_prompting(bundle, prices: _Prices, rating: dict | None = None) -> Se
         notes=notes,
         tips=tips,
         misfires=misfires,
+        tips_measured=tips_measured,
         tip_answers=Counter(
             (span.feedback.tip_hint, span.feedback.tip)
             for span in spans
@@ -965,11 +975,16 @@ def build_section(
         value_labels={**TITLES, **_TREND_LABELS},
     )
     notes: Counter = Counter()
+    #: The notes of the sessions whose tips were measured: the base of what
+    #: Claude passed on, which an older digest has no figure for.
+    relay_notes: Counter = Counter()
     tips: Counter = Counter()
     misfires: Counter = Counter()
     answers: Counter = Counter()
     for s in sessions:
         notes.update(s.notes)
+        if s.tips_measured:
+            relay_notes.update(s.notes)
         tips.update(s.tips)
         misfires.update(s.misfires)
         answers.update(s.tip_answers)
@@ -996,8 +1011,10 @@ def build_section(
         rows=[
             [
                 hint, notes[hint], tips[hint],
-                100.0 * tips[hint] / notes[hint] if notes[hint] and hint in TIP_HINTS else None,
-                relay_text(hint, notes[hint], tips[hint]), glass.shown[hint], glass_where(hint, glass.surfaces),
+                100.0 * tips[hint] / relay_notes[hint] if relay_notes[hint] and hint in TIP_HINTS else None,
+                # A hint that asks for no tip has none to measure: its text says so whatever the digests.
+                relay_text(hint, notes[hint] if hint in catalogue.CLAUDE_ONLY_HINTS else relay_notes[hint], tips[hint]),
+                glass.shown[hint], glass_where(hint, glass.surfaces),
                 tips[hint] + glass.shown[hint], misfires[hint],
                 answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")],
                 trust_pct(answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")], misfires[hint]),

@@ -11,7 +11,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture, capture_catalogue as cat, events as events_mod, habits, prompt_shape, prompting
+from claudeglass import PARSER_VERSION, capture, capture_catalogue as cat, events as events_mod, habits, prompt_shape, prompting
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
@@ -1028,6 +1029,41 @@ def test_a_later_notes_tip_is_not_credited_to_an_earlier_note_of_the_same_messag
     ])
     assert session.notes == {"cold_return": 1, "report_reread": 1}
     assert session.tips == {"report_reread": 1}, dict(session.tips)
+
+
+def test_tips_of_a_session_read_by_an_older_version_are_left_out_of_shown_and_its_share(tmp_path):
+    # The same coaching notes and replies in both; the second's digest is from before the stamp, so
+    # the tip words a newer parser keeps are not measured in it (its transcript is gone).
+    disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_own_tip('drip_feed')}"
+    misfire = "That ClaudeGlass note doesn't apply: I needed the whole file."
+    lines = [
+        *_START,
+        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_own_tip('drip_feed')}"),
+        _said("two", 4), _note_line("drip_feed", 4), _reply(5, edit=True, say=disowned),
+        _said("three", 6), _note_line("quiet_output", 6), _reply(7, say=misfire),
+    ]
+
+    def stamped(name, stamp):
+        top = _parse(tmp_path, lines, name)
+        top.parser_version = stamp
+        return prompting.session_prompting(NS(top=top, session_id=name), prompting._Prices(PRICING))
+
+    current, older = stamped("current.jsonl", PARSER_VERSION), stamped("older.jsonl", BEFORE_STAMP)
+    assert current.tips_measured and not older.tips_measured
+    assert current.tips == {"drip_feed": 2} and current.misfires == {"drip_feed": 1, "quiet_output": 1}
+    # A tip the reply disowned is a misfire an older digest still shows (tip_disowned is unchanged);
+    # a note called a misfire in words, with no tip, is a field it lacks.
+    assert not older.tips and older.misfires == {"drip_feed": 1}
+    assert older.notes == current.notes == {"drip_feed": 2, "quiet_output": 1}
+    rows = {r[0]: r for r in prompting.build_section([current, older]).tables[1].rows}
+    # Notes count every session; what Claude passed on, its share and the relay text only the measured one.
+    assert rows["drip_feed"][:5] == ["drip_feed", 4, 2, 100.0, "relayed 2 of 2"]
+    assert rows["drip_feed"][8] == 2
+    assert rows["quiet_output"][1:5] == [2, 0, None, "no tip asked"]
+    assert rows["quiet_output"][8] == 1
+    # With every session older there is nothing to share out: no share, no relay text.
+    row = prompting.build_section([older]).tables[1].rows[0]
+    assert row[:5] == ["drip_feed", 2, 0, None, None] and row[8] == 1
 
 
 def test_a_disowned_tip_is_not_a_misfire_of_a_quiet_output_note_in_the_same_message(tmp_path):

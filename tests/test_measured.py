@@ -299,3 +299,12 @@ def test_the_playbook_clauses_on_lone_lookups_take_numerator_and_base_from_measu
                                + [_looker(8, 4, None, probe_shell_calls=None) for _ in range(n)])
     assert "one lookup" not in habits._item_name_files(only_older).evidence
     assert "one lookup" not in habits._item_explore_research(only_older).evidence
+
+
+def test_the_tips_of_the_older_row_are_not_measured(older_store):
+    from claudeglass import prompting
+
+    by_id = {s.session_id: s for s in prompting.collect(corpus_from_store(older_store), PRICING)}
+    assert set(by_id) == {"sess-new", "sess-old"}
+    assert by_id["sess-new"].tips_measured is True
+    assert by_id["sess-old"].tips_measured is False
