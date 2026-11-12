@@ -2482,3 +2482,65 @@ def test_remove_dry_run_leaves_the_feedback_items_on(tmp_path):
     rc, out = _capture(config_dir, "remove", "--dry-run")
     assert "Dry run: config.toml left unchanged." in out
     assert {"plan_check", "feedback_reminder"} <= set(load_config(config_dir=config_dir).capture.feedback)
+
+
+# -- a hook file the hook has open for a moment: the replace is tried again -----------------------------------------
+
+
+def _replace_of(monkeypatch, name: str, errors: list) -> list:
+    """The final rename of ``name`` raises the ``errors`` in turn (then works); the sleeps are not waited for.
+    Returns the calls made for ``name``."""
+    real_replace = os.replace
+    calls: list = []
+    pauses: list = []
+
+    def _replace(src, dst):
+        if Path(dst).name == name:
+            calls.append(src)
+            if len(calls) <= len(errors):
+                raise errors[len(calls) - 1]
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _replace)
+    monkeypatch.setattr(hook_health.time, "sleep", pauses.append)
+    return calls
+
+
+def test_install_hook_files_tries_a_refused_replace_again_and_installs_the_file(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    calls = _replace_of(monkeypatch, cat.HOOK_SCRIPT, [PermissionError("open"), PermissionError("open")])
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert len(calls) == 3
+    assert (config_dir / "hooks" / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    assert "Could not finish copying" not in out
+    assert _capture_commands_in(_settings(config_dir))
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_install_hook_files_gives_up_after_twenty_refused_tries(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    calls = _replace_of(monkeypatch, cat.HOOK_MODULE, [PermissionError("open")] * 100)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert len(calls) == 20
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_connect_ends_as_before_when_every_try_is_refused(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _replace_of(monkeypatch, cat.HOOK_SCRIPT, [PermissionError("open")] * 100)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out
+    assert _settings(config_dir) == {"model": "opus"}
+
+
+def test_install_hook_files_tries_another_kind_of_error_once(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    calls = _replace_of(monkeypatch, cat.HOOK_MODULE, [OSError("disk full")] * 100)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert len(calls) == 1
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
