@@ -1076,14 +1076,6 @@ def changes_setting(point: ChangePoint, key: str) -> bool:
     return any(label in names for label in point.keys)
 
 
-def last_change(points: list[ChangePoint], key: str, project: str | Collection[str]) -> datetime | None:
-    """When the main session's ``key`` last changed in ``project`` (a key, or
-    every key one project goes by): the newest of ``points`` that changes it
-    (:func:`changes_setting`) and applies there (:func:`applies_to`). ``None``
-    when none does."""
-    return max((p.ts for p in points if changes_setting(p, key) and applies_to(p, project)), default=None)
-
-
 def last_change_point(points: list[ChangePoint], key: str, project: str | Collection[str]) -> ChangePoint | None:
     """The newest of ``points`` that changes the main session's ``key``
     (:func:`changes_setting`) and applies in ``project`` (:func:`applies_to`:
@@ -1145,7 +1137,6 @@ __all__ = [
     "applies_to",
     "change_points",
     "changes_setting",
-    "last_change",
     "last_change_point",
     "latest",
     "model_runs",
