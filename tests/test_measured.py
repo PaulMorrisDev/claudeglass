@@ -308,3 +308,32 @@ def test_the_tips_of_the_older_row_are_not_measured(older_store):
     assert set(by_id) == {"sess-new", "sess-old"}
     assert by_id["sess-new"].tips_measured is True
     assert by_id["sess-old"].tips_measured is False
+
+
+# -- the Data quality line ------------------------------------------------------------------------
+
+
+def test_a_store_with_one_older_session_says_1_of_2_on_data_quality(older_store):
+    from claudeglass import helptext
+    from claudeglass.model import Diagnostics
+    from claudeglass.render.html import render_html
+    from claudeglass.render.markdown import render_markdown
+
+    model = _report_of(corpus_from_store(older_store))
+    assert (model.meta.older_sessions, model.meta.sessions) == (1, 2)
+    sentence = older_sentence(1, 2)
+    table = helptext.diagnostics_table(Diagnostics(), older=(1, 2))
+    assert table.rows[-1] == ["older_sessions", "1 of 2", sentence]
+    assert table.value_labels["older_sessions"] == helptext.OLDER_SESSIONS_LABEL == "Sessions read by an older version"
+    # With no older session the page has no such row and every other row is where it was.
+    plain = helptext.diagnostics_table(Diagnostics())
+    assert helptext.diagnostics_table(Diagnostics(), older=(0, 2)).rows == plain.rows
+    assert helptext.diagnostics_table(Diagnostics(), older=None).rows == plain.rows
+    assert table.rows[:-1] == plain.rows
+    # The reports say it once, and only when a session was read by an older version.
+    assert render_markdown(model).count(sentence) == 1
+    assert render_html(model).count(sentence) == 1
+    only_new = _report_of(corpus_from_store(older_store, session_ids=["sess-new"]))
+    assert (only_new.meta.older_sessions, only_new.meta.sessions) == (0, 1)
+    assert "read by an older version" not in render_markdown(only_new)
+    assert "read by an older version" not in render_html(only_new)

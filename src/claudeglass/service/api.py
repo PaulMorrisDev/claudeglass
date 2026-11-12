@@ -2914,6 +2914,7 @@ def make_handler(
                     statusline=statusline,
                     parser_notes=model.parser_notes,
                     unpriced=unpriced,
+                    older=(model.meta.older_sessions, model.meta.sessions),
                 )
             )
         )

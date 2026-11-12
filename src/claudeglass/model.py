@@ -2098,6 +2098,12 @@ class ReportMeta:
     #: per model family, and the ``default_family``). Two floats per
     #: family and nothing else; the mod's settings file keeps it.
     calibration: dict = field(default_factory=dict)
+    #: Of ``sessions`` (those with a top-level transcript in this window), how
+    #: many hold a digest an older parser wrote whose figures the newer ones
+    #: leave out (``measured.older_sessions``). 0 when every transcript was read
+    #: by this version.
+    older_sessions: int = 0
+    sessions: int = 0
 
 
 @dataclass(slots=True)

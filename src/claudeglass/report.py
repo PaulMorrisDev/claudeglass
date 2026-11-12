@@ -155,6 +155,7 @@ from . import (
     helptext,
     hook_costs,
     limits,
+    measured as measured_mod,
     model_swap,
     prompting,
     quality,
@@ -1738,6 +1739,8 @@ def build_report(
         session_cc_total[record.session_id] = session_cc_total_tokens
         session_recache_cc[record.session_id] = session_recache_cc_tokens
 
+    older_n, sessions_m = measured_mod.older_sessions(corpus.sessions)
+
     if group_by:
         # "agent"/"model"/"entrypoint" vary per transcript within a
         # session (see _transcript_key_lookup's docstring — R5 fix);
@@ -2272,6 +2275,8 @@ def build_report(
         # by_model table shows can be looked up in `rates`.
         model_ids=pricing.model_ids_meta(overview.by_model.keys()),
         calibration=calibration.to_dict(),
+        older_sessions=older_n,
+        sessions=sessions_m,
     )
 
     # Fixes 2/3: these two counters are pricing-time totals (every turn

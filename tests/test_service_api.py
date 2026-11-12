@@ -2546,6 +2546,37 @@ def test_diagnostics_names_a_model_the_rate_card_has_no_price_for(tmp_path, monk
         handle.store.close()
 
 
+def test_diagnostics_route_carries_the_older_sessions_row(tmp_path):
+    """R10: a store with one session read by an older version (its transcript
+    gone) says "1 of 2" on the Data quality page; with none, no row."""
+    from datetime import datetime, timedelta, timezone
+
+    from helpers import fallback_read_session, store_with_older_sessions
+
+    when = datetime.now(timezone.utc) - timedelta(days=2)
+    sessions = {sid: fallback_read_session(sid, when) for sid in ("sess-new", "sess-old")}
+    for name, older, expected in (("with", {"sess-old"}, "1 of 2"), ("without", set(), None)):
+        store, options = store_with_older_sessions(tmp_path / name, sessions, older)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), service_api.make_handler(store, options))
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        handle = _ServerHandle(httpd, thread, corpus=None, store=store, options=options)
+        try:
+            resp, body = handle.get_json("/api/diagnostics?window=all")
+            assert resp.status == 200
+            rows = {row[0]: row for row in body["data"]["rows"]}
+            if expected is None:
+                assert "older_sessions" not in rows
+            else:
+                assert rows["older_sessions"][1] == expected
+                assert body["data"]["rows"][-1][0] == "older_sessions"
+                assert body["data"]["value_labels"]["older_sessions"] == "Sessions read by an older version"
+            assert_privacy(body)
+        finally:
+            handle.close()
+            store.close()
+
+
 def test_diagnostics_has_no_unpriced_models_row_when_every_model_is_priced(server):
     resp, body = server.get_json("/api/diagnostics")
     assert "pricing_unknown_models" not in [row[0] for row in body["data"]["rows"]]

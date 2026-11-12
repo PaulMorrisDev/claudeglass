@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 
+from . import measured
 from .capture_catalogue import TASK_LABELS
 from .capture_catalogue import THEMES as CAPTURE_THEMES
 from .habits import ITEMS as HABIT_ITEMS
@@ -5882,12 +5883,18 @@ UNPRICED_MODELS_LABEL = (
 )
 
 
+#: The Data quality row for sessions whose digest an older parser wrote
+#: (``measured.older_sessions``), also not a ``Diagnostics`` field.
+OLDER_SESSIONS_LABEL = "Sessions read by an older version"
+
+
 def diagnostics_table(
     diagnostics: Diagnostics,
     hook=None,
     statusline=None,
     parser_notes: dict | None = None,
     unpriced: dict | None = None,
+    older: tuple[int, int] | None = None,
 ) -> Table:
     """The parse-quality counters as a plain-English table (the Data
     quality page, ``GET /api/diagnostics``). Rows keep the raw field name
@@ -5902,7 +5909,11 @@ def diagnostics_table(
     no price for to its ``turns`` and ``tokens`` (the report's
     ``pricing_unknown_models`` table); when it is not empty one more row
     lists them, since those replies cost $0 in every figure and nothing
-    else on this page says so.
+    else on this page says so. ``older`` is ``(n, m)`` from
+    ``measured.older_sessions`` (the report's ``meta.older_sessions`` and
+    ``meta.sessions``); when ``n`` is not 0 a last row says how many of the
+    window's sessions an older version read, since the newer figures leave
+    those out.
 
     With a hook or statusline row, ``row_groups`` splits the table in two:
     those rows describe your setup and every session in every project
@@ -5941,6 +5952,8 @@ def diagnostics_table(
             for model_id, counts in sorted(unpriced.items())
         )
         rows.append(["pricing_unknown_models", value, UNPRICED_MODELS_LABEL[1]])
+    if older and older[0]:
+        rows.append(["older_sessions", f"{older[0]:,} of {older[1]:,}", measured.older_sentence(*older)])
     return Table(
         name="data_quality",
         title="What could be read",
@@ -5959,7 +5972,8 @@ def diagnostics_table(
         value_labels={"snapshot_hook": "Config snapshot hook", "statusline": "Statusline (usage limits)"}
         | {key: label for key, (label, _) in DIAGNOSTIC_LABELS.items()}
         | {key: label for key, (label, _) in _PARSER_NOTE_LABELS.items()}
-        | {"pricing_unknown_models": UNPRICED_MODELS_LABEL[0]},
+        | {"pricing_unknown_models": UNPRICED_MODELS_LABEL[0]}
+        | {"older_sessions": OLDER_SESSIONS_LABEL},
     )
 
 

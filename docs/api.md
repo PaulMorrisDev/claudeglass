@@ -971,6 +971,14 @@ value `working` or `needs attention`. With a `project`, the counters
 count that project's sessions, but these two rows still describe the
 whole machine: the hook and the statusline are not per project.
 
+The last row, `older_sessions`, is there only when some session of the
+window holds a digest an older parser wrote, whose transcript Claude Code
+has deleted: the newer figures leave that session out. Its value is
+`"<n> of <m>"` (sessions read by an older version, of the window's sessions
+with a main transcript; the report's `meta.older_sessions` and
+`meta.sessions`) and its meaning is one sentence saying so. With a
+`project`, `n` and `m` are that project's.
+
 ### `GET /api/profiles`
 
 Every profile the service knows about (v0.3): the eight shipped
