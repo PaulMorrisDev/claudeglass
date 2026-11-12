@@ -389,7 +389,9 @@ def _omit_claude_md(draft: _Draft, tables) -> None:
         evidence = f"About {round(tokens):,} CLAUDE.md tokens at each of {int(whatif._num(row.get('spawns')) or 0)} spawns."
         if managed:
             evidence += f" Managed policy CLAUDE.md ({round(managed):,} tokens) still loads either way."
-        if unused:
+        if unused and used + unused == 1:
+            evidence += " The one run that said, said it didn't use it."
+        elif unused:
             evidence += f" {unused} of the {used + unused} runs that said, said they didn't use it."
         else:
             evidence += " Not ticked: move the rules it needs into its agent file first."
