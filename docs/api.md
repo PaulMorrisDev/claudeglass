@@ -981,6 +981,12 @@ with a main transcript; the report's `meta.older_sessions` and
 runs (`/api/health` says `starting`) the row is left out, since an older
 session's transcript may still be on disk and about to be read again.
 
+The command-line report's `meta.sessions_left_out` (in `--json`, and as one
+line in the Markdown and HTML meta list) is how many sessions of the window
+its figures leave out: the dashboard's database holds them and their
+transcripts were not found. It is `0` when none is missing, when there is no
+database, and always in `/api/report`, which reads the database itself.
+
 ### `GET /api/profiles`
 
 Every profile the service knows about (v0.3): the eight shipped

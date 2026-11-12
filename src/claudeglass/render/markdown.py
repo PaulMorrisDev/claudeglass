@@ -66,7 +66,7 @@ def _render_meta(model: ReportModel) -> list[str]:
         f"- Billing mode: {meta.billing_mode}" + (f" ({meta.billing_source})" if meta.billing_source else ""),
     ]
     # Directly after "- Window:".
-    gone = covered.gone_sentence(meta.sessions, meta.sessions_known, meta.kept_days)
+    gone = covered.gone_sentence(meta.sessions, meta.sessions + meta.sessions_left_out)
     if gone:
         lines.insert(3, f"- {gone}")
     if meta.thresholds:

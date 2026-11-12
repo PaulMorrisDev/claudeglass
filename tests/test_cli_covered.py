@@ -26,7 +26,7 @@ NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 ONE = (
     "These figures cover 1 of 3 sessions in this window. "
-    "Claude Code keeps transcripts for 30 days here, and the dashboard has the other 2."
+    "The transcripts of the other 2 were not found, and the dashboard still has those sessions."
 )
 
 
@@ -88,7 +88,12 @@ def report(world, *extra, capsys):
 
 STORED_2 = (
     "2 of 3 sessions in this window are read from what the dashboard kept, "
-    "because Claude Code keeps transcripts for 30 days here."
+    "because their transcripts were not found."
+)
+#: The same line as ``tuning summary`` prints it, for a file that may have come from another machine.
+STORED_2_FILE = (
+    "2 of 3 sessions in this window were read from what the dashboard kept "
+    "on the machine that made this file, because their transcripts were not found there."
 )
 
 
@@ -100,7 +105,7 @@ def test_tuning_export_covers_all_3_and_says_2_were_read_from_what_the_dashboard
     code, _stdout, err = tuning_export(world, out, capsys=capsys)
     assert code == 0
     doc = json.loads(out.read_text(encoding="utf-8"))
-    assert doc["coverage"] == {"sessions": 3, "read": 1, "stored": 2, "older": 0, "kept_days": 30}
+    assert doc["coverage"] == {"sessions": 3, "read": 1, "stored": 2, "older": 0}
     assert list(doc).index("coverage") == 6
     assert doc["compactions"]["sessions"] == 3
     assert doc["pieces"]["total"] == 3
@@ -109,7 +114,7 @@ def test_tuning_export_covers_all_3_and_says_2_were_read_from_what_the_dashboard
     assert (config_dir / "service.db").read_bytes() == before
     capsys.readouterr()
     assert cli.main(["tuning", "summary", str(out)]) == 0
-    assert capsys.readouterr().out.splitlines()[1] == STORED_2
+    assert capsys.readouterr().out.splitlines()[1] == STORED_2_FILE
     # The dashboard's own corpus gives the same figures.
     config = load_config(config_dir)
     since = discovery.window_start_iso(30, config.tz)
@@ -145,7 +150,7 @@ def test_the_export_marks_the_gone_sessions_an_older_version_read(tmp_path, caps
     assert doc["prompting"]["totals"]["typed"] == 3
     capsys.readouterr()
     assert cli.main(["tuning", "summary", str(out)]) == 0
-    assert capsys.readouterr().out.splitlines()[1:3] == [STORED_2, older]
+    assert capsys.readouterr().out.splitlines()[1:3] == [STORED_2_FILE, older]
 
 
 def test_no_store_or_nothing_gone_leaves_the_export_as_it_was(tmp_path, capsys):
@@ -172,7 +177,7 @@ def test_a_store_that_cannot_be_read_leaves_the_export_as_it_was(tmp_path, capsy
     assert "coverage" not in json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
 
 
-def test_the_days_claude_code_keeps_come_from_the_newest_settings_snapshot(tmp_path, capsys):
+def test_the_sentences_name_no_day_count_whatever_the_settings_say(tmp_path, capsys):
     world = three_sessions(tmp_path)
     snapshots = world[1] / "snapshots"
     snapshots.mkdir()
@@ -183,8 +188,11 @@ def test_the_days_claude_code_keeps_come_from_the_newest_settings_snapshot(tmp_p
     code, _stdout, err = tuning_export(world, tmp_path / "figures.json", capsys=capsys)
     assert code == 0
     doc = json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
-    assert doc["coverage"]["kept_days"] == 45
-    assert "for 45 days here" in err
+    assert "kept_days" not in doc["coverage"]
+    assert err == f"claudeglass tuning export: {STORED_2}\n"
+    code, out, _err = report(world, capsys=capsys)
+    assert code == 0 and "- " + ONE in out.splitlines()
+    assert "45" not in ONE and "days here" not in out
 
 
 def test_only_gone_sessions_in_the_window_and_the_picked_projects_count(tmp_path, capsys):
@@ -203,9 +211,9 @@ def test_only_gone_sessions_in_the_window_and_the_picked_projects_count(tmp_path
         return json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
 
     doc30 = export("--days", "30")
-    assert doc30["coverage"] == {"sessions": 3, "read": 2, "stored": 1, "older": 0, "kept_days": 30}
+    assert doc30["coverage"] == {"sessions": 3, "read": 2, "stored": 1, "older": 0}
     doc45 = export("--days", "45")
-    assert doc45["coverage"] == {"sessions": 4, "read": 2, "stored": 2, "older": 0, "kept_days": 30}
+    assert doc45["coverage"] == {"sessions": 4, "read": 2, "stored": 2, "older": 0}
     # The 365-day window holds the same 4 sessions: it differs from the 30-day export and covers the 40-day one.
     doc365 = export("--days", "365")
     assert doc365["compactions"]["sessions"] == 4 != doc30["compactions"]["sessions"]
@@ -226,7 +234,7 @@ def test_a_window_whose_transcripts_are_all_gone_still_exports(tmp_path, capsys)
     code, _stdout, _err = tuning_export(world, tmp_path / "figures.json", "--days", "30", capsys=capsys)
     assert code == 0
     doc = json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
-    assert doc["coverage"] == {"sessions": 1, "read": 0, "stored": 1, "older": 0, "kept_days": 30}
+    assert doc["coverage"] == {"sessions": 1, "read": 0, "stored": 1, "older": 0}
 
 
 def test_the_cli_report_says_it_covers_1_of_3_and_carries_the_counts(tmp_path, capsys):
@@ -238,7 +246,8 @@ def test_the_cli_report_says_it_covers_1_of_3_and_carries_the_counts(tmp_path, c
     assert lines.index("- " + ONE) < lines.index("## Assumptions")
     code, out, _err = report(world, "--json", capsys=capsys)
     meta = json.loads(out)["report"]["meta"]
-    assert (meta["sessions"], meta["sessions_known"], meta["kept_days"]) == (1, 3, 30)
+    assert (meta["sessions"], meta["sessions_left_out"]) == (1, 2)
+    assert "sessions_known" not in meta and "kept_days" not in meta
     page = tmp_path / "report.html"
     code, _out, _err = report(world, "--html", str(page), capsys=capsys)
     assert code == 0
@@ -251,7 +260,7 @@ def test_the_cli_report_says_it_covers_1_of_3_and_carries_the_counts(tmp_path, c
     assert code == 0 and "These figures cover" not in out
     code, out, _err = report(world, "--json", capsys=capsys)
     meta = json.loads(out)["report"]["meta"]
-    assert meta["sessions_known"] == 0
+    assert meta["sessions_left_out"] == 0
 
 
 def test_export_says_on_stderr_what_it_covers_and_writes_the_same_file(tmp_path, capsys):

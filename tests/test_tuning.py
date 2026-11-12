@@ -64,6 +64,10 @@ SNAKE_CASE = re.compile(r"\b[a-z]+_[a-z0-9_]+\b")
 CAMEL_CASE = re.compile(r"\b[a-z]+[A-Z][A-Za-z]*\b")
 FILLER = re.compile(r"\b(just|simply)\b", re.I)
 MAX_SENTENCE_WORDS = 25
+#: ``covered.stored_sentence(..., of_file=True)`` is worded by decision (it must say whose dashboard and
+#: where the transcripts were not found) and runs to 28 words: the one sentence allowed past the limit.
+FILE_STORED_MARK = "on the machine that made this file, because their transcripts were not found there."
+FILE_STORED_SENTENCE_WORDS = 28
 
 
 @pytest.fixture(autouse=True)
@@ -79,7 +83,8 @@ def _plain(text: str, where: str = "summary") -> None:
     assert not CAMEL_CASE.search(text), f"{where}: camelCase name in {text!r}"
     assert " -- " not in text, f"{where}: dash aside in {text!r}"
     for sentence in re.split(r"(?<=[.?!])\s+", text):
-        assert len(sentence.split()) <= MAX_SENTENCE_WORDS, f"{where}: sentence over 25 words: {sentence!r}"
+        limit = FILE_STORED_SENTENCE_WORDS if FILE_STORED_MARK in sentence else MAX_SENTENCE_WORDS
+        assert len(sentence.split()) <= limit, f"{where}: sentence over {limit} words: {sentence!r}"
 
 
 # -- the sample document and ways to break it ------------------------------------------------
@@ -616,9 +621,10 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     lines = text.splitlines()
     assert lines[0] == "Tuning figures made on 2026-09-19 for the last 30 days, by ClaudeGlass 0.14.0."
     # The sample's coverage block: 9 read from transcripts and 3 from the store make all 12.
+    # A summary is read on any machine, so it says whose dashboard and where the transcripts were missing.
     assert lines[1] == (
-        "3 of 12 sessions in this window are read from what the dashboard kept, "
-        "because Claude Code keeps transcripts for 30 days here."
+        "3 of 12 sessions in this window were read from what the dashboard kept "
+        "on the machine that made this file, because their transcripts were not found there."
     )
     assert lines[2] == (
         "1 of 12 sessions in this window was read by an older version and its transcripts are gone, "
@@ -654,8 +660,36 @@ def test_a_coverage_block_fails_the_checks_like_any_block():
     problems = tuning.validate(_put(_sample(), "coverage.extra", 1))
     assert any("coverage: has a key" in problem for problem in problems)
     doc = _sample()
-    del doc["coverage"]["kept_days"]
-    assert "coverage.kept_days: is missing" in tuning.validate(doc)
+    del doc["coverage"]["stored"]
+    assert "coverage.stored: is missing" in tuning.validate(doc)
+    # The days Claude Code keeps transcripts are not in the block: a file that has them is refused.
+    problems = tuning.validate(_put(_sample(), "coverage.kept_days", 30))
+    assert any("coverage: has a key" in problem for problem in problems)
+    assert list(_sample()["coverage"]) == ["sessions", "read", "stored", "older"]
+
+
+def test_the_coverage_lines_say_it_for_the_machine_that_runs_them_or_for_a_file():
+    block = {"sessions": 82, "read": 9, "stored": 0, "older": 0}
+    assert tuning.coverage_lines(block) == [
+        "These figures cover 9 of 82 sessions in this window. "
+        "The transcripts of the other 73 were not found, and the dashboard still has those sessions."
+    ]
+    assert tuning.coverage_lines(block, of_file=True) == [
+        "These figures cover 9 of 82 sessions in this window. "
+        "The transcripts of the other 73 were not found on the machine that made this file."
+    ]
+    block = {"sessions": 82, "read": 9, "stored": 73, "older": 73}
+    assert tuning.coverage_lines(block) == [
+        "73 of 82 sessions in this window are read from what the dashboard kept, "
+        "because their transcripts were not found.",
+        "73 of 82 sessions in this window were read by an older version and their transcripts are gone, "
+        "so the newer figures leave them out.",
+    ]
+    assert tuning.coverage_lines(block, of_file=True)[0] == (
+        "73 of 82 sessions in this window were read from what the dashboard kept "
+        "on the machine that made this file, because their transcripts were not found there."
+    )
+    assert tuning.coverage_lines(None) == tuning.coverage_lines({}) == []
 
 
 def test_the_summary_gives_the_tools_list_saving_by_agent_type_when_the_file_has_one():
@@ -1133,17 +1167,17 @@ def test_build_writes_the_coverage_block_first_only_when_given_one(world):
     from claudeglass import covered, measured
 
     assert "coverage" not in _build(world)
-    doc = _build(world, coverage=covered.Coverage(sessions=8, read=6, stored=2, kept_days=30))
+    doc = _build(world, coverage=covered.Coverage(sessions=8, read=6, stored=2))
     assert list(doc)[6] == "coverage"
-    assert doc["coverage"] == {"sessions": 8, "read": 6, "stored": 2, "older": 0, "kept_days": 30}
+    assert doc["coverage"] == {"sessions": 8, "read": 6, "stored": 2, "older": 0}
     assert tuning.validate(doc) == []
-    assert tuning.summary_text(doc).splitlines()[1] == covered.stored_sentence(2, 8, 30)
-    doc = _build(world, coverage=covered.Coverage(8, 6, 0, 30))
-    assert tuning.summary_text(doc).splitlines()[1] == covered.gone_sentence(6, 8, 30)
+    assert tuning.summary_text(doc).splitlines()[1] == covered.stored_sentence(2, 8, of_file=True)
+    doc = _build(world, coverage=covered.Coverage(8, 6, 0))
+    assert tuning.summary_text(doc).splitlines()[1] == covered.gone_sentence(6, 8, of_file=True)
     # A session an older parser wrote is counted once, for the newer figures to leave out.
     corpus = copy.deepcopy(world.corpus)
     corpus.sessions[0].top.parser_version = measured.BEFORE_STAMP
-    doc = _build(world, corpus=corpus, coverage=covered.Coverage(8, 8, 0, 30))
+    doc = _build(world, corpus=corpus, coverage=covered.Coverage(8, 8, 0))
     assert doc["coverage"]["older"] == 1
 
 

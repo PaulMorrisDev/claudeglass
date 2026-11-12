@@ -838,20 +838,19 @@ def build(
 # -- coverage ----------------------------------------------------------------------------------
 
 
-@_block("coverage", _counts("sessions", "read", "stored", "older", "kept_days"), required=False)
+@_block("coverage", _counts("sessions", "read", "stored", "older"), required=False)
 def _coverage(ctx: _Ctx) -> dict | None:
     """What the document covers, when the dashboard's store holds sessions
     of the window whose transcripts are gone: the window's ``sessions``,
     those ``read`` from transcripts on disk, those ``stored`` (read from
     the store's digests), the ``older`` of the document's sessions an older
     version read, which the newer figures leave out
-    (``measured.older_sessions``), and ``kept_days``, how long Claude Code
-    keeps transcripts here. Left out otherwise."""
+    (``measured.older_sessions``). Left out otherwise."""
     c = ctx.coverage
     if c is None:
         return None
     older, _covered = measured.older_sessions(ctx.corpus.sessions)
-    return {"sessions": c.sessions, "read": c.read, "stored": c.stored, "older": older, "kept_days": c.kept_days}
+    return {"sessions": c.sessions, "read": c.read, "stored": c.stored, "older": older}
 
 
 # -- capture -----------------------------------------------------------------------------------
@@ -1906,19 +1905,19 @@ def _total(node) -> int:
     return int(node) if isinstance(node, (int, float)) and not isinstance(node, bool) else 0
 
 
-def coverage_lines(block: dict | None) -> list[str]:
+def coverage_lines(block: dict | None, *, of_file: bool = False) -> list[str]:
     """The plain lines for a document's ``coverage`` block, none without
     one: the sessions the figures cover, those read from what the dashboard
-    kept, and those of them the newer figures leave out."""
+    kept, and those of them the newer figures leave out. ``of_file`` words
+    them for a reader of a file another machine made (``summary_text``)."""
     if not block:
         return []
     covered = block["read"] + block["stored"]
-    days = block["kept_days"]
     return [
         line
         for line in (
-            covered_mod.gone_sentence(covered, block["sessions"], days),
-            covered_mod.stored_sentence(block["stored"], block["sessions"], days),
+            covered_mod.gone_sentence(covered, block["sessions"], of_file=of_file),
+            covered_mod.stored_sentence(block["stored"], block["sessions"], of_file=of_file),
             measured.older_sentence(block["older"], covered),
         )
         if line
@@ -1936,7 +1935,7 @@ def summary_text(doc) -> str:
         f"Tuning figures made on {doc['generated_on']} for the last {_n(doc['window_days'], 'day')}, "
         f"by ClaudeGlass {doc['tool_version']}."
     ]
-    lines += coverage_lines(doc.get("coverage"))
+    lines += coverage_lines(doc.get("coverage"), of_file=True)
     for lines_of, name in (
         (_capture_lines, "capture"),
         (_prompting_lines, "prompting"),

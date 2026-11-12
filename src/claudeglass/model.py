@@ -2104,14 +2104,12 @@ class ReportMeta:
     #: by this version.
     older_sessions: int = 0
     sessions: int = 0
-    #: Set by the CLI's report only (``cli._store_coverage``), when the
-    #: dashboard's store holds sessions of this window whose transcripts are
-    #: gone: all the window's sessions, of which ``sessions`` were read from
-    #: transcripts, and how many days Claude Code keeps transcripts here
-    #: (``covered.kept_days``). 0 otherwise, and always 0 on the dashboard,
-    #: which reads the store.
-    sessions_known: int = 0
-    kept_days: int = 0
+    #: Set by the CLI's report only (``cli._store_coverage``): how many
+    #: sessions of this window the figures leave out, because the dashboard's
+    #: store holds them and their transcripts were not found. 0 when none is
+    #: missing, with no store, and always on the dashboard, which reads the
+    #: store.
+    sessions_left_out: int = 0
 
 
 @dataclass(slots=True)

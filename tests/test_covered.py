@@ -1,6 +1,5 @@
-"""What an export or a CLI report covers (``covered``, R12): the sentences, the
-days Claude Code keeps transcripts, the store's list of a window's sessions
-and the report's meta lines. The CLI's own promises are in
+"""What an export or a CLI report covers (``covered``, R12): the sentences,
+the store's list of a window's sessions and the report's meta lines. The CLI's own promises are in
 ``tests/test_cli_covered.py``.
 """
 
@@ -8,7 +7,6 @@ from __future__ import annotations
 
 import html
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace as NS
 
 import pytest
 
@@ -27,7 +25,7 @@ NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 ONE = (
     "These figures cover 1 of 3 sessions in this window. "
-    "Claude Code keeps transcripts for 30 days here, and the dashboard has the other 2."
+    "The transcripts of the other 2 were not found, and the dashboard still has those sessions."
 )
 
 
@@ -49,53 +47,80 @@ def _salt():
     parse.set_salt(b"d" * 32)
 
 
-def test_kept_days_is_the_newest_settings_snapshots_cleanup_period_else_30():
-    def eff(value):
-        return NS(data={"effective": {"cleanupPeriodDays": value}})
-
-    assert covered.kept_days([]) == 30
-    assert covered.kept_days([eff(45)]) == 45
-    # The newest snapshot records no settings, so the older one that does is used.
-    assert covered.kept_days([eff(45), NS(data={"user_settings": {}})]) == 45
-    assert covered.kept_days([eff(45), NS(data={"effective": {}})]) == 30
-    assert covered.kept_days([eff(45), eff(7)]) == 7
-    for value in ("45", True, -1):
-        assert covered.kept_days([eff(value)]) == 30
-    assert covered.kept_days([eff(0)]) == 0
-
-
 def test_the_gone_sentence_in_the_singular_the_plural_and_never_when_all_are_covered():
-    assert covered.gone_sentence(1, 3, 30) == ONE
-    assert covered.gone_sentence(9, 82, 1) == (
+    assert covered.gone_sentence(1, 3) == ONE
+    assert covered.gone_sentence(9, 82) == (
         "These figures cover 9 of 82 sessions in this window. "
-        "Claude Code keeps transcripts for 1 day here, and the dashboard has the other 73."
+        "The transcripts of the other 73 were not found, and the dashboard still has those sessions."
     )
-    assert covered.gone_sentence(0, 1, 30) == (
+    assert covered.gone_sentence(0, 1) == (
         "These figures cover 0 of 1 session in this window. "
-        "Claude Code keeps transcripts for 30 days here, and the dashboard has the other 1."
+        "The transcripts of the other 1 were not found, and the dashboard still has those sessions."
     )
-    assert covered.gone_sentence(3, 3, 30) == ""
-    assert covered.gone_sentence(4, 3, 30) == ""
-    for sentence in (covered.gone_sentence(1, 3, 30), covered.gone_sentence(9, 82, 1), covered.gone_sentence(0, 1, 30)):
+    assert covered.gone_sentence(3, 3) == ""
+    assert covered.gone_sentence(4, 3) == ""
+    for sentence in (covered.gone_sentence(1, 3), covered.gone_sentence(9, 82), covered.gone_sentence(0, 1)):
+        _plain(sentence)
+
+
+def test_the_gone_sentence_of_a_file_names_the_machine_that_made_it():
+    assert covered.gone_sentence(9, 82, of_file=True) == (
+        "These figures cover 9 of 82 sessions in this window. "
+        "The transcripts of the other 73 were not found on the machine that made this file."
+    )
+    assert covered.gone_sentence(0, 1, of_file=True) == (
+        "These figures cover 0 of 1 session in this window. "
+        "The transcripts of the other 1 were not found on the machine that made this file."
+    )
+    assert covered.gone_sentence(3, 3, of_file=True) == ""
+    for sentence in (covered.gone_sentence(9, 82, of_file=True), covered.gone_sentence(0, 1, of_file=True)):
         _plain(sentence)
 
 
 def test_the_stored_sentence_in_the_singular_the_plural_and_never_at_zero():
-    assert covered.stored_sentence(2, 3, 30) == (
-        "2 of 3 sessions in this window are read from what the dashboard kept, "
-        "because Claude Code keeps transcripts for 30 days here."
+    assert covered.stored_sentence(73, 82) == (
+        "73 of 82 sessions in this window are read from what the dashboard kept, "
+        "because their transcripts were not found."
     )
-    assert covered.stored_sentence(1, 3, 45) == (
+    assert covered.stored_sentence(1, 3) == (
         "1 of 3 sessions in this window is read from what the dashboard kept, "
-        "because Claude Code keeps transcripts for 45 days here."
+        "because their transcripts were not found."
     )
-    assert covered.stored_sentence(1, 1, 30) == (
+    assert covered.stored_sentence(1, 1) == (
         "1 of 1 session in this window is read from what the dashboard kept, "
-        "because Claude Code keeps transcripts for 30 days here."
+        "because their transcripts were not found."
     )
-    assert covered.stored_sentence(0, 3, 30) == ""
-    for sentence in (covered.stored_sentence(2, 3, 30), covered.stored_sentence(1, 3, 45), covered.stored_sentence(1, 1, 30)):
+    assert covered.stored_sentence(0, 3) == ""
+    for sentence in (covered.stored_sentence(73, 82), covered.stored_sentence(1, 3), covered.stored_sentence(1, 1)):
         _plain(sentence)
+
+
+def test_the_stored_sentence_of_a_file_names_the_machine_that_made_it():
+    assert covered.stored_sentence(73, 82, of_file=True) == (
+        "73 of 82 sessions in this window were read from what the dashboard kept "
+        "on the machine that made this file, because their transcripts were not found there."
+    )
+    assert covered.stored_sentence(1, 3, of_file=True) == (
+        "1 of 3 sessions in this window was read from what the dashboard kept "
+        "on the machine that made this file, because their transcripts were not found there."
+    )
+    assert covered.stored_sentence(0, 3, of_file=True) == ""
+    # Nothing in it says "here" or speaks of the reader's own dashboard.
+    for sentence in (covered.stored_sentence(73, 82, of_file=True), covered.gone_sentence(9, 82, of_file=True)):
+        assert "here" not in sentence.split() and "your" not in sentence.split()
+        _plain(sentence)
+
+
+def test_no_sentence_gives_a_reason_the_code_does_not_check():
+    sentences = (
+        covered.gone_sentence(1, 3),
+        covered.stored_sentence(2, 3),
+        covered.gone_sentence(1, 3, of_file=True),
+        covered.stored_sentence(2, 3, of_file=True),
+    )
+    for sentence in sentences:
+        assert "day" not in sentence and "keeps" not in sentence
+    assert not hasattr(covered, "kept_days")
 
 
 def test_window_session_ids_are_the_sessions_corpus_from_store_builds(tmp_path):
@@ -116,12 +141,12 @@ def test_the_markdown_and_html_meta_say_what_the_report_covers_only_when_some_ar
     def model(**meta) -> ReportModel:
         return ReportModel(meta=ReportMeta(window="last 30 days", sessions=1, **meta))
 
-    gone = model(sessions_known=3, kept_days=30)
+    gone = model(sessions_left_out=2)
     lines = render_markdown(gone).splitlines()
     assert lines.count("- " + ONE) == 1
     assert lines.index("- " + ONE) == next(i for i, line in enumerate(lines) if line.startswith("- Window:")) + 1
     assert render_html(gone).count(html.escape(ONE)) == 1
-    for none_gone in (model(), model(sessions_known=1, kept_days=30)):
+    for none_gone in (model(), model(sessions_left_out=0)):
         assert "These figures cover" not in render_markdown(none_gone)
         assert "These figures cover" not in render_html(none_gone)
 

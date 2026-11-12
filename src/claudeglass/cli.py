@@ -1548,14 +1548,13 @@ def _store_coverage(
         read = {b.session_id for b in corpus.sessions if b.top is not None}
         if not known - read:
             return None, corpus
-        days = covered_mod.kept_days(snapshots.load_snapshots(config_dir))
         if not add:
-            return covered_mod.Coverage(len(known | read), len(read), 0, days), corpus
+            return covered_mod.Coverage(len(known | read), len(read)), corpus
         from .service import rebuild
 
         merged = rebuild.add_stored_sessions(corpus, store, sorted(known - read))
         stored = sum(1 for b in merged.sessions if b.top is not None) - len(read)
-        return covered_mod.Coverage(len(known | read), len(read), stored, days), merged
+        return covered_mod.Coverage(len(known | read), len(read), stored), merged
     except (sqlite3.Error, ValueError, zlib.error):
         return None, corpus
     finally:
@@ -1867,9 +1866,9 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
         print(f"claudeglass {command}: {exc}", file=sys.stderr)
         return 2
     # The sessions of the window only the dashboard's store still has: the
-    # report says it covers ``meta.sessions`` of them.
+    # report leaves them out, and says so.
     if coverage is not None:
-        model.meta.sessions_known, model.meta.kept_days = coverage.sessions, coverage.kept_days
+        model.meta.sessions_left_out = coverage.sessions - coverage.read
     if emit is not None:
         return emit(model, config_dir, window, since_dt, until_dt, projects)
     _emit_report_outputs(model, args)
@@ -2445,7 +2444,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
         else:
             sys.stdout.write(text)
         if coverage is not None:
-            _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions, coverage.kept_days)])
+            _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions)])
         return 0
 
     options = exports_mod.resolve_export_options(args.format, args.aggregate_only, args.hash_slugs)
@@ -2511,7 +2510,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
         if not text.endswith("\n"):
             sys.stdout.write("\n")
     if coverage is not None:
-        _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions, coverage.kept_days)])
+        _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions)])
     return 0
 
 
