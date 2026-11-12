@@ -206,6 +206,11 @@ def _pipelines(command: str, powershell: bool) -> list[list[_Command]]:
             expect = None
             if text == "|":
                 pipelines[-1].append(_Command())
+            elif len(pipelines[-1]) == 1 and not (cmd.words or cmd.writes or cmd.fed):
+                # Nothing has come since the last separator (``||`` then a
+                # newline or ``(``): the pipeline it opened is still the one
+                # waiting, so it keeps its fallback flag.
+                cmd.fallback = cmd.fallback or text == "||"
             else:
                 pipelines.append([_Command(fallback=text == "||")])
     return [p for p in pipelines if any(c.words or c.writes or c.fed for c in p)]

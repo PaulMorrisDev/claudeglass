@@ -32,6 +32,20 @@ COMMANDS = [
     ("cat a || cat b || cat c", False, 1),
     ("cat a && cat b", False, 2),
     ("test -f a || cat b", False, 1),
+    # A fallback that starts on the next line, or inside a subshell, is still a fallback
+    ("cat a 2>/dev/null ||\n  cat b", False, 1),
+    ("cat a || (cat b)", False, 1),
+    ("(cat a) || (cat b)", False, 1),
+    ("cat a ||\n(cat b)", False, 1),
+    ("Get-Content a ||\n  Get-Content b", True, 1),
+    # A second read after ;, && or a newline is a second read, even after a fallback line
+    ("cat a ||\n  cat b; cat c", False, 2),
+    ("cat a ||\n  cat b && cat c", False, 2),
+    ("cat a ||\n  cat b\ncat c", False, 2),
+    ("cat a;\ncat b", False, 2),
+    ("cat a\ncat b", False, 2),
+    ("cat a && (cat b)", False, 2),
+    ("(cat a); (cat b)", False, 2),
     ("for f in a b; do cat $f; done", False, 1),
     ("Get-Content src/a.py -TotalCount 20", True, 1),
     ("Get-Content -Path src/a.py | Select-String foo", True, 1),
@@ -127,6 +141,11 @@ def test_a_read_through_powershell_counts_like_one_through_bash(tmp_path):
         tmp_path, [("PowerShell", {"command": "Get-Content src/a.py -TotalCount 5"})], [("line\n" * 5, False, {})]
     )
     assert (turns[0].shell_read_count, turns[0].shell_read_chars) == (1, 25)
+
+
+def test_a_fallback_on_the_next_line_is_one_read_in_the_turn(tmp_path):
+    turns = _session(tmp_path, [_bash("cat a.txt 2>/dev/null ||\n  cat b.txt")], [("body", False, {})])
+    assert turns[0].shell_read_count == 1
 
 
 def test_a_search_that_found_nothing_still_counts_and_its_output_is_in_context(tmp_path):
