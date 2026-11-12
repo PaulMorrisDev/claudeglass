@@ -518,7 +518,7 @@ def test_build_config_section_renders_none_value_as_unset(tmp_path):
     table = section.tables[0]
     # None the fixture doesn't need to actually trip: confirm the helper
     # itself renders None as "(unset)" and never as the literal "None".
-    assert snap_mod._stringify_config_value(None) == "(unset)"
+    assert snap_mod.config_value_text(None) == "(unset)"
     for row in table.rows:
         assert row[0] != "None"
 

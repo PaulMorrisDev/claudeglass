@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import shlex
 
+from . import snapshots as snapshots_mod
 from .model import Recommendation, SettingChange
 
 #: Shown after every fix and profile change, and printed after an apply:
@@ -901,7 +902,7 @@ def _human(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (list, tuple)):
-        return ", ".join(str(v) for v in value) if value else "(empty list)"
+        return snapshots_mod.config_value_text(value)
     if isinstance(value, dict):
         return ", ".join(f"{k}: {_human(v)}" for k, v in value.items()) if value else "(none)"
     return str(value)

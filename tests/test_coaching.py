@@ -4502,19 +4502,23 @@ def test_a_new_hook_beside_an_older_catalogue_keeps_no_count_of_runs_for_the_hin
     assert not (_config_dir(tmp_path) / cat.COACH_STATE_FILE).exists()
 
 
-def test_a_claim_released_within_a_moment_is_waited_for(tmp_path):
-    import threading
-
+def test_a_claim_released_within_a_moment_is_waited_for(tmp_path, monkeypatch):
+    # Counted, not timed: the holder lets go during the first wait, whatever the machine is doing.
     payload = _scene_big_paste(tmp_path)
     claim = _claim_path(tmp_path)
     claim.parent.mkdir(parents=True, exist_ok=True)
     claim.write_text("", encoding="utf-8")
-    timer = threading.Timer(0.03, claim.unlink)
-    timer.start()
-    try:
-        assert _kind(_coach(tmp_path, payload)) == "big_paste"
-    finally:
-        timer.join()
+    sleeps = []
+
+    def released_while_waiting(seconds):
+        sleeps.append(seconds)
+        claim.unlink(missing_ok=True)
+
+    monkeypatch.setattr(HOOK.time, "sleep", released_while_waiting)
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+    # One wait, after which the claim was made, used and released: no later wait, no claim left behind.
+    assert sleeps == [HOOK._CLAIM_POLL_S]
+    assert not claim.exists()
 
 
 def test_a_claim_that_stays_held_is_given_up_on_after_a_moment(tmp_path):

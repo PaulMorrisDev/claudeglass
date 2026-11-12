@@ -406,6 +406,42 @@ def test_the_why_counts_the_tools_that_cleared_the_bar_not_the_ones_a_rule_added
     assert "called 3 of the tools it was offered" in plain.why and "stay too" not in plain.why
 
 
+def _workflow_rule_rec(*called):
+    # Read and Grep were called in every spawn. Each tool in ``called`` was called
+    # by one spawn on another model, which the workflow rule keeps on the line.
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "PowerShell": 9000, "Write": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    acc = _diet_acc("workflow-subagent", spawns=20, uses={"Read": 20, "Grep": 20}, chars=chars)
+    acc.tool_uses["claude-sonnet-5"] = {name: 1 for name in called}
+    return _tools_rec(_recs(_report(acc), units=Units()), "workflow-subagent")
+
+
+def test_the_why_names_one_tool_the_workflow_rule_kept_in_the_singular():
+    rec = _workflow_rule_rec("PowerShell")
+    assert rec.why.endswith(" PowerShell stays too because workflow agents called it.")
+    assert "stay too" not in rec.why and "called them" not in rec.why
+    # The same sentence reaches the card's fix prompt and the project's bundle prompt.
+    prompt = rec.fixes[0]["prompt"]
+    assert "PowerShell stays too because workflow agents called it." in prompt
+    assert "stay too" not in prompt
+    bundle = fixes.project_prompt([rec])["prompt"]
+    assert "PowerShell stays too because workflow agents called it." in bundle
+    assert "stay too" not in bundle
+
+
+def test_the_why_names_three_tools_the_workflow_rule_kept_in_the_plural():
+    rec = _workflow_rule_rec("Edit", "PowerShell", "Write")
+    assert rec.why.endswith(" Edit, PowerShell and Write stay too because workflow agents called them.")
+    assert "Edit, PowerShell and Write stay too because workflow agents called them." in rec.fixes[0]["prompt"]
+
+
+def test_one_run_that_said_it_did_not_use_claude_md_is_not_counted_as_runs():
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    report = _with_rules(_report(_acc("reviewer")), "reviewer", used=0, unused=1)
+    rec = next(r for r in _recs(report, snapshot=snap) if r.id == "spawn-claude-md")
+    assert " The one run that said, said it didn't use your CLAUDE.md." in rec.why
+    assert "1 of the 1" not in rec.why
+
+
 def test_the_why_counts_a_tool_called_often_that_the_known_line_lacks():
     # Bash was called in 2 of 20 spawns, but the line the agent has now lacks it.
     # The card never adds it, and it still cleared the bar, so the why counts it.
