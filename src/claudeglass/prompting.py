@@ -990,6 +990,12 @@ def build_section(
         answers.update(s.tip_answers)
     answers.update(card_answers or {})
     glass = glass_tips(mod_events, {s.session_id for s in sessions})
+
+    def unmeasured(hint: str) -> bool:
+        """Whether Claude's tips for ``hint`` were measured in none of the sessions with a note for it: a
+        count of 0 there would read as "Claude passed on none"."""
+        return hint in TIP_HINTS and notes[hint] > 0 and not relay_notes[hint]
+
     tips_table = Table(
         name="prompting_tips",
         title="Coaching tips shown",
@@ -1010,12 +1016,13 @@ def build_section(
         ],
         rows=[
             [
-                hint, notes[hint], tips[hint],
+                hint, notes[hint], None if unmeasured(hint) else tips[hint],
                 100.0 * tips[hint] / relay_notes[hint] if relay_notes[hint] and hint in TIP_HINTS else None,
                 # A hint that asks for no tip has none to measure: its text says so whatever the digests.
                 relay_text(hint, notes[hint] if hint in catalogue.CLAUDE_ONLY_HINTS else relay_notes[hint], tips[hint]),
                 glass.shown[hint], glass_where(hint, glass.surfaces),
-                tips[hint] + glass.shown[hint], misfires[hint],
+                (glass.shown[hint] or None) if unmeasured(hint) else tips[hint] + glass.shown[hint],
+                misfires[hint],
                 answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")],
                 trust_pct(answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")], misfires[hint]),
             ]

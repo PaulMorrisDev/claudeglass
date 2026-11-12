@@ -1061,9 +1061,17 @@ def test_tips_of_a_session_read_by_an_older_version_are_left_out_of_shown_and_it
     assert rows["drip_feed"][8] == 2
     assert rows["quiet_output"][1:5] == [2, 0, None, "no tip asked"]
     assert rows["quiet_output"][8] == 1
-    # With every session older there is nothing to share out: no share, no relay text.
+    # With every session older there is nothing to share out: no count passed on (not 0, which would
+    # read as "none"), no share, no relay text, and no total unless the mod showed one.
     row = prompting.build_section([older]).tables[1].rows[0]
-    assert row[:5] == ["drip_feed", 2, 0, None, None] and row[8] == 1
+    assert row[:5] == ["drip_feed", 2, None, None, None] and row[7] is None and row[8] == 1
+    # The mod's own tips are still counted, on their own.
+    shown = [{"session_id": "older.jsonl", "event": "note", "kind": "drip_feed", "surface": "hint"}] * 2
+    row = prompting.build_section([older], mod_events=shown).tables[1].rows[0]
+    assert (row[2], row[5], row[7]) == (None, 2, 2)
+    # A hint with a measured session keeps its counts, zeros included.
+    row = prompting.build_section([current]).tables[1].rows[0]
+    assert (row[2], row[7]) == (2, 2)
 
 
 def test_a_session_read_by_an_older_version_names_no_tip_to_the_rating_questions(tmp_path):
