@@ -1066,6 +1066,22 @@ def test_tips_of_a_session_read_by_an_older_version_are_left_out_of_shown_and_it
     assert row[:5] == ["drip_feed", 2, 0, None, None] and row[8] == 1
 
 
+def test_a_session_read_by_an_older_version_names_no_tip_to_the_rating_questions(tmp_path):
+    from claudeglass import ratings
+
+    lines = [
+        *_START,
+        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_own_tip('drip_feed')}"),
+    ]
+    facts = {}
+    for stamp in (PARSER_VERSION, BEFORE_STAMP):
+        top = _parse(tmp_path, lines, f"{stamp}.jsonl")
+        top.parser_version = stamp
+        facts[stamp] = ratings.session_facts(NS(top=top, subs=[], workflows=[], session_id="s"))
+    assert (facts[PARSER_VERSION]["tips"], facts[PARSER_VERSION]["tip"]) == ("drip_feed:1", "drip_feed")
+    assert (facts[BEFORE_STAMP]["tips"], facts[BEFORE_STAMP]["tip"]) == ("none", "none")
+
+
 def test_a_disowned_tip_is_not_a_misfire_of_a_quiet_output_note_in_the_same_message(tmp_path):
     # drip_feed's tip is relayed and called a false alarm; the quiet_output note after the Read was never called anything.
     disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_own_tip('drip_feed')}"

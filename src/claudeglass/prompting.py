@@ -638,13 +638,13 @@ def _message_of(turns, at: datetime | None) -> int | None:
     return id(turns[first])
 
 
-def _tips(top) -> tuple[Counter, Counter, Counter, bool]:
+def _tips(top) -> tuple[Counter, Counter, Counter]:
     """Coaching notes that asked for a tip, by hint, and of those, the ones
     whose message Claude answered with a tip, and the ones where it said
-    the tip misfired; and whether the digest measured the tip fields
-    (``measured.TIP_FIELDS``). A digest that did not has no tips and no
-    misfire for a hint that asks for no tip; a tip Claude called a misfire
-    is read from ``tip_disowned``, which no version changed."""
+    the tip misfired. A digest that did not measure the tip fields
+    (``measured.TIP_FIELDS``) has no tips and no misfire for a hint that
+    asks for no tip; a tip Claude called a misfire is read from
+    ``tip_disowned``, which no version changed."""
     ok = measured.measures(top, *measured.TIP_FIELDS)
     notes: Counter = Counter()
     tips: Counter = Counter()
@@ -687,7 +687,7 @@ def _tips(top) -> tuple[Counter, Counter, Counter, bool]:
             tips[kind] += 1
         if any(turn.tip_disowned for turn in cycle):
             misfires[kind] += 1
-    return notes, tips, misfires, ok
+    return notes, tips, misfires
 
 
 def session_prompting(bundle, prices: _Prices, rating: dict | None = None) -> SessionPrompting | None:
@@ -707,7 +707,7 @@ def session_prompting(bundle, prices: _Prices, rating: dict | None = None) -> Se
     messages = messages_of(top, prices, cycles, spans)
     if not messages:
         return None
-    notes, tips, misfires, tips_measured = _tips(top)
+    notes, tips, misfires = _tips(top)
     return SessionPrompting(
         session_id=bundle.session_id,
         start=messages[0].at,
@@ -716,7 +716,7 @@ def session_prompting(bundle, prices: _Prices, rating: dict | None = None) -> Se
         notes=notes,
         tips=tips,
         misfires=misfires,
-        tips_measured=tips_measured,
+        tips_measured=measured.measures(top, *measured.TIP_FIELDS),
         tip_answers=Counter(
             (span.feedback.tip_hint, span.feedback.tip)
             for span in spans
