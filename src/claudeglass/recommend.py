@@ -1847,10 +1847,8 @@ def _entry_denies(entry: str, name: str) -> bool:
     (``mcp__server__*`` for a whole server). ``mcp__X`` and ``mcp__X__*``
     withhold server X and each of its tools, ``mcp__*`` every MCP tool, and
     ``mcp__X__tool`` that one tool only, so the server stays offered. An entry
-    with a specifier (``Bash(rm *)``) is a rule about some calls, not the
-    tool."""
-    if "(" in entry:
-        return False
+    with a specifier (``Bash(git push *)``) still removes the whole tool, so it
+    withholds its base tool (``Task`` counting as ``Agent``)."""
     base, want = _tool_name(entry), _tool_name(name)
     if not want.startswith("mcp__"):
         return base == want
@@ -1874,9 +1872,9 @@ class AgentTools:
     #: (``Agent(worker-one, ...``): their allowlist is lost, so a line can't be
     #: written with that entry.
     cut: tuple[str, ...] = ()
-    #: Whether ``deny`` is the whole ``disallowedTools`` line. A cut deny entry
-    #: is left out of it rather than widened to its base name, and a deny line
-    #: the hook cut off or masked is only partly read: it still withholds what
+    #: Whether ``deny`` is the whole ``disallowedTools`` line. A deny entry cut
+    #: inside its parentheses is its base name (a specifier does not narrow it),
+    #: but a deny line the hook cut off or masked is only partly read: it still withholds what
     #: it shows (:meth:`denied`), but a tool it does not show may be withheld.
     deny_whole: bool = True
 
@@ -1920,10 +1918,11 @@ def read_agent_tools(tools, disallowed=None) -> AgentTools:
     known = whole and bool(entries)
     return AgentTools(
         allow=tuple(entry for entry, _cut in entries) if known else None,
-        deny=tuple(entry for entry, cut in denied if not cut),
+        # An entry cut inside its parentheses is its base name, which a specifier does not narrow.
+        deny=tuple(entry for entry, _cut in denied),
         cut=tuple(dict.fromkeys(_tool_name(entry) for entry, cut in entries if cut)) if known else (),
         # No line at all denies nothing; the unknown-snapshot marker says nothing.
-        deny_whole=(disallowed is None or denied_whole) and not any(cut for _entry, cut in denied),
+        deny_whole=disallowed is None or denied_whole,
     )
 
 

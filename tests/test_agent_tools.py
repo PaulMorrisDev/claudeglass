@@ -102,9 +102,11 @@ def test_the_reader_reports_which_entries_were_cut_inside_their_parentheses():
     assert read_agent_tools(None).cut == ()
 
 
-def test_a_cut_deny_entry_is_left_out_and_the_deny_line_is_marked_partly_read():
+def test_a_cut_deny_entry_counts_as_its_base_tool_and_the_line_is_still_whole():
+    # An entry with a specifier still removes the whole tool, so the cut costs nothing.
     line = read_agent_tools(None, [_CUT_BASH, "Write"])
-    assert line.deny == ("Write",) and line.deny_whole is False
+    assert line.deny == ("Bash", "Write") and line.deny_whole is True
+    assert not line.offered("Bash") and not line.offered("Write")
     whole = read_agent_tools(None, ["Bash(rm -rf /tmp/x)", "Write"])
     assert whole.deny == ("Bash(rm -rf /tmp/x)", "Write") and whole.deny_whole is True
     assert read_agent_tools("Read").deny_whole is True
@@ -242,8 +244,14 @@ def test_a_line_that_changes_is_an_edit_whether_stored_as_a_string_or_a_list(tmp
         ("mcp__github__create_issue", "mcp__github__create_issue", False),
         ("mcp__github__create_issue", "mcp__github__*", True),
         ("mcp__github__create_issue", "mcp__github__list_issues", True),
-        # An entry with a specifier is a rule about some calls, not the whole tool.
-        ("Bash(rm *)", "Bash", True),
+        # An entry with a specifier still removes the whole tool (the sub-agents page).
+        ("Bash(rm *)", "Bash", False),
+        ("Bash(git push *)", "Bash", False),
+        ("Bash(rm *)", "Read", True),
+        ("Agent(Explore)", "Agent", False),
+        ("Task(Explore)", "Agent", False),
+        ("Agent(Explore)", "Bash", True),
+        (["Read", ("Bash(" + "rm -rf /tmp/a-very-long-path-" * 3)[:61] + "..."], "Bash", False),
     ],
 )
 def test_a_denied_tool_is_not_offered_with_no_tools_line(deny, name, offered):
