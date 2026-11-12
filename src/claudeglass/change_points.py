@@ -1084,6 +1084,60 @@ def last_change(points: list[ChangePoint], key: str, project: str | Collection[s
     return max((p.ts for p in points if changes_setting(p, key) and applies_to(p, project)), default=None)
 
 
+def last_change_point(points: list[ChangePoint], key: str, project: str | Collection[str]) -> ChangePoint | None:
+    """The newest of ``points`` that changes the main session's ``key``
+    (:func:`changes_setting`) and applies in ``project`` (:func:`applies_to`:
+    a key, or every key one project goes by); of two at the same time, the
+    later one in ``points``. ``None`` when none does."""
+    found = None
+    for point in points:
+        if changes_setting(point, key) and applies_to(point, project) and (found is None or point.ts >= found.ts):
+            found = point
+    return found
+
+
+def _main_entry(point: ChangePoint, key: str) -> dict | None:
+    return next((c for c in point.changes if c.get("key") == key and not c.get("agent")), None)
+
+
+def new_value(point: ChangePoint, key: str, points: list[ChangePoint]) -> object:
+    """The value ``point`` moved the main session's ``key`` to: what it
+    records (a settings change, an apply, a session's transcript), or for an
+    undo the old value its apply recorded (found in ``points`` by the backup).
+    ``None`` when no value is recorded."""
+    if point.source == "revert":
+        apply = next((p for p in points if p.source == "apply" and p.backup_ts == point.backup_ts), None)
+        entry = _main_entry(apply, key) if apply is not None else None
+        return entry.get("old") if entry is not None else None
+    entry = _main_entry(point, key)
+    return entry.get("new") if entry is not None else None
+
+
+def model_runs(points: list[ChangePoint], corpus) -> dict[int, list]:
+    """For each transcript point that changes the model, by its index in
+    ``points``, the sessions of the run that made it: the first
+    :data:`SUSTAINED_SESSIONS` of its project from the point's time on whose
+    dominant model is the one the point moved to (:func:`_session_signature`,
+    the tracker's own reading). ``{}`` without a ``corpus``."""
+    if corpus is None:
+        return {}
+    sessions = []
+    for bundle in corpus.sessions:
+        sig = _session_signature(bundle)
+        if sig is not None:
+            sessions.append((sig, bundle))
+    sessions.sort(key=lambda item: item[0].start)
+    runs: dict[int, list] = {}
+    for index, point in enumerate(points):
+        if point.source != "transcript" or "model" not in point.keys:
+            continue
+        model = new_value(point, "model", points)
+        runs[index] = [
+            bundle for sig, bundle in sessions if sig.key == point.project and sig.start >= point.ts and sig.model == model
+        ][:SUSTAINED_SESSIONS]
+    return runs
+
+
 __all__ = [
     "ChangePoint",
     "SUSTAINED_SESSIONS",
@@ -1092,7 +1146,10 @@ __all__ = [
     "change_points",
     "changes_setting",
     "last_change",
+    "last_change_point",
     "latest",
+    "model_runs",
+    "new_value",
     "project_key",
     "session_start",
     "summary",

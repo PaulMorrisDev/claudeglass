@@ -867,21 +867,61 @@ def test_a_change_to_the_main_model_is_named_in_every_way_a_point_names_it(label
     assert change_points.changes_setting(point, "model") is named
 
 
-def test_the_last_change_in_a_project_is_the_newest_that_applies_there(tmp_path):
+def test_the_last_change_point_in_a_project_is_the_newest_that_applies_there(tmp_path):
     config_dir = tmp_path / "tl"
     _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"}, slug="slug:a")
     _snapshot(config_dir, "20260922T100000Z", {"model": "sonnet"}, {"model": "project_local"}, slug="slug:a")
     points = change_points.change_points(config_dir)
-    assert change_points.last_change(points, "model", "slug:a") == datetime(2026, 9, 22, 10, tzinfo=timezone.utc)
-    assert change_points.last_change(points, "model", "slug:b") is None
-    assert change_points.last_change(points, "effortLevel", "slug:a") is None
+    point = change_points.last_change_point(points, "model", "slug:a")
+    assert point.ts == datetime(2026, 9, 22, 10, tzinfo=timezone.utc)
+    assert change_points.last_change_point(points, "model", "slug:b") is None
+    assert change_points.last_change_point(points, "effortLevel", "slug:a") is None
     # A change made for every project applies in each one, and the newest counts.
     _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"}, slug="slug:b")
     _snapshot(config_dir, "20260923T100000Z", {"model": "fable"}, {"model": "user"}, slug="slug:b")
     points = change_points.change_points(config_dir)
     expected = datetime(2026, 9, 23, 10, tzinfo=timezone.utc)
-    assert change_points.last_change(points, "model", "slug:a") == expected
-    assert change_points.last_change(points, "model", "slug:zzz") == expected
+    assert change_points.last_change_point(points, "model", "slug:a").ts == expected
+    assert change_points.last_change_point(points, "model", "slug:zzz").ts == expected
+
+
+def test_the_value_a_point_moved_the_model_to(tmp_path):
+    config_dir = tmp_path / "tl"
+    _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"})
+    _snapshot(config_dir, "20260922T100000Z", {"model": "sonnet"}, {"model": "user"})
+    points = change_points.change_points(config_dir)
+    assert change_points.new_value(points[-1], "model", points) == "sonnet"
+
+    # An apply moves it to its value, and its undo moves it back to the old one.
+    claude_root = tmp_path / ".claude"
+    claude_root.mkdir()
+    (claude_root / "settings.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+    applied_dir, result = _apply(tmp_path, {"model": "opus"})
+    apply_mod.revert(result.ts, config_dir=applied_dir)
+    points = change_points.change_points(applied_dir)
+    applied = next(p for p in points if p.source == "apply")
+    undone = next(p for p in points if p.source == "revert")
+    assert change_points.new_value(applied, "model", points) == "opus"
+    assert change_points.new_value(undone, "model", points) == "sonnet"
+
+    # A point that names the model but records no value for it.
+    bare = change_points.ChangePoint(
+        ts=datetime(2026, 9, 22, tzinfo=timezone.utc), source="config", label="x", keys=["user_settings.model"]
+    )
+    assert change_points.new_value(bare, "model", [bare]) is None
+
+
+def test_the_sessions_behind_a_transcript_model_point_are_its_run(tmp_path):
+    corpus = _history(tmp_path, OLD, OLD, OLD, NEW, NEW, NEW, NEW)
+    _snapshot(tmp_path, "20260901T000000Z", {"model": "sonnet"}, {"model": "user"})
+    _snapshot(tmp_path, "20260902T000000Z", {"model": "opus"}, {"model": "user"})
+    points = change_points.change_points(tmp_path, corpus)
+    runs = change_points.model_runs(points, corpus)
+    transcript = [i for i, p in enumerate(points) if p.source == "transcript"]
+    assert len(transcript) == 1 and set(runs) == set(transcript)
+    assert points[transcript[0]].ts == datetime(2026, 9, 13, 9, tzinfo=timezone.utc)
+    assert [b.top.meta.session_id for b in runs[transcript[0]]] == ["s03", "s04", "s05"]
+    assert change_points.model_runs(points, None) == {}
 
 
 def test_a_session_starts_at_its_first_priced_reply():
