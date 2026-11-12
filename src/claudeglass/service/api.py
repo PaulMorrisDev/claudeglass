@@ -3053,6 +3053,7 @@ def make_handler(
                 _report_units(model),
                 _period_text(*window, name=query.get("window")),
                 only=_project_folders(project),
+                projects_roots=_projects_roots(),
             )
         )
 

@@ -2545,3 +2545,21 @@ def test_check_claude_md_finds_the_users_file_beside_the_projects_root(tmp_path,
     out = capsys.readouterr().out
     assert exit_code == 0
     assert str(user) in out, out
+
+def test_review_skills_reads_the_skills_beside_the_projects_root(tmp_path, capsys):
+    """docs/deploy.md's layout: the config folder is not in Claude's home, the projects folder is."""
+    home = tmp_path / "data" / "claude"
+    (home / "skills" / "grill-me").mkdir(parents=True)
+    (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    slug = _write_project(home / "projects", "proj-a")
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    with (slug / "session-1.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(listing) + "\n")
+    exit_code = cli.main(
+        ["review", "skills", "--projects-root", str(home / "projects"), "--all-projects",
+         "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Interview the user about a plan." in out, out

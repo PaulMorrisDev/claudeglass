@@ -280,3 +280,50 @@ def test_a_plugin_enabled_under_any_marketplace_is_not_hidden():
     settings = {"enabledPlugins": {"impeccable@a": False, "impeccable@b": True}}
     assert skills_review.hidden_by("impeccable:impeccable", "plugin", settings) == ""
     assert skills_review.hidden_by("grill-me", "user", {"skillOverrides": {"grill-me": "on"}}) == ""
+
+def _docker_setup(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """docs/deploy.md's layout: Claude's home at ``data/claude`` (skills, projects), this tool's
+    config folder at ``data/claudeglass``. Returns ``(claude_root, config_dir, project)``."""
+    config_dir, project = _setup(tmp_path / "default")
+    claude_root = tmp_path / "data" / "claude"
+    claude_root.parent.mkdir(parents=True)
+    config_dir.parent.rename(claude_root)
+    moved = tmp_path / "data" / "claudeglass"
+    moved.mkdir()
+    return claude_root, moved, project
+
+
+def test_the_skills_review_reads_beside_the_projects_root_when_the_config_folder_is_elsewhere(tmp_path):
+    claude_root, config_dir, project = _docker_setup(tmp_path)
+    write_jsonl(claude_root / "projects" / "C--repo" / "s2.jsonl", [{"type": "user", "cwd": str(project)}])
+    rows = [_usage("grill-me", listed=4), _usage("qa-round", listed=4)]
+    # The config folder's parent holds nothing: the old derivation sees no skill file and no description.
+    lost = skills_review.review(config_dir, {"skills": rows}, UNITS, PERIOD)
+    assert {row["name"]: row["source"] for row in lost["skills"]}["grill-me"] == "built-in"
+    assert not any(row["description"] for row in lost["skills"])
+    # Given the projects root, Claude's home is its parent: the user's skill, the project's workflow
+    # (its folder found from the sessions' cwd) and the listing's descriptions are all found.
+    data = skills_review.review(
+        config_dir, {"skills": rows}, UNITS, PERIOD, projects_roots=[claude_root / "projects"]
+    )
+    by_name = {row["name"]: row for row in data["skills"]}
+    assert by_name["grill-me"]["source"] == "user"
+    assert by_name["qa-round"]["source"] == "workflow"
+    assert by_name["grill-me"]["description"] == "Interview the user about a plan."
+    # An explicit Claude folder wins over the projects root's parent.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    data = skills_review.review(
+        config_dir, {"skills": rows}, UNITS, PERIOD, claude_root=empty, projects_roots=[claude_root / "projects"]
+    )
+    assert {row["name"]: row["source"] for row in data["skills"]}["grill-me"] == "built-in"
+
+
+def test_a_project_slug_is_found_in_the_projects_root_it_was_given(tmp_path):
+    claude_root, _config_dir, project = _docker_setup(tmp_path)
+    write_jsonl(claude_root / "projects" / "C--repo" / "s2.jsonl", [{"type": "user", "cwd": str(project)}])
+    elsewhere = tmp_path / "elsewhere"
+    assert skills_review.project_folders_for(elsewhere, ["C--repo"]) == ()
+    assert skills_review.project_folders_for(elsewhere, ["C--repo", "C--gone"], roots=[claude_root / "projects"]) == (
+        project,
+    )

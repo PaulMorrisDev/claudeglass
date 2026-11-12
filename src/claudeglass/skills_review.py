@@ -53,6 +53,7 @@ is offered for hiding.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,13 +106,21 @@ def _claude_root(config_dir: Path) -> Path:
     return Path(config_dir).parent
 
 
-def descriptions(claude_root: Path, names: set[str] | None = None) -> dict[str, str]:
+def descriptions(
+    claude_root: Path, names: set[str] | None = None, *, roots: Iterable[Path] | None = None
+) -> dict[str, str]:
     """``{name: description}`` from the newest transcripts' skill
-    listings, newest first. Read now, never stored."""
+    listings, newest first, under every projects root (``roots``, else
+    ``projects/`` inside ``claude_root``). Read now, never stored."""
     found: dict[str, str] = {}
-    projects = claude_root / "projects"
+    transcripts: list[Path] = []
+    for projects in [Path(root) for root in roots] if roots is not None else [claude_root / "projects"]:
+        try:
+            transcripts += projects.glob("*/*.jsonl")
+        except OSError:
+            continue
     try:
-        transcripts = sorted(projects.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        transcripts.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return found
     for transcript in transcripts[:_MAX_TRANSCRIPTS]:
@@ -148,19 +157,24 @@ def _listings(transcript: Path):
         return
 
 
-def locate(name: str, claude_root: Path, projects: list[Path]) -> tuple[str, Path | None]:
-    """Where skill ``name`` comes from, and its file when it has one."""
+def locate(
+    name: str, claude_root: Path, projects: list[Path], *, user_folders: list[Path] | None = None
+) -> tuple[str, Path | None]:
+    """Where skill ``name`` comes from, and its file when it has one.
+    ``user_folders``: every folder that holds your own skills (``claude_root``
+    first), when there is more than one."""
     if ":" in name:
         return "plugin", None
-    for root, source in [(claude_root, "user")] + [(p / ".claude", "project") for p in projects]:
+    users = user_folders or [claude_root]
+    for root, source in [(user, "user") for user in users] + [(p / ".claude", "project") for p in projects]:
         skill = root / "skills" / name / "SKILL.md"
         if skill.is_file():
             return source, skill
-    for root in [claude_root] + [p / ".claude" for p in projects]:
+    for root in users + [p / ".claude" for p in projects]:
         command = root / "commands" / f"{name}.md"
         if command.is_file():
             return "command", command
-    for root in [claude_root] + [p / ".claude" for p in projects]:
+    for root in users + [p / ".claude" for p in projects]:
         workflow = root / "workflows" / f"{name}.js"
         if workflow.is_file():
             return "workflow", workflow
@@ -190,26 +204,14 @@ def _settings(claude_root: Path, project: Path | None) -> dict:
     return settings
 
 
-def project_folders_for(claude_root: Path, slugs) -> tuple[Path, ...]:
+def project_folders_for(claude_root: Path, slugs, *, roots: Iterable[Path] | None = None) -> tuple[Path, ...]:
     """The folder each project slug stands for, from the ``cwd`` of its
-    newest transcripts under ``projects/<slug>/``; a slug with none is
-    left out. Read on request, never stored."""
-    from .claude_md_review import _first_cwd
+    newest transcripts under ``<root>/<slug>/`` in the first projects root
+    that has the slug (``roots``, else ``projects/`` inside ``claude_root``);
+    a slug with none is left out. Read on request, never stored."""
+    from .claude_md_review import folders_for_slugs
 
-    folders = []
-    for slug in slugs:
-        try:
-            transcripts = sorted(
-                (claude_root / "projects" / slug).glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
-            )
-        except OSError:
-            continue
-        for transcript in transcripts[:3]:
-            cwd = _first_cwd(transcript, 60)
-            if cwd and Path(cwd).is_dir():
-                folders.append(Path(cwd))
-                break
-    return tuple(folders)
+    return folders_for_slugs([Path(root) for root in roots] if roots is not None else [claude_root / "projects"], slugs)
 
 
 def hidden_by(name: str, source: str, settings: dict) -> str:
@@ -278,19 +280,31 @@ def _listed_at(usage: dict) -> float | None:
 
 
 def build_rows(
-    config_dir: Path, context_files: dict, *, projects: list[Path] | None = None, only: tuple[Path, ...] | None = None
+    config_dir: Path,
+    context_files: dict,
+    *,
+    projects: list[Path] | None = None,
+    only: tuple[Path, ...] | None = None,
+    claude_root: Path | None = None,
+    projects_roots: Iterable[Path] | None = None,
 ) -> list[SkillRow]:
-    from .claude_md_review import project_folders, split_worktrees
+    """``claude_root`` and ``projects_roots``: where Claude's own folder is and
+    which folders of project folders the report read, as for
+    ``claude_md_review.build_review``; ``None`` for both is the config
+    folder's parent and its ``projects/``."""
+    from .claude_md_review import _claude_folders, project_folders, split_worktrees
 
-    claude_root = _claude_root(config_dir)
-    folders = split_worktrees(projects if projects is not None else project_folders(claude_root))[0]
+    roots = None if projects_roots is None else list(projects_roots)
+    user_folders = _claude_folders(config_dir, claude_root, roots)
+    claude_root = user_folders[0]
+    folders = split_worktrees(projects if projects is not None else project_folders(claude_root, roots=roots))[0]
     usage = {row["name"]: row for row in context_files.get("skills") or () if isinstance(row, dict)}
-    texts = descriptions(claude_root, set(usage))
+    texts = descriptions(claude_root, set(usage), roots=roots)
     settings = _settings(claude_root, _one(only))
     newest = max((t for t in map(_listed_at, usage.values()) if t is not None), default=None)
     rows = []
     for name in sorted(set(usage) | set(texts), key=str.lower):
-        source, path = locate(name, claude_root, folders)
+        source, path = locate(name, claude_root, folders, user_folders=user_folders)
         listed_at = _listed_at(usage.get(name, {}))
         if source == "built-in" and listed_at is not None and newest - listed_at > REMOVED_AFTER_DAYS * 86400:
             source = "removed"
@@ -517,12 +531,22 @@ def review(
     *,
     projects: list[Path] | None = None,
     only: tuple[Path, ...] | None = None,
+    claude_root: Path | None = None,
+    projects_roots: Iterable[Path] | None = None,
 ) -> dict:
     """``only``: the project folders the report was limited to, or
-    ``None`` when it saw every project (see the module docstring)."""
+    ``None`` when it saw every project (see the module docstring).
+    ``claude_root`` and ``projects_roots``: see :func:`build_rows`."""
     rows = [
         row_dict(row, units, period, only=only)
-        for row in build_rows(config_dir, context_files, projects=projects, only=only)
+        for row in build_rows(
+            config_dir,
+            context_files,
+            projects=projects,
+            only=only,
+            claude_root=claude_root,
+            projects_roots=projects_roots,
+        )
     ]
     rows.sort(key=lambda r: (r["status"] != "unused", -r["listing_cost_usd"], r["name"].lower()))
     total_cost = sum(r["listing_cost_usd"] for r in rows)

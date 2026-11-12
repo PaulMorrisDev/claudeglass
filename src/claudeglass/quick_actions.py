@@ -635,7 +635,13 @@ def _skills(ctx: Context) -> dict:
     from . import skills_review
 
     data = skills_review.review(
-        ctx.config_dir, getattr(ctx.model, "context_files", None) or {}, ctx.units, ctx.period, only=ctx.only,
+        ctx.config_dir,
+        getattr(ctx.model, "context_files", None) or {},
+        ctx.units,
+        ctx.period,
+        only=ctx.only,
+        claude_root=ctx.claude_root,
+        projects_roots=ctx.projects_roots,
     )
     rows = data["skills"]
     if not any(r["status"] != "not listed" for r in rows):

@@ -6623,3 +6623,19 @@ def test_claude_md_reads_the_projects_folder_the_service_is_given_wherever_the_c
     two_project_server.options.projects_root = moved
     assert _claude_md_projects(two_project_server) == {"", "alpha-repo", "beta-repo"}
     assert _claude_md_projects(two_project_server, "?project=proj-alpha") == {"", "alpha-repo"}
+
+def test_skills_route_reads_beside_the_projects_folder_the_service_is_given(server, tmp_path):
+    """docs/deploy.md's container: Claude's home (its skills and the sessions) is the projects folder's
+    parent, and the config folder is somewhere else."""
+    home = tmp_path / "elsewhere"
+    (home / "skills" / "grill-me").mkdir(parents=True)
+    (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    (home / "projects" / "proj-x").mkdir(parents=True)
+    write_jsonl(home / "projects" / "proj-x" / "s.jsonl", [listing])
+    server.options.projects_root = home / "projects"
+    resp, payload = server.get_json("/api/skills?window=all")
+    assert resp.status == 200, payload
+    row = next(item for item in payload["data"]["skills"] if item["name"] == "grill-me")
+    assert row["source"] == "user" and row["description"] == "Interview the user about a plan."

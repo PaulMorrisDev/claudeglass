@@ -2589,3 +2589,31 @@ def test_the_claude_md_check_finds_and_ranks_the_users_file_beside_the_projects_
     assert result["status"] == "act"
     assert result["summary"].startswith(str(user)) and "costs most" in result["summary"], result["summary"]
     assert [row[0] for row in result["table"]["rows"]][0] == str(user)
+
+def test_the_skills_check_reads_the_skills_beside_the_projects_root(tmp_path):
+    """The service's kind of context in docs/deploy.md's layout: only the projects roots are given,
+    and Claude's home (its skills, the sessions' skill listings) is their parent."""
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True)
+    (claude_root / "skills" / "grill-me").mkdir(parents=True)
+    (claude_root / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    slug = claude_root / "projects" / "C--repo"
+    slug.mkdir(parents=True)
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    (slug / "s1.jsonl").write_text(json.dumps(listing) + "\n", encoding="utf-8")
+    row = {"name": "grill-me", "listing_tokens": 40, "listed": {"main": 60}, "listing_cost_usd": 4.0, "invoked": 0,
+           "invoked_by": {}, "resent_tokens": 0, "resent_cost_usd": 0.0, "attributed_turns": 0,
+           "attributed_cost_usd": 0.0, "last_seen": "2026-09-18T12:00:00Z"}
+    model = NS(sections=[], context_files={"skills": [row]}, recommendations=[])
+
+    def table_rows(**extra):
+        ctx = qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                         effective={}, effective_agents={}, **extra)
+        return qa.run("skills", ctx).get("table", {}).get("rows", [])
+
+    assert table_rows()[0][2] == ""
+    (found,) = table_rows(projects_roots=(claude_root / "projects",))
+    assert found[0] == "grill-me" and found[2] == "Interview the user about a plan."
+    assert found[1] != "Built in"

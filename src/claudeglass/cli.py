@@ -1828,10 +1828,13 @@ def _cmd_review(args: argparse.Namespace) -> int:
         context = model.context_files or {}
         # Both follow the project: its folders' files and your own.
         only = _report_only(args, projects, config_dir)
+        claude_root, roots = _read_where(args, config_dir)
         if args.what == "skills":
-            print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period, only=only)))
+            data = skills_review.review(
+                config_dir, context, units, period, only=only, claude_root=claude_root, projects_roots=roots
+            )
+            print(skills_review.render_markdown(data))
         else:
-            claude_root, roots = _read_where(args, config_dir)
             review = claude_md_review.build_review(
                 config_dir,
                 context,
