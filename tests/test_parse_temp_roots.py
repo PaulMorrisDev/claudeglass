@@ -88,6 +88,19 @@ def test_a_path_in_a_known_temp_shape_is_temp_under_any_reader(target):
     "C:/Users/someone/AppData/Local/Tempfiles/x.py",
     "C:/Users/someone/AppData/Roaming/Temp/x.py",
     "C:/Users/someone/Documents/AppData/Local/Temp/x.py",
+    # A shape counts only from the root of the path: a relative target that resolves inside a project is a
+    # project file, whatever folders it is named after
+    "C:\\Dev\\proj\\Users\\someone\\AppData\\Local\\Temp\\out.py",
+    "/c/Dev/proj/Users/someone/AppData/Local/Temp/out.py",
+    "C:/Dev/proj/Windows/Temp/out.py",
+    "/home/ana/proj/tmp/out.py",
+    "/home/ana/proj/var/tmp/out.py",
+    "/home/ana/proj/private/tmp/out.py",
+    "/home/ana/proj/var/folders/zz/abc123def456/T/out.py",
+    # A folder at the root of a drive is not temp
+    "C:\\tmp\\x.py",
+    "C:\\Temp\\x.py",
+    "C:/tmp/x.py",
     "C:/Windows/Temporary/x.py",
     "C:/Users/someone/Temp/x.py",
     "/var/folders/zz/abc123def456/x.py",
@@ -142,3 +155,12 @@ def test_the_reading_process_temp_folder_does_not_change_what_a_project_temp_fol
         counted.append(_counts(_turn(tmp_path, blocks, results)))
     assert counted[0] == counted[1]
     assert counted[0][:2] == (1, 1)
+
+
+def test_a_relative_target_that_resolves_inside_the_project_is_a_project_file_even_named_like_temp(tmp_path):
+    blocks = [
+        tool_use_block("Bash", "t1", {"command": "echo x > Users/someone/AppData/Local/Temp/out.py"}),
+        tool_use_block("Bash", "t2", {"command": "echo x > /tmp/scratch.py", }),
+    ]
+    turn = _turn(tmp_path, blocks, [tool_result_block("t1", "ok"), tool_result_block("t2", "ok")])
+    assert (turn.shell_write_count, turn.shell_code_write_count) == (1, 1)
