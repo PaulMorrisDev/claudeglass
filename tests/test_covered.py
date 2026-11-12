@@ -6,6 +6,8 @@ the store's list of a window's sessions and the report's meta lines. The CLI's o
 from __future__ import annotations
 
 import html
+import sqlite3
+import zlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -175,5 +177,21 @@ def test_add_stored_sessions_adds_only_what_disk_lacks_in_load_corpus_order(tmp_
         assert merged.sessions[2] is disk.sessions[0]
         assert merged.total_files == disk.total_files + 2
         assert rebuild.add_stored_sessions(disk, store, []) is disk
+    finally:
+        store.close()
+
+
+def test_add_stored_sessions_skips_the_session_whose_digest_cannot_be_read(tmp_path):
+    projects, config_dir, _claude = three_sessions(tmp_path)
+    conn = sqlite3.connect(config_dir / "service.db")
+    conn.execute("UPDATE transcripts SET digest_blob = ? WHERE session_id = 'gone-b'", (zlib.compress(b'{"turns": 5}'),))
+    conn.commit()
+    conn.close()
+    disk = load_corpus([projects / "proj-a"], salt=b"d" * 32, config_dir=config_dir)
+    store = Store.open_read_only(config_dir / "service.db", config_dir=config_dir)
+    try:
+        merged = rebuild.add_stored_sessions(disk, store, ["gone-a", "gone-b"])
+        assert [b.session_id for b in merged.sessions] == ["gone-a", "keep"]
+        assert rebuild.add_stored_sessions(disk, store, ["gone-b"]) is disk
     finally:
         store.close()

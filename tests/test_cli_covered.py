@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import html
 import json
+import sqlite3
+import zlib
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -290,3 +292,42 @@ def test_export_says_on_stderr_what_it_covers_and_writes_the_same_file(tmp_path,
     assert cli.main(argv) == 0
     assert "These figures cover" not in capsys.readouterr().err
     assert out.read_bytes() == first
+
+
+def damage_digest(config_dir, session_id: str, blob: bytes) -> None:
+    conn = sqlite3.connect(config_dir / "service.db")
+    try:
+        conn.execute("UPDATE transcripts SET digest_blob = ? WHERE session_id = ?", (blob, session_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+DAMAGED_DIGESTS = {
+    "not zlib": b"garbage",
+    "zlib of bad utf-8": zlib.compress(b"\xff\xfe\xfa"),
+    "zlib of text that is not json": zlib.compress(b"not json"),
+    "json of the wrong shape": zlib.compress(json.dumps({"turns": 5}).encode()),
+}
+
+
+@pytest.mark.parametrize("blob", DAMAGED_DIGESTS.values(), ids=DAMAGED_DIGESTS.keys())
+def test_one_damaged_digest_leaves_out_only_its_session(tmp_path, capsys, blob):
+    world = three_sessions(tmp_path)
+    damage_digest(world[1], "gone-b", blob)
+    out = tmp_path / "figures.json"
+    code, _stdout, err = tuning_export(world, out, capsys=capsys)
+    assert code == 0
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    # gone-a is still read from the store; gone-b is left out and is not counted as read from it.
+    assert doc["coverage"] == {"sessions": 3, "read": 1, "stored": 1, "older": 0}
+    assert doc["compactions"]["sessions"] == 2
+    assert err == (
+        "claudeglass tuning export: These figures cover 2 of 3 sessions in this window. "
+        "The transcripts of the other 1 were not found, and the dashboard still has those sessions.\n"
+        "claudeglass tuning export: 1 of 3 sessions in this window is read from what the dashboard kept, "
+        "because their transcripts were not found.\n"
+    )
+    # The report still counts the session the export could not read.
+    _code, text, _err = report(world, capsys=capsys)
+    assert "- " + ONE in text.splitlines()
