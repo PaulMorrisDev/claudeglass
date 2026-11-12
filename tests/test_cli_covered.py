@@ -52,6 +52,21 @@ def three_sessions(tmp_path, **kw):
     )
 
 
+def store_state(config_dir):
+    """What a store holds, read through a fresh read-only connection: every
+    table and row (so a write still sitting in ``service.db-wal`` shows), the
+    ``-wal``'s size and the main file's bytes."""
+    main = config_dir / "service.db"
+    wal = config_dir / "service.db-wal"
+    wal_size = wal.stat().st_size if wal.exists() else 0
+    conn = sqlite3.connect(f"{main.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        dump = "\n".join(conn.iterdump())
+    finally:
+        conn.close()
+    return main.read_bytes(), dump, wal_size
+
+
 def drop_store(config_dir) -> None:
     for name in ("service.db", "service.db-wal", "service.db-shm"):
         (config_dir / name).unlink(missing_ok=True)
@@ -104,7 +119,7 @@ def test_tuning_export_covers_all_3_and_says_2_were_read_from_what_the_dashboard
     world = three_sessions(tmp_path)
     projects, config_dir, claude_root = world
     out = tmp_path / "figures.json"
-    before = (config_dir / "service.db").read_bytes()
+    before = store_state(config_dir)
     code, _stdout, err = tuning_export(world, out, capsys=capsys)
     assert code == 0
     doc = json.loads(out.read_text(encoding="utf-8"))
@@ -114,7 +129,7 @@ def test_tuning_export_covers_all_3_and_says_2_were_read_from_what_the_dashboard
     assert doc["pieces"]["total"] == 3
     assert doc["prompting"]["totals"]["typed"] == 3
     assert err == f"claudeglass tuning export: {STORED_2}\n"
-    assert (config_dir / "service.db").read_bytes() == before
+    assert store_state(config_dir) == before
     capsys.readouterr()
     assert cli.main(["tuning", "summary", str(out)]) == 0
     assert capsys.readouterr().out.splitlines()[1] == STORED_2_FILE
@@ -400,3 +415,18 @@ def test_a_project_family_counts_the_store_projects_whose_folder_is_gone(tmp_pat
     code, text, _err = run_cli(world, ["report"], "--project-family", "proj-.*", "--days", "30", "--json", capsys=capsys)
     assert code == 0
     assert json.loads(text)["report"]["meta"]["sessions_left_out"] == 1
+
+
+def test_no_command_writes_to_the_store_not_even_into_its_wal(tmp_path, capsys):
+    world = three_sessions(tmp_path)
+    before = store_state(world[1])
+    assert before[1].count("INSERT INTO") > 0
+    for command, extra in (
+        (["report"], ["--all-projects", "--days", "30"]),
+        (["report"], ["--all-projects", "--days", "30", "--json"]),
+        (["export", "--format", "json"], ["--all-projects", "--days", "30"]),
+        (["tuning", "export"], []),
+    ):
+        code, _out, _err = run_cli(world, command, *extra, capsys=capsys)
+        assert code == 0, command
+        assert store_state(world[1]) == before, command
