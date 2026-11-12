@@ -994,14 +994,15 @@ TABLE_COPY: dict[str, TableCopy] = {
             "/cg-feedback, a session rating, or the rating buttons on a card.",
             read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
             "when your message calls for it, so fewer of those show and that's no miss. A tip you called wrong, "
-            "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session.",
+            "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session. "
+            "Sessions an older version read are left out of what Claude passed on.",
             act="",
         ),
         columns={
             "hint": ("Hint", "The coaching hint."),
             "notes": ("Notes", "How many times the hint's note was added."),
             "shown": ("Passed on by Claude", "How many of those replies ended with a ClaudeGlass tip."),
-            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip."),
+            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip, in sessions this version read."),
             "relay": (
                 "Passed on, of notes",
                 "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "

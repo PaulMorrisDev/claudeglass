@@ -354,6 +354,17 @@ def test_the_data_quality_page_says_how_many_sessions_an_older_version_read():
         _plain(text, "older_sessions")
 
 
+def test_the_coaching_tips_help_names_the_sessions_an_older_version_read_are_left_out():
+    """R10: what Claude passed on counts the sessions this version read, so the share is not of all notes."""
+    copy = helptext.TABLE_COPY["prompting_tips"]
+    assert "Sessions an older version read are left out of what Claude passed on." in copy.help.read
+    assert copy.columns["shown_pct"][1] == "The share of notes that ended with a tip, in sessions this version read."
+    # The same leave-out sentence the single-lookups table carries.
+    assert "left out" in helptext.TABLE_COPY["habits_probes"].help.read
+    for text in (copy.help.read, copy.columns["shown_pct"][1]):
+        _plain(text, "prompting_tips")
+
+
 def test_usage_log_tables_have_help_and_measured_causes_sit_on_the_cache_tab(tmp_path):
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
