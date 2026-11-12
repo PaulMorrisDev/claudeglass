@@ -589,13 +589,26 @@ class _Ctx:
     block first asks for it."""
 
     def __init__(
-        self, corpus, config, pricing, config_dir, days: int, today: date, claude_root, ratings=None, tip_feedback=None
+        self,
+        corpus,
+        config,
+        pricing,
+        config_dir,
+        days: int,
+        today: date,
+        claude_root,
+        ratings=None,
+        tip_feedback=None,
+        projects_roots=None,
     ):
         self.corpus = corpus
         self.config = config
         self.pricing = pricing
         self.config_dir = config_dir
         self.claude_root = claude_root
+        # The folders of project folders the export read, where a session's folder is found when the
+        # config folder is not beside them (a container).
+        self.projects_roots = projects_roots
         self.days = days
         self.today = today
         self.ratings = ratings or {}
@@ -795,6 +808,7 @@ def build(
     claude_root: str | Path | None = None,
     ratings: dict | None = None,
     tip_feedback: dict | None = None,
+    projects_roots: list[Path] | None = None,
 ) -> dict:
     """The export document for ``corpus`` (already loaded for the last
     ``days`` days, Haiku's tags put on its turns). ``config_dir`` is where
@@ -803,10 +817,12 @@ def build(
     when not given. ``ratings`` are the dashboard's session ratings by
     session id (``Store.all_feedback``) and ``tip_feedback`` its tip-card
     answers (``Store.tip_feedback``), counted as the dashboard counts them;
-    none of their words reach the document. Raises :class:`TuningError` if
+    none of their words reach the document. ``projects_roots`` are the
+    folders of project folders the corpus was read from, where a session's
+    own folder is looked for (the project-files block). Raises :class:`TuningError` if
     what it built doesn't validate, which would be a bug here."""
     days = max(1, int(days))
-    ctx = _Ctx(corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback)
+    ctx = _Ctx(corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback, projects_roots)
     version = _VERSION_RE.match(__version__)
     doc: dict = {
         "kind": KIND,
@@ -1751,7 +1767,9 @@ def _project_files(ctx: _Ctx) -> dict:
     if not data:
         return {"total": 0, "files": []}
     if ctx.config_dir:
-        rows, _local = claude_md_review.project_file_rows(ctx.config_dir, data)
+        rows, _local = claude_md_review.project_file_rows(
+            ctx.config_dir, data, projects_roots=getattr(ctx, "projects_roots", None)
+        )
     else:
         rows = context_files_mod.project_files(data)
     newest = context_files_mod.monday_of(data.get("newest") or "")

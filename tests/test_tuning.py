@@ -1796,6 +1796,26 @@ def test_the_project_files_block_holds_closed_words_and_shares_and_no_name(tmp_p
     assert claude_md_review.EXT_CLASSES  # the vocabulary the block draws from
 
 
+def test_the_project_files_block_looks_in_the_projects_roots_the_export_read(tmp_path):
+    """The config folder is not beside the projects (docs/deploy.md's container): the folder a session ran
+    in is found under the projects root the export read, so its file has an extension class."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "notes.md").write_text("Notes.\n", encoding="utf-8")
+    root = tmp_path / "data" / "projects"
+    (root / "repo").mkdir(parents=True)
+    (root / "repo" / "s.jsonl").write_text(json.dumps({"cwd": str(repo)}) + "\n", encoding="utf-8")
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    salt = parse.load_or_create_salt(config_dir)
+    md = parse.path_hash(str(repo / "docs" / "notes.md"), salt)
+    data = _files_data([_file_row(md, 9000, {"main": 4}, {"2026-09-07": 9000}, cost=3.0)])
+    (lost,) = tuning._project_files(NS(context_files=data, config_dir=config_dir))["files"]
+    assert lost["ext"] == "unknown"
+    (found,) = tuning._project_files(NS(context_files=data, config_dir=config_dir, projects_roots=[root]))["files"]
+    assert found["ext"] == "md"
+
+
 def test_the_project_files_block_keeps_the_dearest_files_and_counts_them_all():
     rows = [_file_row(f"{i:016x}", 1000 + i, {"main": 5}, cost=float(i)) for i in range(1, 61)]
     block = tuning._project_files(NS(context_files=_files_data(rows), config_dir=None))

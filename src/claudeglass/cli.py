@@ -2653,6 +2653,7 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
                 claude_root=_resolve_claude_root(args.claude_root),
                 ratings=ratings,
                 tip_feedback=_dashboard_tip_feedback(config_dir),
+                projects_roots=_read_where(args, config_dir)[1],
             )
         )
     except tuning_mod.TuningError as exc:
