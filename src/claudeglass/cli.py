@@ -3917,6 +3917,17 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
     return 0
 
 
+#: The feedback items ``capture remove`` turns off, with the words its line uses: those that do nothing without
+#: the hook entries it takes out.
+_REMOVED_FEEDBACK_ITEMS = {
+    "plan_check": "plan check",
+    "feedback_reminder": "rating reminder",
+}
+assert set(_REMOVED_FEEDBACK_ITEMS) == set(capture_catalogue.FEEDBACK_MESSAGE_IDS) - set(
+    capture_catalogue.FEEDBACK_WORKS_WITHOUT_HOOK
+)
+
+
 def _capture_metric_changes(action: str, values: list[str], current: CaptureConfig) -> dict:
     """``set_capture`` arguments for ``enable``/``disable``. Raises
     ``ValueError`` naming an id it doesn't know."""
@@ -4434,6 +4445,9 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             if action == "remove" and current.coaching_notes_on:
                 # Coaching notes run through the hook entries remove takes out.
                 changes["coaching"] = [i for i in current.coaching if i != "coaching_notes"]
+            if action == "remove" and any(i in current.feedback for i in _REMOVED_FEEDBACK_ITEMS):
+                # So do the plan check and the rating reminder; the skill and its note work without them.
+                changes["feedback"] = [i for i in current.feedback if i not in _REMOVED_FEEDBACK_ITEMS]
         elif action in _SKILL_SWITCHES:
             if len(args.values) != 1 or args.values[0] not in ("on", "off"):
                 raise ValueError(f"'capture {action}' needs on or off")
@@ -4514,6 +4528,14 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 "Deep also turns on the /cg-feedback survey with its facts line, the plan check, and Claude's "
                 "one-line reminder to run the survey. 'claudeglass capture feedback off' turns them off.\n"
             )
+        if action == "remove":
+            off_too = [name for i, name in _REMOVED_FEEDBACK_ITEMS.items() if i in current.feedback and i not in preview.feedback]
+            if off_too:
+                verb, pronoun = ("are", "they") if len(off_too) > 1 else ("is", "it")
+                stdout.write(
+                    f"The {' and the '.join(off_too)} {verb} off too: {pronoun} run{'' if len(off_too) > 1 else 's'} through "
+                    "the hook entries this took out.\n"
+                )
         if action == "disable":
             also = [m for m in current.active_metrics() if m not in preview.active_metrics() and m not in args.values]
             if also:

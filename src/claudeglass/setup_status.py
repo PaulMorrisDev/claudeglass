@@ -192,11 +192,17 @@ def _service(
 
 def _stopped_capture(stopped: SetupItem, config_dir: Path, claude_root, capture: CaptureConfig) -> SetupItem:
     """``stopped`` (capture is off, or its time-box ended), unless coaching
-    notes or a feedback item on your messages is on: those run at any
+    notes, the plan check or the rating reminder is on: those run at any
     level, so their settings.json entries must be there, and a missing one
     is a problem the line names."""
     still = replace(capture, level="off", tagger=capture_catalogue.DEFAULT_TAGGER)
-    if not still.hooked:
+    # Coaching notes, the plan check and the rating reminder do nothing without the entry; the skill works without it.
+    needs_the_entry = capture.coaching_notes_on or any(
+        i in capture.feedback
+        for i in capture_catalogue.FEEDBACK_MESSAGE_IDS
+        if i not in capture_catalogue.FEEDBACK_WORKS_WITHOUT_HOOK
+    )
+    if not needs_the_entry:
         return stopped
     health = hook_health.check_capture(
         hook_health.capture_specs(still.hook_metrics()), claude_root=claude_root, config_dir=config_dir

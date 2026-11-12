@@ -17,7 +17,7 @@ import pytest
 
 from claudeglass import capture_catalogue as cat
 from claudeglass import cli, footprint, hook_health, installer, mod_settings, setup_flow, signals
-from claudeglass.config import CAPTURE_LOG_NAME, SIGNAL_RETENTION_DEFAULT_DAYS, CaptureConfig, load_capture_log, load_config
+from claudeglass.config import CAPTURE_LOG_NAME, SIGNAL_RETENTION_DEFAULT_DAYS, CaptureConfig, load_capture_log, load_config, set_capture
 
 NOW = datetime(2026, 9, 24, 6, 0, tzinfo=timezone.utc)
 ESSENTIALS = hook_health.capture_specs(cat.level_metrics("essentials"))
@@ -2319,3 +2319,55 @@ def test_snapshot_config_install_hook_ends_in_a_sentence_when_the_file_cannot_be
     assert rc == 2
     assert "Could not finish copying the snapshot hook file" in seen.out + seen.err
     assert "Installed snapshot-config hook" not in seen.out
+
+
+# -- remove takes out the feedback items that do nothing without the entries it removes --------------------------------
+
+
+def test_remove_turns_off_the_plan_check_and_the_rating_reminder_and_says_so(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "level", "deep", "--yes")
+    before = load_config(config_dir=config_dir).capture
+    assert {"feedback_skill", "feedback_note", "plan_check", "feedback_reminder"} <= set(before.feedback)
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert "The plan check and the rating reminder are off too: they run through the hook entries this took out." in out
+    after = load_config(config_dir=config_dir).capture
+    assert "plan_check" not in after.feedback and "feedback_reminder" not in after.feedback
+    # The skill and the survey note stay, and so does the skill file.
+    assert "feedback_skill" in after.feedback and "feedback_note" in after.feedback
+    assert _skill(config_dir).is_file()
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+@pytest.mark.parametrize(
+    "item, line",
+    [
+        ("plan_check", "The plan check is off too: it runs through the hook entries this took out."),
+        ("feedback_reminder", "The rating reminder is off too: it runs through the hook entries this took out."),
+    ],
+)
+def test_remove_names_only_the_feedback_items_it_turned_off(tmp_path, item, line):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--yes")
+    set_capture(config_dir, feedback=["feedback_skill", item], now=NOW)
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert line in out
+    assert "off too" not in out.replace(line, "")
+
+
+def test_remove_says_nothing_about_feedback_items_that_were_not_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--yes")
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert "off too" not in out
+
+
+def test_remove_dry_run_leaves_the_feedback_items_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "level", "deep", "--yes")
+    rc, out = _capture(config_dir, "remove", "--dry-run")
+    assert "Dry run: config.toml left unchanged." in out
+    assert {"plan_check", "feedback_reminder"} <= set(load_config(config_dir=config_dir).capture.feedback)

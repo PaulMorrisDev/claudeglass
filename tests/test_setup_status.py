@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from claudeglass import capture_catalogue, cli, hook_health, installer, setup_status
-from claudeglass.config import set_capture
+from claudeglass.config import load_config, set_capture
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -302,9 +302,10 @@ def test_coaching_notes_with_capture_off_and_no_entries_is_a_problem(tmp_path):
     assert item.fix == "claudeglass capture connect"
 
 
-def test_a_message_feedback_item_with_no_message_entry_is_a_problem_at_capture_off(tmp_path):
+@pytest.mark.parametrize("item", ["plan_check", "feedback_reminder"])
+def test_a_message_feedback_item_with_no_message_entry_is_a_problem_at_capture_off(tmp_path, item):
     config_dir, claude = _dirs(tmp_path)
-    set_capture(config_dir, level="off", feedback=["plan_check"], now=NOW)
+    set_capture(config_dir, level="off", feedback=[item], now=NOW)
     hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[capture_catalogue.HOOK_SCRIPT])
     item = _items(config_dir, claude)["capture"]
     assert item.state == "problem"
@@ -316,3 +317,40 @@ def test_capture_off_with_no_coaching_or_survey_item_is_still_just_off(tmp_path)
     set_capture(config_dir, level="off", now=NOW)
     item = _items(config_dir, claude)["capture"]
     assert (item.state, item.fix) == ("off", "claudeglass capture on")
+
+
+def test_the_feedback_skill_alone_with_no_message_entry_is_not_a_problem(tmp_path):
+    # The skill works without the hook (it only loses the facts line the entry adds), so nothing is said.
+    config_dir, claude = _dirs(tmp_path)
+    set_capture(config_dir, level="off", feedback=["feedback_skill"], now=NOW)
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[capture_catalogue.HOOK_SCRIPT])
+    item = _items(config_dir, claude)["capture"]
+    assert (item.state, item.essential) == ("off", False)
+    assert "still on" not in item.detail and "settings.json does not run" not in item.detail
+
+
+def test_the_feedback_skill_does_not_hide_a_missing_entry_that_the_plan_check_needs(tmp_path):
+    config_dir, claude = _dirs(tmp_path)
+    set_capture(config_dir, level="off", feedback=["feedback_skill", "plan_check"], now=NOW)
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[capture_catalogue.HOOK_SCRIPT])
+    assert _items(config_dir, claude)["capture"].state == "problem"
+
+
+def test_status_after_leaving_deep_with_remove_reads_plain_off(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(installer, "is_registered", lambda *a, **k: True)
+    monkeypatch.setattr(installer, "http_health_ok", lambda url: True)
+    config_dir, claude = _dirs(tmp_path)
+    _billing(config_dir, "auto")
+    _connect(config_dir, claude)
+    _snapshot(config_dir, "2026-09-22T11:00:00+00:00")
+    for argv in (["level", "deep"], ["remove"]):
+        assert cli.main(["capture", *argv, "--yes", "--config-dir", str(config_dir)]) == 0
+        capsys.readouterr()
+    feedback = load_config(config_dir).capture.feedback
+    assert "feedback_skill" in feedback
+    assert "plan_check" not in feedback and "feedback_reminder" not in feedback
+    item = _items(config_dir, claude)["capture"]
+    assert (item.state, item.essential) == ("off", False)
+    rc, out = _run_status(config_dir, claude, capsys)
+    assert rc == 0
+    assert "Everything's set up." in out
