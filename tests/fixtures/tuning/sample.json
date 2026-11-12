@@ -5,6 +5,7 @@
   "parser_version": 40,
   "generated_on": "2026-09-19",
   "window_days": 30,
+  "coverage": {"sessions": 12, "read": 9, "stored": 3, "older": 1, "kept_days": 30},
   "capture": {
     "level": "standard",
     "tagger": "claude",

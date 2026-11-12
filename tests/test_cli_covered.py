@@ -1,0 +1,219 @@
+"""What ``tuning export``, ``tuning summary``, the CLI report and ``export``
+say about the sessions of the window the dashboard's store still holds after
+Claude Code deleted their transcripts (R12). The world is a temp folder
+(projects root, ``--config-dir`` with a ``service.db`` one FileWatcher tick
+made, an empty Claude root), never the real config. The sentences are tested
+in ``tests/test_covered.py``.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from claudeglass import cli, parse
+
+from helpers import fallback_read_session, store_with_gone_sessions
+
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+
+ONE = (
+    "These figures cover 1 of 3 sessions in this window. "
+    "Claude Code keeps transcripts for 30 days here, and the dashboard has the other 2."
+)
+
+
+def S(session_id: str, days: float) -> list[dict]:
+    return fallback_read_session(session_id, NOW - timedelta(days=days))
+
+
+@pytest.fixture(autouse=True)
+def _salt():
+    parse.set_salt(b"d" * 32)
+
+
+def three_sessions(tmp_path, **kw):
+    """The plan's world: one session on disk, two whose transcripts are gone."""
+    return store_with_gone_sessions(
+        tmp_path,
+        {"proj-a": {"keep": S("keep", 1), "gone-a": S("gone-a", 2), "gone-b": S("gone-b", 3)}},
+        kw.pop("gone", {"gone-a", "gone-b"}),
+        **kw,
+    )
+
+
+def drop_store(config_dir) -> None:
+    for name in ("service.db", "service.db-wal", "service.db-shm"):
+        (config_dir / name).unlink(missing_ok=True)
+
+
+def tuning_export(world, out, *extra, capsys):
+    projects, config_dir, claude_root = world
+    capsys.readouterr()
+    code = cli.main(
+        [
+            "tuning",
+            "export",
+            "--projects-root",
+            str(projects),
+            "--config-dir",
+            str(config_dir),
+            "--claude-root",
+            str(claude_root),
+            "--out",
+            str(out),
+            *extra,
+        ]
+    )
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def report(world, *extra, capsys):
+    projects, config_dir, _claude_root = world
+    capsys.readouterr()
+    code = cli.main(
+        ["report", "--projects-root", str(projects), "--config-dir", str(config_dir), "--all-projects", "--days", "30", *extra]
+    )
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_tuning_export_says_it_covers_1_of_3_when_the_store_holds_two_gone_sessions(tmp_path, capsys):
+    world = three_sessions(tmp_path)
+    config_dir = world[1]
+    out = tmp_path / "figures.json"
+    before = (config_dir / "service.db").read_bytes()
+    code, _stdout, err = tuning_export(world, out, capsys=capsys)
+    assert code == 0
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["coverage"] == {"sessions": 3, "read": 1, "stored": 0, "older": 0, "kept_days": 30}
+    assert list(doc).index("coverage") == 6
+    assert doc["compactions"]["sessions"] == 1
+    assert err == f"claudeglass tuning export: {ONE}\n"
+    assert (config_dir / "service.db").read_bytes() == before
+    capsys.readouterr()
+    assert cli.main(["tuning", "summary", str(out)]) == 0
+    assert capsys.readouterr().out.splitlines()[1] == ONE
+
+
+def test_no_store_or_nothing_gone_leaves_the_export_as_it_was(tmp_path, capsys):
+    world = three_sessions(tmp_path / "a")
+    drop_store(world[1])
+    code, _stdout, err = tuning_export(world, tmp_path / "a.json", capsys=capsys)
+    assert code == 0 and err == ""
+    assert "coverage" not in json.loads((tmp_path / "a.json").read_text(encoding="utf-8"))
+
+    world = three_sessions(tmp_path / "b", gone=set())
+    code, _stdout, err = tuning_export(world, tmp_path / "b.json", capsys=capsys)
+    assert code == 0 and err == ""
+    assert "coverage" not in json.loads((tmp_path / "b.json").read_text(encoding="utf-8"))
+
+
+def test_a_store_that_cannot_be_read_leaves_the_export_as_it_was(tmp_path, capsys):
+    world = three_sessions(tmp_path)
+    config_dir = world[1]
+    for name in ("service.db-wal", "service.db-shm"):
+        (config_dir / name).unlink(missing_ok=True)
+    (config_dir / "service.db").write_bytes(b"not a database" * 64)
+    code, _stdout, err = tuning_export(world, tmp_path / "figures.json", capsys=capsys)
+    assert code == 0 and err == ""
+    assert "coverage" not in json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
+
+
+def test_the_days_claude_code_keeps_come_from_the_newest_settings_snapshot(tmp_path, capsys):
+    world = three_sessions(tmp_path)
+    snapshots = world[1] / "snapshots"
+    snapshots.mkdir()
+    (snapshots / "2026-01-01T00-00-00Z.json").write_text(
+        json.dumps({"ts": "2026-01-01T00:00:00Z", "schema_version": 2, "effective": {"cleanupPeriodDays": 45}}),
+        encoding="utf-8",
+    )
+    code, _stdout, err = tuning_export(world, tmp_path / "figures.json", capsys=capsys)
+    assert code == 0
+    doc = json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
+    assert doc["coverage"]["kept_days"] == 45
+    assert "for 45 days here" in err
+
+
+def test_only_gone_sessions_in_the_window_and_the_picked_projects_count(tmp_path, capsys):
+    world = store_with_gone_sessions(
+        tmp_path,
+        {
+            "proj-a": {"keep": S("keep", 1), "near": S("near", 2), "far": S("far", 40)},
+            "proj-b": {"b1": S("b1", 1)},
+        },
+        {"near", "far"},
+    )
+
+    def export(*extra):
+        code, _stdout, _err = tuning_export(world, tmp_path / "figures.json", *extra, capsys=capsys)
+        assert code == 0
+        return json.loads((tmp_path / "figures.json").read_text(encoding="utf-8"))
+
+    doc = export("--days", "30")
+    assert (doc["coverage"]["sessions"], doc["coverage"]["read"]) == (3, 2)
+    doc = export("--days", "45")
+    assert (doc["coverage"]["sessions"], doc["coverage"]["read"]) == (4, 2)
+    assert "coverage" not in export("--project", "proj-b")
+    (world[1] / "config.toml").write_text('exclude_projects = ["proj-a"]\n', encoding="utf-8")
+    doc = export()
+    assert "coverage" not in doc
+    assert doc["compactions"]["sessions"] == 1
+
+
+def test_the_cli_report_says_it_covers_1_of_3_and_carries_the_counts(tmp_path, capsys):
+    world = three_sessions(tmp_path)
+    code, out, _err = report(world, capsys=capsys)
+    assert code == 0
+    lines = out.splitlines()
+    assert "- " + ONE in lines
+    assert lines.index("- " + ONE) < lines.index("## Assumptions")
+    code, out, _err = report(world, "--json", capsys=capsys)
+    meta = json.loads(out)["report"]["meta"]
+    assert (meta["sessions"], meta["sessions_known"], meta["kept_days"]) == (1, 3, 30)
+    page = tmp_path / "report.html"
+    code, _out, _err = report(world, "--html", str(page), capsys=capsys)
+    assert code == 0
+    assert page.read_text(encoding="utf-8").count(html.escape(ONE)) == 1
+    for flags in (("--window-by", "mtime"), ("--limit", "5")):
+        code, out, _err = report(world, *flags, capsys=capsys)
+        assert code == 0 and "These figures cover" not in out
+    drop_store(world[1])
+    code, out, _err = report(world, capsys=capsys)
+    assert code == 0 and "These figures cover" not in out
+    code, out, _err = report(world, "--json", capsys=capsys)
+    meta = json.loads(out)["report"]["meta"]
+    assert meta["sessions_known"] == 0
+
+
+def test_export_says_on_stderr_what_it_covers_and_writes_the_same_file(tmp_path, capsys):
+    projects, config_dir, _claude_root = three_sessions(tmp_path)
+    out = tmp_path / "export.json"
+    argv = [
+        "export",
+        "--projects-root",
+        str(projects),
+        "--config-dir",
+        str(config_dir),
+        "--all-projects",
+        "--days",
+        "30",
+        "--format",
+        "json",
+        "--generated-at",
+        "2026-11-12T00:00:00Z",
+        "--out",
+        str(out),
+    ]
+    capsys.readouterr()
+    assert cli.main(argv) == 0
+    assert f"claudeglass export: {ONE}" in capsys.readouterr().err
+    first = out.read_bytes()
+    drop_store(config_dir)
+    assert cli.main(argv) == 0
+    assert "These figures cover" not in capsys.readouterr().err
+    assert out.read_bytes() == first

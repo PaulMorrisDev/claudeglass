@@ -1862,6 +1862,19 @@ class Store:
             rows = [row for row in rows if row["slug"] in allowed]
         return [row["id"] for row in rows if ts_in_window(row[column], since_dt, until_dt)]
 
+    def window_session_ids(self, *, since: str | None = None, until: str | None = None) -> dict[str, str]:
+        """``{session id: raw slug}`` for the sessions a report over the window
+        counts (last reply in it, as :meth:`_session_ids_in_window`) that have a
+        top-level transcript stored, which :func:`rebuild.corpus_from_store`
+        needs to build one. For the CLI: the sessions of a window it can compare
+        with the transcripts it read from disk."""
+        since_dt, until_dt = _resolve_window(None, since, until)
+        rows = self._connection().execute(
+            "SELECT s.id, s.slug, s.last_ts FROM sessions s WHERE EXISTS "
+            "(SELECT 1 FROM transcripts t WHERE t.session_id = s.id AND t.kind = 'top-level')"
+        ).fetchall()
+        return {row["id"]: row["slug"] or "" for row in rows if ts_in_window(row["last_ts"], since_dt, until_dt)}
+
     def resolve_project_slug(self, redacted: str) -> list[str] | None:
         """The raw ``sessions.slug`` value(s) that redact
         (``discovery.redact_slug``) to ``redacted`` -- resolves a

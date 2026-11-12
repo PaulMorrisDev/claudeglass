@@ -36,6 +36,7 @@ from zoneinfo import available_timezones
 
 from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, compaction, discovery, installer as installer_mod
 from . import invocation, onboarding, setup_flow
+from . import covered as covered_mod
 from . import mod_settings as mod_settings_mod
 from . import pages
 from . import haiku_tags, helptext, hook_health, probe as probe_mod, recache, signals as signals_mod, snapshots
@@ -1497,6 +1498,56 @@ def _merge_dashboard_marks(config_dir: Path, overrides: dict) -> tuple[dict, dic
     return merged, ratings
 
 
+def _store_slugs_selected(slugs, args: argparse.Namespace, config: Config, project_dirs: list[Path]) -> set[str]:
+    """Of ``slugs`` (the dashboard's store's raw ``sessions.slug`` values, a
+    project folder's name each), those ``args`` picked: every one
+    ``exclude_projects`` leaves with ``--all-projects``, as the dashboard's
+    all-projects view counts them, else the folders it resolved
+    (``--project``, ``--project-family`` or the current folder's), case aside."""
+    from .corpus import _filter_excluded_dirs
+
+    if args.all_projects:
+        return {p.name for p in _filter_excluded_dirs([Path(s) for s in slugs if s], config.exclude_projects)}
+    names = {p.name.lower() for p in project_dirs}
+    return {s for s in slugs if s and s.lower() in names}
+
+
+def _store_coverage(
+    args: argparse.Namespace, config: Config, config_dir: Path, project_dirs: list[Path], corpus: Corpus
+) -> covered_mod.Coverage | None:
+    """What ``corpus`` (read from transcripts on disk for ``args``' window)
+    covers of the sessions the dashboard's store holds for the same window
+    and projects, read from ``<config-dir>/service.db`` without writing to it.
+    ``None`` when there is no store, it can't be read, none of its sessions
+    is missing from ``corpus``, or the window is one the store can't tell
+    (``--window-by`` other than ``last-reply``, or ``--limit``)."""
+    import sqlite3
+    import zlib
+
+    from .service.serve import STORE_FILENAME
+    from .service.store import Store
+
+    if args.window_by != "last-reply" or args.limit is not None:
+        return None
+    store = Store.open_read_only(config_dir / STORE_FILENAME)
+    if store is None:
+        return None
+    try:
+        held = store.window_session_ids(since=_window_since(args, config), until=args.until)
+        slugs = _store_slugs_selected(set(held.values()), args, config, project_dirs)
+        known = {sid for sid, slug in held.items() if slug in slugs}
+        read = {b.session_id for b in corpus.sessions if b.top is not None}
+        if not known - read:
+            return None
+        return covered_mod.Coverage(
+            len(known | read), len(read), 0, covered_mod.kept_days(snapshots.load_snapshots(config_dir))
+        )
+    except (sqlite3.Error, ValueError, zlib.error):
+        return None
+    finally:
+        store.close()
+
+
 def _load_corpus_for_args(
     args: argparse.Namespace,
     config: Config,
@@ -1697,6 +1748,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             file=sys.stderr,
         )
         return 1
+    coverage = _store_coverage(args, config, config_dir, project_dirs, corpus)
 
     snaps = snapshots.load_snapshots(config_dir) or None
     projects = tuple(p.name for p in project_dirs)
@@ -1800,6 +1852,10 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
         # other user-facing config error in this function.
         print(f"claudeglass {command}: {exc}", file=sys.stderr)
         return 2
+    # The sessions of the window only the dashboard's store still has: the
+    # report says it covers ``meta.sessions`` of them.
+    if coverage is not None:
+        model.meta.sessions_known, model.meta.kept_days = coverage.sessions, coverage.kept_days
     if emit is not None:
         return emit(model, config_dir, window, since_dt, until_dt, projects)
     _emit_report_outputs(model, args)
@@ -2344,6 +2400,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    coverage = _store_coverage(args, config, config_dir, project_dirs, corpus)
 
     if args.aggregate:
         from . import team as team_mod
@@ -2373,6 +2430,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
             Path(args.out).write_text(text, encoding="utf-8")
         else:
             sys.stdout.write(text)
+        if coverage is not None:
+            _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions, coverage.kept_days)])
         return 0
 
     options = exports_mod.resolve_export_options(args.format, args.aggregate_only, args.hash_slugs)
@@ -2437,6 +2496,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
         sys.stdout.write(text)
         if not text.endswith("\n"):
             sys.stdout.write("\n")
+    if coverage is not None:
+        _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions, coverage.kept_days)])
     return 0
 
 
@@ -2510,6 +2571,13 @@ def _tuning_refuse(command: str, headline: str, problems: list[str]) -> int:
     return 2
 
 
+def _print_coverage(command: str, lines: list[str]) -> None:
+    """Print what a command's figures cover, one line each on stderr
+    (:mod:`covered`)."""
+    for line in lines:
+        print(f"claudeglass {command}: {line}", file=sys.stderr)
+
+
 def _write_file_atomic(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` through a temporary file in the same
     folder and a rename, so the file is the whole document or not there:
@@ -2561,7 +2629,9 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     printed as problem lines and nothing is written (exit 2). With ``--out``
     the file is written whole or not at all; without it the JSON is printed.
     Your dashboard ratings and tip-card answers are read from its store
-    without writing to it, as ``report`` reads them."""
+    without writing to it, as ``report`` reads them. When the dashboard's
+    store holds sessions of the window whose transcripts are gone, the file's
+    ``coverage`` block and a line on stderr say what it covers."""
     from . import tuning as tuning_mod
 
     if args.path:
@@ -2597,28 +2667,30 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     if not corpus.sessions:
         print(f"claudeglass {command}: no sessions found under {root} for window {window!r}", file=sys.stderr)
         return 1
+    coverage = _store_coverage(args, config, config_dir, project_dirs, corpus)
 
     _overrides, ratings = _merge_dashboard_marks(config_dir, {})
     today = discovery.to_local(datetime.now(timezone.utc), config.tz).date()
     try:
-        text = tuning_mod.dumps(
-            tuning_mod.build(
-                corpus,
-                config,
-                rates,
-                config_dir=config_dir,
-                days=days,
-                today=today,
-                claude_root=_resolve_claude_root(args.claude_root),
-                ratings=ratings,
-                tip_feedback=_dashboard_tip_feedback(config_dir),
-            )
+        doc = tuning_mod.build(
+            corpus,
+            config,
+            rates,
+            config_dir=config_dir,
+            days=days,
+            today=today,
+            claude_root=_resolve_claude_root(args.claude_root),
+            ratings=ratings,
+            tip_feedback=_dashboard_tip_feedback(config_dir),
+            coverage=coverage,
         )
+        text = tuning_mod.dumps(doc)
     except tuning_mod.TuningError as exc:
         return _tuning_refuse(command, "the figures fail the checks, so nothing was written:", exc.problems)
 
     if not args.out:
         sys.stdout.write(text)
+        _print_coverage(command, tuning_mod.coverage_lines(doc.get("coverage")))
         return 0
     out = Path(args.out)
     try:
@@ -2633,6 +2705,7 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
             "markdown",
         )
     )
+    _print_coverage(command, tuning_mod.coverage_lines(doc.get("coverage")))
     return 0
 
 
