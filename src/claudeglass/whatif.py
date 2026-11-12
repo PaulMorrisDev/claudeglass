@@ -52,6 +52,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import workstyle
 from .compaction_sim import CompactionSimThresholds
 from .units import Units
 
@@ -152,6 +153,12 @@ def _row(key: str, agent: str | None, value, saving: float | None, fidelity: str
     }
 
 
+def _sonnet(value) -> bool:
+    """Whether a model value (``sonnet``, ``sonnet[1m]``, a Sonnet id) is a
+    Sonnet, the one model the main session's counted sessions are for."""
+    return workstyle.model_tier(str(value)) == workstyle.model_tier("sonnet")
+
+
 def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> dict:
     row = tables.row("model_swap", "model_swap_by_agent_type", agent)
     if row is None:
@@ -170,11 +177,11 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
                 "spawn itself named it.",
             )
         runs = " started without a model of their own"
-    elif agent == TOP and tables.has("model_swap", "model_swap_agent_file_runs"):
-        # The main session's model setting prices only the sessions the
-        # report counts: not those already on Sonnet or smaller, nor those
-        # from before their project moved there. (A report from before that
-        # table had a main-session row priced every session.)
+    elif agent == TOP and _sonnet(value) and tables.has("model_swap", "model_swap_agent_file_runs"):
+        # Sonnet for the main session prices only the sessions the report
+        # counts: not those already on Sonnet or smaller, nor those from
+        # before their project moved there. Any other model reprices them
+        # all, as does a report from before that table.
         file_row = tables.row("model_swap", "model_swap_agent_file_runs", TOP)
         counted, total = _num(row.get("lever_runs")), _num(row.get("spawns"))
         if file_row is not None:

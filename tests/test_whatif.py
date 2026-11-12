@@ -360,3 +360,41 @@ def test_calibration_never_invents_a_saving_for_a_row_that_had_none():
     assert row["saving_usd"] is None
     assert row["fidelity"] == "none"
     assert row["uncalibrated_usd"] is None
+
+
+def test_only_sonnet_for_the_main_session_prices_the_sessions_it_counts():
+    def tables(*, file_row=True, **counts):
+        swap = _table("model_swap_by_agent_type", [
+            {"agent_type": "top-level", "observed_model": "claude-opus-5", "observed_cost": 100.0,
+             "cost_claude-sonnet-5": 60.0, "cost_claude-haiku-5-5": 20.0, "cost_claude-fable-5-1": 150.0,
+             "spawns": 5, **counts},
+        ])
+        decided = _table("model_swap_agent_file_runs", [
+            {"agent_type": "top-level", "runs": 2, "observed_cost": 40.0, "cost_claude-sonnet-5": 25.0,
+             "cost_claude-haiku-5-5": 15.0, "cost_claude-fable-5-1": 60.0},
+        ] if file_row else [])
+        return NS(sections=[NS(key="model_swap", tables=[swap, decided])])
+
+    def price(model, value):
+        [row] = whatif.estimate({"model": value}, {}, model, UNITS, period=PERIOD)["rows"]
+        return row
+
+    some = tables(lever_runs=2, before_change_runs=3, settled_runs=0)
+    assert price(some, "claude-sonnet-5")["saving_usd"] == 15.0
+    for value, saving in (("claude-haiku-5-5", 80.0), ("claude-fable-5-1", -50.0)):
+        row = price(some, value)
+        assert (row["saving_usd"], row["fidelity"]) == (saving, "ceiling"), value
+        assert row["basis"] == (
+            f"Worked out by repricing the main session's replies in this window at {value}. A different model "
+            "may need more or fewer replies for the same work, which this doesn't capture."
+        )
+    none = tables(file_row=False, lever_runs=0, before_change_runs=3, settled_runs=2)
+    assert price(none, "claude-sonnet-5")["saving_usd"] is None
+    assert price(none, "claude-haiku-5-5")["saving_usd"] == 80.0
+
+
+def test_a_sonnet_is_any_value_that_names_the_sonnet_family():
+    for value in ("sonnet", "sonnet[1m]", "claude-sonnet-5-5", "Sonnet"):
+        assert whatif._sonnet(value), value
+    for value in ("haiku", "claude-haiku-5-5", "opus", "fable[1m]", "opusplan", "default", None):
+        assert not whatif._sonnet(value), value
