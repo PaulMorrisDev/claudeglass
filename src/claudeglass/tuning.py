@@ -605,12 +605,16 @@ class _Ctx:
         ratings=None,
         tip_feedback=None,
         coverage=None,
+        projects_roots=None,
     ):
         self.corpus = corpus
         self.config = config
         self.pricing = pricing
         self.config_dir = config_dir
         self.claude_root = claude_root
+        # The folders of project folders the export read, where a session's folder is found when the
+        # config folder is not beside them (a container).
+        self.projects_roots = projects_roots
         self.days = days
         self.today = today
         self.ratings = ratings or {}
@@ -675,12 +679,9 @@ class _Ctx:
         canonical = snapshots_mod.canonical_project_keys({b.slug for b in self.corpus.sessions if b.slug})
         return _agent_file_models(snapshots_mod.with_every_project_agents(snapshots, canonical))
 
-    @cached_property
-    def agent_tools(self) -> dict[str, object]:
-        """Each agent file's ``tools`` line by agent type, from the same
-        snapshot as :attr:`agent_files`; empty without one. Read to tell
-        which rarely used tools a tools list would still leave out, never
-        exported."""
+    def _agent_line(self, key: str) -> dict[str, object]:
+        """Each agent file's ``key`` line by agent type, from the same
+        snapshot as :attr:`agent_files`; empty without one."""
         snapshots = snapshots_mod.load_snapshots(self.config_dir) if self.config_dir else []
         if not snapshots:
             return {}
@@ -688,9 +689,24 @@ class _Ctx:
         merged = snapshots_mod.with_every_project_agents(snapshots, canonical)
         agents = merged.data.get("agents") if merged is not None else None
         return {
-            name: entry["tools"] for name, entry in (agents.items() if isinstance(agents, dict) else ())
-            if isinstance(entry, dict) and "tools" in entry
+            name: entry[key] for name, entry in (agents.items() if isinstance(agents, dict) else ())
+            if isinstance(entry, dict) and key in entry
         }
+
+    @cached_property
+    def agent_tools(self) -> dict[str, object]:
+        """Each agent file's ``tools`` line by agent type, from the same
+        snapshot as :attr:`agent_files`; empty without one. Read to tell
+        which rarely used tools a tools list would still leave out, never
+        exported."""
+        return self._agent_line("tools")
+
+    @cached_property
+    def agent_denied(self) -> dict[str, object]:
+        """Each agent file's ``disallowedTools`` line by agent type, read
+        as :attr:`agent_tools` is: a tool it withholds is not left out by a
+        tools list, because the agent is never sent it."""
+        return self._agent_line("disallowedTools")
 
     @cached_property
     def compactions(self) -> tuple[compaction_mod.CompactionStats, dict[str, float]]:
@@ -800,6 +816,7 @@ def build(
     ratings: dict | None = None,
     tip_feedback: dict | None = None,
     coverage: "covered_mod.Coverage | None" = None,
+    projects_roots: list[Path] | None = None,
 ) -> dict:
     """The export document for ``corpus`` (already loaded for the last
     ``days`` days, Haiku's tags put on its turns). ``config_dir`` is where
@@ -811,10 +828,15 @@ def build(
     none of their words reach the document. ``coverage``
     (``covered.Coverage``), given when the dashboard's store holds sessions of
     the window whose transcripts are gone, fills the ``coverage`` block;
-    without it the block is left out. Raises :class:`TuningError` if
+    without it the block is left out. ``projects_roots`` are the
+    folders of project folders the corpus was read from, where a session's
+    own folder is looked for (the project-files block). Raises :class:`TuningError` if
     what it built doesn't validate, which would be a bug here."""
     days = max(1, int(days))
-    ctx = _Ctx(corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback, coverage)
+    ctx = _Ctx(
+        corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback,
+        coverage=coverage, projects_roots=projects_roots,
+    )
     version = _VERSION_RE.match(__version__)
     doc: dict = {
         "kind": KIND,
@@ -1520,7 +1542,7 @@ def _agents(ctx: _Ctx) -> dict:
         "types": _tally(types, AGENT_TYPES),
         "models": {word: {"runs": models[word][0], "cost_usd": _num(models[word][1])} for word in MODELS if word in models},
     }
-    diet = _startup_diet_usd(ctx.startup, ctx.agent_tools)
+    diet = _startup_diet_usd(ctx.startup, ctx.agent_tools, ctx.agent_denied)
     if diet:
         block["startup_diet_usd"] = diet
     # An agent whose digest an older parser wrote has no single-lookup figures: out of the count and its base.
@@ -1590,13 +1612,14 @@ def _model_choice(ctx: _Ctx) -> list[dict]:
     return rows
 
 
-def _startup_diet_usd(stats, agent_tools: dict | None = None) -> dict[str, float]:
+def _startup_diet_usd(stats, agent_tools: dict | None = None, agent_denied: dict | None = None) -> dict[str, float]:
     """What a tools list is worth over the window, by agent type: the
     saving of each ``agent_startup_diet`` row the dashboard would give a
     tools list card for (:func:`recommend.tools_list_offer`), at list
     prices. Built-in types by name, every other type summed as ``custom``.
-    ``agent_tools`` is each agent file's ``tools`` line: the card leaves out
-    only the rarely used tools still on a known line, and so does this.
+    ``agent_tools`` is each agent file's ``tools`` line and ``agent_denied``
+    its ``disallowedTools`` line: the card leaves out only the rarely used
+    tools still offered, and so does this.
     Amounts only: no agent's name, tool or file is in it."""
     section = context_budget_mod.build_startup_section(stats)
     table = next((t for t in section.tables if t.name == "agent_startup_diet"), None)
@@ -1604,9 +1627,12 @@ def _startup_diet_usd(stats, agent_tools: dict | None = None) -> dict[str, float
     for row in table.rows if table is not None else []:
         values = dict(zip((column.key for column in table.columns), row))
         current = (agent_tools or {}).get(values["agent_type"])
-        values = recommend.current_diet(values, current)
+        denied = (agent_denied or {}).get(values["agent_type"])
+        values = recommend.current_diet(values, current, denied)
         usd = values.get("saving_usd")
-        if recommend.tools_list_offer(values["agent_type"], values, current=current) is None or not isinstance(usd, (int, float)):
+        if recommend.tools_list_offer(
+            values["agent_type"], values, current=current, disallowed=denied
+        ) is None or not isinstance(usd, (int, float)):
             continue
         saved[values["agent_type"] if values["agent_type"] in AGENT_TYPES else "custom"] += usd
     return {word: _num(saved[word]) for word in AGENT_TYPES if saved.get(word, 0) > 0}
@@ -1776,7 +1802,9 @@ def _project_files(ctx: _Ctx) -> dict:
     if not data:
         return {"total": 0, "files": []}
     if ctx.config_dir:
-        rows, _local = claude_md_review.project_file_rows(ctx.config_dir, data)
+        rows, _local = claude_md_review.project_file_rows(
+            ctx.config_dir, data, projects_roots=getattr(ctx, "projects_roots", None)
+        )
     else:
         rows = context_files_mod.project_files(data)
     newest = context_files_mod.monday_of(data.get("newest") or "")

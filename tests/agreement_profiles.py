@@ -1,4 +1,4 @@
-"""Six synthetic profiles for the agreement checks (``agreement.py``): a
+"""Seven synthetic profiles for the agreement checks (``agreement.py``): a
 projects folder and a config folder each, built on ``helpers.py`` and
 nothing else.
 
@@ -12,7 +12,7 @@ a card with a standing rule, and (in the API profile) a stored ignore. A
 profile that stops building one of them fails ``test_agreement_profiles``,
 rather than letting a check pass over nothing.
 
-The six, each a :class:`Spec`:
+The seven, each a :class:`Spec`:
 
 - ``api``: API billing, the desktop app, a status line absent;
 - ``cli_status``: the CLI with a status line (``usage-log.csv``) on a subscription;
@@ -20,7 +20,10 @@ The six, each a :class:`Spec`:
 - ``old_version``: Claude Code before 2.1.308, which writes no
   ``api-request-shape`` lines;
 - ``capture_on``: metrics capture on, replies tagged ``[cg: ...]``;
-- ``capture_off``: the same work with capture off.
+- ``capture_off``: the same work with capture off;
+- ``denied``: the same work, and the reviewer's file withholds ``Edit`` and
+  ``Write`` with ``disallowedTools`` (its spawns called ``Edit`` before the
+  file said so, as a line changed after the spawns would leave it).
 
 No randomness, and every date is fixed.
 """
@@ -77,6 +80,8 @@ class Spec:
     changed_later: bool = False
     #: Ignore these recommendation ids (one card each) once the first report is built.
     ignore_ids: tuple[str, ...] = ()
+    #: The reviewer's file has a ``disallowedTools:`` line (``REVIEWER_DENIED``).
+    denies: bool = False
 
 
 SPECS: dict[str, Spec] = {
@@ -86,6 +91,7 @@ SPECS: dict[str, Spec] = {
     "old_version": Spec("old_version", version="2.1.300", request_lines=False),
     "capture_on": Spec("capture_on", capture=True),
     "capture_off": Spec("capture_off"),
+    "denied": Spec("denied", denies=True),
 }
 
 
@@ -142,6 +148,12 @@ def wire(tools: list[dict]) -> list[dict]:
 #: write them: a comma string and a list.
 REVIEWER_LINE = "Read, Grep, Bash, Edit, Write, WebFetch, NotebookEdit, Skill"
 IMPLEMENTER_LINE = ["Read", "Edit", "Bash", "Grep", "WebFetch", "NotebookEdit", "Skill", "mcp__figma__get_node"]
+
+
+#: The reviewer's ``disallowedTools:`` line in the ``denied`` profile, as the hook stores a
+#: line: a list. ``Edit`` is on its ``tools:`` line and was called in two of five spawns;
+#: ``Write`` is on it and never called.
+REVIEWER_DENIED = ["Edit", "Write"]
 
 
 def _reviewer_plan(k: int) -> list[str]:
@@ -459,9 +471,12 @@ def write_workflow(spec: Spec, root: Path, sid: str, index: int, clock: Clock, f
 def _agent_files(spec: Spec, *, reviewer_line: str = REVIEWER_LINE) -> dict:
     if not spec.custom_agents:
         return {}
+    reviewer = {"model": "sonnet", "effort": "medium", "maxTurns": 40, "description": "str(120)",
+                "source": "project", "tools": reviewer_line}
+    if spec.denies:
+        reviewer["disallowedTools"] = list(REVIEWER_DENIED)
     return {
-        "reviewer": {"model": "sonnet", "effort": "medium", "maxTurns": 40, "description": "str(120)",
-                     "source": "project", "tools": reviewer_line},
+        "reviewer": reviewer,
         "claude-implementer": {"model": "sonnet", "effort": "medium", "maxTurns": 60,
                                "experimental.cacheTtl": "1h", "description": "str(120)", "source": "project",
                                "tools": list(IMPLEMENTER_LINE)},

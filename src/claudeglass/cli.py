@@ -931,16 +931,19 @@ def _add_apply_args(sub: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_claude_root_arg(sub: argparse.ArgumentParser) -> None:
+def _add_claude_root_arg(sub: argparse.ArgumentParser, *, help: str | None = None) -> None:
     """``--claude-root`` for the commands that read or change Claude
     Code's own ``settings.json`` (``init``, ``uninstall``, ``changes``);
-    ``apply`` declares its own with the same meaning."""
+    ``apply`` declares its own with the same meaning. ``review`` and
+    ``check`` read your CLAUDE.md files and rules from it (``help`` says
+    what they do without it)."""
     sub.add_argument(
         "--claude-root",
         metavar="PATH",
         default=None,
         dest="claude_root",
-        help="the Claude Code folder holding settings.json (default: $CLAUDE_CONFIG_DIR, else ~/.claude; "
+        help=help
+        or "the Claude Code folder holding settings.json (default: $CLAUDE_CONFIG_DIR, else ~/.claude; "
         "never worked out from --config-dir)",
     )
 
@@ -1202,6 +1205,12 @@ def _make_parser() -> argparse.ArgumentParser:
             _add_probe_config_args(sub)
         if name == "apply":
             _add_apply_args(sub)
+        if name in ("review", "check"):
+            _add_claude_root_arg(
+                sub,
+                help="the Claude Code folder holding your CLAUDE.md, rules/, agents/ and skills/ "
+                "(default: the folder above --config-dir, never worked out from --projects-root)",
+            )
         if name == "review":
             sub.add_argument(
                 "what",
@@ -1896,10 +1905,20 @@ def _cmd_review(args: argparse.Namespace) -> int:
         context = model.context_files or {}
         # Both follow the project: its folders' files and your own.
         only = _report_only(args, projects, config_dir)
+        claude_root, roots = _read_where(args, config_dir)
         if args.what == "skills":
-            print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period, only=only)))
+            data = skills_review.review(
+                config_dir, context, units, period, only=only, claude_root=claude_root, projects_roots=roots
+            )
+            print(skills_review.render_markdown(data))
         else:
-            review = claude_md_review.build_review(config_dir, context, projects=None if only is None else list(only))
+            review = claude_md_review.build_review(
+                config_dir,
+                context,
+                projects=None if only is None else list(only),
+                claude_root=claude_root,
+                projects_roots=roots,
+            )
             print(claude_md_review.render_markdown(review, units, period))
         return 0
 
@@ -1913,11 +1932,30 @@ def _report_only(args: argparse.Namespace, projects, config_dir) -> tuple[Path, 
     report loaded (``_cmd_report_like``'s), never ``model.meta.projects``:
     those are redacted (``Users-<user>``), so a project under a home
     folder would match no folder."""
-    from . import skills_review
+    from . import claude_md_review
 
     if args.all_projects:
         return None
-    return skills_review.project_folders_for(Path(config_dir).parent, projects)
+    return claude_md_review.folders_for_slugs(_read_where(args, config_dir)[1], projects)
+
+
+def _read_where(args: argparse.Namespace, config_dir) -> tuple[Path | None, list[Path]]:
+    """Where ``review`` and ``check`` read a project's files: Claude's own
+    folder, when ``--claude-root`` names one and otherwise ``None``, which
+    is the config folder's parent; and every
+    folder of project folders the report read (``--projects-root``, then
+    ``config.toml``'s ``extra_projects_roots``). A config folder kept apart
+    from the projects it describes, as in a container, reads the same files
+    as one beside them."""
+    try:
+        extra = load_config(Path(config_dir)).extra_projects_roots
+    except ConfigError:
+        extra = ()
+    explicit = getattr(args, "claude_root", None)
+    return (
+        _resolve_claude_root(explicit) if explicit else None,
+        discovery.projects_roots(args.projects_root, extra),
+    )
 
 
 def _period_phrase(window: str) -> str:
@@ -1946,6 +1984,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         snapshot = snapshots.with_every_project_agents(snaps, snapshots.canonical_project_keys(projects))
         effective_agents = snapshot.data.get("effective_agents") if snapshot is not None else None
         agent_files = snapshot.data.get("agents") if snapshot is not None else None
+        claude_root, roots = _read_where(args, config_dir)
         ctx = quick_actions.Context(
             model=model,
             units=model.units or Units(),
@@ -1957,6 +1996,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
             only=_report_only(args, projects, config_dir),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
+            claude_root=claude_root,
+            projects_roots=tuple(roots),
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))
@@ -2717,6 +2758,7 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
             ratings=ratings,
             tip_feedback=_dashboard_tip_feedback(config_dir),
             coverage=coverage,
+            projects_roots=_read_where(args, config_dir)[1],
         )
         text = tuning_mod.dumps(doc)
     except tuning_mod.TuningError as exc:

@@ -6633,3 +6633,59 @@ def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_bui
     assert ctx.effective == {"model": "opus"}
     assert ctx.effective_agents == {"reviewer": {"source": "user", "model": "haiku"}}
     assert len(merges) == 1
+
+
+def test_claude_md_reads_the_projects_folder_the_service_is_given_wherever_the_config_folder_is(
+    two_project_server, tmp_path
+):
+    """docs/deploy.md's container: the projects folder is not beside the config folder."""
+    _give_the_projects_folders(two_project_server)
+    moved = tmp_path / "elsewhere" / "projects"
+    moved.parent.mkdir()
+    (two_project_server.options.config_dir.parent / "projects").rename(moved)
+    two_project_server.options.projects_root = moved
+    assert _claude_md_projects(two_project_server) == {"", "alpha-repo", "beta-repo"}
+    assert _claude_md_projects(two_project_server, "?project=proj-alpha") == {"", "alpha-repo"}
+
+def test_skills_route_finds_descriptions_under_the_projects_folder_the_service_is_given(server, tmp_path):
+    """docs/deploy.md's container: the sessions are under the projects folder, and the folder above it is
+    not read as yours."""
+    home = tmp_path / "elsewhere"
+    (home / "skills" / "grill-me").mkdir(parents=True)
+    (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    (home / "projects" / "proj-x").mkdir(parents=True)
+    write_jsonl(home / "projects" / "proj-x" / "s.jsonl", [listing])
+    server.options.projects_root = home / "projects"
+    resp, payload = server.get_json("/api/skills?window=all")
+    assert resp.status == 200, payload
+    row = next(item for item in payload["data"]["skills"] if item["name"] == "grill-me")
+    assert row["source"] == "built-in" and row["description"] == "Interview the user about a plan."
+
+def _move_the_projects_apart(handle, tmp_path):
+    """The projects folder the service is given is not beside its config folder (docs/deploy.md's mount)."""
+    apart = tmp_path / "mount" / "projects"
+    apart.parent.mkdir()
+    (tmp_path / "projects").rename(apart)
+    handle.options.projects_root = apart
+
+
+def test_project_files_route_names_files_from_the_projects_folder_the_service_is_given(project_files_server, tmp_path):
+    _move_the_projects_apart(project_files_server, tmp_path)
+    resp, payload = project_files_server.get_json("/api/project-files")
+    assert resp.status == 200
+    assert payload["data"]["named"] == 1
+    assert payload["data"]["files"][0]["name"] == "docs/context.md"
+
+
+def test_the_quick_actions_name_project_files_from_the_projects_folder_the_service_is_given(
+    project_files_server, tmp_path
+):
+    _move_the_projects_apart(project_files_server, tmp_path)
+    for route in ("/api/quick-actions/project-files", "/api/quick-actions"):
+        resp, payload = project_files_server.get_json(route)
+        assert resp.status == 200, route
+        check = payload["data"] if route.endswith("project-files") else next(
+            item for item in payload["data"]["checks"] if item["id"] == "project-files")
+        assert check["status"] == "act" and check["summary"].startswith("docs/context.md is now about 10k tokens"), route

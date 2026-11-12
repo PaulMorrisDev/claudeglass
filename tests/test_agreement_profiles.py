@@ -1,4 +1,4 @@
-"""The six synthetic profiles (``agreement_profiles.py``) each produce the
+"""The seven synthetic profiles (``agreement_profiles.py``) each produce the
 cards the agreement checks read.
 
 A check over a profile with no tools card, no info card with a saving and no
@@ -31,14 +31,15 @@ def _cards(inp, rec_id):
     return [rec for rec in inp.recs if rec.id == rec_id]
 
 
-def test_there_are_six_profiles_of_the_kinds_the_plan_names():
-    assert NAMES == ["api", "cli_status", "bare", "old_version", "capture_on", "capture_off"]
-    api, cli, bare, old, on, off = (ap.SPECS[n] for n in NAMES)
+def test_there_are_seven_profiles_of_the_kinds_the_plan_names():
+    assert NAMES == ["api", "cli_status", "bare", "old_version", "capture_on", "capture_off", "denied"]
+    api, cli, bare, old, on, off, denied = (ap.SPECS[n] for n in NAMES)
     assert api.billing == "api" and cli.billing == "subscription"
     assert cli.entrypoint == "cli" and cli.statusline and not api.statusline
     assert not bare.custom_agents and not bare.workflows
     assert old.version == "2.1.300" and not old.request_lines
     assert on.capture and not off.capture
+    assert denied.denies and not any(ap.SPECS[n].denies for n in NAMES if n != "denied")
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -142,3 +143,21 @@ def test_claude_code_before_2_1_308_writes_no_request_shape_lines(built):
         assert transcripts
         has = any("api-request-shape" in path.read_text(encoding="utf-8") for path in transcripts)
         assert has == (name != "old_version"), name
+
+
+def test_the_denied_profile_has_an_agent_whose_file_withholds_a_tool_its_spawns_called(built):
+    profile, inp = built("denied")
+    assert inp.agents["reviewer"]["disallowedTools"] == ap.REVIEWER_DENIED
+    rows = {row["agent_type"]: row for row in agreement.tables_of(inp.model)["agent_startup_diet"]}
+    # The report still measures Edit as called in two of five spawns and Write as rare.
+    assert "Edit" in rows["reviewer"]["keep_tools"] and "Write" in rows["reviewer"]["rare_tools"]
+    card = [r for r in _cards(inp, "spawn-tools-list") if r.agent_type == "reviewer"][0]
+    assert "Edit" not in card.changes[0].value and "Write" not in card.changes[0].value
+    assert "Write" not in card.action.split("Rarely used")[1]
+    # Edit is on the reviewer's tools line; it is the deny line that keeps it off the suggested one.
+    assert "Edit" in recommend.read_agent_tools(inp.agents["reviewer"]["tools"]).allow
+    assert "Edit is on its disallowedTools line, so it isn't added." in card.action
+    assert "Edit isn't on its tools line" not in card.action
+    for name in NAMES:
+        if name != "denied":
+            assert not any("disallowedTools" in entry for entry in built(name)[1].agents.values()), name

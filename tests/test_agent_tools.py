@@ -102,9 +102,11 @@ def test_the_reader_reports_which_entries_were_cut_inside_their_parentheses():
     assert read_agent_tools(None).cut == ()
 
 
-def test_a_cut_deny_entry_is_left_out_and_the_deny_line_is_marked_partly_read():
+def test_a_cut_deny_entry_counts_as_its_base_tool_and_the_line_is_still_whole():
+    # An entry with a specifier still removes the whole tool, so the cut costs nothing.
     line = read_agent_tools(None, [_CUT_BASH, "Write"])
-    assert line.deny == ("Write",) and line.deny_whole is False
+    assert line.deny == ("Bash", "Write") and line.deny_whole is True
+    assert not line.offered("Bash") and not line.offered("Write")
     whole = read_agent_tools(None, ["Bash(rm -rf /tmp/x)", "Write"])
     assert whole.deny == ("Bash(rm -rf /tmp/x)", "Write") and whole.deny_whole is True
     assert read_agent_tools("Read").deny_whole is True
@@ -214,3 +216,79 @@ def test_a_line_that_changes_is_an_edit_whether_stored_as_a_string_or_a_list(tmp
     _write_snapshot(tmp_path, "20260902T100000Z", ["Read", "Grep", "Bash"])
     [point] = change_points.change_points(tmp_path)
     assert point.keys == ["agents.overseer.tools"]
+
+
+# -- deny first: a tool on disallowedTools is not offered, whatever tools says -
+
+
+@pytest.mark.parametrize(
+    "deny, name, offered",
+    [
+        ("Skill", "Skill", False),
+        ("Skill", "Read", True),
+        (["Write", "Edit"], "Edit", False),
+        # Task is Agent under its old name, on either line.
+        ("Task", "Agent", False),
+        ("Agent", "Task", False),
+        # mcp__X and mcp__X__* withhold server X, and each of its tools.
+        ("mcp__github", "mcp__github__*", False),
+        ("mcp__github__*", "mcp__github__*", False),
+        ("mcp__github", "mcp__github__create_issue", False),
+        ("mcp__github", "mcp__gitlab__*", True),
+        ("mcp__git", "mcp__github__*", True),
+        # mcp__* withholds every MCP tool and no other.
+        ("mcp__*", "mcp__github__*", False),
+        ("mcp__*", "mcp__github__create_issue", False),
+        ("mcp__*", "Read", True),
+        # mcp__X__tool withholds that tool only: the server stays offered.
+        ("mcp__github__create_issue", "mcp__github__create_issue", False),
+        ("mcp__github__create_issue", "mcp__github__*", True),
+        ("mcp__github__create_issue", "mcp__github__list_issues", True),
+        # An entry with a specifier still removes the whole tool (the sub-agents page).
+        ("Bash(rm *)", "Bash", False),
+        ("Bash(git push *)", "Bash", False),
+        ("Bash(rm *)", "Read", True),
+        ("Agent(Explore)", "Agent", False),
+        ("Task(Explore)", "Agent", False),
+        ("Agent(Explore)", "Bash", True),
+        (["Read", ("Bash(" + "rm -rf /tmp/a-very-long-path-" * 3)[:61] + "..."], "Bash", False),
+    ],
+)
+def test_a_denied_tool_is_not_offered_with_no_tools_line(deny, name, offered):
+    assert read_agent_tools(None, deny).offered(name) is offered
+
+
+@pytest.mark.parametrize("tools", ["Read, Skill, mcp__github__*", ["Read", "Skill", "mcp__github__*"]])
+def test_a_tool_on_both_lines_is_removed(tools):
+    line = read_agent_tools(tools, "Skill, mcp__github")
+    assert line.offered("Read")
+    assert not line.offered("Skill") and not line.offered("mcp__github__*")
+    # A tool the tools line lacks stays absent whatever the deny line says.
+    assert not read_agent_tools("Read", "Write").offered("Bash")
+
+
+def test_a_deny_line_the_hook_cut_off_still_denies_what_it_shows():
+    cut = "Write, Edit, NotebookEdit, MultiEdit, Bash, PowerShell, WebFetch, WebSearch"[:61] + "..."
+    line = read_agent_tools(None, cut)
+    assert not line.offered("Bash") and line.offered("Read")
+
+def test_a_deny_string_cut_inside_its_last_entrys_parentheses_still_withholds_that_tool():
+    """The old hook stored the line as one string cut at 64 characters. Its last entry may be cut inside the
+    parentheses, and then it is its base name, as a list entry is."""
+    long_entry = "Bash(rm -rf /tmp/a-very-long-path-that-the-hook-cuts-somewhere-in-the-middle)"
+    stored = ("Read, Grep, " + long_entry)[:61] + "..."
+    assert len(stored) == 64 and "(" in stored and ")" not in stored
+    tools = read_agent_tools(None, stored)
+    assert tools.deny == ("Read", "Grep", "Bash")
+    assert tools.denied("Bash") and not tools.offered("Bash") and not tools.deny_whole
+    # The list form says the same for one entry cut at the cap.
+    assert read_agent_tools(None, ["Read", ("Bash(" + "x" * 70)[:61] + "..."]).denied("Bash")
+    # A cut before any parenthesis is still not counted: that entry is unknown.
+    assert read_agent_tools(None, "Write, Edit, NotebookEdit, MultiEdit, Bash, PowerShell, WebFetch, WebSearch"[:61] + "...").deny == (
+        "Write", "Edit", "NotebookEdit", "MultiEdit", "Bash", "PowerShell")
+
+
+def test_a_tools_string_cut_inside_its_last_entrys_parentheses_is_still_not_known():
+    stored = ("Read, Grep, Agent(worker-one, worker-two, worker-three, worker-four, worker-five)")[:61] + "..."
+    assert len(stored) == 64 and "(" in stored and ")" not in stored
+    assert read_agent_tools(stored).allow is None

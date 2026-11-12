@@ -28,6 +28,7 @@ _RULE_MODULES = ("recommend.py", "advice.py", "carry.py", "compaction_sim.py", "
                   "run_split.py", "model_swap.py", "waste.py", "elasticity.py", "tool_search.py")
 
 UNITS = Units(billing_mode="api", currency="USD")
+IGNORED_ONLY = "The only change this check would suggest is on a card you ignored."
 FIX_KEYS = {"key", "agent", "explainer", "command", "command_warning", "prompt", "title"}
 
 
@@ -387,7 +388,8 @@ def test_models_check_is_ok_when_the_ignored_card_was_its_only_change(tmp_path):
     model.recommendations = [_main_sonnet_card()]
     result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
     assert result["status"] == "ok" and result["fixes"] == []
-    assert "Main session on sonnet" not in result["summary"]
+    # Not "every agent is on the cheapest model": Main session is not, its card was ignored.
+    assert result["summary"] == IGNORED_ONLY
 
 
 def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
@@ -2280,3 +2282,443 @@ def test_models_check_survives_an_ignored_card_whose_value_is_a_list(tmp_path):
     result = qa.run("models", ctx)
     assert "Main session" not in result["summary"]
     assert len(qa.run_all(ctx)) == 20
+
+
+# -- R9: a card you ignored leads no check ------------------------------------
+
+
+def _thinking_rows(model, share):
+    """``_full_model``'s main session spends ``share`` percent of its output thinking."""
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    column = [c.key for c in table.columns].index("thinking_share")
+    for row in table.rows:
+        row[column] = share
+
+
+def _effort_card(**kw):
+    return Recommendation(
+        id="effort-mismatch", key="effort-mismatch:reviewer", severity="advice", title="High effort on easy work",
+        agent_type="reviewer",
+        changes=[SettingChange(target="agent", key="effort", agent="reviewer", value="medium", current="high")],
+        **kw,
+    )
+
+
+def test_the_effort_check_is_ok_when_the_only_card_for_it_is_ignored_and_no_agent_is_over_the_bar(tmp_path):
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    model.recommendations = [_effort_card()]
+    shown = qa.run("effort", _ctx(tmp_path, model=model))
+    assert shown["status"] == "act" and shown["fixes"]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch:reviewer"}))
+    result = qa.run("effort", ctx)
+    assert result["status"] == "ok" and not result["fixes"]
+    row = next(r for r in qa.run_all(ctx) if r["id"] == "effort")
+    assert row["status"] == "ok" and row["fix_count"] == 0
+
+
+def test_the_effort_check_drops_a_thinking_candidate_an_ignored_card_already_suggested(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(
+        id="effort-mismatch", key="effort-mismatch:main", severity="advice", title="High effort on easy work",
+        changes=[SettingChange(target="settings", key="effortLevel", agent=None, value="medium")],
+    )]
+    assert qa.run("effort", _ctx(tmp_path, model=model))["fixes"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch:main"})))
+    assert result["status"] == "ok" and not result["fixes"]
+    # The table still shows the main session over the bar, so "no agent spends more than 20%" would be false.
+    assert result["summary"] == IGNORED_ONLY
+
+
+@pytest.mark.parametrize("check", [c for c in qa.CHECKS if c.rule_ids], ids=lambda c: c.id)
+def test_an_ignored_card_adds_no_fix_tip_or_title_to_the_check_it_belongs_to(tmp_path, check):
+    cards = [
+        Recommendation(
+            id=rule, key=f"{rule}:x", severity="advice", title=f"Title of {rule}", why="why", action="action",
+            fixes=[{"key": None, "agent": None, "explainer": [], "command": None, "command_warning": None,
+                    "prompt": f"Prompt of {rule}", "title": None}],
+        )
+        for rule in check.rule_ids
+    ]
+    model = _full_model()
+    model.recommendations = cards
+    open_result = qa.run(check.id, _ctx(tmp_path, model=model))
+    ignored = qa.run(check.id, _ctx(tmp_path, model=model, skip_keys=frozenset(c.key for c in cards)))
+    for card in cards:
+        assert not any(fix.get("prompt") == f"Prompt of {card.id}" for fix in ignored["fixes"]), card.id
+        assert card.title not in {tip["title"] for tip in ignored["tips"]}, card.id
+        assert card.title not in ignored["summary"], card.id
+    assert len(ignored["fixes"]) <= len(open_result["fixes"])
+
+
+def test_the_tools_check_counts_what_the_card_counts_for_an_agent_with_a_deny_line(tmp_path):
+    """The agent's lines come as the snapshot stores them (``agents[name]``),
+    not from ``effective_agents``."""
+    from test_spawn_parts import _diet_acc, _recs, _report, _snapshot, _tools_rec
+
+    report = _report(_diet_acc("searcher"))
+    line = ["Read", "Grep", "Bash", "Skill", "WebFetch", "NotebookEdit"]
+
+    def counted(denied):
+        agents = {"searcher": {"source": "user", "tools": line, **({"disallowedTools": denied} if denied else {})}}
+        report.recommendations = _recs(report, snapshot=_snapshot(agents), units=UNITS)
+        card = _tools_rec(report.recommendations, "searcher")
+        result = qa.run("tools", _ctx(tmp_path, model=report, agents=agents))
+        (row,) = [r for r in result["table"]["rows"] if r[0] == "searcher"]
+        return card, row[4]
+
+    open_card, open_cell = counted(None)
+    denied_card, denied_cell = counted(["WebFetch"])
+    assert open_cell.startswith("3 (") and denied_cell.startswith("2 (")
+    assert "WebFetch" in open_card.action.split("Rarely used")[1] and "WebFetch" not in denied_card.action.split("Rarely used")[1]
+
+
+# -- the CLAUDE.md check offers the agent cards' fixes when no file shows a count --
+
+
+def _claude_md_card(agent="reviewer", rec_id="spawn-claude-md"):
+    return Recommendation(
+        id=rec_id, key=f"{rec_id}:{agent}", severity="advice", title=f"{agent} is sent CLAUDE.md files it may not need",
+        agent_type=agent, saving_usd=2.0,
+        changes=[SettingChange(target="agent", key="omitClaudeMd", agent=agent, value=True)],
+    )
+
+
+def test_the_claude_md_check_offers_the_agent_cards_fixes_when_no_file_was_seen(tmp_path):
+    model = NS(sections=[], context_files={}, recommendations=[_claude_md_card("reviewer"), _claude_md_card("tester")])
+    ctx = _ctx(tmp_path, model=model)
+    (ctx.config_dir.parent / "CLAUDE.md").write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act"
+    assert [(f["key"], f["agent"]) for f in result["fixes"]] == [("omitClaudeMd", "reviewer"), ("omitClaudeMd", "tester")]
+    assert "None of your CLAUDE.md files was seen in a session over the last 14 days" in result["summary"]
+    assert "how often each is sent isn't known" in result["summary"]
+    assert result["table"]["rows"]
+    # Nothing to offer: still no data, and an ignored card offers nothing.
+    model.recommendations = []
+    assert qa.run("claude-md", ctx)["status"] == "no_data"
+    model.recommendations = [_claude_md_card("reviewer")]
+    ignored = _ctx(tmp_path, model=model, skip_keys=frozenset({"spawn-claude-md:reviewer"}))
+    assert qa.run("claude-md", ignored)["status"] == "no_data"
+
+
+def test_the_claude_md_check_offers_the_agent_cards_fixes_when_no_file_was_found(tmp_path):
+    model = NS(sections=[], context_files={}, recommendations=[_claude_md_card(rec_id="spawn-shared-claude-md")])
+    ctx = _ctx(tmp_path, model=model)
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most.")
+    model.recommendations = []
+    assert qa.run("claude-md", ctx)["status"] == "no_data"
+    assert qa.run("claude-md", ctx)["summary"] == "No CLAUDE.md files found."
+
+
+def test_the_claude_md_check_still_leads_with_the_file_that_costs_most_once_one_was_seen(tmp_path):
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[_claude_md_card()]))
+    path = ctx.config_dir.parent / "CLAUDE.md"
+    path.write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    from claudeglass import claude_md_review, parse
+
+    salt = parse.load_or_create_salt(ctx.config_dir)
+    row = {"hash": parse.path_hash(str(path), salt), "type": "instructions", "sends": 4, "reach": {"main": 4},
+           "cost_by_reach": {"main": 1.5}, "cost_usd": 1.5, "tokens": 8, "last_seen": "2026-10-01", "weekly": {}}
+    ctx.model.context_files = {"files": [row], "transcripts": {"main": 4}}
+    assert [f.usage is not None for f in claude_md_review.build_review(ctx.config_dir, ctx.model.context_files).files] == [True]
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and "costs most" in result["summary"]
+
+
+def test_the_compaction_check_drops_a_candidate_an_ignored_card_already_suggested(tmp_path):
+    model = NS(sections=[NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+        {"window": 300000, "compactions_per_session": 2.0, "cost": 75.0, "delta_pct": -25.0},
+        {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
+    ])])], context_files={}, recommendations=[Recommendation(
+        id="compaction-window", key="compaction-window:top-level", severity="advice", title="Summarise earlier",
+        changes=[SettingChange(target="settings", key="autoCompactWindow", agent=None, value=300000)],
+    )])
+    shown = qa.run("compaction", _ctx(tmp_path, model=model))
+    assert shown["status"] == "act" and shown["fixes"]
+    result = qa.run("compaction", _ctx(tmp_path, model=model, skip_keys=frozenset({"compaction-window:top-level"})))
+    assert result["status"] == "ok" and result["fixes"] == []
+    # Not "your summary point is within a few percent of the cheapest": the table has one 25% cheaper.
+    assert result["summary"] == IGNORED_ONLY
+
+
+# -- the CLAUDE.md check reads where the report read -----------------------------------------------
+
+
+def _docker_context(tmp_path, cards, *, give_roots=True):
+    """docs/deploy.md's layout: Claude's folder and its projects under data/claude, this tool's own
+    folder at data/claudeglass. One project file is readable and was sent 40 times."""
+    from claudeglass import parse
+
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True)
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("# Rules\n\n" + "Be brief and careful.\n" * 200, encoding="utf-8")
+    slug = claude_root / "projects" / "C--work-demo"
+    slug.mkdir(parents=True)
+    (slug / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project), "sessionId": "s1"}) + "\n",
+                                   encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    row = {"hash": parse.path_hash(str(project / "CLAUDE.md"), salt), "type": "instructions", "sends": 40,
+           "reach": {"main": 40}, "cost_by_reach": {"main": 3.0}, "cost_usd": 3.0, "tokens": 1100,
+           "last_seen": "2026-11-01", "weekly": {}}
+    model = NS(sections=[], context_files={"files": [row], "transcripts": {"main": 40}}, recommendations=cards)
+    extra = {"claude_root": claude_root, "projects_roots": (claude_root / "projects",)} if give_roots else {}
+    return qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                      effective={}, effective_agents={}, **extra)
+
+
+def test_the_claude_md_check_finds_the_files_in_the_layout_the_report_read(tmp_path):
+    result = qa.run("claude-md", _docker_context(tmp_path, [_claude_md_card()]))
+    assert result["status"] == "act"
+    assert "costs most" in result["summary"], result["summary"]
+
+
+def test_the_claude_md_check_derives_the_folders_from_the_config_folder_when_none_are_given(tmp_path):
+    ctx = _docker_context(tmp_path, [_claude_md_card()], give_roots=False)
+    assert ctx.claude_root is None and ctx.projects_roots is None
+    result = qa.run("claude-md", ctx)
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read"), result["summary"]
+
+
+def test_the_claude_md_check_says_when_it_could_read_no_file_and_offers_the_open_cards_fixes(tmp_path):
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[_claude_md_card()]))
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"] == (
+        "ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most. "
+        "The fixes below come from what your agents were sent."
+    )
+
+
+def test_the_claude_md_check_offers_no_fix_from_a_card_that_is_only_information_or_already_fixed(tmp_path):
+    import dataclasses
+
+    info = dataclasses.replace(_claude_md_card(), severity="info")
+    fixed = dataclasses.replace(_claude_md_card("tester"), variant="fixed")
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[info, fixed]))
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "no_data" and result["fixes"] == []
+    assert result["summary"] == "No CLAUDE.md files found."
+    (ctx.config_dir.parent / "CLAUDE.md").write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    unseen = qa.run("claude-md", ctx)
+    assert unseen["status"] == "no_data" and unseen["fixes"] == []
+    assert "None of your CLAUDE.md files was seen in a session over the last 14 days" in unseen["summary"]
+
+
+# -- a goal check whose only changes were on ignored cards says so -------------------------------------
+
+
+def _cache_card():
+    """One card holding every cache-lifetime change the cache check would draft for ``_full_model``."""
+    return Recommendation(
+        id="ttl-switch", key="ttl-switch", severity="advice", title="Longer cache",
+        changes=[
+            SettingChange(target="settings", key="promptCacheTtl", agent=None, value="1h"),
+            SettingChange(target="settings", key="subagentPromptCacheTtl", agent=None, value="5m"),
+            SettingChange(target="agent", key="experimental.cacheTtl", agent="Explore", value="5m"),
+            SettingChange(target="agent", key="experimental.cacheTtl", agent="Plan", value="5m"),
+        ],
+    )
+
+
+def test_the_cache_check_says_the_ignored_card_held_its_only_change_not_that_the_lifetimes_are_cheapest(tmp_path):
+    model = _full_model()
+    model.recommendations = [_cache_card()]
+    assert qa.run("cache", _ctx(tmp_path, model=model))["status"] == "act"
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == IGNORED_ONLY
+
+
+def test_a_goal_check_with_no_change_and_no_ignored_card_keeps_its_all_clear_sentence(tmp_path):
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    assert qa.run("effort", _ctx(tmp_path, model=model))["summary"] == "No agent spends more than 20% of its output thinking."
+    model.sections[0].tables[0].rows[0][-3] = None
+    model.sections[0].tables[0].rows[1][-3] = None
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok" and result["summary"].startswith("Every agent is already on the cheapest model")
+
+
+def test_the_effort_check_counts_the_rows_over_the_bar_in_its_table_not_its_fixes(tmp_path):
+    """Two rows are over the bar and a third is under it, and three fixes are on offer."""
+    model = _full_model()
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    template = list(table.rows[0])
+    table.rows[0][keys.index("thinking_share")] = 40.0
+    for name, share in (("reviewer", 40.0), ("tester", 5.0)):
+        row = list(template)
+        row[keys.index("agent_type")], row[keys.index("thinking_share")] = name, share
+        table.rows.append(row)
+    over = sum(1 for row in table.rows if row[keys.index("thinking_share")] > 20)
+    assert over == 2 and len(table.rows) == 3
+    model.recommendations = [_effort_card(), Recommendation(
+        id="effort-mismatch", key="effort-mismatch:tester", severity="advice", title="High effort on easy work",
+        agent_type="tester",
+        changes=[SettingChange(target="agent", key="effort", agent="tester", value="low", current="high")],
+    )]
+    result = qa.run("effort", _ctx(tmp_path, model=model))
+    assert len(result["fixes"]) > over
+    assert result["summary"].startswith("2 of your agents or sessions spent more than 20% of their output thinking."), result["summary"]
+
+def _mounted_context(tmp_path, cards):
+    """docs/deploy.md's container, as the service sees it: the host's ~/.claude is mounted at data/claude
+    and the config folder is data/claudeglass. The transcripts name the host's paths, which do not exist
+    here, so no project folder is known and the mounted CLAUDE.md is not at any path the report names."""
+    from claudeglass import parse
+
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    claude_root.mkdir(parents=True, exist_ok=True)
+    (claude_root / "CLAUDE.md").write_text("# Mine\n\n" + "Always be careful and brief.\n" * 400, encoding="utf-8")
+    slug = claude_root / "projects" / "C--work-demo"
+    slug.mkdir(parents=True, exist_ok=True)
+    host = tmp_path / "host" / ".claude" / "CLAUDE.md"
+    (slug / "s1.jsonl").write_text(
+        json.dumps({"type": "user", "cwd": str(tmp_path / "host" / "work"), "sessionId": "s1"}) + "\n", encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    row = {"hash": parse.path_hash(str(host), salt), "type": "instructions", "sends": 40, "reach": {"main": 40},
+           "cost_by_reach": {"main": 3.0}, "cost_usd": 3.0, "tokens": 1100, "last_seen": "2026-11-01", "weekly": {}}
+    model = NS(sections=[], context_files={"files": [row], "transcripts": {"main": 40}}, recommendations=cards)
+    return qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                      effective={}, effective_agents={}, projects_roots=(claude_root / "projects",))
+
+
+def test_the_claude_md_check_does_not_read_the_projects_roots_parent_as_yours(tmp_path):
+    """The mounted file is found at a path no transcript names, so the check must neither list it nor say
+    that it was never sent."""
+    result = qa.run("claude-md", _mounted_context(tmp_path, []))
+    assert result["status"] == "no_data" and result["summary"] == "No CLAUDE.md files found."
+    assert not result.get("table")
+    result = qa.run("claude-md", _mounted_context(tmp_path, [_claude_md_card()]))
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read")
+    assert "was seen in a session" not in result["summary"]
+
+
+def test_the_skills_check_finds_descriptions_under_the_projects_root_but_not_your_skills_beside_it(tmp_path):
+    """The listings of the sessions are under the projects roots; your skills are in the Claude folder."""
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True)
+    (claude_root / "skills" / "grill-me").mkdir(parents=True)
+    (claude_root / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    slug = claude_root / "projects" / "C--repo"
+    slug.mkdir(parents=True)
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    (slug / "s1.jsonl").write_text(json.dumps(listing) + "\n", encoding="utf-8")
+    row = {"name": "grill-me", "listing_tokens": 40, "listed": {"main": 60}, "listing_cost_usd": 4.0, "invoked": 0,
+           "invoked_by": {}, "resent_tokens": 0, "resent_cost_usd": 0.0, "attributed_turns": 0,
+           "attributed_cost_usd": 0.0, "last_seen": "2026-09-18T12:00:00Z"}
+    model = NS(sections=[], context_files={"skills": [row]}, recommendations=[])
+
+    def table_rows(**extra):
+        ctx = qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                         effective={}, effective_agents={}, **extra)
+        return qa.run("skills", ctx).get("table", {}).get("rows", [])
+
+    assert table_rows()[0][2] == ""
+    (found,) = table_rows(projects_roots=(claude_root / "projects",))
+    assert found[0] == "grill-me" and found[2] == "Interview the user about a plan."
+    assert found[1] == "Built into Claude Code"
+    # Given the Claude folder, the skill is yours.
+    (found,) = table_rows(claude_root=claude_root, projects_roots=(claude_root / "projects",))
+    assert "Built" not in found[1]
+
+def test_models_check_does_not_say_nothing_else_would_save_when_an_ignored_card_held_a_change(tmp_path):
+    """An advice-level agent-model card is open and the ignored card held the main session's change:
+    the table still shows that saving, so "no change would save a useful amount" would be false."""
+    model = _full_model()
+    model.sections[0].tables[0].rows[1][-3] = None  # Explore has no cheaper alternative
+    flagged = _agent_model_rec("agent-model-inherited", "advice", _INHERITED,
+                               prompt="From now on, set the model on every agent you start.")
+    model.recommendations = [_main_sonnet_card(), flagged]
+    open_result = qa.run("models", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 model change would have cost less")
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert result["status"] == "act"
+    assert result["summary"] == f"{_INHERITED}. The only other change this check would suggest is on a card you ignored."
+    # With no change to ignore, the sentence about the rest is as it was.
+    model.sections[0].tables[0].rows[0][-3] = None
+    model.recommendations = [flagged]
+    assert qa.run("models", _ctx(tmp_path, model=model))["summary"] == (
+        f"{_INHERITED}. Apart from that, no change to an agent file or setting would save a useful amount."
+    )
+
+def test_the_project_files_check_names_files_from_the_projects_roots_it_is_given(tmp_path, pf_names):
+    """The sessions' folders are found under the projects root, which need not be beside the config folder."""
+    ctx, project, salt = _pf_setup(tmp_path)
+    apart = tmp_path / "mount" / "projects"
+    apart.parent.mkdir()
+    (ctx.config_dir.parent / "projects").rename(apart)
+    data = _pf_data(_pf_read(_pf_hash(project / "docs" / "context.md", salt)))
+    lost = _pf_run(ctx, data)
+    assert not lost["summary"].startswith("docs/context.md")
+    ctx.projects_roots = (apart,)
+    found = _pf_run(ctx, data)
+    assert found["status"] == "act" and found["summary"].startswith("docs/context.md is now about 9k tokens")
+
+
+def _ttl_rows(model, rows):
+    """``_full_model``'s cache-lifetime table with these ``(agent, observed, all 5m, all 1h)`` rows."""
+    (table,) = [t for s in model.sections if s.key == "ttl" for t in s.tables if t.name == "ttl_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    table.rows[:] = [[{"agent_type": a, "cost_observed": o, "cost_all_5m": m5, "cost_all_1h": h1}[k] for k in keys]
+                     for a, o, m5, h1 in rows]
+
+
+def _ttl_card(*changes):
+    return Recommendation(id="ttl-switch", key="ttl-switch", severity="advice", title="Longer cache",
+                          changes=list(changes))
+
+
+def test_the_cache_check_counts_an_ignored_settings_candidate_as_removed(tmp_path):
+    """Only the main session would save (a settings candidate); no agent would. Its card is ignored."""
+    model = _full_model()
+    _ttl_rows(model, [("top-level", 50.0, 55.0, 45.0), ("Explore", 5.0, 5.0, 6.0), ("Plan", 3.0, 3.0, 3.5)])
+    model.recommendations = [_ttl_card(SettingChange(target="settings", key="promptCacheTtl", agent=None, value="1h"))]
+    open_result = qa.run("cache", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 cache lifetime change would")
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["summary"] == IGNORED_ONLY
+
+
+def test_the_cache_check_counts_an_ignored_per_agent_candidate_as_removed(tmp_path):
+    """Only Explore would save; the agents together and the main session would not. Its card is ignored."""
+    model = _full_model()
+    _ttl_rows(model, [("top-level", 50.0, 50.0, 55.0), ("Explore", 10.0, 5.0, 12.0), ("Plan", 10.0, 15.0, 10.0)])
+    model.recommendations = [_ttl_card(
+        SettingChange(target="agent", key="experimental.cacheTtl", agent="Explore", value="5m"))]
+    open_result = qa.run("cache", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 cache lifetime change would")
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["summary"] == IGNORED_ONLY
+    # With nothing ignored and nothing to change, the lifetimes are said to be within a few percent.
+    _ttl_rows(model, [("top-level", 50.0, 50.0, 55.0), ("Explore", 10.0, 10.0, 12.0)])
+    model.recommendations = []
+    assert qa.run("cache", _ctx(tmp_path, model=model))["summary"] == (
+        "Your cache lifetimes are within a few percent of the cheapest replayed.")
+
+
+def test_the_effort_check_counts_its_changes_when_no_row_is_over_the_bar(tmp_path):
+    """No agent is over the bar, so the sentence cannot say how many are; it says how many changes there are."""
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    other = _effort_card()
+    other.key, other.agent_type = "effort-mismatch:tester", "tester"
+    other.changes = [SettingChange(target="agent", key="effort", agent="tester", value="medium", current="high")]
+    model.recommendations = [_effort_card()]
+    prefix = " Thinking is billed as output; a lower effort thinks less"
+    summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
+    assert summary.startswith("1 effort change would think less." + prefix), summary
+    model.recommendations = [_effort_card(), other]
+    summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
+    assert summary.startswith("2 effort changes would think less." + prefix), summary

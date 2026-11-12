@@ -56,6 +56,14 @@ class Context:
     #: such as the "savers" check's read of tokensave's own ledger.
     since_ts: float | None = None
     until_ts: float | None = None
+    #: Where the CLAUDE.md checks read when it is not the layout of
+    #: ``~/.claude`` (``config_dir``'s parent is Claude's folder and holds
+    #: ``projects/``): Claude's own folder, and the folders of project
+    #: folders the report read. Your own files are in ``claude_root``, else
+    #: beside the config folder; the roots give project folders, auto memory
+    #: and skill listings, never your own files.
+    claude_root: Path | None = None
+    projects_roots: tuple[Path, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +156,23 @@ def _result(
 
 
 def _recommendations(ctx: Context, ids: set[str]) -> list:
-    return [rec for rec in getattr(ctx.model, "recommendations", ()) or () if rec.id in ids]
+    """The open cards among ``ids``: a card you ignored leads no check."""
+    return [
+        rec for rec in getattr(ctx.model, "recommendations", ()) or ()
+        if rec.id in ids and rec.key not in ctx.skip_keys
+    ]
+
+
+def _ignored_changes(ctx: Context) -> set[tuple]:
+    """What the cards you ignored suggested, as ``_change_id``s: a card is
+    left out by its key, agent and value, so a new value for the same
+    setting still comes back."""
+    return {
+        _change_id(change.key, change.agent, change.value)
+        for rec in getattr(ctx.model, "recommendations", ()) or ()
+        if rec.key in ctx.skip_keys
+        for change in rec.changes or ()
+    }
 
 
 def _rec_fixes(recs) -> list[dict]:
@@ -208,8 +232,16 @@ def _merge_fixes(*groups: list[dict]) -> list[dict]:
     return out
 
 
+#: What a goal check says when the cards you ignored held every change it
+#: would have suggested: not that nothing is worth changing.
+_IGNORED_ONLY = "The only change this check would suggest is on a card you ignored."
+
+
 def _goal(ctx: Context, goal_id: str) -> dict:
-    return goals.draft(
+    """The goal's draft without the candidates an ignored card already
+    suggested. ``removed`` counts those candidates and ``ignored`` lists them,
+    so a check left with none can say the ignored cards are why."""
+    draft = goals.draft(
         goal_id,
         ctx.model,
         ctx.units,
@@ -218,6 +250,11 @@ def _goal(ctx: Context, goal_id: str) -> dict:
         period=ctx.period,
         skip_keys=ctx.skip_keys,
     )
+    ignored = _ignored_changes(ctx)
+    kept, removed = [], []
+    for candidate in draft["candidates"]:
+        (removed if _change_id(candidate["key"], candidate["agent"], candidate["value"]) in ignored else kept).append(candidate)
+    return {**draft, "candidates": kept, "removed": len(removed), "ignored": removed}
 
 
 def _goal_fixes(ctx: Context, draft: dict, title: Callable[[dict], str]) -> list[dict]:
@@ -251,15 +288,6 @@ def _models(ctx: Context) -> dict:
         ],
     )
     draft = _goal(ctx, "models")
-    # A card you ignored is left out by what it suggested (key, agent and
-    # value), so a new value for the same setting still comes back.
-    ignored = {
-        _change_id(change.key, change.agent, change.value)
-        for rec in getattr(ctx.model, "recommendations", ()) or ()
-        if rec.key in ctx.skip_keys
-        for change in rec.changes or ()
-    }
-    draft = {**draft, "candidates": [c for c in draft["candidates"] if _change_id(c["key"], c["agent"], c["value"]) not in ignored]}
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
@@ -268,7 +296,7 @@ def _models(ctx: Context) -> dict:
     # own fix is offered either way; an info-level one with no prompt in
     # its fix is a tip instead, its title and why. The cards share ids
     # across agent types, so this is decided per card, not per id.
-    agent_recs = [rec for rec in _recommendations(ctx, _AGENT_MODEL_RECS) if rec.key not in ctx.skip_keys]
+    agent_recs = _recommendations(ctx, _AGENT_MODEL_RECS)
     flagged = [rec for rec in agent_recs if rec.severity != "info"]
     tips += [{"title": rec.title, "text": rec.why or rec.action} for rec in agent_recs
              if rec.severity == "info" and not _recs_with_prompt_fix([rec])]
@@ -276,7 +304,9 @@ def _models(ctx: Context) -> dict:
     if not fixes and not flagged:
         return _result(
             "ok",
-            "Every agent is already on the cheapest model that priced lower by a useful margin"
+            _IGNORED_ONLY
+            if draft["removed"]
+            else "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
             fixes=agent_fixes,
@@ -286,7 +316,9 @@ def _models(ctx: Context) -> dict:
     if not fixes:
         return _result(
             "act",
-            f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount.",
+            f"{flagged_text} The only other change this check would suggest is on a card you ignored."
+            if draft["removed"]
+            else f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount.",
             table=table,
             fixes=agent_fixes,
             tips=tips,
@@ -411,12 +443,21 @@ def _effort(ctx: Context) -> dict:
     )
     if not fixes:
         return _result(
-            "ok", f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.", table=table
+            "ok",
+            _IGNORED_ONLY
+            if draft["removed"]
+            else f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
+            table=table,
         )
+    over = sum(1 for r in rows if (whatif._num(r.get("thinking_share")) or 0.0) > goals.THINKING_PCT)
     return _result(
         "act",
-        f"{len(fixes)} of your agents or sessions spent more than {goals.THINKING_PCT:.0f}% of their output "
-        "thinking. Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
+        (
+            f"{over} of your agents or sessions spent more than {goals.THINKING_PCT:.0f}% of their output thinking."
+            if over
+            else f"{len(fixes)} effort change{'s' if len(fixes) != 1 else ''} would think less."
+        )
+        + " Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
         "check {{page:changes}} after a few sessions.",
         table=table,
         fixes=fixes,
@@ -462,6 +503,8 @@ def _compaction(ctx: Context) -> dict:
     )
     draft = _goal(ctx, "compaction")
     fixes = _goal_fixes(ctx, draft, lambda c: f"Summarise at {c['value']:,} tokens")
+    if not fixes and draft["removed"]:
+        return _result("ok", _IGNORED_ONLY, table=table)
     limit = CompactionSimThresholds().max_compactions_per_session
     if not fixes and not any(
         str(r.get("window")) != "none" and (whatif._num(r.get("compactions_per_session")) or 0.0) <= limit
@@ -525,7 +568,12 @@ def _cache(ctx: Context) -> dict:
         _rec_fixes(_recommendations(ctx, {"ttl-switch"})),
     )
     if not fixes:
-        return _result("ok", "Your cache lifetimes are within a few percent of the cheapest replayed.", table=table)
+        ignored = draft["removed"] + sum(1 for c in subagents["ignored"] if c["key"] == "experimental.cacheTtl")
+        return _result(
+            "ok",
+            _IGNORED_ONLY if ignored else "Your cache lifetimes are within a few percent of the cheapest replayed.",
+            table=table,
+        )
     return _result(
         "act",
         f"{len(fixes)} cache lifetime change{'s' if len(fixes) != 1 else ''} would have cost less. A 1-hour cache "
@@ -555,10 +603,11 @@ def _tools(ctx: Context) -> dict:
         row = diet.get(agent_type)
         if row is None:
             return "none"
-        # Only what the agent's file still lists is sent, as the card counts it:
-        # the line is in the snapshot's agents map, not in effective_agents.
+        # Only what the agent's file still offers is sent, as the card counts it:
+        # the lines are in the snapshot's agents map, not in effective_agents.
         entry = ctx.agents.get(agent_type)
-        row = current_diet(row, entry.get("tools") if isinstance(entry, dict) else None)
+        entry = entry if isinstance(entry, dict) else {}
+        row = current_diet(row, entry.get("tools"), entry.get("disallowedTools"))
         count = len([name for name in str(row.get("rare_tools") or "").split(", ") if name])
         left_out = sum(
             whatif._num(row.get(key)) or 0.0
@@ -589,7 +638,13 @@ def _skills(ctx: Context) -> dict:
     from . import skills_review
 
     data = skills_review.review(
-        ctx.config_dir, getattr(ctx.model, "context_files", None) or {}, ctx.units, ctx.period, only=ctx.only,
+        ctx.config_dir,
+        getattr(ctx.model, "context_files", None) or {},
+        ctx.units,
+        ctx.period,
+        only=ctx.only,
+        claude_root=ctx.claude_root,
+        projects_roots=ctx.projects_roots,
     )
     rows = data["skills"]
     if not any(r["status"] != "not listed" for r in rows):
@@ -658,6 +713,22 @@ def _skill_timing_tips(ctx: Context) -> list[dict]:
     return tips
 
 
+def _claude_md_cards_only(ctx: Context, lead: str, table=None, none: str | None = None) -> dict:
+    """The check when no file shows how often it is sent: the fixes of its own
+    open cards (action or advice, not already fixed), which are read from the
+    agents' starts and need no file, with ``lead`` saying the counts are not
+    known. A card that is only information gives no fix, so with none open the
+    answer is the one without cards: no data (``none`` or ``lead``)."""
+    open_cards = [
+        rec for rec in _recommendations(ctx, {"spawn-claude-md", "spawn-shared-claude-md"})
+        if rec.severity in ("action", "advice") and rec.variant != "fixed"
+    ]
+    fixes = _merge_fixes(_rec_fixes(open_cards))
+    if not fixes:
+        return _result("no_data", none or lead, table=table)
+    return _result("act", f"{lead} The fixes below come from what your agents were sent.", table=table, fixes=fixes)
+
+
 def _claude_md(ctx: Context) -> dict:
     from . import claude_md_review
 
@@ -665,13 +736,19 @@ def _claude_md(ctx: Context) -> dict:
         ctx.config_dir,
         getattr(ctx.model, "context_files", None) or {},
         projects=None if ctx.only is None else list(ctx.only),
+        claude_root=ctx.claude_root,
+        projects_roots=ctx.projects_roots,
     )
     pairs = sorted(
         ((item, claude_md_review.file_summary(item, ctx.units, ctx.period)) for item in review.files),
         key=lambda pair: -pair[1]["cost_usd"],
     )
     if not pairs:
-        return _result("no_data", "No CLAUDE.md files found.")
+        return _claude_md_cards_only(
+            ctx,
+            "ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most.",
+            none="No CLAUDE.md files found.",
+        )
     summaries = [summary for _item, summary in pairs]
     table = _table(
         [("file", "File"), ("tokens", "Tokens"), ("sent", "Sent to"), ("cost", "Cost"), ("findings", "Findings")],
@@ -679,8 +756,8 @@ def _claude_md(ctx: Context) -> dict:
          for s in summaries[:10]],
     )
     if not any(summary["seen"] for summary in summaries):
-        return _result(
-            "no_data",
+        return _claude_md_cards_only(
+            ctx,
             f"None of your CLAUDE.md files was seen in a session {ctx.period}, so how often each is sent isn't known.",
             table=table,
         )
@@ -769,7 +846,11 @@ def _project_files(ctx: Context) -> dict:
     if not context_files.check_rows(candidates, maybe_imports=True):
         return _project_files_quiet(ctx)
     rows, _local = claude_md_review.project_file_rows(
-        ctx.config_dir, data, projects=None if ctx.only is None else list(ctx.only)
+        ctx.config_dir,
+        data,
+        projects=None if ctx.only is None else list(ctx.only),
+        claude_root=ctx.claude_root,
+        projects_roots=ctx.projects_roots,
     )
     flagged = context_files.check_rows(rows)
     if not flagged:
@@ -1541,7 +1622,7 @@ def _habits(ctx: Context) -> dict:
         [("cause", "Replies that went nowhere"), ("turns", "Replies"), ("cost", "Cost"), ("lever", "What helps")],
         [[r["label"], r["turns"], _cell(ctx, r["cost_usd"]), r["lever"]] for r in rows],
     )
-    recs = [rec for rec in _recommendations(ctx, _HABIT_RECS) if rec.key not in ctx.skip_keys]
+    recs = _recommendations(ctx, _HABIT_RECS)
     skip_as_tip = _recs_with_prompt_fix(recs)
     tips = [{"title": rec.title, "text": rec.action or rec.why} for rec in recs if rec.id not in skip_as_tip]
     playbook = _playbook_tips(ctx, tables)

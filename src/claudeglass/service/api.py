@@ -2948,7 +2948,10 @@ def make_handler(
         # files, which every project reads), as Skills reads them.
         folders = _project_folders(project)
         review = claude_md_review.build_review(
-            options.config_dir, model.context_files or {}, projects=None if folders is None else list(folders)
+            options.config_dir,
+            model.context_files or {},
+            projects=None if folders is None else list(folders),
+            projects_roots=_projects_roots(),
         )
         return claude_md_review, review, _report_units(model), _period_text(*window, name=query.get("window"))
 
@@ -3006,7 +3009,10 @@ def make_handler(
         data = model.context_files or {}
         folders = _project_folders(project)
         rows, local = claude_md_review.project_file_rows(
-            options.config_dir, data, projects=None if folders is None else list(folders)
+            options.config_dir,
+            data,
+            projects=None if folders is None else list(folders),
+            projects_roots=_projects_roots(),
         )
         flagged = {row["hash"]: row["reasons"] for row in context_files.check_rows(rows)}
         units = _report_units(model)
@@ -3053,15 +3059,21 @@ def make_handler(
                 _report_units(model),
                 _period_text(*window, name=query.get("window")),
                 only=_project_folders(project),
+                projects_roots=_projects_roots(),
             )
         )
 
-    def _project_folders(project):
-        """The folders a ``project`` filter stands for (``skills_review``),
-        or ``None`` with no filter."""
-        from .. import skills_review
+    def _projects_roots():
+        """The folders of project folders the service reads, as the report
+        does: the configured one, then the extra ones."""
+        return discovery.projects_roots([options.projects_root], options.extra_projects_roots)
 
-        return skills_review.project_folders_for(Path(options.config_dir).parent, project) if project else None
+    def _project_folders(project):
+        """The folders a ``project`` filter stands for, found under the
+        projects roots the report read, or ``None`` with no filter."""
+        from .. import claude_md_review
+
+        return claude_md_review.folders_for_slugs(_projects_roots(), project) if project else None
 
     def _current_settings(project=None) -> tuple[dict, dict, bool]:
         """The latest snapshot's effective settings as in force, every project's agent
@@ -3243,6 +3255,7 @@ def make_handler(
             only=_project_folders(project),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
+            projects_roots=tuple(_projects_roots()),
         )
 
     def route_quick_actions(store, query, body):
