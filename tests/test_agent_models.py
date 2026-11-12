@@ -20,9 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import agent_models, ignores, model_swap, recommend
+from claudeglass import PARSER_VERSION, agent_models, ignores, model_swap, recommend
 from claudeglass.agent_models import AgentModelThresholds, compute_agent_models
 from claudeglass.cache import encode_result, result_from_jsonable
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.model import ReportModel, Section, TranscriptMeta, TranscriptResult, Turn
 from claudeglass.pricing import load_pricing
 
@@ -522,6 +523,24 @@ def test_a_decider_from_an_old_digest_is_left_out_of_decide_apply_whatever_the_t
     }
     # Only decide-apply needs the counts: an old digest's writer is judged as ever.
     assert set(_verdicts([_old_digest(_agent(role_word="fix", real_edits=2))])) == {("general-purpose", "inherited")}
+
+
+def test_a_digest_from_before_the_stamp_is_left_out_of_decide_apply_even_with_counts():
+    # A 47 to 49 digest keeps its code-write counts, but in their pre-50 meaning:
+    # the stamp, not the counts, says whether they are measured.
+    decider = dict(role_word="review", turns=6, real_edits=3)
+    older = _agent(**decider)
+    older.parser_version = BEFORE_STAMP
+    assert {t.edit_code_count for t in older.turns} == {0, 1}
+    assert _verdicts([older]) == {}
+    for stamp in (None, PARSER_VERSION):
+        run = _agent(**decider)
+        run.parser_version = stamp
+        assert set(_verdicts([run])) == {("general-purpose", "decide-apply")}
+    # The decide-apply group counts the measured runs only.
+    current = _agent(**decider)
+    row = _verdicts([older, current])[("general-purpose", "decide-apply")]
+    assert row["runs"] == 1
 
 
 def _parsed_decider(tmp_path, paths):

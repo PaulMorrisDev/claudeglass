@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Sequence
 
-from . import agent_roles, workstyle
+from . import agent_roles, measured, workstyle
 from .model import Column, Recommendation, ReportModel, Table, TranscriptResult, Turn
 from .model_swap import _ALL_ARCHETYPES, _NO_SUBAGENT_ARCHETYPES, _dominant_label
 from .pricing import Pricing, model_name, price_turn
@@ -306,11 +306,13 @@ def _analyse(
     write_turns = sum(1 for t in result.turns if t.edit_kind == "real" or t.shell_write_count > 0)
     # A decider that only wrote its report or a ledger did not change code:
     # decide-apply counts shell writes and edit-tool calls aimed at code.
-    # A digest an older parser wrote has no such counts (None, not 0), and its
-    # transcript may be gone: that run is left out of decide-apply.
+    # A digest an older parser wrote (``measured``) has no such counts, or has
+    # them in an older meaning; its transcript may be gone: that run is left
+    # out of decide-apply.
     code_write_turns = (
         None
-        if any(t.shell_code_write_count is None or t.edit_code_count is None for t in result.turns)
+        if not measured.measures(result, *measured.CODE_WRITE_FIELDS)
+        or any(t.shell_code_write_count is None or t.edit_code_count is None for t in result.turns)
         else sum(1 for t in result.turns if t.shell_code_write_count > 0 or t.edit_code_count > 0)
     )
     role_class = agent_roles.role_class(meta.role_word)
