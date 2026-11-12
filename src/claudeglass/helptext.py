@@ -4711,7 +4711,10 @@ TABLE_COPY: dict[str, TableCopy] = {
         ),
         columns={
             "agent_type": ("", "The main session or the subagent type."),
-            "spawns": ("Runs", "Main session: how many sessions. Subagents: how many times that type started."),
+            "spawns": (
+                "Runs",
+                "Main session: how many sessions had a priced reply. Subagents: how many times that type started.",
+            ),
             "priced_turns": ("Replies", "Model replies counted, including any with an unknown model."),
             "unpriced_turns": (
                 "Replies with an unknown model",
@@ -4796,7 +4799,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="For the main session, the sessions it counts. Per subagent type, its runs started without a "
             "model of their own. Each is repriced at every known model.",
-            read="These are the runs a model setting would change. A what-if for that setting prices these runs.",
+            read="These are the runs a model setting would change. A what-if for that setting prices these runs. "
+            "For the main session, only a what-if for Sonnet does.",
             act="",
         ),
         columns={
@@ -4809,6 +4813,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "observed_model": ("Model used", "The model most of those replies used."),
             "observed_cost": ("Real cost", "Measured cost of those runs, at list price."),
         },
+        value_labels={"top-level": "Main session"},
     ),
     "model_swap_agent_models": TableCopy(
         title="Agents that ran on a larger model than their work needed",
