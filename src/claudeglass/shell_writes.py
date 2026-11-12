@@ -281,6 +281,11 @@ def _tokens(command: str, powershell: bool):
                     j += 2
                 elif ch == '"':
                     break
+                elif not powershell and ch in "$`" and (end := _substitution_end(command, j)) >= 0:
+                    # A substitution is read to its own end, so the quotes
+                    # inside it are its text and not this word's.
+                    word.append(command[j:end])
+                    j = end
                 else:
                     word.append(ch)
                     j += 1
@@ -380,6 +385,94 @@ def _tokens(command: str, powershell: bool):
 def _rest_of_line_blank(command: str, start: int) -> bool:
     end = command.find("\n", start)
     return end >= 0 and not command[start:end].strip()
+
+
+def _substitution_end(command: str, i: int) -> int:
+    """The index just past the substitution that starts at ``i`` (``$(``
+    or a backtick), or -1 when it is not one or never closes. Bash parses
+    what is inside afresh: its quotes pair with each other, its heredoc
+    bodies are text, and parens nest, whatever the double quote around it
+    is doing."""
+    n = len(command)
+    if command.startswith("$(", i):
+        i += 2
+    elif command.startswith("`", i):
+        return _backtick_end(command, i + 1)
+    else:
+        return -1
+    depth = 1
+    heredocs: list[tuple[str, bool]] = []
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            end = command.find("'", i + 1)
+            if end < 0:
+                return -1
+            i = end + 1
+        elif c == '"':
+            i = _double_quote_end(command, i + 1)
+            if i < 0:
+                return -1
+        elif c == "`":
+            i = _backtick_end(command, i + 1)
+            if i < 0:
+                return -1
+        elif c == "(":
+            depth += 1
+            i += 1
+        elif c == ")":
+            depth -= 1
+            i += 1
+            if not depth:
+                return i
+        elif c == "\n":
+            i += 1
+            if heredocs:
+                i = _skip_heredoc_bodies(command, i, heredocs)
+                heredocs = []
+        elif command.startswith("<<<", i):
+            i += 3
+        elif command.startswith("<<", i):
+            strip_tabs = command.startswith("<<-", i)
+            delimiter, i = _read_heredoc_delimiter(command, i + (3 if strip_tabs else 2))
+            if delimiter:
+                heredocs.append((delimiter, strip_tabs))
+        else:
+            i += 1
+    return -1
+
+
+def _double_quote_end(command: str, i: int) -> int:
+    """The index just past the ``"`` that closes the double-quoted text
+    starting at ``i``, or -1 when it never closes."""
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == '"':
+            return i + 1
+        elif c in "$`" and (end := _substitution_end(command, i)) >= 0:
+            i = end
+        else:
+            i += 1
+    return -1
+
+
+def _backtick_end(command: str, i: int) -> int:
+    """The index just past the backtick that closes the one before ``i``,
+    or -1 when it never closes."""
+    n = len(command)
+    while i < n:
+        if command[i] == "\\":
+            i += 2
+        elif command[i] == "`":
+            return i + 1
+        else:
+            i += 1
+    return -1
 
 
 def _read_heredoc_delimiter(command: str, i: int) -> tuple[str, int]:

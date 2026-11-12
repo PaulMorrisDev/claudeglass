@@ -100,6 +100,8 @@ def test_a_command_that_moves_or_removes_files_changes_them_in_bash(command):
     "git branch merge-notes",
     "git commit -m 'merge it' && git push",
     "git commit -m \"$(cat <<'EOF'\nrm -rf build\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF'\nsay \"rm -rf build\" before it; mv a b\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor\nrm -rf build\nEOF\n)\"",
     "echo 'rm -rf build'",
     "grep -r mv src",
     "npm test 2>&1",

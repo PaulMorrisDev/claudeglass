@@ -69,6 +69,25 @@ COMMANDS = [
     ("type a.txt", False, 0),
     ("pytest -q", False, 0),
     ("git commit -m 'grep foo'", False, 0),
+    # A message in "$( ... )" is text, whatever it quotes or however many stray quotes it holds
+    ("git commit -m \"$(cat <<'EOF'\nShell reads: \"cat a 2>/dev/null || cat b\" counts once\nEOF\n)\"", False, 0),
+    ("git commit -m \"$(cat <<'EOF'\nDocs: say \"cd src; grep -n foo x.py\" in the guide\nEOF\n)\"", False, 0),
+    ("git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor layout\nFind the cards that overflow\nEOF\n)\"", False, 0),
+    ("gh pr create --title t --body \"$(cat <<'EOF'\nRun \"git log -1; git show HEAD\" to check\nEOF\n)\"", False, 0),
+    ("git commit -m \"$(cat <<EOF\nHead the list\ntail -n 5 x\nEOF\n)\"", False, 0),
+    ("git commit -m \"$(printf '%s' 'say \"cat a\" here; cat b')\"", False, 0),
+    ("git commit -m \"`cat <<'EOF'\nFind \"cat a\" it\nEOF\n`\"", False, 0),
+    # A message that nests a substitution or a paren
+    ("git commit -m \"$(cat <<'EOF'\nMove (a; cat b) and $(grep x y) out\nEOF\n)\"", False, 0),
+    # A real second read after the commit still counts, so does one inside an unquoted substitution
+    ("git commit -m \"$(cat <<'EOF'\nsay \"cat a\"\nEOF\n)\" && cat src/a.py", False, 1),
+    ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"; grep -n foo a.py\ncat b.py", False, 2),
+    ("git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor\nEOF\n)\"\ngrep -n foo a.py", False, 1),
+    ("echo $(cat a.py)", False, 1),
+    ("x=$(grep -rn foo src/)", False, 1),
+    ("git log -1 && git commit -m \"$(cat <<'EOF'\nsay \"cat a\"\nEOF\n)\"", False, 1),
+    # An unterminated substitution is left as text, as before
+    ("echo \"$(cat a.py", False, 0),
     ("echo grep foo", False, 0),
     ("", False, 0),
 ]
@@ -146,6 +165,12 @@ def test_a_read_through_powershell_counts_like_one_through_bash(tmp_path):
 def test_a_fallback_on_the_next_line_is_one_read_in_the_turn(tmp_path):
     turns = _session(tmp_path, [_bash("cat a.txt 2>/dev/null ||\n  cat b.txt")], [("body", False, {})])
     assert turns[0].shell_read_count == 1
+
+
+def test_a_commit_reply_that_quotes_a_read_in_its_message_reads_nothing(tmp_path):
+    message = "git commit -m \"$(cat <<'EOF'\nShell reads: \"cat a || cat b\" counts once\nEOF\n)\""
+    turns = _session(tmp_path, [_bash(message)], [("[main abc] Shell reads", False, {})])
+    assert (turns[0].shell_read_count, turns[0].shell_read_chars) == (0, 0)
 
 
 def test_a_search_that_found_nothing_still_counts_and_its_output_is_in_context(tmp_path):
