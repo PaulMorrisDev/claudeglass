@@ -1990,30 +1990,41 @@ def test_status_cost_lines_ask_a_subagent_for_nothing(tmp_path):
     assert "after each large or web tool result" not in haiku
 
 
+def _signed_out_tags(config_dir, *, minutes_ago: float = 5, lines=None) -> None:
+    """A tag file whose every call found the claude command signed out."""
+    folder = config_dir / cat.JUDGE_DIR
+    folder.mkdir(exist_ok=True)
+    stamp = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = lines or [
+        {"reply": "msg_1", "agent": "", "err": "no_login"},
+        {"reply": "msg_2", "agent": "", "err": "no_login"},
+        {"reply": "msg_3", "w": cat.JUDGE_FALLBACK_WRITER, "err": "no_login"},
+    ]
+    (folder / f"{stamp[:7]}.jsonl").write_text(
+        "".join(json.dumps({"ts": stamp, **line}) + "\n" for line in lines), encoding="utf-8"
+    )
+
+
 def test_status_adds_the_signed_out_count_and_the_pause_to_the_judged_line(tmp_path):
-    """A tag file whose every call found the claude command signed out: 0% judged, the count beside it and one
-    plain sentence that says what to do."""
+    """A tag file whose every call found the claude command signed out: 0% judged, the count beside it and the
+    pause in two sentences (the advice is in the "No verdict" line already)."""
     from claudeglass import haiku_tags
     from claudeglass.capture import CaptureUsage
     from claudeglass.units import Units
 
-    folder = tmp_path / cat.JUDGE_DIR
-    folder.mkdir()
-    (folder / "2026-09.jsonl").write_text(
-        "".join(
-            json.dumps({"ts": f"2026-09-27T10:0{n}:00Z", "reply": f"msg_{n}", "agent": "", "err": "no_login"}) + "\n"
-            for n in range(3)
-        ),
-        encoding="utf-8",
-    )
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    _signed_out_tags(config_dir, lines=[{"reply": f"msg_{n}", "agent": "", "err": "no_login"} for n in range(3)])
     use = CaptureUsage(sessions=1, subagents=3, cycles=2, tagged_cycles=2, reports=3, tagged_reports=0)
-    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False, signed_out=haiku_tags.signed_out(tmp_path))
+    lines = cli._capture_usage_lines(
+        use, Units(billing_mode="api"), haiku=False, signed_out=haiku_tags.signed_out(config_dir)
+    )
     assert (
         "  Claude tagged 100.0% of your messages; Claude Haiku judged 0.0% of agent runs, and 3 found the claude "
         "command signed out"
     ) in lines
-    assert haiku_tags.SIGNED_OUT_NOTE in [line.strip() for line in lines]
-    assert sum("sign" in line for line in lines) == 2
+    assert f"  {haiku_tags.SIGNED_OUT_WHAT} {haiku_tags.SIGNED_OUT_RETRY}" in lines
+    assert haiku_tags.SIGNED_OUT_HOW not in "\n".join(lines)
 
 
 def test_status_says_nothing_of_signing_in_when_judged_calls_are_all_there_is(tmp_path):
@@ -2034,27 +2045,57 @@ def test_status_says_nothing_of_signing_in_when_judged_calls_are_all_there_is(tm
         assert not any("sign" in line for line in lines)
 
 
-def test_status_while_the_judge_cannot_sign_in_says_so_from_the_tag_files(tmp_path):
+@pytest.mark.parametrize("level", ["essentials", "deep"])
+def test_status_while_the_judge_cannot_sign_in_gives_the_advice_once(tmp_path, level):
     from claudeglass import haiku_tags
     from claudeglass.config import set_capture
 
     config_dir = _claude(tmp_path, {})
     _api_billing(config_dir)
     start = _session(config_dir, captured=True)
-    set_capture(config_dir, level="essentials", now=start - timedelta(hours=1))
-    folder = config_dir / cat.JUDGE_DIR
-    folder.mkdir()
-    stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (folder / f"{stamp[:7]}.jsonl").write_text(
-        json.dumps({"ts": stamp, "reply": "msg_1", "agent": "", "err": "no_login"}) + "\n", encoding="utf-8"
-    )
+    set_capture(config_dir, level=level, now=start - timedelta(hours=1))
+    _signed_out_tags(config_dir, lines=[{"reply": f"msg_{n}", "agent": "", "err": "no_login"} for n in range(2)])
     rc, out = _capture(config_dir, "status")
-    assert haiku_tags.SIGNED_OUT_NOTE in out
+    # What it is and when it tries again, once each; and the advice once, in the "No verdict" line the status
+    # already gave ("isn't signed in" and what to do), so the pause does not say it again.
+    assert out.count(haiku_tags.SIGNED_OUT_WHAT) == 1 and out.count(haiku_tags.SIGNED_OUT_RETRY) == 1
+    assert "No verdict for 2" in out and out.count("keeps its own login") == 1
+    assert haiku_tags.SIGNED_OUT_HOW not in out
     # Judged lines that came before a sign-out do not hide it, and a judged one after it clears it.
-    (folder / f"{stamp[:7]}.jsonl").write_text(
-        json.dumps({"ts": stamp, "reply": "msg_1", "agent": "", "err": "no_login"}) + "\n"
-        + json.dumps({"ts": stamp, "reply": "msg_2", "agent": "brief=clear result=done"}) + "\n",
-        encoding="utf-8",
+    _signed_out_tags(
+        config_dir, lines=[{"reply": "msg_1", "agent": "", "err": "no_login"},
+                           {"reply": "msg_2", "agent": "brief=clear result=done"}],
     )
     rc, out = _capture(config_dir, "status")
-    assert haiku_tags.SIGNED_OUT_NOTE not in out
+    assert haiku_tags.SIGNED_OUT_WHAT not in out
+
+
+@pytest.mark.parametrize("enabled_at", ["2026-11-01", "2026-11-01T10:00:00"])
+def test_a_hand_written_start_with_no_time_zone_is_read_as_utc_by_the_haiku_lines(tmp_path, enabled_at):
+    """``config.py`` accepts ``enabled_at`` with no zone and reads it as UTC; so must the lines that count the tag
+    files from it."""
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    _signed_out_tags(config_dir, minutes_ago=2)
+    capture = CaptureConfig(level="essentials", enabled_at=enabled_at)
+    out = "\n".join(cli._haiku_lines(capture, config_dir))
+    assert "No verdict for 2" in out
+
+
+@pytest.mark.parametrize("enabled_at", ["2026-11-01", "2026-11-01T10:00:00"])
+def test_a_hand_written_start_with_no_time_zone_does_not_stop_the_status_measured_lines(tmp_path, enabled_at):
+    from claudeglass import haiku_tags
+
+    config_dir = _claude(tmp_path, {})
+    _api_billing(config_dir)
+    start = _session(config_dir, captured=True)
+    from claudeglass.config import set_capture
+
+    set_capture(config_dir, level="essentials", now=start - timedelta(hours=1))
+    path = config_dir / "config.toml"
+    text = path.read_text(encoding="utf-8")
+    stamp = next(line for line in text.splitlines() if line.startswith("enabled_at"))
+    path.write_text(text.replace(stamp, f'enabled_at = "{enabled_at}"'), encoding="utf-8")
+    _signed_out_tags(config_dir, minutes_ago=2)
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0 and haiku_tags.SIGNED_OUT_WHAT in out

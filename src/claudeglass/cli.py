@@ -3843,8 +3843,8 @@ def _capture_usage_lines(use, units, *, haiku: bool, signed_out: haiku_tags.Sign
         else:
             who = "Claude Haiku" if haiku else "Claude"
             lines.append(f"  {who} tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
-    if signed_out is not None and signed_out.note:
-        lines.append(f"  {signed_out.note}")
+    if signed_out is not None and signed_out.status_note:
+        lines.append(f"  {signed_out.status_note}")
     return lines
 
 
@@ -4175,7 +4175,7 @@ def _haiku_lines(
     ids of the agent runs from your sessions, only when a turn got no tag:
     a run logged before the ``agent`` mark left an error line that reads as
     a main-session turn's until its reply is known to be an agent's."""
-    since = datetime.fromisoformat(capture.enabled_at) if capture.enabled_at else None
+    since = discovery._parse_bound(capture.enabled_at) if capture.enabled_at else None
     agent_ids = (
         agent_replies()
         if agent_replies is not None and haiku_tags.summary(config_dir, since=since, kind="main").errors
@@ -4357,7 +4357,7 @@ def _capture_measured(capture: CaptureConfig, *, args, config: Config, config_di
         units = _report_units(corpus, rates, config, config_dir)
         return _capture_usage_lines(
             capture_mod.usage(corpus, rates, since=capture.enabled_at), units, haiku=capture.haiku_tags,
-            signed_out=haiku_tags.signed_out(config_dir, since=datetime.fromisoformat(capture.enabled_at)),
+            signed_out=haiku_tags.signed_out(config_dir, since=discovery._parse_bound(capture.enabled_at)),
         )
     past, units = _capture_history(args, config, config_dir)
     return _capture_estimate_lines(past, units) if past is not None else []

@@ -1887,7 +1887,7 @@ def make_handler(
             hook_health.capture_specs(capture.hook_metrics()), config_dir=options.config_dir
         )
         signed_out = (
-            haiku_tags.signed_out(options.config_dir, since=datetime.fromisoformat(capture.enabled_at))
+            haiku_tags.signed_out(options.config_dir, since=discovery._parse_bound(capture.enabled_at))
             if use is not None and capture.enabled_at
             else None
         )

@@ -915,7 +915,7 @@ def test_measured_carries_the_signed_out_count_and_the_pause_for_the_judged_line
     assert measured["report_coverage_pct"] == 0.0
     assert measured["report_signed_out"] == 76
     assert measured["report_signed_out_text"] == "76 found the claude command signed out"
-    assert measured["judge_paused_text"] == haiku_tags.SIGNED_OUT_NOTE
+    assert measured["judge_paused_text"] == signed_out.note
     # Judged calls and no pause, or nothing read: nothing to say.
     for quiet in (haiku_tags.SignedOut(), None):
         measured = capture_view.view(

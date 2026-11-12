@@ -4725,42 +4725,46 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
 
 
 #: How long the judge is left alone after the ``claude`` command is found
-#: signed out, and the longest it is left alone: each further signed-out
-#: result doubles the wait (1, 2, 4, then 6 hours). A call it answers ends
-#: it. There is no cheap sign-in check to wait on instead: the login is a
-#: file on one system and a keychain entry on another, and only starting
-#: the command shows it works.
+#: signed out. A call it answers ends it. There is no cheap sign-in check to
+#: wait on instead: the login is a file on one system and a keychain entry on
+#: another, and only starting the command shows it works. The wait is short
+#: so that a user who signs in is judged again within the hour.
 _SIGNED_OUT_WAIT_S = 3600.0
-_SIGNED_OUT_WAIT_MAX_S = 6 * 3600.0
 
 
 def _judge_state_path(config_dir: Path, catalogue: dict) -> Path:
     return config_dir / catalogue["coaching"]["state_file"]
 
 
+def _wait_to(row, now: float) -> bool:
+    """Whether the coach state's ``judge`` row holds a wait that is still to
+    end: an end past ``now`` and no more than :data:`_SIGNED_OUT_WAIT_S`
+    past it. One further off cannot be one this hook began (a clock put
+    right since, or a file that is wrong), and it would hold the judge for
+    as long as the error, so it counts as no wait. A number that is not
+    finite fails both tests, so it counts as none too."""
+    until = _number(row.get("until")) if isinstance(row, dict) else None
+    return until is not None and now < until <= now + _SIGNED_OUT_WAIT_S
+
+
 def _judge_waiting(config_dir: Path, catalogue: dict, now: float) -> bool:
     """Whether the judge is in the wait a signed-out result began
-    (:func:`_judge_signed_out`): ``judge.until`` in the coach state is still
-    to come."""
-    row = _read_json(_judge_state_path(config_dir, catalogue)).get("judge")
-    return isinstance(row, dict) and (_number(row.get("until")) or 0.0) > now
+    (:func:`_judge_signed_out`). Read without the claim."""
+    return _wait_to(_read_json(_judge_state_path(config_dir, catalogue)).get("judge"), now)
 
 
 def _judge_signed_out(config_dir: Path, catalogue: dict, now: float) -> None:
-    """Begin the wait, or lengthen it: an hour, then twice the last wait up
-    to six hours. A worker that finds the wait already begun (it was started
+    """Begin the wait: ``judge.until`` in the coach state is an hour from
+    ``now``. A worker that finds the wait already begun (it was started
     before another had found the command signed out) leaves it as it is."""
     path = _judge_state_path(config_dir, catalogue)
     with _claimed(path) as held:
         if not held:
             return
         state = _read_json(path)
-        row = state.get("judge") if isinstance(state.get("judge"), dict) else {}
-        if (_number(row.get("until")) or 0.0) > now:
+        if _wait_to(state.get("judge"), now):
             return
-        last = _number(row.get("wait_s")) or 0.0
-        wait = min(last * 2, _SIGNED_OUT_WAIT_MAX_S) if last >= _SIGNED_OUT_WAIT_S else _SIGNED_OUT_WAIT_S
-        state["judge"] = {"wait_s": wait, "until": now + wait}
+        state["judge"] = {"until": now + _SIGNED_OUT_WAIT_S}
         _write_json(path, state)
 
 
@@ -4788,14 +4792,15 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
     nothing to judge writes no line (``{}``).
 
     After a call finds the ``claude`` command signed out, the command is not
-    started again for an hour, and each further signed-out result doubles
-    the wait up to six hours (``now``, in seconds, stands in for the clock
-    it is kept by); a call the command answers ends it. A run that comes
-    while the judge waits is logged as signed out, as a call that found it
-    so is, so the totals add up."""
+    started again for an hour (``now``, in seconds, stands in for the clock
+    the wait is kept by); a call the command answers ends it. A run that
+    comes while the judge waits is not judged and writes no line (``{}``),
+    and takes no claim: no call was made for it to count."""
     import subprocess
 
     now = time.time() if now is None else now
+    if _judge_waiting(config_dir, catalogue, now):
+        return {}
     judge = catalogue["judge"]
     agent = job.get("kind") == "agent"
     if agent and "excerpt" not in job:
@@ -4814,8 +4819,6 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
     try:
         if job.get("err") == "no_answer":
             raise NoAnswer()
-        if _judge_waiting(config_dir, catalogue, now):
-            raise NoLogin()
         answer = (ask or ask_haiku)(job, judge, config_dir)
     except NoAnswer:
         record["err"] = "no_answer"

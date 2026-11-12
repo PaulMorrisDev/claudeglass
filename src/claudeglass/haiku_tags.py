@@ -62,6 +62,7 @@ from .capture_catalogue import (
     JUDGE_ERRORS,
     JUDGE_WRITER,
     JUDGE_WRITERS,
+    NO_LOGIN_REASON,
     RESULT_WORDS,
     RETIRED_AGENT_KEYS,
     RETRY_REASONS,
@@ -417,13 +418,17 @@ def summary(
     return out
 
 
-#: Said beside the share of agent runs judged while the judge is waiting
-#: for a sign-in (the hook leaves the ``claude`` command alone for a while
-#: after it finds it signed out: ``capture_hook._judge_signed_out``).
-SIGNED_OUT_NOTE = (
-    "Judging is paused because the claude command is signed out: run claude in a terminal and sign in, "
-    "and judging starts again by itself."
+#: What is said beside the share of agent runs judged while the judge is
+#: waiting for a sign-in (the hook leaves the ``claude`` command alone for an
+#: hour after it finds it signed out: ``capture_hook._judge_signed_out``), in
+#: three sentences. The advice is the one ``capture status`` gives beside
+#: "No verdict for N" (``NO_LOGIN_REASON``), as a sentence of its own.
+SIGNED_OUT_WHAT = (
+    "Claude Haiku isn't being asked for now: the claude command wasn't signed in when ClaudeGlass last tried."
 )
+_ADVICE = NO_LOGIN_REASON.partition(": ")[2]
+SIGNED_OUT_HOW = f"{_ADVICE[:1].upper()}{_ADVICE[1:]}."
+SIGNED_OUT_RETRY = "ClaudeGlass tries again by itself, at most once an hour."
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,7 +449,14 @@ class SignedOut:
 
     @property
     def note(self) -> str:
-        return SIGNED_OUT_NOTE if self.paused else ""
+        """What, how and retry: for the Capture page."""
+        return f"{SIGNED_OUT_WHAT} {SIGNED_OUT_HOW} {SIGNED_OUT_RETRY}" if self.paused else ""
+
+    @property
+    def status_note(self) -> str:
+        """What and retry: for ``capture status``, whose "No verdict for N"
+        lines just above already give the advice."""
+        return f"{SIGNED_OUT_WHAT} {SIGNED_OUT_RETRY}" if self.paused else ""
 
 
 def signed_out(config_dir: str | Path | None, *, since: datetime | None = None) -> SignedOut:
@@ -477,6 +489,6 @@ def prune(config_dir: str | Path, retention_days: int, now: datetime | None = No
 
 
 __all__ = [
-    "Judged", "SIGNED_OUT_NOTE", "SignedOut", "Summary", "agent_replies", "apply", "load", "prune", "signed_out",
+    "Judged", "SIGNED_OUT_HOW", "SIGNED_OUT_RETRY", "SIGNED_OUT_WHAT", "SignedOut", "Summary", "agent_replies", "apply", "load", "prune", "signed_out",
     "summary", "tags_dir",
 ]
