@@ -93,7 +93,7 @@ def test_parser_51_redefined_the_shell_read_and_the_code_write_counts():
         assert not measures(TranscriptResult(parser_version=50), field)
         assert measures(TranscriptResult(parser_version=51), field)
     assert measures(TranscriptResult(parser_version=50), "coach_tips", "coach_disowned")
-    assert PARSER_VERSION == 51
+    assert PARSER_VERSION >= 51
 
 
 def test_a_result_built_in_memory_reads_as_current():

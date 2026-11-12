@@ -27,6 +27,7 @@ from .model import TranscriptResult
 #: the agent-model cards for a difference no real data shows: 0 of 37,438
 #: real write targets moved.
 FIELD_VERSIONS: dict[str, int] = {
+    "background_waiting": 52,
     "shell_read_count": 51,
     "shell_code_write_count": 51,
     "edit_code_count": 51,
@@ -43,6 +44,7 @@ BEFORE_STAMP = 0
 #: The sets the readers ask about together.
 TIP_FIELDS = ("coach_tip", "coach_tips", "coach_disowned")
 CODE_WRITE_FIELDS = ("shell_code_write_count", "edit_code_count")
+OCCASION_FIELDS = ("background_waiting",)
 
 
 def measures(result: TranscriptResult, *fields: str) -> bool:
@@ -89,6 +91,7 @@ __all__ = [
     "CODE_WRITE_FIELDS",
     "FIELD_VERSIONS",
     "NEWEST",
+    "OCCASION_FIELDS",
     "TIP_FIELDS",
     "is_older",
     "measures",
