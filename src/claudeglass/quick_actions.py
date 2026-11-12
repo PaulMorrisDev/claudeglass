@@ -673,6 +673,17 @@ def _skill_timing_tips(ctx: Context) -> list[dict]:
     return tips
 
 
+def _claude_md_cards_only(ctx: Context, lead: str, table=None, none: str | None = None) -> dict:
+    """The check when no file shows how often it is sent: the fixes of its own
+    cards, which are read from the agents' starts and need no file, with
+    ``lead`` saying the counts are not known; no data (``none`` or ``lead``)
+    when the cards have no fix to give."""
+    fixes = _merge_fixes(_rec_fixes(_recommendations(ctx, {"spawn-claude-md", "spawn-shared-claude-md"})))
+    if not fixes:
+        return _result("no_data", none or lead, table=table)
+    return _result("act", f"{lead} The fixes below come from what your agents were sent.", table=table, fixes=fixes)
+
+
 def _claude_md(ctx: Context) -> dict:
     from . import claude_md_review
 
@@ -686,7 +697,9 @@ def _claude_md(ctx: Context) -> dict:
         key=lambda pair: -pair[1]["cost_usd"],
     )
     if not pairs:
-        return _result("no_data", "No CLAUDE.md files found.")
+        return _claude_md_cards_only(
+            ctx, "No CLAUDE.md file was found, so how often each is sent isn't known.", none="No CLAUDE.md files found."
+        )
     summaries = [summary for _item, summary in pairs]
     table = _table(
         [("file", "File"), ("tokens", "Tokens"), ("sent", "Sent to"), ("cost", "Cost"), ("findings", "Findings")],
@@ -694,8 +707,8 @@ def _claude_md(ctx: Context) -> dict:
          for s in summaries[:10]],
     )
     if not any(summary["seen"] for summary in summaries):
-        return _result(
-            "no_data",
+        return _claude_md_cards_only(
+            ctx,
             f"None of your CLAUDE.md files was seen in a session {ctx.period}, so how often each is sent isn't known.",
             table=table,
         )

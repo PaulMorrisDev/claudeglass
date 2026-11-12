@@ -2367,3 +2367,58 @@ def test_the_tools_check_counts_what_the_card_counts_for_an_agent_with_a_deny_li
     denied_card, denied_cell = counted(["WebFetch"])
     assert open_cell.startswith("3 (") and denied_cell.startswith("2 (")
     assert "WebFetch" in open_card.action.split("Rarely used")[1] and "WebFetch" not in denied_card.action.split("Rarely used")[1]
+
+
+# -- the CLAUDE.md check offers the agent cards' fixes when no file shows a count --
+
+
+def _claude_md_card(agent="reviewer", rec_id="spawn-claude-md"):
+    return Recommendation(
+        id=rec_id, key=f"{rec_id}:{agent}", severity="advice", title=f"{agent} is sent CLAUDE.md files it may not need",
+        agent_type=agent, saving_usd=2.0,
+        changes=[SettingChange(target="agent", key="omitClaudeMd", agent=agent, value=True)],
+    )
+
+
+def test_the_claude_md_check_offers_the_agent_cards_fixes_when_no_file_was_seen(tmp_path):
+    model = NS(sections=[], context_files={}, recommendations=[_claude_md_card("reviewer"), _claude_md_card("tester")])
+    ctx = _ctx(tmp_path, model=model)
+    (ctx.config_dir.parent / "CLAUDE.md").write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act"
+    assert [(f["key"], f["agent"]) for f in result["fixes"]] == [("omitClaudeMd", "reviewer"), ("omitClaudeMd", "tester")]
+    assert "None of your CLAUDE.md files was seen in a session over the last 14 days" in result["summary"]
+    assert "how often each is sent isn't known" in result["summary"]
+    assert result["table"]["rows"]
+    # Nothing to offer: still no data, and an ignored card offers nothing.
+    model.recommendations = []
+    assert qa.run("claude-md", ctx)["status"] == "no_data"
+    model.recommendations = [_claude_md_card("reviewer")]
+    ignored = _ctx(tmp_path, model=model, skip_keys=frozenset({"spawn-claude-md:reviewer"}))
+    assert qa.run("claude-md", ignored)["status"] == "no_data"
+
+
+def test_the_claude_md_check_offers_the_agent_cards_fixes_when_no_file_was_found(tmp_path):
+    model = NS(sections=[], context_files={}, recommendations=[_claude_md_card(rec_id="spawn-shared-claude-md")])
+    ctx = _ctx(tmp_path, model=model)
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert "No CLAUDE.md file was found" in result["summary"] and "how often each is sent isn't known" in result["summary"]
+    model.recommendations = []
+    assert qa.run("claude-md", ctx)["status"] == "no_data"
+    assert qa.run("claude-md", ctx)["summary"] == "No CLAUDE.md files found."
+
+
+def test_the_claude_md_check_still_leads_with_the_file_that_costs_most_once_one_was_seen(tmp_path):
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[_claude_md_card()]))
+    path = ctx.config_dir.parent / "CLAUDE.md"
+    path.write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    from claudeglass import claude_md_review, parse
+
+    salt = parse.load_or_create_salt(ctx.config_dir)
+    row = {"hash": parse.path_hash(str(path), salt), "type": "instructions", "sends": 4, "reach": {"main": 4},
+           "cost_by_reach": {"main": 1.5}, "cost_usd": 1.5, "tokens": 8, "last_seen": "2026-10-01", "weekly": {}}
+    ctx.model.context_files = {"files": [row], "transcripts": {"main": 4}}
+    assert [f.usage is not None for f in claude_md_review.build_review(ctx.config_dir, ctx.model.context_files).files] == [True]
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and "costs most" in result["summary"]

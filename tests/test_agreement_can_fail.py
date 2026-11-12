@@ -235,3 +235,34 @@ def test_check_2_still_reports_a_card_of_one_exact_file_that_names_the_other_age
     assert fixes.fix_group(card, None)[1] == "file"
     problems = agreement.check_agent_folders(_with_cards(inp, card))
     assert any("ttl-switch" in p and "action names .claude/agents/" in p and "settings.json" in p for p in problems), problems
+
+
+def test_check_7_reports_a_check_that_says_no_data_while_an_open_card_for_its_rules_changes_a_setting(profile, monkeypatch):
+    base = profile("capture_off")[1]
+    # The profile's CLAUDE.md cards are information only; one of them as advice is an open card.
+    advice = [dataclasses.replace(rec, severity="advice") if rec.key == "spawn-claude-md:general-purpose" else rec
+              for rec in base.recs]
+    inp = base.with_recommendations(advice)
+    assert agreement.check_same_setting(inp) == []
+    real = quick_actions.run
+
+    def no_data(check_id, ctx):
+        result = real(check_id, ctx)
+        return {**result, "status": "no_data", "fixes": []} if check_id == "claude-md" else result
+
+    monkeypatch.setattr(quick_actions, "run", no_data)
+    problems = agreement.check_same_setting(inp.with_skip(inp.skip))
+    assert any(p.startswith("claude-md says no_data but the open card spawn-claude-md:general-purpose changes omitClaudeMd")
+               for p in problems), problems
+
+
+def test_the_harness_refuses_a_config_folder_that_is_not_beside_the_projects_folder(tmp_path):
+    """A config copy kept apart from its projects reads as having no CLAUDE.md files, and makes
+    the CLAUDE.md check disagree with its cards; that is the layout, not the data."""
+    (tmp_path / "data" / "projects").mkdir(parents=True)
+    (tmp_path / "copy" / "claudeglass").mkdir(parents=True)
+    with pytest.raises(agreement.LayoutError):
+        agreement.load_inputs(tmp_path / "data" / "projects", tmp_path / "copy" / "claudeglass", None)
+    (tmp_path / "data" / "claudeglass").mkdir()
+    with pytest.raises(agreement.LayoutError):
+        agreement.load_inputs(tmp_path / "copy" / "projects", tmp_path / "data" / "claudeglass", None)

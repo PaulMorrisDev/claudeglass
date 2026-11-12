@@ -71,6 +71,14 @@ from claudeglass.units import Units
 COUNTING = ("action", "advice")
 
 
+class LayoutError(Exception):
+    """The config folder has no ``projects`` folder beside it that is the one
+    the report reads. The product finds a project's own folder, and so its
+    CLAUDE.md files, under the config folder's parent, so a config copy kept
+    apart from the projects it describes reads as having no files and makes
+    checks disagree that agree on a real install."""
+
+
 class CheckUnavailable(Exception):
     """A check could not run here (Node is not installed): the runner says
     so rather than counting it as agreement."""
@@ -133,7 +141,10 @@ def load_inputs(projects_root, config_dir, project=None, *, days: int | None = N
     own report path (``cli._cmd_report_like``) and the context the dashboard
     gives the checks (``api._quick_context``): the settings in force and
     every project's agents come from one merged snapshot, the ignored cards
-    from ``ignores``. ``days`` is a window of the last N days; ``None`` is all time."""
+    from ``ignores``. ``days`` is a window of the last N days; ``None`` is all time.
+    The config folder must sit beside the projects folder (:class:`LayoutError`)."""
+    if (Path(config_dir).parent / "projects").resolve() != Path(projects_root).resolve():
+        raise LayoutError(f"the projects folder must sit beside the config folder, as in ~/.claude: {projects_root}")
     argv = ["check", "--projects-root", str(projects_root), "--config-dir", str(config_dir), "--no-cache", "--quiet"]
     argv += ["--days", str(days)] if days else ["--since", "2000-01-01"]
     argv += ["--project", project] if project else ["--all-projects"]
