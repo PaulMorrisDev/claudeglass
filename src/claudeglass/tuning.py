@@ -21,7 +21,8 @@ the data, so a key can't carry anything either. A problem line names the
 key path and the check, never the value or the key it found.
 
 The spec tree is the single list of what may appear. A block is a function
-that takes the shared :class:`_Ctx` and returns a dict, registered with
+that takes the shared :class:`_Ctx` and returns a dict (or None, which leaves an
+optional block out), registered with
 :func:`_block` beside the spec node that describes it; adding one means
 adding one registration with ``required=False``, so documents made before
 it still validate. The ``cost_centres``, ``project_files`` and
@@ -37,7 +38,10 @@ Window: the corpus the caller passes is the window (the callers load it with
 first; ``build`` doesn't). ``days`` and ``today`` fill the header and bound
 Haiku's judge calls (read from files here) and the overhead block's hook
 runs and costs: the last ``days`` days, counting ``today`` whole, from local
-midnight in the config's time zone as the corpus's window starts.
+midnight in the config's time zone as the corpus's window starts. When the
+dashboard's store holds sessions of the window whose transcripts are gone, the
+caller passes a ``covered.Coverage`` and the ``coverage`` block says what the
+document covers.
 
 A map lists only the words that were counted, so a missing word reads as
 zero. The caller passes the dashboard's session ratings and tip-card answers
@@ -64,12 +68,13 @@ from . import compaction as compaction_mod
 from . import context_budget as context_budget_mod
 from . import context_files as context_files_mod
 from . import cost_centres as cost_centres_mod
+from . import covered as covered_mod
 from . import discovery
 from . import coaching as coaching_mod
 from . import events as events_mod
 from . import habits as habits_mod
 from . import handoff as handoff_mod
-from . import haiku_tags, helptext, hook_health, limits
+from . import haiku_tags, helptext, hook_health, limits, measured
 from . import pieces as pieces_mod
 from . import prompting as prompting_mod
 from . import ratings as ratings_mod
@@ -589,7 +594,17 @@ class _Ctx:
     block first asks for it."""
 
     def __init__(
-        self, corpus, config, pricing, config_dir, days: int, today: date, claude_root, ratings=None, tip_feedback=None
+        self,
+        corpus,
+        config,
+        pricing,
+        config_dir,
+        days: int,
+        today: date,
+        claude_root,
+        ratings=None,
+        tip_feedback=None,
+        coverage=None,
     ):
         self.corpus = corpus
         self.config = config
@@ -600,6 +615,7 @@ class _Ctx:
         self.today = today
         self.ratings = ratings or {}
         self.tip_feedback = tip_feedback or {}
+        self.coverage = coverage
         # Local midnight in the config's zone, where the corpus's --days window starts.
         self.start = discovery.local_midnight(today - timedelta(days=days - 1), config.tz)
 
@@ -783,6 +799,7 @@ def build(
     claude_root: str | Path | None = None,
     ratings: dict | None = None,
     tip_feedback: dict | None = None,
+    coverage: "covered_mod.Coverage | None" = None,
 ) -> dict:
     """The export document for ``corpus`` (already loaded for the last
     ``days`` days, Haiku's tags put on its turns). ``config_dir`` is where
@@ -791,10 +808,13 @@ def build(
     when not given. ``ratings`` are the dashboard's session ratings by
     session id (``Store.all_feedback``) and ``tip_feedback`` its tip-card
     answers (``Store.tip_feedback``), counted as the dashboard counts them;
-    none of their words reach the document. Raises :class:`TuningError` if
+    none of their words reach the document. ``coverage``
+    (``covered.Coverage``), given when the dashboard's store holds sessions of
+    the window whose transcripts are gone, fills the ``coverage`` block;
+    without it the block is left out. Raises :class:`TuningError` if
     what it built doesn't validate, which would be a bug here."""
     days = max(1, int(days))
-    ctx = _Ctx(corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback)
+    ctx = _Ctx(corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback, coverage)
     version = _VERSION_RE.match(__version__)
     doc: dict = {
         "kind": KIND,
@@ -805,11 +825,32 @@ def build(
         "window_days": days,
     }
     for name, (_node, builder, _required) in _BLOCKS.items():
-        doc[name] = builder(ctx)
+        value = builder(ctx)
+        # An optional block's builder gives None when it has nothing to say.
+        if value is not None:
+            doc[name] = value
     problems = validate(doc)
     if problems:
         raise TuningError(problems)
     return doc
+
+
+# -- coverage ----------------------------------------------------------------------------------
+
+
+@_block("coverage", _counts("sessions", "read", "stored", "older"), required=False)
+def _coverage(ctx: _Ctx) -> dict | None:
+    """What the document covers, when the dashboard's store holds sessions
+    of the window whose transcripts are gone: the window's ``sessions``,
+    those ``read`` from transcripts on disk, those ``stored`` (read from
+    the store's digests), the ``older`` of the document's sessions an older
+    version read, which the newer figures leave out
+    (``measured.older_sessions``). Left out otherwise."""
+    c = ctx.coverage
+    if c is None:
+        return None
+    older, _covered = measured.older_sessions(ctx.corpus.sessions)
+    return {"sessions": c.sessions, "read": c.read, "stored": c.stored, "older": older}
 
 
 # -- capture -----------------------------------------------------------------------------------
@@ -1864,6 +1905,25 @@ def _total(node) -> int:
     return int(node) if isinstance(node, (int, float)) and not isinstance(node, bool) else 0
 
 
+def coverage_lines(block: dict | None, *, of_file: bool = False) -> list[str]:
+    """The plain lines for a document's ``coverage`` block, none without
+    one: the sessions the figures cover, those read from what the dashboard
+    kept, and those of them the newer figures leave out. ``of_file`` words
+    them for a reader of a file another machine made (``summary_text``)."""
+    if not block:
+        return []
+    covered = block["read"] + block["stored"]
+    return [
+        line
+        for line in (
+            covered_mod.gone_sentence(covered, block["sessions"], of_file=of_file),
+            covered_mod.stored_sentence(block["stored"], block["sessions"], of_file=of_file),
+            measured.older_sentence(block["older"], covered),
+        )
+        if line
+    ]
+
+
 def summary_text(doc) -> str:
     """Plain lines about ``doc``, a block each, for the summary command.
     Validates first and raises :class:`TuningError`, so a file that fails
@@ -1875,6 +1935,7 @@ def summary_text(doc) -> str:
         f"Tuning figures made on {doc['generated_on']} for the last {_n(doc['window_days'], 'day')}, "
         f"by ClaudeGlass {doc['tool_version']}."
     ]
+    lines += coverage_lines(doc.get("coverage"), of_file=True)
     for lines_of, name in (
         (_capture_lines, "capture"),
         (_prompting_lines, "prompting"),

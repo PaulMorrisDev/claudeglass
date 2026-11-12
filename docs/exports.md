@@ -348,6 +348,10 @@ later, not the Capture page's last 7 days. Session modes are the rules' own,
 without an override you set. Money is list price, whatever you pay, and the
 keys that hold it end in `_usd`.
 
+When the dashboard's database (`<config-dir>/service.db`) holds sessions of the window whose transcripts were not found, `tuning export` reads those sessions from it, so the file covers what the dashboard covers, and says how many on stderr. Without that database, or when every session's transcript is found, the file is read from transcripts alone.
+
+A transcript can be missing for three reasons. Claude Code's cleanup deletes transcripts after `cleanupPeriodDays` (30 days by default; sessions started or continued in the desktop app are kept at any age unless `desktopSessionCleanupPeriodDays` is set). The project folder may have been moved or deleted. Or the projects folder may not be one this command was pointed at (`--projects-root`, or `extra_projects_roots` in `config.toml`). ClaudeGlass cannot tell which, so it says only that the transcripts were not found. `report` and `export` read their figures from transcripts alone: they say how many sessions their figures leave out and that the dashboard still has them.
+
 With `--out`, the file is written whole or not at all: ClaudeGlass writes a
 temporary file beside it and renames it into place, so a failure leaves any
 file already there as it was. Exit `0` is a written file, `1` means no
@@ -357,7 +361,7 @@ written, or figures that failed the checks below.
 ### What the file holds
 
 A header (`kind`, `format`, `tool_version`, `parser_version`,
-`generated_on` and `window_days`) and nine blocks. A map lists only the words
+`generated_on` and `window_days`), a `coverage` block when some of the window's sessions were read from the dashboard's database, and nine blocks. A map lists only the words
 that were counted, so a missing word reads as zero. A file made before the
 `cost_centres` block was added has six, one made before `project_files` has
 seven, one made before `compactions` has eight, and all are still valid. So is
@@ -367,6 +371,7 @@ there is nothing to count, and a file from before them never had them.
 
 | Block | Holds |
 | --- | --- |
+| `coverage` | Only when the dashboard's database holds sessions of the window whose transcripts were not found: the window's sessions, those read from transcripts, those read from the database, and those an older ClaudeGlass read (the newer figures leave them out) |
 | `capture` | The setup: capture level, who writes the tags, the share of sessions, which metrics and coaching notes are on and the thresholds in force. For each tip: the notes that asked for it, the replies that showed it, the ones Claude called a misfire, and your useful, known and wrong answers |
 | `prompting` | Messages you typed, ones you typed while Claude worked, go-aheads, status checks, corrections, adjustments and reminders. Per week: messages and the times each habit showed. Pieces of work with an approved plan, plan rounds declined in the dialog (a decline you then answered with a go-ahead included) and how your feedback to them read. The approved plans by how the build began (in the same session, after a `/clear`, or in a session that opens with the plan): how many you approved by typing, the context carried, and the replies of the build with their context and list-price cost. The plans put up for each ask, grouped by how many times you sent one back: how many, how many you typed, the rounds and questions, and what they cost. Tool calls that were turned away, by reason |
 | `tags` | Each tag word as written, by who wrote it (Claude, Haiku, or Haiku filling a reply Claude left bare). Words put right by the hook and by the transcript. The shift Claude wrote against corrections, adjustments and rework. Mistakes Claude admitted, by kind and who caught them. Your `/cg-feedback` answers as counts |

@@ -2110,6 +2110,12 @@ class ReportMeta:
     #: by this version.
     older_sessions: int = 0
     sessions: int = 0
+    #: Set by the CLI's report only (``cli._store_coverage``): how many
+    #: sessions of this window the figures leave out, because the dashboard's
+    #: store holds them and their transcripts were not found. 0 when none is
+    #: missing, with no store, and always on the dashboard, which reads the
+    #: store.
+    sessions_left_out: int = 0
 
 
 @dataclass(slots=True)

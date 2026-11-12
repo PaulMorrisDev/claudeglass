@@ -615,6 +615,16 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     text = tuning.summary_text(_sample())
     lines = text.splitlines()
     assert lines[0] == "Tuning figures made on 2026-09-19 for the last 30 days, by ClaudeGlass 0.14.0."
+    # The sample's coverage block: 9 read from transcripts and 3 from the store make all 12.
+    # A summary is read on any machine, so it says whose dashboard and where the transcripts were missing.
+    assert lines[1] == (
+        "3 of 12 sessions in this window were read from what the dashboard kept "
+        "on the machine that made this file. Their transcripts were not found there."
+    )
+    assert lines[2] == (
+        "1 of 12 sessions in this window was read by an older version and its transcripts are gone, "
+        "so the newer figures leave it out."
+    )
     assert "Pieces of work: 67." in lines
     assert "Of the 55 delivered pieces with a clear start, 10 needed changes after delivery." in lines
     assert "Hooks: SessionStart ran 54 times, median 140 ms; Stop ran 800 times, no time recorded." in lines
@@ -627,6 +637,59 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     for name in ("Tips:", "Plans:", "Tags:", "Rework:", "Agent answers:", "Hooks:", "Limits:"):
         assert any(line.startswith(name) for line in lines), name
     assert len(lines) < 50
+
+
+def test_a_file_without_a_coverage_block_as_every_older_one_is_still_passes_and_says_nothing_of_it():
+    doc = _sample()
+    del doc["coverage"]
+    assert tuning.validate(doc) == []
+    text = tuning.summary_text(doc)
+    assert text.splitlines()[1].startswith("Capture:")
+    for words in ("These figures cover", "what the dashboard kept", "older version"):
+        assert words not in text
+
+
+def test_a_coverage_block_fails_the_checks_like_any_block():
+    problems = tuning.validate(_put(_sample(), "coverage.read", -1))
+    assert any(problem.startswith("coverage.read: must be 0 or more") for problem in problems)
+    problems = tuning.validate(_put(_sample(), "coverage.extra", 1))
+    assert any("coverage: has a key" in problem for problem in problems)
+    doc = _sample()
+    del doc["coverage"]["stored"]
+    assert "coverage.stored: is missing" in tuning.validate(doc)
+    # The days Claude Code keeps transcripts are not in the block: a file that has them is refused.
+    problems = tuning.validate(_put(_sample(), "coverage.kept_days", 30))
+    assert any("coverage: has a key" in problem for problem in problems)
+    assert list(_sample()["coverage"]) == ["sessions", "read", "stored", "older"]
+
+
+def test_the_coverage_lines_say_it_for_the_machine_that_runs_them_or_for_a_file():
+    block = {"sessions": 82, "read": 9, "stored": 0, "older": 0}
+    assert tuning.coverage_lines(block) == [
+        "These figures cover 9 of 82 sessions in this window. "
+        "The transcripts of the other 73 were not found, and the dashboard still has those sessions."
+    ]
+    assert tuning.coverage_lines(block, of_file=True) == [
+        "These figures cover 9 of 82 sessions in this window. "
+        "The transcripts of the other 73 were not found on the machine that made this file."
+    ]
+    block = {"sessions": 82, "read": 9, "stored": 73, "older": 73}
+    assert tuning.coverage_lines(block) == [
+        "73 of 82 sessions in this window are read from what the dashboard kept, "
+        "because their transcripts were not found.",
+        "73 of 82 sessions in this window were read by an older version and their transcripts are gone, "
+        "so the newer figures leave them out.",
+    ]
+    assert tuning.coverage_lines(block, of_file=True)[0] == (
+        "73 of 82 sessions in this window were read from what the dashboard kept "
+        "on the machine that made this file. Their transcripts were not found there."
+    )
+    assert tuning.coverage_lines(None) == tuning.coverage_lines({}) == []
+    one = {"sessions": 2, "read": 1, "stored": 1, "older": 0}
+    assert tuning.coverage_lines(one, of_file=True) == [
+        "1 of 2 sessions in this window was read from what the dashboard kept "
+        "on the machine that made this file. Its transcript was not found there."
+    ]
 
 
 def test_the_summary_gives_the_tools_list_saving_by_agent_type_when_the_file_has_one():
@@ -1098,6 +1161,32 @@ def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert doc["generated_on"] == "2026-09-19" and doc["window_days"] == 30
     assert tuning.loads(tuning.dumps(doc)) == doc
     assert 2_000 < len(tuning.dumps(doc).encode("utf-8")) < 40_000
+
+
+def test_build_writes_the_coverage_block_first_only_when_given_one(world):
+    from claudeglass import covered, measured
+
+    assert "coverage" not in _build(world)
+    doc = _build(world, coverage=covered.Coverage(sessions=8, read=6, stored=2))
+    assert list(doc)[6] == "coverage"
+    assert doc["coverage"] == {"sessions": 8, "read": 6, "stored": 2, "older": 0}
+    assert tuning.validate(doc) == []
+    assert tuning.summary_text(doc).splitlines()[1] == covered.stored_sentence(2, 8, of_file=True)
+    doc = _build(world, coverage=covered.Coverage(8, 6, 0))
+    assert tuning.summary_text(doc).splitlines()[1] == covered.gone_sentence(6, 8, of_file=True)
+    # A session an older parser wrote is counted once, for the newer figures to leave out.
+    corpus = copy.deepcopy(world.corpus)
+    corpus.sessions[0].top.parser_version = measured.BEFORE_STAMP
+    doc = _build(world, corpus=corpus, coverage=covered.Coverage(8, 8, 0))
+    assert doc["coverage"]["older"] == 1
+
+
+def test_a_required_block_whose_builder_gives_none_fails_the_build(monkeypatch):
+    original = tuning._BLOCKS["pieces"]
+    monkeypatch.setitem(tuning._BLOCKS, "pieces", (original[0], lambda ctx: None, True))
+    with pytest.raises(tuning.TuningError) as raised:
+        tuning.build(NS(sessions=[]), Config(), None, config_dir=None, days=7, today=TODAY, claude_root=None)
+    assert "pieces: is missing" in raised.value.problems
 
 
 def test_the_built_document_holds_nothing_that_names_anything(doc, world):

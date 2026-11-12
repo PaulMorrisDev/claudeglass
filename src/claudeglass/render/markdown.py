@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from .. import measured, pages
+from .. import covered, measured, pages
 from ..fixes import fix_note
 from ..model import Diagnostics, ReportModel, Table
 from .tables import SCOPE_LABELS, SEVERITY_LABELS, display_cell, display_row, fix_subject, escape_md, evidence_source, format_evidence_value, help_parts
@@ -65,6 +65,10 @@ def _render_meta(model: ReportModel) -> list[str]:
         ),
         f"- Billing mode: {meta.billing_mode}" + (f" ({meta.billing_source})" if meta.billing_source else ""),
     ]
+    # Directly after "- Window:".
+    gone = covered.gone_sentence(meta.sessions, meta.sessions + meta.sessions_left_out)
+    if gone:
+        lines.insert(3, f"- {gone}")
     if meta.thresholds:
         thresholds = ", ".join(f"{k}={v}" for k, v in meta.thresholds.items())
     else:
