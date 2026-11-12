@@ -1498,25 +1498,31 @@ def _merge_dashboard_marks(config_dir: Path, overrides: dict) -> tuple[dict, dic
     return merged, ratings
 
 
-def _store_slugs_selected(slugs, args: argparse.Namespace, config: Config, project_dirs: list[Path]) -> set[str]:
+def _store_slugs_selected(slugs, args: argparse.Namespace, config: Config) -> set[str]:
     """Of ``slugs`` (the dashboard's store's raw ``sessions.slug`` values, a
-    project folder's name each), those ``args`` picked: every one
-    ``exclude_projects`` leaves with ``--all-projects``, as the dashboard's
-    all-projects view counts them, else the folders it resolved
-    (``--project``, ``--project-family`` or the current folder's), case aside."""
+    project folder's name each), those ``args`` picked, by the rule
+    ``discovery.resolve_project_dirs`` applies to the folders on disk:
+    ``--all-projects``, else ``--project-family``, else ``--project`` (or the
+    current folder's), case aside, less ``exclude_projects``. A project whose
+    folder is gone is picked the same way."""
     from .corpus import _filter_excluded_dirs
 
+    slugs = [s for s in slugs if s]
     if args.all_projects:
-        return {p.name for p in _filter_excluded_dirs([Path(s) for s in slugs if s], config.exclude_projects)}
-    names = {p.name.lower() for p in project_dirs}
-    return {s for s in slugs if s and s.lower() in names}
+        picked = slugs
+    elif args.project_family:
+        pattern = re.compile(args.project_family, re.IGNORECASE)
+        picked = [s for s in slugs if pattern.search(s)]
+    else:
+        wanted = {s.lower() for s in (args.project or [discovery.slug_for(os.getcwd())])}
+        picked = [s for s in slugs if s.lower() in wanted]
+    return {p.name for p in _filter_excluded_dirs([Path(s) for s in picked], config.exclude_projects)}
 
 
 def _store_coverage(
     args: argparse.Namespace,
     config: Config,
     config_dir: Path,
-    project_dirs: list[Path],
     corpus: Corpus,
     *,
     add: bool = False,
@@ -1543,7 +1549,7 @@ def _store_coverage(
         return None, corpus
     try:
         held = store.window_session_ids(since=_window_since(args, config), until=args.until)
-        slugs = _store_slugs_selected(set(held.values()), args, config, project_dirs)
+        slugs = _store_slugs_selected(set(held.values()), args, config)
         known = {sid for sid, slug in held.items() if slug in slugs}
         read = {b.session_id for b in corpus.sessions if b.top is not None}
         if not known - read:
@@ -1752,6 +1758,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             f"claudeglass {command}: no matching project directories under {root}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
 
     corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
@@ -1760,8 +1767,9 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             f"claudeglass {command}: no sessions found under {root} for window {window!r}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
-    coverage, _corpus = _store_coverage(args, config, config_dir, project_dirs, corpus)
+    coverage, _corpus = _store_coverage(args, config, config_dir, corpus)
 
     snaps = snapshots.load_snapshots(config_dir) or None
     projects = tuple(p.name for p in project_dirs)
@@ -2404,6 +2412,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
             f"claudeglass {command}: no matching project directories under {root}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
 
     corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
@@ -2412,8 +2421,9 @@ def _cmd_export(args: argparse.Namespace) -> int:
             f"claudeglass {command}: no sessions found under {root} for window {window!r}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
-    coverage, _corpus = _store_coverage(args, config, config_dir, project_dirs, corpus)
+    coverage, _corpus = _store_coverage(args, config, config_dir, corpus)
 
     if args.aggregate:
         from . import team as team_mod
@@ -2591,6 +2601,15 @@ def _print_coverage(command: str, lines: list[str]) -> None:
         print(f"claudeglass {command}: {line}", file=sys.stderr)
 
 
+def _print_nothing_read(command: str, args: argparse.Namespace, config: Config, config_dir: Path) -> None:
+    """After a command found no project folder or no session on disk: when the
+    dashboard's store still holds sessions of the window for the projects
+    asked for, say that the figures cover none of them."""
+    coverage, _corpus = _store_coverage(args, config, config_dir, Corpus())
+    if coverage is not None:
+        _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions)])
+
+
 def _write_file_atomic(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` through a temporary file in the same
     folder and a rename, so the file is the whole document or not there:
@@ -2676,9 +2695,10 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     window = _window_description(args, config)
     if not project_dirs:
         print(f"claudeglass {command}: no matching project directories under {root}", file=sys.stderr)
+        _print_nothing_read(command, args, config, config_dir)
         return 1
     corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
-    coverage, corpus = _store_coverage(args, config, config_dir, project_dirs, corpus, add=True)
+    coverage, corpus = _store_coverage(args, config, config_dir, corpus, add=True)
     if not corpus.sessions:
         print(f"claudeglass {command}: no sessions found under {root} for window {window!r}", file=sys.stderr)
         return 1

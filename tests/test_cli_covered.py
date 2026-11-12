@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import json
+import shutil
 import sqlite3
 import zlib
 from datetime import date, datetime, timedelta, timezone
@@ -331,3 +332,71 @@ def test_one_damaged_digest_leaves_out_only_its_session(tmp_path, capsys, blob):
     # The report still counts the session the export could not read.
     _code, text, _err = report(world, capsys=capsys)
     assert "- " + ONE in text.splitlines()
+
+
+GONE_0_OF_1 = (
+    "These figures cover 0 of 1 session in this window. "
+    "The transcripts of the other 1 were not found, and the dashboard still has those sessions."
+)
+
+
+def run_cli(world, command, *extra, capsys):
+    projects, config_dir, claude_root = world
+    capsys.readouterr()
+    code = cli.main(
+        [*command, "--projects-root", str(projects), "--config-dir", str(config_dir), *extra]
+    )
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def every_session_gone(tmp_path):
+    """One session of the window in the store, its transcript gone; the only other one is outside the window."""
+    return store_with_gone_sessions(
+        tmp_path, {"proj-a": {"keep": S("keep", 40), "gone-a": S("gone-a", 2)}}, {"gone-a"}
+    )
+
+
+def project_folder_removed(tmp_path):
+    """``proj-a`` holds a session; ``proj-old`` held one whose transcript and folder are gone."""
+    world = store_with_gone_sessions(
+        tmp_path, {"proj-a": {"keep": S("keep", 1)}, "proj-old": {"old-1": S("old-1", 2)}}, {"old-1"}
+    )
+    shutil.rmtree(world[0] / "proj-old")
+    return world
+
+
+@pytest.mark.parametrize("command", [["report"], ["export", "--format", "json"]])
+def test_report_and_export_say_what_the_dashboard_has_when_no_session_is_found(tmp_path, capsys, command):
+    world = every_session_gone(tmp_path)
+    code, out, err = run_cli(world, command, "--all-projects", "--days", "30", capsys=capsys)
+    assert code == 1 and out == ""
+    lines = err.splitlines()
+    assert lines[0].startswith(f"claudeglass {command[0]}: no sessions found under ")
+    assert lines[1:] == [f"claudeglass {command[0]}: {GONE_0_OF_1}"]
+
+
+@pytest.mark.parametrize("command", [["report"], ["export", "--format", "json"], ["tuning", "export"]])
+def test_a_project_whose_folder_is_gone_still_gets_the_line(tmp_path, capsys, command):
+    world = project_folder_removed(tmp_path)
+    code, _out, err = run_cli(world, command, "--project", "proj-old", "--days", "30", capsys=capsys)
+    assert code == 1
+    name = "tuning export" if command[0] == "tuning" else command[0]
+    lines = err.splitlines()
+    assert lines[0].startswith(f"claudeglass {name}: no matching project directories under ")
+    assert lines[1:] == [f"claudeglass {name}: {GONE_0_OF_1}"]
+    # A project the store knows nothing of gets no line.
+    code, _out, err = run_cli(world, command, "--project", "proj-none", "--days", "30", capsys=capsys)
+    assert code == 1 and len(err.splitlines()) == 1
+
+
+def test_a_project_family_counts_the_store_projects_whose_folder_is_gone(tmp_path, capsys):
+    world = project_folder_removed(tmp_path)
+    out = tmp_path / "figures.json"
+    code, _stdout, err = tuning_export(world, out, "--project-family", "proj-.*", capsys=capsys)
+    assert code == 0
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["coverage"] == {"sessions": 2, "read": 1, "stored": 1, "older": 0}
+    code, text, _err = run_cli(world, ["report"], "--project-family", "proj-.*", "--days", "30", "--json", capsys=capsys)
+    assert code == 0
+    assert json.loads(text)["report"]["meta"]["sessions_left_out"] == 1
