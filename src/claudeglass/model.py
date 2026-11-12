@@ -581,9 +581,14 @@ phase, label, description or path:
   uses, but counted with or without the salt). Repeats are kept, so a
   file written twice counts twice. A target is temp when, normalised like
   the path hashes (``..`` resolved, case and slashes folded, ``/c/`` read
-  as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
-  back for a command that was blocked or denied. A count only, never a
-  path.
+  as ``c:``), it sits under the reading process's own temp folder
+  (``tempfile.gettempdir()``) or at the root of a path of a system temp
+  shape (``parse._TEMP_SHAPE_RE``): a Windows user's ``AppData/Local/Temp``,
+  ``Windows/Temp`` or ``Windows/SystemTemp`` (also as ``/mnt/c/...`` or
+  ``/cygdrive/c/...``), macOS ``/var/folders/<xx>/<id>/t`` and
+  ``/private/tmp``, ``/tmp`` and ``/var/tmp``; a folder only named ``temp``
+  or ``tmp`` inside a project is not. Taken back for a command that was
+  blocked or denied. A count only, never a path.
 - ``Turn.shell_code_write_count: int | None = None`` -- the part of
   ``shell_write_count`` aimed at code: not a document (a
   ``capture_catalogue.DOC_SUFFIXES`` file, a ``.log``, ``.csv``, ``.tsv``
@@ -773,7 +778,8 @@ memory and dropped:
 - ``Turn.shell_read_count: int = 0`` and ``shell_read_chars: int = 0`` --
   the commands of the turn's shell calls that read files and the size of
   their results (``shell_reads``: grep, rg, ``sed -n``, cat, head, tail,
-  find, git log/show/diff, Get-Content, Select-String; not a heredoc
+  find, git log/show/diff/grep, ``git ls-files | xargs grep``, Get-Content,
+  Select-String, ``Get-ChildItem -Recurse | Select-String``; not a heredoc
   write, ``sed -i``, ls, wc or git status). A call that was blocked or
   denied is taken back, like ``shell_write_count``.
 - ``Turn.tests_run: str = ""`` -- ``full`` when a shell call ran a whole

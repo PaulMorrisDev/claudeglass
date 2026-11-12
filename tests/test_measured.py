@@ -85,6 +85,17 @@ def test_an_unstamped_digest_measures_none_of_the_newer_fields(field):
     assert is_older(result)
 
 
+def test_parser_51_redefined_the_shell_read_and_the_code_write_counts():
+    # 51: a fallback on the next line is one read, a message in "$( ... )" is text, and temp is found by the
+    # shape of the path. A digest from parser 50 or earlier keeps the older counts, so it does not measure them.
+    for field in ("shell_read_count", "shell_code_write_count", "edit_code_count"):
+        assert FIELD_VERSIONS[field] == 51
+        assert not measures(TranscriptResult(parser_version=50), field)
+        assert measures(TranscriptResult(parser_version=51), field)
+    assert measures(TranscriptResult(parser_version=50), "coach_tips", "coach_disowned")
+    assert PARSER_VERSION == 51
+
+
 def test_a_result_built_in_memory_reads_as_current():
     result = TranscriptResult()
     assert result.parser_version is None
