@@ -10,13 +10,16 @@ name, instead of letting every check pass over nothing.
 from __future__ import annotations
 
 import re
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 import agreement
 import agreement_profiles as ap
-from claudeglass import change_points, corpus, fixes, model_swap, recommend
+from claudeglass import change_points, corpus, fixes, model_swap, recommend, snapshots
+from claudeglass.model import Recommendation, SettingChange
 from claudeglass.pricing import load_pricing
 
 NAMES = list(ap.SPECS)
@@ -155,46 +158,53 @@ def _main_row(inp) -> dict:
 
 def test_the_two_project_profile_prices_only_the_project_still_on_opus(built):
     """The first project moved to Sonnet part-way and runs Sonnet from then:
-    its earlier sessions ran under a model that has since changed, its later
-    ones are already on Sonnet. The all-projects card prices the second
-    project's sessions, as that project's own view does."""
+    its Sonnet sessions are already there, its earlier Opus ones are from
+    before the move down. The all-projects card prices the second project's
+    Opus sessions, as that project's own view does."""
     profile, inp = built("two_projects")
     row = _main_row(inp)
-    assert row["lever_runs"] == 8
+    assert row["lever_runs"] == 6
     alone = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG_B)
     (alone_card,) = _cards(alone, "model-tier-main")
     (card,) = _cards(inp, "model-tier-main")
     assert card.saving_usd == pytest.approx(alone_card.saving_usd, rel=1e-9)
-    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 4, 4)
+    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 3, 7)
     assert card.changes[0].current == "opus"
-    assert "It leaves out the 4 main sessions that started before the model last changed in their project." in card.why
+    assert (
+        "It leaves out 10 main sessions: 7 already on Sonnet or smaller, and 3 from before their project moved there."
+        in card.why
+    )
     assert agreement.check_same_setting(inp) == []
     first = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG)
     assert not _cards(first, "model-tier-main")
 
 
-def test_a_project_that_moved_its_model_and_back_counts_from_the_move_back(tmp_path):
+def _on_opus(bundle) -> bool:
+    """Whether most of a main session's priced replies ran on Opus."""
+    models = Counter(t.model for t in bundle.top.turns if t.turn_index > 0 and t.model)
+    return models.most_common(1)[0][0] == ap.OPUS
+
+
+def test_a_project_that_moved_its_model_and_back_counts_every_session_on_opus(tmp_path):
     spec = ap.Spec("and_back", custom_agents=False, workflows=False, second_project=True, model_back=True)
     profile = ap.build(spec, tmp_path / "p")
     inp = agreement.load_inputs(profile.projects_root, profile.config_dir, None)
     row = _main_row(inp)
-    assert row["lever_runs"] == 11
-    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 5, 0)
+    assert row["lever_runs"] == 10
+    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 0, 6)
     folders = [profile.projects_root / ap.SLUG, profile.projects_root / ap.SLUG_B]
     loaded = corpus.load_corpus(folders, since="2000-01-01")
-    counted = [
-        b.top for b in loaded.sessions
-        if b.top is not None and (b.slug == ap.SLUG_B or b.top.meta.session_id in ("sess-005", "sess-006", "sess-007"))
-    ]
+    counted = [b.top for b in loaded.sessions if b.top is not None and _on_opus(b)]
+    assert len(counted) == 10
     expected = model_swap.compute_model_swap(counted, load_pricing()).by_key["top-level"].tier_verdict.saving_usd
     assert row["saving_usd"] == pytest.approx(expected, rel=1e-9)
     (card,) = _cards(inp, "model-tier-main")
     assert card.saving_usd == pytest.approx(expected, rel=1e-9)
     assert agreement.check_same_setting(inp) == []
-    # The first project alone: three sessions (about 138 replies) are under the bar.
+    # The first project alone: four Opus sessions (about 184 replies) are under the bar.
     first = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG)
     first_row = _main_row(first)
-    assert (first_row["lever_runs"], first_row["before_change_runs"]) == (3, 5)
+    assert (first_row["lever_runs"], first_row["before_change_runs"]) == (4, 0)
     assert not _cards(first, "model-tier-main")
 
 
@@ -207,3 +217,29 @@ def test_the_card_stays_when_the_newest_snapshot_is_the_project_already_on_sonne
     alone = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG_B)
     (alone_card,) = _cards(alone, "model-tier-main")
     assert card.saving_usd == pytest.approx(alone_card.saving_usd, rel=1e-9)
+
+
+def test_check_7_in_the_all_projects_view_still_reads_a_projects_own_agent_change(built, monkeypatch):
+    """A project's own change to the main model holds there alone, but agent
+    files are merged per project, so a change to an agent's model still counts."""
+    profile, inp = built("two_projects")
+    real = change_points.change_points
+    own = snapshots.snapshot_project_key(ap.SLUG)
+
+    def point(keys, change):
+        return change_points.ChangePoint(
+            ts=datetime(2026, 11, 2, tzinfo=timezone.utc), source="config", label="Your settings changed", keys=keys,
+            changes=[change], project=own,
+        )
+
+    agent_point = point(["agents.reviewer.model"], {"key": "model", "agent": "reviewer", "old": "haiku", "new": "sonnet"})
+    main_point = point(["effective.model"], {"key": "model", "agent": None, "old": "opus", "new": "haiku"})
+    fake = Recommendation(
+        id="model-tier", title="y", severity="advice", saving_usd=5.0,
+        changes=[SettingChange(target="agent", key="model", agent="reviewer", value="haiku", current="haiku")],
+    )
+    monkeypatch.setattr(agreement.change_points, "change_points", lambda *a, **k: [*real(*a, **k), agent_point])
+    (problem,) = agreement.check_same_setting(inp.with_recommendations([*inp.recs, fake]))
+    assert "reviewer" in problem and "'sonnet'" in problem
+    monkeypatch.setattr(agreement.change_points, "change_points", lambda *a, **k: [*real(*a, **k), main_point])
+    assert agreement.check_same_setting(inp) == []

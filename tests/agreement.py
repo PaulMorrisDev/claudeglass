@@ -672,7 +672,8 @@ def check_same_setting(inp: Inputs) -> list[str]:
     of its rules that changes a setting. (b) A card's current value for a
     setting is the one the Changes page last shows it moved to: in one
     project's view, by a change there or for every project; in the
-    all-projects view, by a change for every project."""
+    all-projects view, a main-session setting by a change for every project
+    only (a project's own files set it there alone) and an agent's by either."""
     problems: list[str] = []
     open_cards = [rec for rec in inp.recs if _open(rec, inp.skip) and rec.changes]
     card_values: dict[tuple, dict[str, str]] = {}
@@ -701,12 +702,10 @@ def check_same_setting(inp: Inputs) -> list[str]:
                         f"{', '.join(c.key for c in rec.changes)}"
                     )
     keys = {key for slug in inp.projects for key in snapshots.snapshot_project_keys(slug)}
-    # In the all-projects view a change one project's own files made holds there alone, so only a
-    # change for every project speaks for a card's current value (``snapshots.with_every_project_agents``).
-    points = [
-        p for p in change_points.change_points(inp.config_dir)
-        if not p.project or (not inp.all_projects and p.project in keys)
-    ]
+    # In the all-projects view a main-session setting one project's own files changed holds there alone
+    # (``snapshots.with_every_project_agents`` reads your user settings); agent files are merged per
+    # project, so their changes still count.
+    points = [p for p in change_points.change_points(inp.config_dir) if not p.project or p.project in keys]
     for rec in open_cards:
         for change in rec.changes:
             moved = [
@@ -714,7 +713,7 @@ def check_same_setting(inp: Inputs) -> list[str]:
                 for p in points
                 for entry in p.changes
                 if entry.get("key") == change.key and (entry.get("agent") or None) == (change.agent or None)
-                and "new" in entry
+                and "new" in entry and not (inp.all_projects and p.project and not entry.get("agent"))
             ]
             if moved:
                 latest = max(moved, key=lambda item: item[0])[1]
