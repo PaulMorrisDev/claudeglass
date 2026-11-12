@@ -4704,7 +4704,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "repriced at every known model, and the saving one tier down.",
             read="Only real cost is measured. The saving is the most you could save at today's usage, and it "
             "appears only when a cheaper tier exists. A subagent's saving counts only the runs its agent file "
-            "decides. The main session's counts only the sessions since its model last changed.",
+            "decides. The main session's leaves out sessions already on Sonnet or smaller, and those from before "
+            "their project moved there.",
             act="A saving above 10% and above $1.00 at list price, on at least 5 runs or 200 replies, becomes "
             "a recommendation.",
         ),
@@ -4731,8 +4732,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "lever": ("Where to change it", "The file and field that set this agent type's model."),
             "lever_runs": (
                 "Runs it decides",
-                "Main session: sessions since its model last changed, outside projects already on Sonnet. "
-                "Subagents: runs started without a model of their own, which follow the agent file.",
+                "Main session: its sessions not already on Sonnet or smaller, and not from before their project "
+                "moved there. Subagents: runs started without a model of their own, which follow the agent file.",
             ),
             "lever_priced_turns": ("Replies on those runs", "Model replies on the runs that setting decides."),
             "lever_model": ("Model on those runs", "The model most of those replies used."),
@@ -4746,14 +4747,14 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Runs given a model when they started. That model wins over the agent file.",
             ),
             "before_change_runs": (
-                "From before the last change",
-                "Main session: sessions that started before its model last changed in their project. The saving "
-                "leaves them out.",
+                "From before a move to Sonnet",
+                "Main session: sessions that started before their project's model moved to Sonnet or smaller. The "
+                "saving leaves them out.",
             ),
             "settled_runs": (
                 "Already on Sonnet",
-                "Main session: sessions in a project whose model is already Sonnet or smaller. The main session is "
-                "never moved below Sonnet, so the saving leaves them out.",
+                "Main session: sessions that ran on Sonnet or smaller. The main session is never moved below "
+                "Sonnet, so the saving leaves them out.",
             ),
         },
         value_labels={
@@ -4793,8 +4794,8 @@ TABLE_COPY: dict[str, TableCopy] = {
     "model_swap_agent_file_runs": TableCopy(
         title="Runs each model setting decides, on other models",
         help=Help(
-            shows="For the main session, the sessions since its model last changed. Per subagent type, its runs "
-            "started without a model of their own. Each is repriced at every known model.",
+            shows="For the main session, the sessions it counts. Per subagent type, its runs started without a "
+            "model of their own. Each is repriced at every known model.",
             read="These are the runs a model setting would change. A what-if for that setting prices these runs.",
             act="",
         ),
@@ -4802,8 +4803,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "agent_type": ("", "The main session or the subagent type."),
             "runs": (
                 "Runs",
-                "Main session: the sessions since its model last changed. Subagents: runs started without a model "
-                "of their own.",
+                "Main session: the sessions it counts. Subagents: runs started without a model of their own.",
             ),
             "priced_turns": ("Replies", "Model replies on those runs."),
             "observed_model": ("Model used", "The model most of those replies used."),
