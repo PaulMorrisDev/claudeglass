@@ -483,17 +483,15 @@ def _capture_log_cutoff(config_dir: Path, now: datetime | None) -> datetime:
 
 
 def _config_diffs(
-    config_dir: Path, snapshots: list[snapshots_mod.Snapshot] | None = None
+    config_dir: Path,
 ) -> list[tuple[datetime | None, ChangePoint, snapshots_mod.Snapshot, snapshots_mod.Snapshot]]:
     """Wherever one project's snapshot differs from its previous one in a
     key that changes how Claude Code runs: the previous snapshot's time, a
     point with every key that changed, and the two snapshots. Oldest
-    first. ``snapshots`` are the snapshots already loaded from
-    ``config_dir`` (ascending by time, as ``load_snapshots`` gives them);
-    without them they are read from it."""
+    first."""
     diffs = []
     previous: dict[str, snapshots_mod.Snapshot] = {}
-    for snap in snapshots if snapshots is not None else snapshots_mod.load_snapshots(config_dir):
+    for snap in snapshots_mod.load_snapshots(config_dir):
         project = str(snap.data.get("project_slug") or "")
         before = previous.get(project)
         previous[project] = snap
@@ -511,11 +509,7 @@ def _config_diffs(
 
 
 def _config_points(
-    config_dir: Path,
-    applied: list[ChangePoint],
-    captures: list[ChangePoint],
-    now: datetime | None = None,
-    snapshots: list[snapshots_mod.Snapshot] | None = None,
+    config_dir: Path, applied: list[ChangePoint], captures: list[ChangePoint], now: datetime | None = None
 ) -> list[ChangePoint]:
     """A change point for each settings change the snapshots show, once.
 
@@ -541,7 +535,7 @@ def _config_points(
     cutoff = _capture_log_cutoff(config_dir, now)
     reported: dict[str, str] = {}
     points: list[ChangePoint] = []
-    for since, point, before, snap in _config_diffs(config_dir, snapshots):
+    for since, point, before, snap in _config_diffs(config_dir):
         if any((since is None or since <= other.ts) and other.ts <= point.ts for other in applied):
             continue
         after_flat = _flat(snap)
@@ -998,13 +992,7 @@ def _one_edit(points: list[ChangePoint]) -> list[ChangePoint]:
     return out
 
 
-def change_points(
-    config_dir: Path | str,
-    corpus=None,
-    *,
-    now: datetime | None = None,
-    snapshots: list[snapshots_mod.Snapshot] | None = None,
-) -> list[ChangePoint]:
+def change_points(config_dir: Path | str, corpus=None, *, now: datetime | None = None) -> list[ChangePoint]:
     """Every change point, oldest first. A snapshot difference that spans
     an apply or revert is that change seen again, not a second one, and
     so is a transcript change a recorded one explains (:func:`_explained`).
@@ -1014,16 +1002,13 @@ def change_points(
     last change" window) build one only when asked for that window. It
     also names a config point's project by its canonical key, where the
     project is one of the corpus's. ``now`` is where ``capture-log.jsonl``'s
-    retention is counted back from (:func:`_config_points`). ``snapshots``,
-    when the caller has already loaded ``config_dir``'s
-    (``snapshots.load_snapshots``), saves reading them again; it changes
-    nothing in what is returned."""
+    retention is counted back from (:func:`_config_points`)."""
     config_dir = Path(config_dir)
     applied = _apply_points(config_dir)
     captures = _capture_points(config_dir)
     points = [
         *applied,
-        *_one_edit(_config_points(config_dir, applied, captures, now, snapshots)),
+        *_one_edit(_config_points(config_dir, applied, captures, now)),
         *captures,
         *_habit_points(config_dir),
     ]
