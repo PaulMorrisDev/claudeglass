@@ -948,16 +948,19 @@ def test_decide_apply_card_names_the_sessions_measured_when_under_half():
     assert rec.evidence[-1] == (
         "Sessions measured", "1 of 3", "model_swap.model_swap_agent_models", "general-purpose:decide-apply"
     )
-    # Exactly half, or nothing older: no column and no evidence, as in a report with every transcript on disk.
-    for older in ((1, 2), (0, 3), (0, 0)):
+    # Exactly half, nothing older, or nothing measured: no column and no evidence, as in a report with every
+    # transcript on disk.
+    for older in ((1, 2), (0, 3), (0, 0), (3, 3)):
         table = agent_models.build_table(stats, older=older)
         assert [c.key for c in table.columns] == COLUMNS, older
         [rec] = _fire(_report_of(table), "agent-decide-apply")
         assert "Sessions measured" not in [label for label, *_ in rec.evidence], older
     assert [c.key for c in agent_models.build_table(stats).columns] == COLUMNS
-    # Every session older, with a run that was measured all the same (its own digest is current): none measured.
-    [row] = _rows(agent_models.build_table(stats, older=(3, 3))).values()
-    assert row["sessions_measured"] == "0 of 3"
+    # Every session older, with a run that was measured all the same (its own digest is current): "0 of 3"
+    # would only puzzle beside a card that stands, so there is no column and no evidence row.
+    # Above none and under half it stays: 1 of 4 measured.
+    [row] = _rows(agent_models.build_table(stats, older=(3, 4))).values()
+    assert row["sessions_measured"] == "1 of 4"
 
 
 def test_sessions_measured_is_never_shown_as_an_empty_column_or_on_another_verdict():

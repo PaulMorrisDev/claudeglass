@@ -469,7 +469,7 @@ def build_table(stats: AgentModelStats, older: tuple[int, int] = (0, 0)) -> Tabl
     ``older`` is ``(n, m)`` from ``measured.older_sessions``: of the ``m``
     sessions of the window, ``n`` hold a digest an older parser wrote, whose
     runs the decide-apply verdict left out. When fewer than half of the
-    sessions were measured and a decide-apply row stands, that row gets a
+    sessions were measured (and some were) and a decide-apply row stands, that row gets a
     ``sessions_measured`` cell, ``"9 of 82"``, in a column added for it (as
     ``model_swap``'s per-model cost columns are, only where there is
     something to show), and the card cites it.
@@ -501,7 +501,7 @@ def build_table(stats: AgentModelStats, older: tuple[int, int] = (0, 0)) -> Tabl
     ]
 
     n, m = older
-    coverage = f"{m - n:,} of {m:,}" if n and 2 * (m - n) < m else None
+    coverage = f"{m - n:,} of {m:,}" if n and 0 < m - n and 2 * (m - n) < m else None
     if coverage is not None and any(group.verdict == "decide-apply" for group in stats.groups.values()):
         columns.append(Column(key="sessions_measured", label="Sessions measured", kind="str"))
     else:
