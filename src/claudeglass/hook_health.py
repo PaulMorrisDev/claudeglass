@@ -51,6 +51,7 @@ import hashlib
 import importlib.resources
 import json
 import os
+import time
 import re
 import shutil
 import statistics
@@ -1109,6 +1110,27 @@ def hook_command(script: Path, extra_args: str = "", python: str | None = None) 
     return command + extra_args if command is not None else None
 
 
+#: How often, and how far apart, a refused replace of a hook file is tried: on Windows a hook call that has the
+#: target open for a moment refuses it with ``PermissionError``, and a few milliseconds later it lands.
+_REPLACE_TRIES = 20
+_REPLACE_PAUSE_S = 0.002
+
+
+def _replace_file(source: Path, target: Path) -> None:
+    """``os.replace(source, target)``, tried again when only a
+    ``PermissionError`` refuses it, up to :data:`_REPLACE_TRIES` times
+    :data:`_REPLACE_PAUSE_S` apart. Any other ``OSError``, or the last
+    refusal, is raised."""
+    for attempt in range(_REPLACE_TRIES):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_TRIES - 1:
+                raise
+            time.sleep(_REPLACE_PAUSE_S)
+
+
 def _install_rank(name: str) -> int:
     """Where a hook file goes in an install: the catalogue, then the
     module that reads it, then the rest, and a capture script (the
@@ -1161,7 +1183,7 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
         tmp = dest.with_name(f"{name}.{os.getpid()}.tmp")
         try:
             tmp.write_bytes(data)
-            os.replace(tmp, dest)
+            _replace_file(tmp, dest)
         except OSError:
             try:
                 tmp.unlink()
