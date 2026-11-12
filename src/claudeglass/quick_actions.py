@@ -430,9 +430,10 @@ def _models_main_left_out(rows: list[dict]) -> list[dict]:
 
 
 def _models_main_picked(ctx: Context, rows: list[dict]) -> str:
-    """A sentence for the main session when the model setting already says
-    the cheaper model its row priced but its sessions ran on a larger one
-    anyway (picked with /model or the model picker); ``""`` otherwise."""
+    """Two sentences for the main session when the model setting already
+    says the cheaper model its row priced but its sessions ran on a larger
+    one anyway; ``""`` otherwise. They say what ran, not why: /model, the
+    model picker or a project's own settings."""
     main = next((r for r in rows if r.get("agent_type") == "top-level"), None)
     best = main.get("best_cheaper_alternative_model") if main else None
     if not best or (whatif._num(main.get("saving_pct")) or 0.0) < goals.MIN_SHARE_PCT:
@@ -443,10 +444,7 @@ def _models_main_picked(ctx: Context, rows: list[dict]) -> str:
     if model_gate.build(whatif._Tables(ctx.model)).vetoed("top-level", alias):
         return ""
     count = _count(main.get("lever_runs")) or _count(main.get("spawns"))
-    return (
-        f"Your model setting already says {alias}, but {_sessions(count)} ran on a larger model, picked with "
-        "/model or the model picker."
-    )
+    return f"Your model setting already says {alias}. {_sessions(count)} in this window still ran on a larger model."
 
 
 def _models_set_elsewhere(rows: list[dict]) -> list[dict]:

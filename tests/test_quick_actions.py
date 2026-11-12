@@ -442,16 +442,37 @@ def test_models_check_never_says_none_cheaper_for_a_main_session_it_did_not_coun
     assert _models_cells(result)["Main session"]["cheaper"] == "none cheaper"
 
 
-def test_models_check_says_when_the_setting_already_has_the_cheaper_model(tmp_path):
-    model = _full_model()
-    swap = model.sections[0].tables[0]
-    swap.rows[1][-3], swap.rows[1][-2] = None, 0
-    _with_session_counts(model, (29, 24, 0, 5), (10, 10, 0, 0))
-    result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": "sonnet"}))
-    assert result["status"] == "ok"
-    assert result["summary"] == (
-        "Your model setting already says sonnet, but 24 main sessions ran on a larger model, picked with /model "
-        "or the model picker."
+def test_models_check_offers_no_opusplan_beside_no_main_session_counted(tmp_path):
+    def check(main):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+        _with_session_counts(model, main)
+        model.sections.append(NS(key="plan_handoff", tables=[_table("plan_handoff_summary", [
+            {"scope": "main sessions", "build_usd": 100.0, "build_usd_sonnet": 60.0},
+        ])]))
+        return qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}}))
+
+    none = check((20, 0, 16, 4))
+    assert "opusplan" not in none["summary"]
+    assert all("opusplan" not in fix["title"] for fix in none["fixes"])
+    assert [t["title"] for t in none["tips"] if t["title"] == "No main session is counted"]
+    assert "Main session on opusplan" in check((20, 5, 15, 0))["summary"]
+
+
+def test_models_check_says_what_ran_when_the_setting_already_has_the_cheaper_model(tmp_path):
+    def summary(main):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+        _with_session_counts(model, main, (10, 10, 0, 0))
+        return qa.run("models", _ctx(tmp_path, model=model, effective={"model": "sonnet"}))["summary"]
+
+    assert summary((29, 24, 0, 5)) == (
+        "Your model setting already says sonnet. 24 main sessions in this window still ran on a larger model."
+    )
+    assert summary((2, 1, 0, 1)) == (
+        "Your model setting already says sonnet. 1 main session in this window still ran on a larger model."
     )
 
 
