@@ -230,9 +230,15 @@ def _merge_fixes(*groups: list[dict]) -> list[dict]:
     return out
 
 
+#: What a goal check says when the cards you ignored held every change it
+#: would have suggested: not that nothing is worth changing.
+_IGNORED_ONLY = "The only change this check would suggest is on a card you ignored."
+
+
 def _goal(ctx: Context, goal_id: str) -> dict:
     """The goal's draft without the candidates an ignored card already
-    suggested."""
+    suggested. ``removed`` counts those candidates and ``ignored`` lists them,
+    so a check left with none can say the ignored cards are why."""
     draft = goals.draft(
         goal_id,
         ctx.model,
@@ -243,7 +249,10 @@ def _goal(ctx: Context, goal_id: str) -> dict:
         skip_keys=ctx.skip_keys,
     )
     ignored = _ignored_changes(ctx)
-    return {**draft, "candidates": [c for c in draft["candidates"] if _change_id(c["key"], c["agent"], c["value"]) not in ignored]}
+    kept, removed = [], []
+    for candidate in draft["candidates"]:
+        (removed if _change_id(candidate["key"], candidate["agent"], candidate["value"]) in ignored else kept).append(candidate)
+    return {**draft, "candidates": kept, "removed": len(removed), "ignored": removed}
 
 
 def _goal_fixes(ctx: Context, draft: dict, title: Callable[[dict], str]) -> list[dict]:
@@ -293,7 +302,9 @@ def _models(ctx: Context) -> dict:
     if not fixes and not flagged:
         return _result(
             "ok",
-            "Every agent is already on the cheapest model that priced lower by a useful margin"
+            _IGNORED_ONLY
+            if draft["removed"]
+            else "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
             fixes=agent_fixes,
@@ -428,12 +439,21 @@ def _effort(ctx: Context) -> dict:
     )
     if not fixes:
         return _result(
-            "ok", f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.", table=table
+            "ok",
+            _IGNORED_ONLY
+            if draft["removed"]
+            else f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
+            table=table,
         )
+    over = sum(1 for r in rows if (whatif._num(r.get("thinking_share")) or 0.0) > goals.THINKING_PCT)
     return _result(
         "act",
-        f"{len(fixes)} of your agents or sessions spent more than {goals.THINKING_PCT:.0f}% of their output "
-        "thinking. Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
+        (
+            f"{over} of your agents or sessions spent more than {goals.THINKING_PCT:.0f}% of their output thinking."
+            if over
+            else f"{len(fixes)} effort change{'s' if len(fixes) != 1 else ''} would think less."
+        )
+        + " Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
         "check {{page:changes}} after a few sessions.",
         table=table,
         fixes=fixes,
@@ -479,6 +499,8 @@ def _compaction(ctx: Context) -> dict:
     )
     draft = _goal(ctx, "compaction")
     fixes = _goal_fixes(ctx, draft, lambda c: f"Summarise at {c['value']:,} tokens")
+    if not fixes and draft["removed"]:
+        return _result("ok", _IGNORED_ONLY, table=table)
     limit = CompactionSimThresholds().max_compactions_per_session
     if not fixes and not any(
         str(r.get("window")) != "none" and (whatif._num(r.get("compactions_per_session")) or 0.0) <= limit
@@ -542,7 +564,12 @@ def _cache(ctx: Context) -> dict:
         _rec_fixes(_recommendations(ctx, {"ttl-switch"})),
     )
     if not fixes:
-        return _result("ok", "Your cache lifetimes are within a few percent of the cheapest replayed.", table=table)
+        ignored = draft["removed"] + sum(1 for c in subagents["ignored"] if c["key"] == "experimental.cacheTtl")
+        return _result(
+            "ok",
+            _IGNORED_ONLY if ignored else "Your cache lifetimes are within a few percent of the cheapest replayed.",
+            table=table,
+        )
     return _result(
         "act",
         f"{len(fixes)} cache lifetime change{'s' if len(fixes) != 1 else ''} would have cost less. A 1-hour cache "

@@ -28,6 +28,7 @@ _RULE_MODULES = ("recommend.py", "advice.py", "carry.py", "compaction_sim.py", "
                   "run_split.py", "model_swap.py", "waste.py", "elasticity.py", "tool_search.py")
 
 UNITS = Units(billing_mode="api", currency="USD")
+IGNORED_ONLY = "The only change this check would suggest is on a card you ignored."
 FIX_KEYS = {"key", "agent", "explainer", "command", "command_warning", "prompt", "title"}
 
 
@@ -387,7 +388,8 @@ def test_models_check_is_ok_when_the_ignored_card_was_its_only_change(tmp_path):
     model.recommendations = [_main_sonnet_card()]
     result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
     assert result["status"] == "ok" and result["fixes"] == []
-    assert "Main session on sonnet" not in result["summary"]
+    # Not "every agent is on the cheapest model": Main session is not, its card was ignored.
+    assert result["summary"] == IGNORED_ONLY
 
 
 def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
@@ -2324,6 +2326,8 @@ def test_the_effort_check_drops_a_thinking_candidate_an_ignored_card_already_sug
     assert qa.run("effort", _ctx(tmp_path, model=model))["fixes"]
     result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch:main"})))
     assert result["status"] == "ok" and not result["fixes"]
+    # The table still shows the main session over the bar, so "no agent spends more than 20%" would be false.
+    assert result["summary"] == IGNORED_ONLY
 
 
 @pytest.mark.parametrize("check", [c for c in qa.CHECKS if c.rule_ids], ids=lambda c: c.id)
@@ -2436,6 +2440,8 @@ def test_the_compaction_check_drops_a_candidate_an_ignored_card_already_suggeste
     assert shown["status"] == "act" and shown["fixes"]
     result = qa.run("compaction", _ctx(tmp_path, model=model, skip_keys=frozenset({"compaction-window:top-level"})))
     assert result["status"] == "ok" and result["fixes"] == []
+    # Not "your summary point is within a few percent of the cheapest": the table has one 25% cheaper.
+    assert result["summary"] == IGNORED_ONLY
 
 
 # -- the CLAUDE.md check reads where the report read -----------------------------------------------
@@ -2502,3 +2508,61 @@ def test_the_claude_md_check_offers_no_fix_from_a_card_that_is_only_information_
     unseen = qa.run("claude-md", ctx)
     assert unseen["status"] == "no_data" and unseen["fixes"] == []
     assert "None of your CLAUDE.md files was seen in a session over the last 14 days" in unseen["summary"]
+
+
+# -- a goal check whose only changes were on ignored cards says so -------------------------------------
+
+
+def _cache_card():
+    """One card holding every cache-lifetime change the cache check would draft for ``_full_model``."""
+    return Recommendation(
+        id="ttl-switch", key="ttl-switch", severity="advice", title="Longer cache",
+        changes=[
+            SettingChange(target="settings", key="promptCacheTtl", agent=None, value="1h"),
+            SettingChange(target="settings", key="subagentPromptCacheTtl", agent=None, value="5m"),
+            SettingChange(target="agent", key="experimental.cacheTtl", agent="Explore", value="5m"),
+            SettingChange(target="agent", key="experimental.cacheTtl", agent="Plan", value="5m"),
+        ],
+    )
+
+
+def test_the_cache_check_says_the_ignored_card_held_its_only_change_not_that_the_lifetimes_are_cheapest(tmp_path):
+    model = _full_model()
+    model.recommendations = [_cache_card()]
+    assert qa.run("cache", _ctx(tmp_path, model=model))["status"] == "act"
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == IGNORED_ONLY
+
+
+def test_a_goal_check_with_no_change_and_no_ignored_card_keeps_its_all_clear_sentence(tmp_path):
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    assert qa.run("effort", _ctx(tmp_path, model=model))["summary"] == "No agent spends more than 20% of its output thinking."
+    model.sections[0].tables[0].rows[0][-3] = None
+    model.sections[0].tables[0].rows[1][-3] = None
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok" and result["summary"].startswith("Every agent is already on the cheapest model")
+
+
+def test_the_effort_check_counts_the_rows_over_the_bar_in_its_table_not_its_fixes(tmp_path):
+    """Two rows are over the bar and a third is under it, and three fixes are on offer."""
+    model = _full_model()
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    template = list(table.rows[0])
+    table.rows[0][keys.index("thinking_share")] = 40.0
+    for name, share in (("reviewer", 40.0), ("tester", 5.0)):
+        row = list(template)
+        row[keys.index("agent_type")], row[keys.index("thinking_share")] = name, share
+        table.rows.append(row)
+    over = sum(1 for row in table.rows if row[keys.index("thinking_share")] > 20)
+    assert over == 2 and len(table.rows) == 3
+    model.recommendations = [_effort_card(), Recommendation(
+        id="effort-mismatch", key="effort-mismatch:tester", severity="advice", title="High effort on easy work",
+        agent_type="tester",
+        changes=[SettingChange(target="agent", key="effort", agent="tester", value="low", current="high")],
+    )]
+    result = qa.run("effort", _ctx(tmp_path, model=model))
+    assert len(result["fixes"]) > over
+    assert result["summary"].startswith("2 of your agents or sessions spent more than 20% of their output thinking."), result["summary"]
