@@ -1390,7 +1390,10 @@ def _main_model_lever(
     ``None`` with neither a config folder nor snapshots, so every main
     session counts. A session whose project no snapshot or change names is
     judged by the changes made for every project and your user settings."""
-    points = change_points_mod.change_points(config_dir, corpus) if config_dir is not None else []
+    points = []
+    if config_dir is not None:
+        # The snapshots already loaded stand for those on disk (none: read them).
+        points = change_points_mod.change_points(config_dir, corpus, snapshots=snapshots or None)
     if not points and not snapshots:
         return None
     newest = snapshots[-1] if snapshots else None

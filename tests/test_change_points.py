@@ -838,6 +838,23 @@ def test_a_change_in_another_project_or_outside_the_gap_explains_nothing(tmp_pat
     assert sources == ["config", "config", "transcript"]
 
 
+def test_the_loaded_snapshots_given_to_change_points_change_nothing_in_what_it_returns(tmp_path):
+    """A caller that has loaded the snapshots can hand them over to save
+    reading them again: the points are the same, with a corpus or without."""
+    corpus = _history(tmp_path, OLD, OLD, OLD, NEW, NEW, NEW)
+    _snapshot(tmp_path, "20260912T100000Z", {"model": "sonnet"}, {"model": "user"}, slug="slug:a")
+    _snapshot(tmp_path, "20260912T200000Z", {"model": "opus"}, {"model": "user"}, slug="slug:a")
+    _snapshot(tmp_path, "20260913T100000Z", {"model": "opus"}, {"model": "user"}, slug="slug:b")
+    _snapshot(tmp_path, "20260914T100000Z", {"model": "haiku"}, {"model": "project_local"}, slug="slug:b")
+    loaded = snapshots.load_snapshots(tmp_path)
+    for seen in (None, corpus):
+        points = change_points.change_points(tmp_path, seen)
+        assert {p.source for p in points} >= {"config"}
+        assert change_points.change_points(tmp_path, seen, snapshots=loaded) == points
+    # They are used in place of the folder's own, not read besides them.
+    assert not [p for p in change_points.change_points(tmp_path, snapshots=loaded[:1]) if p.source == "config"]
+
+
 def test_without_a_corpus_transcript_points_are_left_out(tmp_path):
     """change_points(config_dir) with no corpus is the "since my last
     change" caller's path -- it can't classify transcript signatures
