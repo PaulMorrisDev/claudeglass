@@ -2077,3 +2077,16 @@ def test_refresh_hook_files_leaves_a_missing_launcher_alone_when_its_module_is_m
     (hooks_dir / cat.HOOK_MODULE).unlink()
     assert hook_health.refresh_hook_files(config_dir) == []
     assert not (hooks_dir / cat.HOOK_SCRIPT).exists()
+
+
+def test_capture_connect_dry_run_adds_the_message_entry_for_coaching_notes_after_the_time_box(tmp_path):
+    # M6: the entry that carries every message-time hint, with capture's time-box over.
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "essentials"\nuntil = "2026-09-01T00:00:00+00:00"\ncoaching = ["coaching_notes"]\n',
+        encoding="utf-8",
+    )
+    rc, out = _capture(config_dir, "connect", "--dry-run")
+    assert rc == 0, out
+    assert "capture-hook.py when you send a message" in out
+    assert _settings(config_dir) == {"model": "opus"}
