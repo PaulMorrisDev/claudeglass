@@ -2005,6 +2005,30 @@ def _fail_replace_of(monkeypatch, name: str) -> None:
     monkeypatch.setattr(hook_health.os, "replace", _boom)
 
 
+CONNECT_SENTENCE = (
+    "Could not finish copying the capture hook files (another program may be using one), so settings.json "
+    "was left unchanged. Run 'claudeglass capture connect' again."
+)
+SETUP_SENTENCE = (
+    "Could not finish copying the capture hook files (another program may be using one), so their entries "
+    "were not added to settings.json. Run 'claudeglass capture connect' to add them."
+)
+SNAPSHOT_SENTENCE = (
+    "Could not finish copying the snapshot hook file (another program may be using it), so settings.json "
+    "was left unchanged. Run 'claudeglass init' again."
+)
+
+
+def _setup(config_dir, *extra) -> tuple[int, str]:
+    args = cli._make_parser().parse_args(
+        ["init", "--config-dir", str(config_dir), "--non-interactive", "--connect", "--no-service",
+         "--capture-level", "essentials", *extra]
+    )
+    out = io.StringIO()
+    rc = setup_flow.run(*cli._setup_flow_inputs(args), stdin=io.StringIO(""), stdout=out, now=NOW)
+    return rc, out.getvalue()
+
+
 def _capture_commands_in(settings: dict) -> list[str]:
     return [entry["command"] for _event, _matcher, entry in _entries(settings) if cat.HOOK_SCRIPT in entry["command"]]
 
@@ -2021,7 +2045,7 @@ def test_capture_connect_writes_no_entry_for_a_launcher_that_could_not_be_instal
     # Every entry would call a file that is not there, and Claude Code treats the exit code 2 as a blocking error.
     assert _capture_commands_in(_settings(config_dir)) == []
     assert _settings(config_dir) == {"model": "opus"}
-    assert "claudeglass capture connect" in out and "again" in out
+    assert CONNECT_SENTENCE in out
     # Run again once the file can be written: it goes through.
     monkeypatch.setattr(hook_health.os, "replace", real_replace)
     rc, out = _capture(config_dir, "connect", "--yes")
@@ -2055,7 +2079,10 @@ def test_setup_writes_no_capture_entry_for_a_launcher_that_could_not_be_installe
     assert _capture_commands_in(_settings(config_dir)) == []
     # What setup could do was done: the snapshot hook is connected.
     assert hook_health.check(config_dir, claude_root=config_dir.parent).command is not None
-    assert "claudeglass capture connect" in out.getvalue() and "again" in out.getvalue()
+    # Setup does change settings.json (the snapshot hook), so it does not say it left it unchanged.
+    assert SETUP_SENTENCE in out.getvalue()
+    assert "left unchanged" not in out.getvalue()
+    assert "Changed Claude Code's settings.json." in out.getvalue()
 
 
 def test_refresh_hook_files_restores_a_launcher_that_is_missing_while_its_module_is_there(tmp_path):
@@ -2158,3 +2185,137 @@ def test_the_feedback_and_brief_switches_refresh_the_mod_settings_too(tmp_path, 
     for argv in (("brief", "on"), ("brief", "off"), ("feedback", "on"), ("feedback", "off")):
         _capture(config_dir, *argv, "--yes")
     assert len(calls) == 4
+
+
+# -- review fixes: the sentences, the module the launcher loads, a file that cannot be created -----------------------
+
+
+def _fail_tmp_write_of(monkeypatch, name: str) -> None:
+    """Creating the temporary file for ``name`` fails, as it does in a hooks folder that refuses new files."""
+    real_write = Path.write_bytes
+
+    def _boom(self, data):
+        if self.name.startswith(name) and self.name.endswith(".tmp"):
+            raise PermissionError("denied")
+        return real_write(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", _boom)
+
+
+def _launcher_without_its_module(config_dir) -> None:
+    """The launcher and the catalogue are on disk; the module the launcher loads is gone."""
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    (config_dir / "hooks" / cat.HOOK_MODULE).unlink()
+
+
+def test_setup_names_what_it_did_when_the_hook_files_could_not_be_copied(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SETUP_SENTENCE in out
+    assert CONNECT_SENTENCE not in out and "left unchanged" not in out
+    assert "Changed Claude Code's settings.json." in out
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_capture_connect_says_its_sentence_when_a_hooks_folder_refuses_the_temporary_file(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _fail_tmp_write_of(monkeypatch, missing)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out
+    assert _settings(config_dir) == {"model": "opus"}
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_setup_says_its_sentence_when_a_hooks_folder_refuses_the_temporary_file(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_tmp_write_of(monkeypatch, missing)
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SETUP_SENTENCE in out
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+def test_install_hook_files_counts_a_file_whose_temporary_file_cannot_be_created_as_not_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    _fail_tmp_write_of(monkeypatch, cat.HOOK_MODULE)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_install_hook_files_does_not_raise_when_even_the_manifest_cannot_be_created(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    real_write = Path.write_text
+
+    def _boom(self, data, *args, **kwargs):
+        if self.name.startswith(".manifest.json"):
+            raise PermissionError("denied")
+        return real_write(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE, cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+
+
+def test_capture_connect_writes_no_entry_for_a_launcher_whose_module_is_gone_and_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _launcher_without_its_module(config_dir)
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out and "Done." not in out
+    assert _settings(config_dir) == {"model": "opus"}
+
+
+def test_capture_connect_removes_no_entry_of_an_older_install_whose_module_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    before = _settings(config_dir)
+    assert _capture_commands_in(before)
+    (config_dir / "hooks" / cat.HOOK_MODULE).unlink()
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "deep"\n', encoding="utf-8")
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out
+    assert _settings(config_dir) == before
+
+
+def test_setup_writes_no_capture_entry_for_a_launcher_whose_module_is_gone_and_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _launcher_without_its_module(config_dir)
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SETUP_SENTENCE in out
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+def test_setup_ends_in_a_sentence_when_the_snapshot_hook_cannot_be_copied(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_replace_of(monkeypatch, "snapshot-config.py")
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SNAPSHOT_SENTENCE in out
+    assert "Traceback" not in out
+    # Nothing was written to settings.json, so nothing in it points at a hook file that is not there.
+    assert _settings(config_dir) == {"model": "opus"}
+    assert "Changed Claude Code's settings.json." not in out
+
+
+def test_snapshot_config_install_hook_ends_in_a_sentence_when_the_file_cannot_be_copied(tmp_path, monkeypatch, capsys):
+    config_dir = _claude(tmp_path, {})
+    _fail_replace_of(monkeypatch, "snapshot-config.py")
+    rc = cli.main(["snapshot-config", "--install-hook", "--config-dir", str(config_dir)])
+    seen = capsys.readouterr()
+    assert rc == 2
+    assert "Could not finish copying the snapshot hook file" in seen.out + seen.err
+    assert "Installed snapshot-config hook" not in seen.out

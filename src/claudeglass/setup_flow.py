@@ -656,7 +656,7 @@ def _apply(setup: _Setup, opts: Options, tools: Tools, *, stdout, now, sleep, cl
             if hook_health.missing_capture_scripts(config_dir, setup.capture_specs):
                 # No entry for a script that is not there: every hook call would exit 2, a blocking error. The
                 # rest of the change is made, and the capture entries stay as they are.
-                stdout.write(f"{hook_health.HOOK_FILES_INCOMPLETE_TEXT}\n")
+                stdout.write(f"{hook_health.HOOK_FILES_INCOMPLETE_SETUP_TEXT}\n")
                 rc = 2
                 if setup.settings is not None:
                     setup.settings = hook_health.plan_connect(
@@ -665,7 +665,13 @@ def _apply(setup: _Setup, opts: Options, tools: Tools, *, stdout, now, sleep, cl
                         statusline_command=tools.statusline_command,
                         claude_root=opts.claude_root,
                     )
-        tools.install_hook(Path(config_dir).resolve())
+        try:
+            tools.install_hook(Path(config_dir).resolve())
+        except OSError:
+            # No entry for a script that is not there: settings.json is left alone.
+            stdout.write(f"{hook_health.SNAPSHOT_HOOK_FILE_TEXT}, so settings.json was left unchanged. Run 'claudeglass init' again.\n")
+            rc = 2
+            setup.settings = None
         if setup.settings is not None and setup.settings.new_text is not None:
             try:
                 backup = hook_health.connect(setup.settings, now=now)

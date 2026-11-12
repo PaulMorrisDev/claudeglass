@@ -413,8 +413,8 @@ def _save_manifest(config_dir: str | Path, manifest: dict[str, str]) -> None:
     path = _manifest_path(config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{_MANIFEST_NAME}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     try:
+        tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         try:
@@ -1127,8 +1127,9 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     :func:`check_capture` can tell this tool's own older copy apart from
     one someone else changed. Reads the packaged bytes through
     ``importlib.resources``, so it works from a ``.pyz`` too. When the
-    final rename fails (ROB-P7: a locked file on Windows, say), that one
-    file is skipped -- its previous copy is left running rather than the
+    final rename fails (ROB-P7: a locked file on Windows, say), or the
+    temporary file cannot be created in the first place (a folder that
+    refuses new files), that one file is skipped -- its previous copy is left running rather than the
     whole install failing -- and it keeps its old manifest stamp, so
     :func:`check_capture` still reports it accurately. The catalogue is
     written before the module that reads it, and the module is left out
@@ -1158,8 +1159,8 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
         data = (importlib.resources.files("claudeglass") / "hooks" / name).read_bytes()
         dest = dest_dir / name
         tmp = dest.with_name(f"{name}.{os.getpid()}.tmp")
-        tmp.write_bytes(data)
         try:
+            tmp.write_bytes(data)
             os.replace(tmp, dest)
         except OSError:
             try:
@@ -1185,13 +1186,32 @@ HOOK_FILES_INCOMPLETE_TEXT = (
     "was left unchanged. Run 'claudeglass capture connect' again."
 )
 
+#: The same, said by setup, which still changes settings.json for the parts it could finish.
+HOOK_FILES_INCOMPLETE_SETUP_TEXT = (
+    "Could not finish copying the capture hook files (another program may be using one), so their entries "
+    "were not added to settings.json. Run 'claudeglass capture connect' to add them."
+)
+
+#: Said when the snapshot hook script could not be copied, by setup and by ``snapshot-config --install-hook``.
+SNAPSHOT_HOOK_FILE_TEXT = "Could not finish copying the snapshot hook file (another program may be using it)"
+
 
 def missing_capture_scripts(config_dir: str | Path, wanted: Iterable[HookSpec]) -> tuple[str, ...]:
-    """The capture scripts ``wanted`` runs that are not on disk under
-    ``<config_dir>/hooks``, after an install. A settings entry may be
-    written only for a script that is there."""
+    """The capture scripts ``wanted`` runs that cannot work from
+    ``<config_dir>/hooks``, after an install: the launcher is not there, or
+    the module it loads is not (the catalogue is not needed: the hook falls
+    back to plain wording). A settings entry may be written only for a
+    script that is there with its module."""
     hooks_dir = Path(config_dir) / "hooks"
-    return tuple(script for script in dict.fromkeys(spec.script for spec in wanted) if not (hooks_dir / script).is_file())
+    return tuple(
+        script
+        for script in dict.fromkeys(spec.script for spec in wanted)
+        if not all(
+            (hooks_dir / name).is_file()
+            for name in CAPTURE_FILES.get(script, (script,))
+            if name != capture_catalogue.CATALOGUE_FILE
+        )
+    )
 
 
 def refresh_hook_files(config_dir: str | Path) -> list[Path]:
@@ -1765,6 +1785,7 @@ __all__ = [
     "HookErrorStat",
     "HookHealth",
     "HookOverhead",
+    "HOOK_FILES_INCOMPLETE_SETUP_TEXT",
     "HOOK_FILES_INCOMPLETE_TEXT",
     "HookOverheadRow",
     "HookSpec",
@@ -1772,6 +1793,7 @@ __all__ = [
     "POLICY_ALL_OFF_MANAGED",
     "POLICY_MANAGED_ONLY",
     "POLICY_TEXT",
+    "SNAPSHOT_HOOK_FILE_TEXT",
     "backup_path",
     "capture_specs",
     "check",

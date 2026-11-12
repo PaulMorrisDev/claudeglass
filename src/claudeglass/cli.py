@@ -2689,7 +2689,13 @@ def _load_snapshot_hook_module():
     exec(code, module.__dict__)
     # The script's own install_hook copies its __file__, which is not a
     # real file inside a zipapp; copy it out of the package instead.
-    module.install_hook = lambda config_dir: hook_health.install_hook_files(config_dir, (hook_health.HOOK_SCRIPT_NAME,))[0]
+    def install_hook(config_dir):
+        written = hook_health.install_hook_files(config_dir, (hook_health.HOOK_SCRIPT_NAME,))
+        if not written:
+            raise OSError(hook_health.SNAPSHOT_HOOK_FILE_TEXT)
+        return written[0]
+
+    module.install_hook = install_hook
     return module
 
 
@@ -2702,7 +2708,11 @@ def _cmd_snapshot_config(args: argparse.Namespace) -> int:
         return 0
 
     if args.install_hook:
-        dest = hook.install_hook(config_dir)
+        try:
+            dest = hook.install_hook(config_dir)
+        except OSError:
+            print(f"{hook_health.SNAPSHOT_HOOK_FILE_TEXT}. Run 'claudeglass snapshot-config --install-hook' again.", file=sys.stderr)
+            return 2
         print(f"Installed snapshot-config hook to {dest}")
         print(
             "This does not edit settings.json - add the SessionStart fragment "
@@ -3395,7 +3405,7 @@ def _cmd_update_finish(
         except OSError:
             refreshed = []
         if refreshed:
-            stdout.write(f"Refreshed {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''} this version changed.\n")
+            stdout.write(f"Updated {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''}.\n")
         _write_mod_settings(
             config_dir, mod_settings_mod.dashboard_url(args.bind, args.port), address_known=not args.no_service
         )
