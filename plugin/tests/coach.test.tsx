@@ -300,6 +300,8 @@ test('with coaching off the mod draws no hint, and its present file lists nothin
   await world.clock.advance(400 * 1000)
   await put($, state, 'x'.repeat(60_000))
   expect((await hint($, world)).tail).toBeUndefined()
+  // A reply after the hint line was drawn writes the present file again: it must still list nothing.
+  await reply($, world, { gap: MINUTE, ...AGAIN })
   const present = JSON.parse(String(world.files.get(`/cfg/claudeglass/mod/present/${SESSION}.json`))) as { shows: string[] }
   expect(present.shows).toEqual([])
   expect(faults(world)).toEqual([])
@@ -348,7 +350,8 @@ test('a hint rests half an hour after it shows, and shows again after', async ($
   expect(String((await hint($, world)).tail)).toMatch(/^Large paste/)
 })
 
-test('a kind marked once shows once, however long it rests', async ($, on) => {
+// Forty-eight hours of timer beats take about 4.5 s, near the 5 s a test is given; three times that leaves room.
+test('a kind marked once shows once, however long it rests', { timeoutMs: 15_000 }, async ($, on) => {
   const world = prepare(on, { settings: settingsFile({ coaching: { once: ['big_paste'] } }) })
   const state = rig(on)
   await started($, world)

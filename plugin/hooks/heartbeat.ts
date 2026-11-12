@@ -61,9 +61,10 @@ export function presentFile(id: string, seen: number, active = 0, shows: string[
 
 async function write(io: Io, id: string, seen: number, active: number, shows: string[]): Promise<void> {
   if (!PLAIN_ID.test(id)) return
+  // Noted before the write, so a write that fails is not tried again at every message: the timer's next beat does.
+  written = shows.join()
   try {
     await io.writeFile(`${await configDir(io)}/mod/present/${id}.json`, presentFile(id, seen, active, shows))
-    written = shows.join()
   } catch {
     // The heartbeat is a courtesy; a failed write is tried again in a minute.
   }

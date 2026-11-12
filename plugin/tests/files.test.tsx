@@ -198,6 +198,36 @@ test('a session that has drawn nothing lists nothing whether coaching is on or o
   expect(json(world, PRESENT).shows).toEqual([])
 })
 
+test('a present file whose write fails is tried again at the next minute, not at every message', async ($, on) => {
+  const world = prepare(on)
+  on('prompt.submit', (_$, e) => e as never)
+  let failing = false
+  let attempts = 0
+  // The world refuses a write of the present file while `failing`.
+  world.failWrite = path => {
+    if (!failing || !path.includes('/present/')) return false
+    attempts += 1
+    return true
+  }
+  await $.session.start(START)
+  await hint($)
+  failing = true
+  // The list changes (the hint line was drawn), so the next message tries to write it and fails.
+  await world.clock.advance(10 * 1000)
+  await $.prompt.submit({ text: 'one', wait: false, origin: { kind: 'composer' } } as never)
+  expect(attempts).toBe(1)
+  // Further messages inside the minute do not try again.
+  await world.clock.advance(10 * 1000)
+  await $.prompt.submit({ text: 'two', wait: false, origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'three', wait: false, origin: { kind: 'composer' } } as never)
+  expect(attempts).toBe(1)
+  // The timer's next beat does, and when the write works the file says what is shown.
+  failing = false
+  await world.clock.advance(61 * 1000)
+  expect(json(world, PRESENT).shows).toEqual(['hint', 'status'])
+  expect(faults(world)).toEqual([])
+})
+
 test('a session id the capture hook would not look for (an underscore) gets a sensor file but no heartbeat', async ($, on) => {
   const world = prepare(on, { session: 'with_underscore' })
   await $.session.start(START)
