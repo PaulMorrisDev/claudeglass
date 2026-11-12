@@ -231,6 +231,11 @@ def _opusplan(draft: _Draft, tables) -> None:
     top = tables.row("model_swap", "model_swap_by_agent_type", TOP)
     if top is None or _alias(str(top.get("observed_model") or "")) != "opus":
         return
+    # With no main session counted (each already on Sonnet or smaller, or
+    # from before their project moved there), the check says nothing is left
+    # to price, so it offers no opusplan beside that.
+    if "lever_runs" in top and not whatif._num(top.get("lever_runs")) and whatif._num(top.get("spawns")):
+        return
     row = next(iter(tables.rows("plan_handoff", "plan_handoff_summary")), None) or {}
     build = row.get("build_usd")
     pct = _share((whatif._num(build) or 0.0) - (whatif._num(row.get("build_usd_sonnet")) or 0.0), build)

@@ -597,3 +597,16 @@ def test_managed_claude_md_is_excluded_and_cited_separately():
 def test_omit_claude_md_not_offered_when_only_managed_claude_md_is_seen():
     out = goals.draft("subagents", _with_agent_reports(1, 3, claude_md=1500, claude_md_managed=1500), UNITS)
     assert not [c for c in out["candidates"] if c["key"] == "omitClaudeMd"]
+
+
+def test_opusplan_is_not_offered_when_no_main_session_is_counted():
+    def candidates(lever_runs):
+        model = _with_plans()
+        table = model.sections[0].tables[0]
+        table.columns += [NS(key="lever_runs"), NS(key="spawns")]
+        table.rows[0] += [lever_runs, 20]
+        table.rows[1] += [10, 10]
+        return goals.draft("models", model, UNITS, effective={"model": "opus"})["candidates"]
+
+    assert all(c["value"] != "opusplan" for c in candidates(0))
+    assert any(c["value"] == "opusplan" for c in candidates(5))
