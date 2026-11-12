@@ -150,7 +150,8 @@ class SessionFacts:
     cold_sends: int = 0
     compactions: int = 0
     #: Tips shown in the session: those Claude passed on, plus the mod's.
-    tips: int = 0
+    #: ``None`` when the digest has the tip fields in an older meaning.
+    tips: int | None = 0
 
 
 def is_headless(entrypoint: str | None) -> bool:
@@ -213,7 +214,7 @@ def facts_of(sessions, corpus, session_cost: dict, th: recache.RecacheThresholds
             end_context=priced[-1].ctx if priced else None,
             cold_sends=cold_sends(top, th, min_tokens),
             compactions=compaction.compactions_in(top)[0],
-            tips=sum(mine.tips.values()) + sum(glass.shown.values()),
+            tips=(sum(mine.tips.values()) + sum(glass.shown.values())) if mine.tips_measured else None,
         ))
     return out
 
@@ -248,7 +249,7 @@ _FIGURES = {
     "end_context": (lambda f: f.end_context, _median),
     "cold_per_100": (lambda f: (f.cold_sends, f.answered) if f.answered else None, _rate_per_100),
     "compaction_churn": (lambda f: f.compactions >= CHURN_COMPACTIONS, _share_pct),
-    "tips_desktop": (lambda f: f.tips if f.desktop else None, _mean),
+    "tips_desktop": (lambda f: f.tips if f.desktop and f.tips is not None else None, _mean),
 }
 
 

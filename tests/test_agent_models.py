@@ -20,9 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import agent_models, ignores, model_swap, recommend
+from claudeglass import PARSER_VERSION, agent_models, ignores, model_swap, recommend
 from claudeglass.agent_models import AgentModelThresholds, compute_agent_models
 from claudeglass.cache import encode_result, result_from_jsonable
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.model import ReportModel, Section, TranscriptMeta, TranscriptResult, Turn
 from claudeglass.pricing import load_pricing
 
@@ -69,6 +70,7 @@ EVIDENCE_LABELS = [
     "Last seen",
     "Later compliant writers",
     "CLAUDE_CODE_SUBAGENT_MODEL set",
+    "Sessions measured",
 ]
 
 
@@ -524,6 +526,24 @@ def test_a_decider_from_an_old_digest_is_left_out_of_decide_apply_whatever_the_t
     assert set(_verdicts([_old_digest(_agent(role_word="fix", real_edits=2))])) == {("general-purpose", "inherited")}
 
 
+def test_a_digest_from_before_the_stamp_is_left_out_of_decide_apply_even_with_counts():
+    # A 47 to 49 digest keeps its code-write counts, but in their pre-50 meaning:
+    # the stamp, not the counts, says whether they are measured.
+    decider = dict(role_word="review", turns=6, real_edits=3)
+    older = _agent(**decider)
+    older.parser_version = BEFORE_STAMP
+    assert {t.edit_code_count for t in older.turns} == {0, 1}
+    assert _verdicts([older]) == {}
+    for stamp in (None, PARSER_VERSION):
+        run = _agent(**decider)
+        run.parser_version = stamp
+        assert set(_verdicts([run])) == {("general-purpose", "decide-apply")}
+    # The decide-apply group counts the measured runs only.
+    current = _agent(**decider)
+    row = _verdicts([older, current])[("general-purpose", "decide-apply")]
+    assert row["runs"] == 1
+
+
 def _parsed_decider(tmp_path, paths):
     """A decider's transcript, parsed: one reply per path, each an Edit to it."""
     import tempfile as _tempfile
@@ -877,6 +897,7 @@ def test_evidence_labels_are_exactly_the_contract_and_resolve_to_the_row(fixture
     table = report.sections[0].tables[0]
     rows = _rows(table)
     cells = {
+        "Sessions measured": "sessions_measured",
         "Agents": "runs",
         "Roles": "roles",
         "Model": "model",
@@ -895,7 +916,10 @@ def test_evidence_labels_are_exactly_the_contract_and_resolve_to_the_row(fixture
         for rec in _fire(report, rule_id):
             # A row that did not measure it (None) has no "Later compliant writers" evidence.
             expected = [
-                label for label in EVIDENCE_LABELS if label != "Later compliant writers" or row_of(rows, rec, rule_id)["later_compliant"] is not None
+                label
+                for label in EVIDENCE_LABELS
+                if (label != "Later compliant writers" or row_of(rows, rec, rule_id)["later_compliant"] is not None)
+                and (label != "Sessions measured" or row_of(rows, rec, rule_id).get("sessions_measured") is not None)
             ]
             assert [label for label, *_ in rec.evidence] == expected
             verdict = {"agent-model-inherited": "inherited", "agent-model-asked": "asked", "agent-decide-apply": "decide-apply"}[rule_id]
@@ -904,6 +928,56 @@ def test_evidence_labels_are_exactly_the_contract_and_resolve_to_the_row(fixture
                 assert source == "model_swap.model_swap_agent_models"
                 assert row_key == row["case"] == f"{rec.agent_type}:{verdict}"
                 assert value == row[cells[label]]
+
+
+def _report_of(table) -> ReportModel:
+    return ReportModel(sections=[Section(key="model_swap", title="Model-swap counterfactual", tables=[table])])
+
+
+def _decide_apply_stats():
+    return compute_agent_models([_agent(role_word="review", turns=6, real_edits=3)], PRICING)
+
+
+def test_decide_apply_card_names_the_sessions_measured_when_under_half():
+    stats = _decide_apply_stats()
+    table = agent_models.build_table(stats, older=(2, 3))
+    assert [c.key for c in table.columns] == [*COLUMNS, "sessions_measured"]
+    [row] = _rows(table).values()
+    assert row["verdict"] == "decide-apply" and row["sessions_measured"] == "1 of 3"
+    [rec] = _fire(_report_of(table), "agent-decide-apply")
+    assert rec.evidence[-1] == (
+        "Sessions measured", "1 of 3", "model_swap.model_swap_agent_models", "general-purpose:decide-apply"
+    )
+    # Exactly half, nothing older, or nothing measured: no column and no evidence, as in a report with every
+    # transcript on disk.
+    for older in ((1, 2), (0, 3), (0, 0), (3, 3)):
+        table = agent_models.build_table(stats, older=older)
+        assert [c.key for c in table.columns] == COLUMNS, older
+        [rec] = _fire(_report_of(table), "agent-decide-apply")
+        assert "Sessions measured" not in [label for label, *_ in rec.evidence], older
+    assert [c.key for c in agent_models.build_table(stats).columns] == COLUMNS
+    # Every session older, with a run that was measured all the same (its own digest is current): "0 of 3"
+    # would only puzzle beside a card that stands, so there is no column and no evidence row.
+    # Above none and under half it stays: 1 of 4 measured.
+    [row] = _rows(agent_models.build_table(stats, older=(3, 4))).values()
+    assert row["sessions_measured"] == "1 of 4"
+
+
+def test_sessions_measured_is_never_shown_as_an_empty_column_or_on_another_verdict():
+    # A report with a verdict but no decide-apply row, under half measured: the column would be empty, so it is not there.
+    stats = compute_agent_models([_agent(role_word="fix", real_edits=2)], PRICING)
+    table = agent_models.build_table(stats, older=(2, 3))
+    assert [c.key for c in table.columns] == COLUMNS
+    # With both kinds of row the cell is on the decide-apply row only.
+    both = compute_agent_models(
+        [_agent(role_word="fix", real_edits=2), _agent(role_word="review", turns=6, real_edits=3, agent_type="reviewer")],
+        PRICING,
+    )
+    rows = _rows(agent_models.build_table(both, older=(2, 3)))
+    assert {key: row["sessions_measured"] for key, row in rows.items()} == {
+        ("general-purpose", "inherited"): None,
+        ("reviewer", "decide-apply"): "1 of 3",
+    }
 
 
 def test_env_var_value_reaches_the_evidence():

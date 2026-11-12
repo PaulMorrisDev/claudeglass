@@ -339,6 +339,7 @@ price for.
 | `last_seen` | the date of the latest agent's first reply |
 | `later_compliant` | the later writers on Sonnet or smaller (see "When a card looks fixed"). Empty on a `decide-apply` row and on a workflow `asked` row: not measured |
 | `env_var_set` | `yes` or `no`: whether `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's environment variable names. The same on every row |
+| `sessions_measured` | `9 of 82`: the sessions of the window whose replies this version read, on a `decide-apply` row. The column is there only when some, but fewer than half, were (the rest are digests an older version wrote, whose transcripts are gone, which the verdict leaves out) and a `decide-apply` row stands; the card then cites it as "Sessions measured" |
 
 ### The three rules
 

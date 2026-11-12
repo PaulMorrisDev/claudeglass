@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 
+from . import measured
 from .capture_catalogue import TASK_LABELS
 from .capture_catalogue import THEMES as CAPTURE_THEMES
 from .habits import ITEMS as HABIT_ITEMS
@@ -993,14 +994,15 @@ TABLE_COPY: dict[str, TableCopy] = {
             "/cg-feedback, a session rating, or the rating buttons on a card.",
             read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
             "when your message calls for it, so fewer of those show and that's no miss. A tip you called wrong, "
-            "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session.",
+            "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session. "
+            "Sessions an older version read are left out of what Claude passed on.",
             act="",
         ),
         columns={
             "hint": ("Hint", "The coaching hint."),
             "notes": ("Notes", "How many times the hint's note was added."),
             "shown": ("Passed on by Claude", "How many of those replies ended with a ClaudeGlass tip."),
-            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip."),
+            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip, in sessions this version read."),
             "relay": (
                 "Passed on, of notes",
                 "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "
@@ -1410,7 +1412,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "one message holding them all would cost one. Replies are counted by message, so calls already sent "
             "together count once. The last column prices only those re-reads, because a batched message still "
             "writes the tool results. It is an upper bound. It takes the lookups to be independent, and "
-            "some aren't, such as a read that needs the name a search found first.",
+            "some aren't, such as a read that needs the name a search found first. Replies an older version read "
+            "are left out.",
             act="This is a measurement, not a recommendation. A shell command that chains several reads is already "
             "a batch, so it is not counted as a single lookup.",
         ),
@@ -4854,6 +4857,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Whether CLAUDE_CODE_SUBAGENT_MODEL is set now: if it is, agents that name no model run on the one "
                 "it names.",
             ),
+            "sessions_measured": (
+                "Sessions measured",
+                "On a decided-and-changed-code row: the sessions whose replies were read by this version, when under "
+                "half of the window.",
+            ),
         },
         # The row key ("workflow-subagent:inherited") is labelled by the
         # table itself, one label per row, since agent types are open-ended.
@@ -5881,12 +5889,18 @@ UNPRICED_MODELS_LABEL = (
 )
 
 
+#: The Data quality row for sessions whose digest an older parser wrote
+#: (``measured.older_sessions``), also not a ``Diagnostics`` field.
+OLDER_SESSIONS_LABEL = "Sessions read by an older version"
+
+
 def diagnostics_table(
     diagnostics: Diagnostics,
     hook=None,
     statusline=None,
     parser_notes: dict | None = None,
     unpriced: dict | None = None,
+    older: tuple[int, int] | None = None,
 ) -> Table:
     """The parse-quality counters as a plain-English table (the Data
     quality page, ``GET /api/diagnostics``). Rows keep the raw field name
@@ -5901,7 +5915,11 @@ def diagnostics_table(
     no price for to its ``turns`` and ``tokens`` (the report's
     ``pricing_unknown_models`` table); when it is not empty one more row
     lists them, since those replies cost $0 in every figure and nothing
-    else on this page says so.
+    else on this page says so. ``older`` is ``(n, m)`` from
+    ``measured.older_sessions`` (the report's ``meta.older_sessions`` and
+    ``meta.sessions``); when ``n`` is not 0 a last row says how many of the
+    window's sessions an older version read, since the newer figures leave
+    those out.
 
     With a hook or statusline row, ``row_groups`` splits the table in two:
     those rows describe your setup and every session in every project
@@ -5940,6 +5958,8 @@ def diagnostics_table(
             for model_id, counts in sorted(unpriced.items())
         )
         rows.append(["pricing_unknown_models", value, UNPRICED_MODELS_LABEL[1]])
+    if older and older[0]:
+        rows.append(["older_sessions", f"{older[0]:,} of {older[1]:,}", measured.older_sentence(*older)])
     return Table(
         name="data_quality",
         title="What could be read",
@@ -5958,7 +5978,8 @@ def diagnostics_table(
         value_labels={"snapshot_hook": "Config snapshot hook", "statusline": "Statusline (usage limits)"}
         | {key: label for key, (label, _) in DIAGNOSTIC_LABELS.items()}
         | {key: label for key, (label, _) in _PARSER_NOTE_LABELS.items()}
-        | {"pricing_unknown_models": UNPRICED_MODELS_LABEL[0]},
+        | {"pricing_unknown_models": UNPRICED_MODELS_LABEL[0]}
+        | {"older_sessions": OLDER_SESSIONS_LABEL},
     )
 
 

@@ -675,7 +675,10 @@ changes a figure.
   smaller: the same kind for `inherited`, the same Agent-tool type
   whose call named the model for `asked`; empty when not measured) and `env_var_set` (`yes` or `no`:
   `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's
-  environment variable names). It holds agent types, role words,
+  environment variable names). A last column, `sessions_measured` (`9 of 82`),
+  is there only when some, but fewer than half, of the window's sessions were
+  read by this version and a `decide-apply` row stands: that row's cell says how many
+  were, and the card cites it. It holds agent types, role words,
   counts, models, amounts and dates, and nothing else.
 
 `recommend.recommend()` runs the `model-tier` rule
@@ -1283,7 +1286,10 @@ columns of a table still divide by that table's own messages.
   another agent. A workflow's agents are counted
   here (their agent type is whatever the run named them, `workflow-subagent`
   when it named none) and read "again" against the message that started
-  the workflow.
+  the workflow. The two single-look shares leave out a run, or a main-session
+  message, whose digest a parser from before 46 wrote and whose transcript is
+  gone: it counted a `||` fallback as two reads. Numerator and replies both come
+  from the runs that were measured; the other columns keep every run.
 - `habits_effort_fit` — per reported level and effort (`easy:high`):
   messages, per message, thinking share of output, redone, met the
   goal, and for easy work at high effort or above, what lower effort
@@ -1388,8 +1394,11 @@ columns of a table still divide by that table's own messages.
   it takes the lookups of a run to be independent. A shell command that
   chains several reads (`grep a x; grep b y`) is already a batch: it is not
   a single lookup, though it neither ends a run nor goes unpriced inside
-  one, and a `||` fallback (`cat a || cat b`) counts as one read. Rows with
-  no single lookups are left out, costliest first. It feeds `research_split`,
+  one, and a `||` fallback (`cat a || cat b`) counts as one read. A digest a
+  parser from before 46 wrote, whose transcript is gone, counted that fallback
+  as two: its replies are left out of every column, `calls` included, so the
+  columns share one base. Rows with no single lookups are left out, costliest
+  first. It feeds `research_split`,
   `explore_research` and `name_files`, "lookups before the first edit", and
   is a measurement only: the `agent-batch-probes` card it once fed was
   dropped because it did not predict batching misses (replayed against a
@@ -1692,7 +1701,13 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   said it was useful (empty with neither). Two wrong answers or misfires
   raise or mute a hint, and two `known` answers, more than `useful`,
   show it once a session (`coaching.tip_rules`, written to
-  `coaching.json` by the daily run).
+  `coaching.json` by the daily run). `shown` and its share count the
+  sessions this version read: a digest an older parser wrote, whose
+  transcript is gone, holds the tip fields in an older meaning, so its
+  session is left out of `shown`, `shown_pct`, the `relay` text and the
+  `quiet_output` misfires, while `notes` still counts every session.
+  Misfires of a hint that asks for a tip come from `Turn.tip_disowned`,
+  which no version changed, and still count.
 
   `prompting_glass` — only once the mod's sensor files hold a session of
   the report: a single row with `sessions` (your sessions with a message of

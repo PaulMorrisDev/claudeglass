@@ -2906,6 +2906,13 @@ def make_handler(
             None,
         )
         unpriced = {row[0]: {"turns": row[1], "tokens": row[2]} for row in unknown.rows} if unknown else None
+        # While the first scan runs, an older session's transcript may be on disk and about to be read again,
+        # so "its transcripts are gone" would not be true yet: the line waits for the scan, as the banner says.
+        scan, _ = _health_status(
+            watcher_stats() if watcher_stats is not None else None,
+            watcher_state() if watcher_state is not None else None,
+            poll_interval_s=options.poll_interval_s,
+        )
         return _ok(
             to_jsonable(
                 helptext.diagnostics_table(
@@ -2914,6 +2921,7 @@ def make_handler(
                     statusline=statusline,
                     parser_notes=model.parser_notes,
                     unpriced=unpriced,
+                    older=None if scan == "starting" else (model.meta.older_sessions, model.meta.sessions),
                 )
             )
         )

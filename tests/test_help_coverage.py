@@ -173,6 +173,7 @@ def test_not_yet_covered_list_only_shrinks(report):
 AGENT_MODEL_COLUMNS = [
     "case", "agent_type", "verdict", "runs", "roles", "model", "cost_usd", "cost_on_sonnet_usd", "saving_usd",
     "saving_pct", "write_turns", "workflow_runs", "first_seen", "last_seen", "later_compliant", "env_var_set",
+    "sessions_measured",
 ]
 
 
@@ -329,6 +330,39 @@ def test_the_data_quality_page_lists_models_with_no_price_in_plain_words():
     for text in (row[2], table.value_labels["pricing_unknown_models"]):
         assert not SNAKE_CASE.search(text), text
         _plain(text, "pricing_unknown_models")
+
+
+def test_the_data_quality_page_says_how_many_sessions_an_older_version_read():
+    """R10: a session whose transcript Claude Code deleted keeps the digest an
+    older version wrote, and the newer figures leave it out; the page says how many."""
+    from claudeglass.measured import older_sentence
+    from claudeglass.model import Diagnostics
+
+    none = helptext.diagnostics_table(Diagnostics())
+    assert "older_sessions" not in [row[0] for row in none.rows]
+    table = helptext.diagnostics_table(
+        Diagnostics(), unpriced={"claude-future-9-9": {"turns": 1, "tokens": 9}}, older=(73, 82)
+    )
+    row = table.rows[-1]
+    assert row == ["older_sessions", "73 of 82", older_sentence(73, 82)]
+    assert table.rows[-2][0] == "pricing_unknown_models"
+    assert table.rows[:-1] == helptext.diagnostics_table(Diagnostics(), unpriced={"claude-future-9-9": {"turns": 1, "tokens": 9}}).rows
+    label = table.value_labels["older_sessions"]
+    assert label == helptext.OLDER_SESSIONS_LABEL
+    for text in (row[2], label):
+        assert not SNAKE_CASE.search(text), text
+        _plain(text, "older_sessions")
+
+
+def test_the_coaching_tips_help_names_the_sessions_an_older_version_read_are_left_out():
+    """R10: what Claude passed on counts the sessions this version read, so the share is not of all notes."""
+    copy = helptext.TABLE_COPY["prompting_tips"]
+    assert "Sessions an older version read are left out of what Claude passed on." in copy.help.read
+    assert copy.columns["shown_pct"][1] == "The share of notes that ended with a tip, in sessions this version read."
+    # The same leave-out sentence the single-lookups table carries.
+    assert "left out" in helptext.TABLE_COPY["habits_probes"].help.read
+    for text in (copy.help.read, copy.columns["shown_pct"][1]):
+        _plain(text, "prompting_tips")
 
 
 def test_usage_log_tables_have_help_and_measured_causes_sit_on_the_cache_tab(tmp_path):

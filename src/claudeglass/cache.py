@@ -73,6 +73,7 @@ from pathlib import Path
 
 from . import PARSER_VERSION, SCHEMA_VERSION, __version__
 from . import capture_catalogue
+from .measured import BEFORE_STAMP
 from .model import PROMPT_FLAGS, TranscriptMeta, TranscriptResult
 
 #: A transcript whose file was modified within this many seconds of "now"
@@ -335,7 +336,12 @@ def result_from_jsonable(data: dict) -> TranscriptResult:
     ``Diagnostics``, ``Turn``, ``Event`` and ``EventKind`` it nests) from
     the dict :func:`encode_result` produced. See the module docstring.
     """
-    return _apply_plan(TranscriptResult, _plan_for(TranscriptResult), data)
+    result = _apply_plan(TranscriptResult, _plan_for(TranscriptResult), data)
+    # A digest from before the stamp (parser 49 or earlier) has no key: it
+    # reads as written before the stamp, not as a result built in memory.
+    if "parser_version" not in data:
+        result.parser_version = BEFORE_STAMP
+    return result
 
 
 # -- DigestCache ------------------------------------------------------------

@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Sequence
 
-from . import agent_roles, workstyle
+from . import agent_roles, measured, workstyle
 from .model import Column, Recommendation, ReportModel, Table, TranscriptResult, Turn
 from .model_swap import _ALL_ARCHETYPES, _NO_SUBAGENT_ARCHETYPES, _dominant_label
 from .pricing import Pricing, model_name, price_turn
@@ -306,11 +306,13 @@ def _analyse(
     write_turns = sum(1 for t in result.turns if t.edit_kind == "real" or t.shell_write_count > 0)
     # A decider that only wrote its report or a ledger did not change code:
     # decide-apply counts shell writes and edit-tool calls aimed at code.
-    # A digest an older parser wrote has no such counts (None, not 0), and its
-    # transcript may be gone: that run is left out of decide-apply.
+    # A digest an older parser wrote (``measured``) has no such counts, or has
+    # them in an older meaning; its transcript may be gone: that run is left
+    # out of decide-apply.
     code_write_turns = (
         None
-        if any(t.shell_code_write_count is None or t.edit_code_count is None for t in result.turns)
+        if not measured.measures(result, *measured.CODE_WRITE_FIELDS)
+        or any(t.shell_code_write_count is None or t.edit_code_count is None for t in result.turns)
         else sum(1 for t in result.turns if t.shell_code_write_count > 0 or t.edit_code_count > 0)
     )
     role_class = agent_roles.role_class(meta.role_word)
@@ -458,11 +460,19 @@ _VERDICT_PHRASES = {
 }
 
 
-def build_table(stats: AgentModelStats) -> Table:
+def build_table(stats: AgentModelStats, older: tuple[int, int] = (0, 0)) -> Table:
     """Render a finished :class:`AgentModelStats` as
     ``model_swap_agent_models``: one row per group and verdict, verdicts in
     :data:`VERDICTS` order, then the biggest saving first. No ids, labels
     or paths.
+
+    ``older`` is ``(n, m)`` from ``measured.older_sessions``: of the ``m``
+    sessions of the window, ``n`` hold a digest an older parser wrote, whose
+    runs the decide-apply verdict left out. When fewer than half of the
+    sessions were measured (and some were) and a decide-apply row stands, that row gets a
+    ``sessions_measured`` cell, ``"9 of 82"``, in a column added for it (as
+    ``model_swap``'s per-model cost columns are, only where there is
+    something to show), and the card cites it.
 
     The first column, the row key every card's evidence cites, is
     ``"<group>:<verdict>"`` (``"workflow-subagent:inherited"``): an agent
@@ -489,6 +499,13 @@ def build_table(stats: AgentModelStats) -> Table:
         Column(key="later_compliant", label="Later writers on Sonnet or smaller", kind="int"),
         Column(key="env_var_set", label="Model environment variable set", kind="str"),
     ]
+
+    n, m = older
+    coverage = f"{m - n:,} of {m:,}" if n and 0 < m - n and 2 * (m - n) < m else None
+    if coverage is not None and any(group.verdict == "decide-apply" for group in stats.groups.values()):
+        columns.append(Column(key="sessions_measured", label="Sessions measured", kind="str"))
+    else:
+        coverage = None
 
     def _saving(group: AgentModelGroup) -> float | None:
         if group.verdict == "decide-apply" or stats.sonnet_model is None:
@@ -525,6 +542,7 @@ def build_table(stats: AgentModelStats) -> Table:
                 group.last_seen,
                 group.later_compliant,
                 "yes" if stats.env_var_set else "no",
+                *([coverage if group.verdict == "decide-apply" else None] if coverage is not None else []),
             ]
         )
 
@@ -587,6 +605,7 @@ _EVIDENCE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Last seen", "last_seen"),
     ("Later compliant writers", "later_compliant"),
     (f"{ENV_VAR} set", "env_var_set"),
+    ("Sessions measured", "sessions_measured"),
 )
 
 #: Plain fallback wording per verdict: ``advice.py`` rewrites the title and
@@ -668,7 +687,8 @@ def _recommendations(
                 evidence=[
                     _evidence(label, cell(row, column_key), _SOURCE_SECTION, TABLE_NAME, row_key)
                     for label, column_key in _EVIDENCE_COLUMNS
-                    if column_key != "later_compliant" or later is not None
+                    if (column_key != "later_compliant" or later is not None)
+                    and (column_key != "sessions_measured" or cell(row, column_key) is not None)
                 ],
             )
         )

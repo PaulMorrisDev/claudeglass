@@ -604,7 +604,8 @@ phase, label, description or path:
   The rule for every field a parser version adds: a default of ``None``
   where the key is missing, and a reader that leaves the run out of that
   figure (a field a version redefines needs the digest's
-  ``TranscriptResult.parser_version`` as well).
+  ``TranscriptResult.parser_version`` as well). ``measured.FIELD_VERSIONS``
+  names each such field and the version its meaning dates from.
 - ``Turn.edit_code_count: int | None = None`` -- how many of this turn's edit-tool
   calls (Edit, Write, MultiEdit, NotebookEdit) were aimed at code: outside
   the temp dir and not a document, by the same test as
@@ -1729,12 +1730,14 @@ class TranscriptResult:
     #: MCP-servers addition: MCP server -> the last connection problem
     #: reported for it: "pending", "needs sign-in" or "failed to connect".
     mcp_connection_status: dict = field(default_factory=dict)
-    #: The ``PARSER_VERSION`` that wrote this digest (from 50). ``None`` in a
-    #: digest from before the stamp: its parser is not known. The store's
-    #: ``transcripts.parser_version`` column does not say, since a rate-card
-    #: change sets it to 0 on every row, including a current one whose
-    #: transcript is gone. Only a reader that leaves out what a newer parser
-    #: added or redefined needs this (a field a version only adds is
+    #: The ``PARSER_VERSION`` that wrote this digest (from 50). ``0``
+    #: (``measured.BEFORE_STAMP``) in a digest from before the stamp, set by
+    #: ``cache.result_from_jsonable`` where the key is missing; ``None`` in a
+    #: result built in memory and not by the parser, which reads as current.
+    #: The store's ``transcripts.parser_version`` column does not say, since
+    #: a rate-card change sets it to 0 on every row, including a current one
+    #: whose transcript is gone. Only a reader that leaves out what a newer
+    #: parser added or redefined needs this (a field a version only adds is
     #: ``None`` where its key is missing).
     parser_version: int | None = None
 
@@ -2095,6 +2098,12 @@ class ReportMeta:
     #: per model family, and the ``default_family``). Two floats per
     #: family and nothing else; the mod's settings file keeps it.
     calibration: dict = field(default_factory=dict)
+    #: Of ``sessions`` (those with a top-level transcript in this window), how
+    #: many hold a digest an older parser wrote whose figures the newer ones
+    #: leave out (``measured.older_sessions``). 0 when every transcript was read
+    #: by this version.
+    older_sessions: int = 0
+    sessions: int = 0
 
 
 @dataclass(slots=True)

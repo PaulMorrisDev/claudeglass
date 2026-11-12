@@ -24,6 +24,7 @@ from claudeglass.cache import (
     encode_result,
     result_from_jsonable,
 )
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 
@@ -67,11 +68,11 @@ def test_a_fresh_parse_carries_the_parser_version_through_the_cache(tmp_path):
     assert cache.get(path, meta).parser_version == PARSER_VERSION
 
 
-def test_a_digest_written_before_the_stamp_reads_none(tmp_path):
-    # Not 0 and not the current version: a digest whose transcript is gone can't be asked again.
+def test_a_digest_written_before_the_stamp_reads_as_before_it(tmp_path):
+    # Not None (a result built in memory) and not the current version: a digest whose transcript is gone can't be asked again.
     data = encode_result(parse_transcript(*(lambda p: (p, _meta_for(p)))(_write_transcript(tmp_path))))
     del data["parser_version"]
-    assert result_from_jsonable(json.loads(json.dumps(data))).parser_version is None
+    assert result_from_jsonable(json.loads(json.dumps(data))).parser_version == BEFORE_STAMP
 
 
 # -- basic put/get hit --------------------------------------------------
