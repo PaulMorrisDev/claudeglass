@@ -265,3 +265,50 @@ def test_a_result_claude_code_saved_to_a_file_counts_as_the_preview_left_in_cont
     assert turns[0].read_target_chars == (len(persisted),)
     assert turns[0].shell_read_chars == len(persisted)
     assert len(persisted) < 214_000
+
+
+# -- odd input: a substitution nested very deep, or opened and never closed ---------------------------------
+
+
+@pytest.mark.parametrize("depth", [40, 500, 3000])
+def test_a_command_nested_very_deep_is_still_read(tmp_path, depth):
+    # The substitutions past the cap are read the old way, so the counts are the ones the quote-by-quote
+    # reading gives; what matters is that the transcript is not lost to a RecursionError.
+    nest = "echo " + '"$(echo ' * depth + "x" + ')"' * depth
+    turns = _session(tmp_path, [_bash(nest + "; cat a.py")], [("body", False, {})])
+    assert turns[0].shell_read_count == 1
+    assert shell_reads.read_count(nest, powershell=False) == 0
+    assert shell_writes.write_targets(nest + "; echo y > src/a.py", powershell=False, cwd="C:/r") == ["C:/r/src/a.py"]
+    unclosed = "echo " + '"$(echo ' * depth + "; cat a.py"
+    assert shell_reads.read_count(unclosed, powershell=False) == 1
+
+
+def _characters_looked_at(command: str) -> int:
+    """How many times the tokenizer indexes into ``command`` while counting its reads and finding its writes."""
+    seen = [0]
+
+    class Counted(str):
+        def __getitem__(self, key):
+            seen[0] += 1
+            return super().__getitem__(key)
+
+    shell_reads.read_count(Counted(command), powershell=False)
+    shell_writes.write_targets(Counted(command), powershell=False, cwd="C:/r")
+    shell_writes.changes_files(Counted(command), powershell=False)
+    assert seen[0] > 0
+    return seen[0]
+
+
+@pytest.mark.parametrize("command", [
+    'echo "' + "$( a " * 2000 + '"; cat x',
+    'echo "' + "` a " * 2000 + '"; cat x',
+    'echo "' + "$(' a " * 2000 + '"; cat x',
+    'echo "' + "$(cat <<EOF\n" * 1500 + '"; cat x',
+    'echo "' + "$(echo \"" * 1500 + "; cat x",
+    'echo "$(' + "abc " * 2500 + '"; cat x',
+    "git commit -m \"$(cat <<'EOF'\n" + "Fix the \"cat a || cat b\" case; see $(grep x y)\n" * 4000 + "EOF\n)\" && git log -1",
+], ids=["unclosed $(", "unclosed backtick", "unclosed $(' ", "unclosed heredocs", "unclosed nesting", "one unclosed $(", "long message"])
+def test_a_substitution_that_never_closes_is_not_scanned_again_and_again(command):
+    # Every look at a character is counted, so a scan that starts over at each opener shows as a count far
+    # past the command's length (it was 2,000 scans of a 10 KB command), whatever the speed of the machine.
+    assert _characters_looked_at(command) <= 12 * len(command)

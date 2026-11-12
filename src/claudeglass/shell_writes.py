@@ -226,6 +226,7 @@ def _tokens(command: str, powershell: bool):
     in_word = False
     quoted = False
     heredocs: list[tuple[str, bool]] = []
+    scan = [_SCAN_STEPS_PER_CHAR * n + _SCAN_STEPS_MIN]
 
     def flush():
         nonlocal word, in_word, quoted
@@ -281,7 +282,7 @@ def _tokens(command: str, powershell: bool):
                     j += 2
                 elif ch == '"':
                     break
-                elif not powershell and ch in "$`" and (end := _substitution_end(command, j)) >= 0:
+                elif not powershell and ch in "$`" and (end := _substitution_end(command, j, scan)) >= 0:
                     # A substitution is read to its own end, so the quotes
                     # inside it are its text and not this word's.
                     word.append(command[j:end])
@@ -387,22 +388,40 @@ def _rest_of_line_blank(command: str, start: int) -> bool:
     return end >= 0 and not command[start:end].strip()
 
 
-def _substitution_end(command: str, i: int) -> int:
+#: A substitution nested deeper than this is read the old way (its quotes
+#: end the word), so a command nested thousands deep cannot overflow the
+#: stack and cost the whole transcript.
+_MAX_SUBSTITUTION_DEPTH = 32
+#: The characters of a command the substitution scans may look at in all,
+#: so one that is opened and never closed is not scanned again from every
+#: opener after it. Reading each substitution once takes about one step a
+#: character; past the budget the rest is read the old way.
+_SCAN_STEPS_PER_CHAR = 4
+_SCAN_STEPS_MIN = 1000
+
+
+def _substitution_end(command: str, i: int, scan: list[int], depth: int = 0) -> int:
     """The index just past the substitution that starts at ``i`` (``$(``
-    or a backtick), or -1 when it is not one or never closes. Bash parses
-    what is inside afresh: its quotes pair with each other, its heredoc
-    bodies are text, and parens nest, whatever the double quote around it
-    is doing."""
+    or a backtick), or -1 when it is not one, never closes, nests deeper
+    than :data:`_MAX_SUBSTITUTION_DEPTH` or runs the command's budget out
+    (``scan[0]``, the steps left). Bash parses what is inside afresh: its
+    quotes pair with each other, its heredoc bodies are text, and parens
+    nest, whatever the double quote around it is doing."""
     n = len(command)
+    if depth >= _MAX_SUBSTITUTION_DEPTH:
+        return -1
     if command.startswith("$(", i):
         i += 2
     elif command.startswith("`", i):
-        return _backtick_end(command, i + 1)
+        return _backtick_end(command, i + 1, scan)
     else:
         return -1
-    depth = 1
+    parens = 1
     heredocs: list[tuple[str, bool]] = []
     while i < n:
+        scan[0] -= 1
+        if scan[0] < 0:
+            return -1
         c = command[i]
         if c == "\\":
             i += 2
@@ -410,27 +429,30 @@ def _substitution_end(command: str, i: int) -> int:
             end = command.find("'", i + 1)
             if end < 0:
                 return -1
+            scan[0] -= end - i
             i = end + 1
         elif c == '"':
-            i = _double_quote_end(command, i + 1)
+            i = _double_quote_end(command, i + 1, scan, depth + 1)
             if i < 0:
                 return -1
         elif c == "`":
-            i = _backtick_end(command, i + 1)
+            i = _backtick_end(command, i + 1, scan)
             if i < 0:
                 return -1
         elif c == "(":
-            depth += 1
+            parens += 1
             i += 1
         elif c == ")":
-            depth -= 1
+            parens -= 1
             i += 1
-            if not depth:
+            if not parens:
                 return i
         elif c == "\n":
             i += 1
             if heredocs:
-                i = _skip_heredoc_bodies(command, i, heredocs)
+                skipped = _skip_heredoc_bodies(command, i, heredocs)
+                scan[0] -= skipped - i
+                i = skipped
                 heredocs = []
         elif command.startswith("<<<", i):
             i += 3
@@ -444,28 +466,35 @@ def _substitution_end(command: str, i: int) -> int:
     return -1
 
 
-def _double_quote_end(command: str, i: int) -> int:
+def _double_quote_end(command: str, i: int, scan: list[int], depth: int) -> int:
     """The index just past the ``"`` that closes the double-quoted text
-    starting at ``i``, or -1 when it never closes."""
+    starting at ``i``, or -1 when it never closes or runs the budget out.
+    A substitution inside it that cannot be read is plain text."""
     n = len(command)
     while i < n:
+        scan[0] -= 1
+        if scan[0] < 0:
+            return -1
         c = command[i]
         if c == "\\":
             i += 2
         elif c == '"':
             return i + 1
-        elif c in "$`" and (end := _substitution_end(command, i)) >= 0:
+        elif c in "$`" and (end := _substitution_end(command, i, scan, depth)) >= 0:
             i = end
         else:
             i += 1
     return -1
 
 
-def _backtick_end(command: str, i: int) -> int:
+def _backtick_end(command: str, i: int, scan: list[int]) -> int:
     """The index just past the backtick that closes the one before ``i``,
-    or -1 when it never closes."""
+    or -1 when it never closes or runs the budget out."""
     n = len(command)
     while i < n:
+        scan[0] -= 1
+        if scan[0] < 0:
+            return -1
         if command[i] == "\\":
             i += 2
         elif command[i] == "`":
