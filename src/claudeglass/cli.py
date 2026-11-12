@@ -4472,6 +4472,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                     stdout.write(f"{exc}\n")
                     return 2
                 stdout.write("Saved to config.toml.\n")
+                mod_settings_mod.refresh_coaching(config_dir)
         else:
             stdout.write(f"{title} {'are' if action == 'brief' else 'is'} already {'on' if on else 'off'}.\n")
         _capture_skill_step(
@@ -4544,6 +4545,9 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 stdout.write(f"{exc}\n")
                 return 2
             stdout.write("Saved to config.toml. It takes effect in new sessions and subagents.\n")
+            # Whether coaching is on and the project filter are in the mod's settings file: say so now, as
+            # the dashboard's route does, so the mod hears of it within its settings reload.
+            mod_settings_mod.refresh_coaching(config_dir)
     elif action != "connect":
         stdout.write(f"Metrics capture is already {capture_view.describe(current)}.\n")
 

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from claudeglass import capture_catalogue as cat
-from claudeglass import cli, footprint, hook_health, installer, setup_flow, signals
+from claudeglass import cli, footprint, hook_health, installer, mod_settings, setup_flow, signals
 from claudeglass.config import CAPTURE_LOG_NAME, SIGNAL_RETENTION_DEFAULT_DAYS, CaptureConfig, load_capture_log, load_config
 
 NOW = datetime(2026, 9, 24, 6, 0, tzinfo=timezone.utc)
@@ -2090,3 +2090,71 @@ def test_capture_connect_dry_run_adds_the_message_entry_for_coaching_notes_after
     assert rc == 0, out
     assert "capture-hook.py when you send a message" in out
     assert _settings(config_dir) == {"model": "opus"}
+
+
+# -- R5: a saved capture change reaches the mod's settings file at once -------------------------------------------------
+
+
+def _mod_file(config_dir) -> dict:
+    return json.loads(mod_settings.settings_path(config_dir).read_text(encoding="utf-8"))
+
+
+def _mod_file_written(config_dir) -> None:
+    assert mod_settings.write(config_dir, mod_settings.build(config_dir, now=NOW))
+
+
+def test_capture_enable_and_disable_rewrite_the_coaching_block_of_the_mod_settings(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _mod_file_written(config_dir)
+    assert _mod_file(config_dir)["coaching"]["enabled"] is False
+
+    rc, out = _capture(config_dir, "enable", "coaching_notes", "--yes")
+    assert rc == 0, out
+    assert _mod_file(config_dir)["coaching"]["enabled"] is True
+
+    rc, out = _capture(config_dir, "disable", "coaching_notes", "--yes")
+    assert rc == 0, out
+    assert _mod_file(config_dir)["coaching"]["enabled"] is False
+
+
+def test_capture_remove_rewrites_the_coaching_block_it_turns_off(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    _mod_file_written(config_dir)
+    assert _mod_file(config_dir)["coaching"]["enabled"] is True
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert _mod_file(config_dir)["coaching"]["enabled"] is False
+
+
+def test_capture_leaves_the_mod_settings_alone_when_nothing_is_saved(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _mod_file_written(config_dir)
+    path = mod_settings.settings_path(config_dir)
+    before = path.read_text(encoding="utf-8")
+    # A dry run, and a change that is asked about and declined, save nothing.
+    _capture(config_dir, "enable", "coaching_notes", "--dry-run")
+    _capture(config_dir, "enable", "coaching_notes", stdin="n\n")
+    assert path.read_text(encoding="utf-8") == before
+    # Nothing changes in config.toml: nothing is rewritten.
+    _capture(config_dir, "disable", "coaching_notes", "--yes")
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_capture_enable_writes_no_mod_settings_where_the_mod_has_none_yet(tmp_path):
+    # The next report writes the file whole; a capture change makes no file of its own.
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "enable", "coaching_notes", "--yes")
+    assert rc == 0, out
+    assert not mod_settings.settings_path(config_dir).exists()
+
+
+def test_the_feedback_and_brief_switches_refresh_the_mod_settings_too(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    _mod_file_written(config_dir)
+    calls = []
+    real = mod_settings.refresh_coaching
+    monkeypatch.setattr(mod_settings, "refresh_coaching", lambda folder, **kw: calls.append(folder) or real(folder, **kw))
+    for argv in (("brief", "on"), ("brief", "off"), ("feedback", "on"), ("feedback", "off")):
+        _capture(config_dir, *argv, "--yes")
+    assert len(calls) == 4
