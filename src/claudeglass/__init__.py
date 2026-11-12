@@ -484,7 +484,14 @@ __version__ = "0.16.0"
 #: Claude Code deleted keeps its old digest. ``measured.FIELD_VERSIONS`` names
 #: the fields each figure leaves out of an older digest; a bump that adds or
 #: redefines one adds it there.
-PARSER_VERSION = 50
+#: Bumped to 51: a ``||`` fallback that starts on the next line or in a
+#: subshell is one shell read, and a commit or pull-request message inside
+#: ``"$( ... )"`` is text and not commands (``Turn.shell_read_count``); a
+#: path in any system's temp folder, found by its shape and not only by the
+#: reading process's own temp folder, is temp
+#: (``Turn.shell_code_write_count``, ``Turn.edit_code_count``). A pre-51
+#: digest has the older readings of each.
+PARSER_VERSION = 51
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

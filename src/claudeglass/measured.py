@@ -19,9 +19,9 @@ from .model import TranscriptResult
 #: whose meaning it has now: the version that added it or last redefined
 #: it. A bump that adds or redefines a field a figure reads adds it here.
 FIELD_VERSIONS: dict[str, int] = {
-    "shell_read_count": 46,
-    "shell_code_write_count": 50,
-    "edit_code_count": 50,
+    "shell_read_count": 51,
+    "shell_code_write_count": 51,
+    "edit_code_count": 51,
     "coach_tip": 50,
     "coach_tips": 50,
     "coach_disowned": 49,
