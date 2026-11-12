@@ -392,6 +392,69 @@ def test_models_check_is_ok_when_the_ignored_card_was_its_only_change(tmp_path):
     assert result["summary"] == IGNORED_ONLY
 
 
+def _with_session_counts(model, main, other=(10, 10, 0, 0)):
+    """``_full_model`` with the swap table's ``spawns``, ``lever_runs``,
+    ``before_change_runs`` and ``settled_runs`` columns, the main session's
+    row (0) and the other row (1) holding the given counts."""
+    swap = model.sections[0].tables[0]
+    swap.columns += [NS(key="spawns"), NS(key="lever_runs"), NS(key="before_change_runs"), NS(key="settled_runs")]
+    swap.rows[0] += list(main)
+    swap.rows[1] += list(other)
+    return model
+
+
+def _models_cells(result):
+    keys = [c["key"] for c in result["table"]["columns"]]
+    return {row[0]: dict(zip(keys, row)) for row in result["table"]["rows"]}
+
+
+def test_models_check_says_on_how_many_sessions_the_main_saving_is(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_with_session_counts(_full_model(), (29, 24, 0, 5)),
+                                   effective_agents={"Explore": {}}))
+    cells = _models_cells(result)
+    assert cells["Main session"]["saving"] == "40.00 USD on 24 of 29 sessions"
+    assert cells["Explore"]["saving"].endswith("80% less")
+    (tip,) = [t for t in result["tips"] if t["title"] == "Some main sessions aren't counted"]
+    assert tip["text"] == "5 main sessions already ran on Sonnet or smaller. The saving counts the other 24."
+    before = qa.run("models", _ctx(tmp_path, model=_with_session_counts(_full_model(), (29, 7, 22, 0)),
+                                   effective_agents={"Explore": {}}))
+    (tip,) = [t for t in before["tips"] if t["title"] == "Some main sessions aren't counted"]
+    assert tip["text"] == (
+        "22 main sessions started before their project moved to Sonnet or smaller. The saving counts the other 7."
+    )
+
+
+def test_models_check_never_says_none_cheaper_for_a_main_session_it_did_not_count(tmp_path):
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+    _with_session_counts(model, (10, 0, 10, 0))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}}))
+    assert _models_cells(result)["Main session"]["cheaper"] == "none counted"
+    (tip,) = [t for t in result["tips"] if t["title"] == "No main session is counted"]
+    assert tip["text"] == (
+        "10 main sessions started before their project moved to Sonnet or smaller. Nothing is left to price."
+    )
+    counted = _full_model()
+    counted.sections[0].tables[0].rows[0][-3] = None
+    _with_session_counts(counted, (10, 10, 0, 0))
+    result = qa.run("models", _ctx(tmp_path, model=counted, effective_agents={"Explore": {}}))
+    assert _models_cells(result)["Main session"]["cheaper"] == "none cheaper"
+
+
+def test_models_check_says_when_the_setting_already_has_the_cheaper_model(tmp_path):
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[1][-3], swap.rows[1][-2] = None, 0
+    _with_session_counts(model, (29, 24, 0, 5), (10, 10, 0, 0))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": "sonnet"}))
+    assert result["status"] == "ok"
+    assert result["summary"] == (
+        "Your model setting already says sonnet, but 24 main sessions ran on a larger model, picked with /model "
+        "or the model picker."
+    )
+
+
 def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
     """The ignore holds for the value that was ignored; a different value for
     the same setting is a new finding (``ignores.fingerprint``)."""
