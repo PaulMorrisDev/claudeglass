@@ -1207,8 +1207,8 @@ def _make_parser() -> argparse.ArgumentParser:
         if name in ("review", "check"):
             _add_claude_root_arg(
                 sub,
-                help="the Claude Code folder holding your CLAUDE.md, rules/ and agents/ "
-                "(default: the folder above --config-dir)",
+                help="the Claude Code folder holding your CLAUDE.md, rules/, agents/ and skills/ "
+                "(default: the folder above --config-dir, never worked out from --projects-root)",
             )
         if name == "review":
             sub.add_argument(
@@ -1865,7 +1865,7 @@ def _report_only(args: argparse.Namespace, projects, config_dir) -> tuple[Path, 
 def _read_where(args: argparse.Namespace, config_dir) -> tuple[Path | None, list[Path]]:
     """Where ``review`` and ``check`` read a project's files: Claude's own
     folder, when ``--claude-root`` names one and otherwise ``None``, which
-    is the parent of the first projects root (``claude_md_review``); and every
+    is the config folder's parent; and every
     folder of project folders the report read (``--projects-root``, then
     ``config.toml``'s ``extra_projects_roots``). A config folder kept apart
     from the projects it describes, as in a container, reads the same files

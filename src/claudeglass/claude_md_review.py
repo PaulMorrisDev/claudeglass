@@ -163,27 +163,15 @@ class FileReview:
 # -- finding files -----------------------------------------------------
 
 
-def _claude_folders(
-    config_dir: Path, claude_root: Path | None = None, projects_roots: Iterable[Path] | None = None
-) -> list[Path]:
-    """The folders that hold your own CLAUDE.md, rules/ and agents/. An
-    explicit ``claude_root`` is the only one. Else, with projects roots, the
-    parent of each (Claude's home holds ``projects/``, as docs/deploy.md
-    mounts it, so this tool's config folder may be anywhere): the first is
-    Claude's folder, and each further root's parent (a WSL distro's) is
-    searched for your files too. With neither, the config folder's parent,
-    the layout of ``~/.claude/claudeglass``."""
-    if claude_root is not None:
-        return [Path(claude_root)]
-    parents = list(dict.fromkeys(Path(root).parent for root in projects_roots or ()))
-    return parents or [Path(config_dir).parent]
-
-
-def _claude_root(
-    config_dir: Path, claude_root: Path | None = None, projects_roots: Iterable[Path] | None = None
-) -> Path:
-    """Claude's own folder: the first of :func:`_claude_folders`."""
-    return _claude_folders(config_dir, claude_root, projects_roots)[0]
+def _claude_root(config_dir: Path, claude_root: Path | None = None) -> Path:
+    """The folder that holds your own CLAUDE.md, rules/ and agents/:
+    ``claude_root`` when the caller knows it (``--claude-root``), else the
+    config folder's parent (the layout of ``~/.claude/claudeglass``). It is
+    never worked out from a projects root: the parent of one is not yours (a
+    WSL distro's ``~/.claude``, a copy of ``projects/`` elsewhere, or a
+    container's mount, whose files are not at the host paths the transcripts
+    name)."""
+    return Path(claude_root) if claude_root is not None else Path(config_dir).parent
 
 
 def _read(path: Path) -> str | None:
@@ -343,13 +331,12 @@ def discover(
 ) -> list[Candidate]:
     """Every CLAUDE.md-family file that exists, with its level.
 
-    ``claude_root``: Claude's own folder. ``projects_roots``: the folders of
-    project folders the report read. With neither, the config folder's parent
-    and its ``projects/``; with only the roots, their parents hold your files
-    (:func:`_claude_folders`)."""
+    ``claude_root``: the folder with your own files (:func:`_claude_root`).
+    ``projects_roots``: the folders of project folders the report read, for
+    the project folders and each project's auto memory; ``None`` is
+    ``projects/`` inside ``claude_root``."""
+    claude_root = _claude_root(config_dir, claude_root)
     roots = None if projects_roots is None else list(projects_roots)
-    claude_folders = _claude_folders(config_dir, claude_root, roots)
-    claude_root = claude_folders[0]
     home = Path.home()
     out: list[Candidate] = []
     seen: set[str] = set()
@@ -362,10 +349,9 @@ def discover(
         scoped = level.endswith("rule") and _has_paths_frontmatter(_read(path) or "")
         out.append(Candidate(path=path, level=level, project_root=project, scoped=scoped))
 
-    for folder in claude_folders:
-        add(folder / "CLAUDE.md", "User")
-        for rule in sorted((folder / "rules").rglob("*.md")) if (folder / "rules").is_dir() else ():
-            add(rule, "User rule")
+    add(claude_root / "CLAUDE.md", "User")
+    for rule in sorted((claude_root / "rules").rglob("*.md")) if (claude_root / "rules").is_dir() else ():
+        add(rule, "User rule")
     for project in projects if projects is not None else project_folders(claude_root, roots=roots):
         parent = project.parent
         while parent != parent.parent and os.path.normcase(str(parent)) != os.path.normcase(str(home.parent)):
@@ -625,14 +611,11 @@ def agent_names(
     seen_types: list[str],
     *,
     claude_root: Path | None = None,
-    projects_roots: Iterable[Path] | None = None,
 ) -> list[str]:
     """Agent names to look for in sections: your agent files (user and
     each project's), plus agent types seen in your sessions."""
     names: set[str] = set()
-    folders = [folder / "agents" for folder in _claude_folders(config_dir, claude_root, projects_roots)] + [
-        project / ".claude" / "agents" for project in projects
-    ]
+    folders = [_claude_root(config_dir, claude_root) / "agents"] + [project / ".claude" / "agents" for project in projects]
     for folder in folders:
         if folder.is_dir():
             names.update(path.stem for path in folder.glob("*.md"))
@@ -1010,21 +993,21 @@ def build_review(
     ``claude_root`` and ``projects_roots``: where Claude's own folder is and
     which folders of project folders the report read, when they are not
     the config folder's parent and its ``projects/`` (a config folder
-    kept apart from Claude's, as in a container). Given only the roots,
-    Claude's folder is the first one's parent (:func:`_claude_folders`).
-    ``None`` for both is the config folder's parent."""
+    kept apart from Claude's, as in a container). The roots give the
+    project folders and their auto memory, never your own files: those are
+    in ``claude_root``, else beside the config folder."""
     config_dir = Path(config_dir)
     salt = salt if salt is not None else parse_mod.load_or_create_salt(config_dir)
     roots = None if projects_roots is None else list(projects_roots)
-    claude_root, explicit = _claude_root(config_dir, claude_root, roots), claude_root
+    claude_root = _claude_root(config_dir, claude_root)
     folders, worktrees = split_worktrees(
         projects if projects is not None else project_folders(claude_root, roots=roots)
     )
     transcripts = dict(context_files.get("transcripts") or {})
-    names = agent_names(config_dir, folders, list(transcripts), claude_root=explicit, projects_roots=roots)
+    names = agent_names(config_dir, folders, list(transcripts), claude_root=claude_root)
     usage = {row["hash"]: row for row in context_files.get("files") or () if isinstance(row, dict)}
     reviews: list[FileReview] = []
-    for candidate in discover(config_dir, projects=folders, claude_root=explicit, projects_roots=roots):
+    for candidate in discover(config_dir, projects=folders, claude_root=claude_root, projects_roots=roots):
         index = _project_index(candidate.project_root) if candidate.project_root is not None else None
         review = read_file(candidate, salt, names, index)
         if review is None:
@@ -1280,15 +1263,14 @@ def local_names(
     config_dir = Path(config_dir)
     wanted = None if wanted is None else frozenset(wanted)
     salt = salt if salt is not None else parse_mod.load_or_create_salt(config_dir)
+    claude_root = _claude_root(config_dir, claude_root)
     roots = None if projects_roots is None else list(projects_roots)
-    claude_folders = _claude_folders(config_dir, claude_root, roots)
-    claude_root = claude_folders[0]
     folders, worktrees = split_worktrees(
         projects if projects is not None else project_folders(claude_root, roots=roots)
     )
     key = (
         os.path.normcase(str(config_dir)),
-        tuple(os.path.normcase(str(folder)) for folder in claude_folders),
+        os.path.normcase(str(claude_root)),
         None if roots is None else tuple(os.path.normcase(str(root)) for root in roots),
         tuple(os.path.normcase(str(folder)) for folder in folders),
         hashlib.sha256(salt).hexdigest(),
@@ -1301,7 +1283,7 @@ def local_names(
             del _NAMES[old_key]
         if key in _NAMES:
             return _NAMES[key][1]
-    found = _find_names(config_dir, claude_folders, folders, worktrees, salt, max_files, wanted, roots)
+    found = _find_names(config_dir, claude_root, folders, worktrees, salt, max_files, wanted, roots)
     with _NAMES_LOCK:
         _NAMES[key] = (time.monotonic(), found)
     return found
@@ -1309,7 +1291,7 @@ def local_names(
 
 def _find_names(
     config_dir: Path,
-    claude_folders: list[Path],
+    claude_root: Path,
     folders: list[Path],
     worktrees: dict[str, list[Path]],
     salt: bytes,
@@ -1317,7 +1299,6 @@ def _find_names(
     wanted: frozenset[str] | None = None,
     roots: list[Path] | None = None,
 ) -> LocalNames:
-    claude_root = claude_folders[0]
     found = LocalNames()
     left = max_files
     #: The wanted hashes with no name yet. The walk ends when it is empty.
@@ -1337,15 +1318,14 @@ def _find_names(
         memory = _memory_file(claude_root, folder, roots).parent
         for path in sorted(memory.glob("*.md")) if memory.is_dir() else ():
             note(path, home_label(path), "")
-    for claude in claude_folders:
-        for extra in (claude / "plans", claude / "rules"):
-            if extra.is_dir():
-                files, _cut = _walk_files(extra, 2000)
-                for path in files:
-                    note(path, home_label(path), "")
-        user_file = claude / "CLAUDE.md"
-        if user_file.is_file():
-            note(user_file, home_label(user_file), "")
+    for extra in (claude_root / "plans", claude_root / "rules"):
+        if extra.is_dir():
+            files, _cut = _walk_files(extra, 2000)
+            for path in files:
+                note(path, home_label(path), "")
+    user_file = claude_root / "CLAUDE.md"
+    if user_file.is_file():
+        note(user_file, home_label(user_file), "")
 
     def walk(folder: Path) -> None:
         nonlocal left

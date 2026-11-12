@@ -292,10 +292,9 @@ def test_a_config_copy_kept_apart_from_the_projects_answers_all_seven_checks_as_
     for inp in (beside, apart):
         assert any(row[0].endswith("CLAUDE.md") for row in inp.result("claude-md")["table"]["rows"])
     assert apart.result("claude-md")["summary"] == beside.result("claude-md")["summary"]
-    # Without the Claude folder given, it is the projects folder's parent: the same files.
-    derived = agreement.load_inputs(built.projects_root, apart_config, ap.SLUG)
-    assert derived.result("claude-md")["summary"] == beside.result("claude-md")["summary"]
-    assert derived.ctx.claude_root is None
+    # Without the Claude folder given, the copy's parent is taken for it and the user file is not found.
+    lost = agreement.load_inputs(built.projects_root, apart_config, ap.SLUG)
+    assert not any(row[0].endswith("CLAUDE.md") for row in (lost.result("claude-md").get("table") or {"rows": []})["rows"])
 
 
 def _run_split_and_plan_handoff():

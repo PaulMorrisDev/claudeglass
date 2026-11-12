@@ -157,24 +157,19 @@ def _listings(transcript: Path):
         return
 
 
-def locate(
-    name: str, claude_root: Path, projects: list[Path], *, user_folders: list[Path] | None = None
-) -> tuple[str, Path | None]:
-    """Where skill ``name`` comes from, and its file when it has one.
-    ``user_folders``: every folder that holds your own skills (``claude_root``
-    first), when there is more than one."""
+def locate(name: str, claude_root: Path, projects: list[Path]) -> tuple[str, Path | None]:
+    """Where skill ``name`` comes from, and its file when it has one."""
     if ":" in name:
         return "plugin", None
-    users = user_folders or [claude_root]
-    for root, source in [(user, "user") for user in users] + [(p / ".claude", "project") for p in projects]:
+    for root, source in [(claude_root, "user")] + [(p / ".claude", "project") for p in projects]:
         skill = root / "skills" / name / "SKILL.md"
         if skill.is_file():
             return source, skill
-    for root in users + [p / ".claude" for p in projects]:
+    for root in [claude_root] + [p / ".claude" for p in projects]:
         command = root / "commands" / f"{name}.md"
         if command.is_file():
             return "command", command
-    for root in users + [p / ".claude" for p in projects]:
+    for root in [claude_root] + [p / ".claude" for p in projects]:
         workflow = root / "workflows" / f"{name}.js"
         if workflow.is_file():
             return "workflow", workflow
@@ -288,15 +283,15 @@ def build_rows(
     claude_root: Path | None = None,
     projects_roots: Iterable[Path] | None = None,
 ) -> list[SkillRow]:
-    """``claude_root`` and ``projects_roots``: where Claude's own folder is and
+    """``claude_root`` and ``projects_roots``: where your own folder is and
     which folders of project folders the report read, as for
-    ``claude_md_review.build_review``; ``None`` for both is the config
-    folder's parent and its ``projects/``."""
-    from .claude_md_review import _claude_folders, project_folders, split_worktrees
+    ``claude_md_review.build_review``: the roots give the project folders
+    and the skill listings, never your own skills."""
+    from .claude_md_review import _claude_root as claude_root_of
+    from .claude_md_review import project_folders, split_worktrees
 
     roots = None if projects_roots is None else list(projects_roots)
-    user_folders = _claude_folders(config_dir, claude_root, roots)
-    claude_root = user_folders[0]
+    claude_root = claude_root_of(config_dir, claude_root)
     folders = split_worktrees(projects if projects is not None else project_folders(claude_root, roots=roots))[0]
     usage = {row["name"]: row for row in context_files.get("skills") or () if isinstance(row, dict)}
     texts = descriptions(claude_root, set(usage), roots=roots)
@@ -304,7 +299,7 @@ def build_rows(
     newest = max((t for t in map(_listed_at, usage.values()) if t is not None), default=None)
     rows = []
     for name in sorted(set(usage) | set(texts), key=str.lower):
-        source, path = locate(name, claude_root, folders, user_folders=user_folders)
+        source, path = locate(name, claude_root, folders)
         listed_at = _listed_at(usage.get(name, {}))
         if source == "built-in" and listed_at is not None and newest - listed_at > REMOVED_AFTER_DAYS * 86400:
             source = "removed"

@@ -2531,23 +2531,26 @@ def test_a_project_picked_for_review_or_check_is_found_in_the_projects_root_the_
     given = cli._make_parser().parse_args(base + ["--claude-root", str(tmp_path / "data" / "claude")])
     assert cli._read_where(given, config) == (tmp_path / "data" / "claude", [root])
 
-def test_check_claude_md_finds_the_users_file_beside_the_projects_root(tmp_path, capsys):
-    """docs/deploy.md's layout: the config folder is not in Claude's home, the projects folder is."""
+def test_check_claude_md_in_the_container_layout_does_not_read_the_mounts_files_as_yours(tmp_path, capsys):
+    """docs/deploy.md's layout: the projects folder is in the mounted Claude home, the config folder is not.
+    Your files are read from --claude-root, else beside the config folder; never beside the projects."""
     home = tmp_path / "data" / "claude"
     user = home / "CLAUDE.md"
     user.parent.mkdir(parents=True)
     user.write_text("# Mine\n\nBe brief.\n", encoding="utf-8")
     _write_project(home / "projects", "proj-a")
-    exit_code = cli.main(
-        ["check", "claude-md", "--projects-root", str(home / "projects"), "--all-projects",
-         "--config-dir", str(tmp_path / "data" / "claudeglass")]
-    )
+    argv = ["check", "claude-md", "--projects-root", str(home / "projects"), "--all-projects",
+            "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    assert cli.main(argv) == 0
     out = capsys.readouterr().out
-    assert exit_code == 0
-    assert str(user) in out, out
+    assert "No CLAUDE.md files found." in out and str(user) not in out, out
+    assert cli.main(argv + ["--claude-root", str(home)]) == 0
+    assert str(user) in capsys.readouterr().out
 
-def test_review_skills_reads_the_skills_beside_the_projects_root(tmp_path, capsys):
-    """docs/deploy.md's layout: the config folder is not in Claude's home, the projects folder is."""
+
+def test_review_skills_finds_descriptions_under_the_projects_root_and_your_skills_in_the_claude_folder(
+    tmp_path, capsys
+):
     home = tmp_path / "data" / "claude"
     (home / "skills" / "grill-me").mkdir(parents=True)
     (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
@@ -2556,10 +2559,10 @@ def test_review_skills_reads_the_skills_beside_the_projects_root(tmp_path, capsy
         "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
     with (slug / "session-1.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(listing) + "\n")
-    exit_code = cli.main(
-        ["review", "skills", "--projects-root", str(home / "projects"), "--all-projects",
-         "--config-dir", str(tmp_path / "data" / "claudeglass")]
-    )
+    argv = ["review", "skills", "--projects-root", str(home / "projects"), "--all-projects",
+            "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    assert cli.main(argv) == 0
     out = capsys.readouterr().out
-    assert exit_code == 0
-    assert "Interview the user about a plan." in out, out
+    assert "Interview the user about a plan." in out and "Built into Claude Code" in out, out
+    assert cli.main(argv + ["--claude-root", str(home)]) == 0
+    assert "Built into Claude Code" not in capsys.readouterr().out

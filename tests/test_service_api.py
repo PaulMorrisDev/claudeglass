@@ -6618,15 +6618,13 @@ def test_claude_md_reads_the_projects_folder_the_service_is_given_wherever_the_c
     moved = tmp_path / "elsewhere" / "projects"
     moved.parent.mkdir()
     (two_project_server.options.config_dir.parent / "projects").rename(moved)
-    # Your own files are beside the projects folder, which is Claude's home.
-    (two_project_server.options.config_dir.parent / "CLAUDE.md").rename(moved.parent / "CLAUDE.md")
     two_project_server.options.projects_root = moved
     assert _claude_md_projects(two_project_server) == {"", "alpha-repo", "beta-repo"}
     assert _claude_md_projects(two_project_server, "?project=proj-alpha") == {"", "alpha-repo"}
 
-def test_skills_route_reads_beside_the_projects_folder_the_service_is_given(server, tmp_path):
-    """docs/deploy.md's container: Claude's home (its skills and the sessions) is the projects folder's
-    parent, and the config folder is somewhere else."""
+def test_skills_route_finds_descriptions_under_the_projects_folder_the_service_is_given(server, tmp_path):
+    """docs/deploy.md's container: the sessions are under the projects folder, and the folder above it is
+    not read as yours."""
     home = tmp_path / "elsewhere"
     (home / "skills" / "grill-me").mkdir(parents=True)
     (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
@@ -6638,4 +6636,4 @@ def test_skills_route_reads_beside_the_projects_folder_the_service_is_given(serv
     resp, payload = server.get_json("/api/skills?window=all")
     assert resp.status == 200, payload
     row = next(item for item in payload["data"]["skills"] if item["name"] == "grill-me")
-    assert row["source"] == "user" and row["description"] == "Interview the user about a plan."
+    assert row["source"] == "built-in" and row["description"] == "Interview the user about a plan."

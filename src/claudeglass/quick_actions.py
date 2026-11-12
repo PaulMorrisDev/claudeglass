@@ -59,8 +59,9 @@ class Context:
     #: Where the CLAUDE.md checks read when it is not the layout of
     #: ``~/.claude`` (``config_dir``'s parent is Claude's folder and holds
     #: ``projects/``): Claude's own folder, and the folders of project
-    #: folders the report read. With only the roots, Claude's folder is the
-    #: first one's parent; with neither, the config folder's parent.
+    #: folders the report read. Your own files are in ``claude_root``, else
+    #: beside the config folder; the roots give project folders, auto memory
+    #: and skill listings, never your own files.
     claude_root: Path | None = None
     projects_roots: tuple[Path, ...] | None = None
 

@@ -293,30 +293,25 @@ def _docker_setup(tmp_path: Path) -> tuple[Path, Path, Path]:
     return claude_root, moved, project
 
 
-def test_the_skills_review_reads_beside_the_projects_root_when_the_config_folder_is_elsewhere(tmp_path):
+def test_the_skills_review_reads_descriptions_and_project_folders_under_the_projects_root(tmp_path):
     claude_root, config_dir, project = _docker_setup(tmp_path)
     write_jsonl(claude_root / "projects" / "C--repo" / "s2.jsonl", [{"type": "user", "cwd": str(project)}])
     rows = [_usage("grill-me", listed=4), _usage("qa-round", listed=4)]
-    # The config folder's parent holds nothing: the old derivation sees no skill file and no description.
+    roots = [claude_root / "projects"]
+    # Nothing is given: the config folder's parent holds nothing.
     lost = skills_review.review(config_dir, {"skills": rows}, UNITS, PERIOD)
     assert {row["name"]: row["source"] for row in lost["skills"]}["grill-me"] == "built-in"
     assert not any(row["description"] for row in lost["skills"])
-    # Given the projects root, Claude's home is its parent: the user's skill, the project's workflow
-    # (its folder found from the sessions' cwd) and the listing's descriptions are all found.
-    data = skills_review.review(
-        config_dir, {"skills": rows}, UNITS, PERIOD, projects_roots=[claude_root / "projects"]
-    )
+    # With the projects root: the listings' descriptions and the project's workflow (its folder found from
+    # the sessions' cwd) are found. The folder above the root is not yours, so grill-me is not your skill.
+    data = skills_review.review(config_dir, {"skills": rows}, UNITS, PERIOD, projects_roots=roots)
     by_name = {row["name"]: row for row in data["skills"]}
-    assert by_name["grill-me"]["source"] == "user"
+    assert by_name["grill-me"]["source"] == "built-in"
     assert by_name["qa-round"]["source"] == "workflow"
     assert by_name["grill-me"]["description"] == "Interview the user about a plan."
-    # An explicit Claude folder wins over the projects root's parent.
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    data = skills_review.review(
-        config_dir, {"skills": rows}, UNITS, PERIOD, claude_root=empty, projects_roots=[claude_root / "projects"]
-    )
-    assert {row["name"]: row["source"] for row in data["skills"]}["grill-me"] == "built-in"
+    # With the Claude folder, your skill is found.
+    data = skills_review.review(config_dir, {"skills": rows}, UNITS, PERIOD, claude_root=claude_root, projects_roots=roots)
+    assert {row["name"]: row["source"] for row in data["skills"]}["grill-me"] == "user"
 
 
 def test_a_project_slug_is_found_in_the_projects_root_it_was_given(tmp_path):

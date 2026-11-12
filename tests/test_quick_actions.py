@@ -2567,32 +2567,44 @@ def test_the_effort_check_counts_the_rows_over_the_bar_in_its_table_not_its_fixe
     assert len(result["fixes"]) > over
     assert result["summary"].startswith("2 of your agents or sessions spent more than 20% of their output thinking."), result["summary"]
 
-def test_the_claude_md_check_finds_and_ranks_the_users_file_beside_the_projects_root(tmp_path):
-    """The service's kind of context in docs/deploy.md's layout: only the projects roots are given,
-    and the user's CLAUDE.md sits in their parent, the Claude home."""
-    import dataclasses
-
+def _mounted_context(tmp_path, cards):
+    """docs/deploy.md's container, as the service sees it: the host's ~/.claude is mounted at data/claude
+    and the config folder is data/claudeglass. The transcripts name the host's paths, which do not exist
+    here, so no project folder is known and the mounted CLAUDE.md is not at any path the report names."""
     from claudeglass import parse
 
-    ctx = _docker_context(tmp_path, [_claude_md_card()], give_roots=False)
     claude_root = tmp_path / "data" / "claude"
-    user = claude_root / "CLAUDE.md"
-    user.write_text("# Mine\n\n" + "Always be careful and brief.\n" * 400, encoding="utf-8")
-    salt = parse.load_or_create_salt(ctx.config_dir)
-    rows = list(ctx.model.context_files["files"]) + [
-        {"hash": parse.path_hash(str(user), salt), "type": "instructions", "sends": 40, "reach": {"main": 40},
-         "cost_by_reach": {"main": 9.0}, "cost_usd": 9.0, "tokens": 3000, "last_seen": "2026-11-01", "weekly": {}}
-    ]
-    ctx.model.context_files = {"files": rows, "transcripts": {"main": 40}}
-    ctx = dataclasses.replace(ctx, projects_roots=(claude_root / "projects",))
-    result = qa.run("claude-md", ctx)
-    assert result["status"] == "act"
-    assert result["summary"].startswith(str(user)) and "costs most" in result["summary"], result["summary"]
-    assert [row[0] for row in result["table"]["rows"]][0] == str(user)
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    claude_root.mkdir(parents=True, exist_ok=True)
+    (claude_root / "CLAUDE.md").write_text("# Mine\n\n" + "Always be careful and brief.\n" * 400, encoding="utf-8")
+    slug = claude_root / "projects" / "C--work-demo"
+    slug.mkdir(parents=True, exist_ok=True)
+    host = tmp_path / "host" / ".claude" / "CLAUDE.md"
+    (slug / "s1.jsonl").write_text(
+        json.dumps({"type": "user", "cwd": str(tmp_path / "host" / "work"), "sessionId": "s1"}) + "\n", encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    row = {"hash": parse.path_hash(str(host), salt), "type": "instructions", "sends": 40, "reach": {"main": 40},
+           "cost_by_reach": {"main": 3.0}, "cost_usd": 3.0, "tokens": 1100, "last_seen": "2026-11-01", "weekly": {}}
+    model = NS(sections=[], context_files={"files": [row], "transcripts": {"main": 40}}, recommendations=cards)
+    return qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                      effective={}, effective_agents={}, projects_roots=(claude_root / "projects",))
 
-def test_the_skills_check_reads_the_skills_beside_the_projects_root(tmp_path):
-    """The service's kind of context in docs/deploy.md's layout: only the projects roots are given,
-    and Claude's home (its skills, the sessions' skill listings) is their parent."""
+
+def test_the_claude_md_check_does_not_read_the_projects_roots_parent_as_yours(tmp_path):
+    """The mounted file is found at a path no transcript names, so the check must neither list it nor say
+    that it was never sent."""
+    result = qa.run("claude-md", _mounted_context(tmp_path, []))
+    assert result["status"] == "no_data" and result["summary"] == "No CLAUDE.md files found."
+    assert not result.get("table")
+    result = qa.run("claude-md", _mounted_context(tmp_path, [_claude_md_card()]))
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read")
+    assert "was seen in a session" not in result["summary"]
+
+
+def test_the_skills_check_finds_descriptions_under_the_projects_root_but_not_your_skills_beside_it(tmp_path):
+    """The listings of the sessions are under the projects roots; your skills are in the Claude folder."""
     claude_root = tmp_path / "data" / "claude"
     config_dir = tmp_path / "data" / "claudeglass"
     config_dir.mkdir(parents=True)
@@ -2616,4 +2628,7 @@ def test_the_skills_check_reads_the_skills_beside_the_projects_root(tmp_path):
     assert table_rows()[0][2] == ""
     (found,) = table_rows(projects_roots=(claude_root / "projects",))
     assert found[0] == "grill-me" and found[2] == "Interview the user about a plan."
-    assert found[1] != "Built in"
+    assert found[1] == "Built into Claude Code"
+    # Given the Claude folder, the skill is yours.
+    (found,) = table_rows(claude_root=claude_root, projects_roots=(claude_root / "projects",))
+    assert "Built" not in found[1]
