@@ -256,16 +256,31 @@ def test_check_7_reports_a_check_that_says_no_data_while_an_open_card_for_its_ru
                for p in problems), problems
 
 
-def test_the_harness_refuses_a_config_folder_that_is_not_beside_the_projects_folder(tmp_path):
-    """A config copy kept apart from its projects reads as having no CLAUDE.md files, and makes
-    the CLAUDE.md check disagree with its cards; that is the layout, not the data."""
-    (tmp_path / "data" / "projects").mkdir(parents=True)
-    (tmp_path / "copy" / "claudeglass").mkdir(parents=True)
-    with pytest.raises(agreement.LayoutError):
-        agreement.load_inputs(tmp_path / "data" / "projects", tmp_path / "copy" / "claudeglass", None)
-    (tmp_path / "data" / "claudeglass").mkdir()
-    with pytest.raises(agreement.LayoutError):
-        agreement.load_inputs(tmp_path / "copy" / "projects", tmp_path / "data" / "claudeglass", None)
+def test_a_config_copy_kept_apart_from_the_projects_answers_all_seven_checks_as_one_beside_them(tmp_path):
+    """The layout of docs/deploy.md: the config folder is a copy somewhere else, and the projects
+    folder the report reads is given. The CLAUDE.md check reads where the report read, so it
+    finds the same files and every check agrees, as on an install with the config beside."""
+    import shutil
+
+    built = ap.build(ap.SPECS["capture_off"], tmp_path / "install")
+    (built.root / "CLAUDE.md").write_text("# Rules\n\n" + "Be brief and careful.\n" * 100, encoding="utf-8")
+    beside = agreement.load_inputs(built.projects_root, built.config_dir, ap.SLUG)
+    apart_config = tmp_path / "copy" / "claudeglass"
+    shutil.copytree(built.config_dir, apart_config)
+    apart = agreement.load_inputs(built.projects_root, apart_config, ap.SLUG, claude_root=built.root)
+    assert apart.ctx.projects_roots == (built.projects_root,) and apart.ctx.claude_root == built.root
+    # All seven run. Check 6 waits on R1 (the xfail in test_agreement.py): it finds the same thing both ways.
+    found = agreement.run_checks(apart)
+    assert list(found) == list(agreement.CHECKS)
+    assert found == agreement.run_checks(beside)
+    assert {number: problems for number, problems in found.items() if number != 6} == {
+        number: [] for number in agreement.CHECKS if number != 6}
+    for inp in (beside, apart):
+        assert any(row[0].endswith("CLAUDE.md") for row in inp.result("claude-md")["table"]["rows"])
+    assert apart.result("claude-md")["summary"] == beside.result("claude-md")["summary"]
+    # Without the Claude folder given, the copy's parent is taken for it and the user file is not found.
+    lost = agreement.load_inputs(built.projects_root, apart_config, ap.SLUG)
+    assert not any(row[0].endswith("CLAUDE.md") for row in (lost.result("claude-md").get("table") or {"rows": []})["rows"])
 
 
 def _run_split_and_plan_handoff():

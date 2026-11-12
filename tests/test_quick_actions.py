@@ -2403,7 +2403,7 @@ def test_the_claude_md_check_offers_the_agent_cards_fixes_when_no_file_was_found
     ctx = _ctx(tmp_path, model=model)
     result = qa.run("claude-md", ctx)
     assert result["status"] == "act" and len(result["fixes"]) == 1
-    assert "No CLAUDE.md file was found" in result["summary"] and "how often each is sent isn't known" in result["summary"]
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most.")
     model.recommendations = []
     assert qa.run("claude-md", ctx)["status"] == "no_data"
     assert qa.run("claude-md", ctx)["summary"] == "No CLAUDE.md files found."
@@ -2436,3 +2436,69 @@ def test_the_compaction_check_drops_a_candidate_an_ignored_card_already_suggeste
     assert shown["status"] == "act" and shown["fixes"]
     result = qa.run("compaction", _ctx(tmp_path, model=model, skip_keys=frozenset({"compaction-window:top-level"})))
     assert result["status"] == "ok" and result["fixes"] == []
+
+
+# -- the CLAUDE.md check reads where the report read -----------------------------------------------
+
+
+def _docker_context(tmp_path, cards, *, give_roots=True):
+    """docs/deploy.md's layout: Claude's folder and its projects under data/claude, this tool's own
+    folder at data/claudeglass. One project file is readable and was sent 40 times."""
+    from claudeglass import parse
+
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True)
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("# Rules\n\n" + "Be brief and careful.\n" * 200, encoding="utf-8")
+    slug = claude_root / "projects" / "C--work-demo"
+    slug.mkdir(parents=True)
+    (slug / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project), "sessionId": "s1"}) + "\n",
+                                   encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    row = {"hash": parse.path_hash(str(project / "CLAUDE.md"), salt), "type": "instructions", "sends": 40,
+           "reach": {"main": 40}, "cost_by_reach": {"main": 3.0}, "cost_usd": 3.0, "tokens": 1100,
+           "last_seen": "2026-11-01", "weekly": {}}
+    model = NS(sections=[], context_files={"files": [row], "transcripts": {"main": 40}}, recommendations=cards)
+    extra = {"claude_root": claude_root, "projects_roots": (claude_root / "projects",)} if give_roots else {}
+    return qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                      effective={}, effective_agents={}, **extra)
+
+
+def test_the_claude_md_check_finds_the_files_in_the_layout_the_report_read(tmp_path):
+    result = qa.run("claude-md", _docker_context(tmp_path, [_claude_md_card()]))
+    assert result["status"] == "act"
+    assert "costs most" in result["summary"], result["summary"]
+
+
+def test_the_claude_md_check_derives_the_folders_from_the_config_folder_when_none_are_given(tmp_path):
+    ctx = _docker_context(tmp_path, [_claude_md_card()], give_roots=False)
+    assert ctx.claude_root is None and ctx.projects_roots is None
+    result = qa.run("claude-md", ctx)
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read"), result["summary"]
+
+
+def test_the_claude_md_check_says_when_it_could_read_no_file_and_offers_the_open_cards_fixes(tmp_path):
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[_claude_md_card()]))
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"] == (
+        "ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most. "
+        "The fixes below come from what your agents were sent."
+    )
+
+
+def test_the_claude_md_check_offers_no_fix_from_a_card_that_is_only_information_or_already_fixed(tmp_path):
+    import dataclasses
+
+    info = dataclasses.replace(_claude_md_card(), severity="info")
+    fixed = dataclasses.replace(_claude_md_card("tester"), variant="fixed")
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[info, fixed]))
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "no_data" and result["fixes"] == []
+    assert result["summary"] == "No CLAUDE.md files found."
+    (ctx.config_dir.parent / "CLAUDE.md").write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    unseen = qa.run("claude-md", ctx)
+    assert unseen["status"] == "no_data" and unseen["fixes"] == []
+    assert "None of your CLAUDE.md files was seen in a session over the last 14 days" in unseen["summary"]

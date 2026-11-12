@@ -6608,3 +6608,16 @@ def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_bui
     assert ctx.effective == {"model": "opus"}
     assert ctx.effective_agents == {"reviewer": {"source": "user", "model": "haiku"}}
     assert len(merges) == 1
+
+
+def test_claude_md_reads_the_projects_folder_the_service_is_given_wherever_the_config_folder_is(
+    two_project_server, tmp_path
+):
+    """docs/deploy.md's container: the projects folder is not beside the config folder."""
+    _give_the_projects_folders(two_project_server)
+    moved = tmp_path / "elsewhere" / "projects"
+    moved.parent.mkdir()
+    (two_project_server.options.config_dir.parent / "projects").rename(moved)
+    two_project_server.options.projects_root = moved
+    assert _claude_md_projects(two_project_server) == {"", "alpha-repo", "beta-repo"}
+    assert _claude_md_projects(two_project_server, "?project=proj-alpha") == {"", "alpha-repo"}

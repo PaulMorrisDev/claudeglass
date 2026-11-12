@@ -56,6 +56,12 @@ class Context:
     #: such as the "savers" check's read of tokensave's own ledger.
     since_ts: float | None = None
     until_ts: float | None = None
+    #: Where the CLAUDE.md checks read when it is not the layout of
+    #: ``~/.claude`` (``config_dir``'s parent is Claude's folder and holds
+    #: ``projects/``): Claude's own folder, and the folders of project
+    #: folders the report read. ``None`` for either is that derivation.
+    claude_root: Path | None = None
+    projects_roots: tuple[Path, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,10 +678,15 @@ def _skill_timing_tips(ctx: Context) -> list[dict]:
 
 def _claude_md_cards_only(ctx: Context, lead: str, table=None, none: str | None = None) -> dict:
     """The check when no file shows how often it is sent: the fixes of its own
-    cards, which are read from the agents' starts and need no file, with
-    ``lead`` saying the counts are not known; no data (``none`` or ``lead``)
-    when the cards have no fix to give."""
-    fixes = _merge_fixes(_rec_fixes(_recommendations(ctx, {"spawn-claude-md", "spawn-shared-claude-md"})))
+    open cards (action or advice, not already fixed), which are read from the
+    agents' starts and need no file, with ``lead`` saying the counts are not
+    known. A card that is only information gives no fix, so with none open the
+    answer is the one without cards: no data (``none`` or ``lead``)."""
+    open_cards = [
+        rec for rec in _recommendations(ctx, {"spawn-claude-md", "spawn-shared-claude-md"})
+        if rec.severity in ("action", "advice") and rec.variant != "fixed"
+    ]
+    fixes = _merge_fixes(_rec_fixes(open_cards))
     if not fixes:
         return _result("no_data", none or lead, table=table)
     return _result("act", f"{lead} The fixes below come from what your agents were sent.", table=table, fixes=fixes)
@@ -688,6 +699,8 @@ def _claude_md(ctx: Context) -> dict:
         ctx.config_dir,
         getattr(ctx.model, "context_files", None) or {},
         projects=None if ctx.only is None else list(ctx.only),
+        claude_root=ctx.claude_root,
+        projects_roots=ctx.projects_roots,
     )
     pairs = sorted(
         ((item, claude_md_review.file_summary(item, ctx.units, ctx.period)) for item in review.files),
@@ -695,7 +708,9 @@ def _claude_md(ctx: Context) -> dict:
     )
     if not pairs:
         return _claude_md_cards_only(
-            ctx, "No CLAUDE.md file was found, so how often each is sent isn't known.", none="No CLAUDE.md files found."
+            ctx,
+            "ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most.",
+            none="No CLAUDE.md files found.",
         )
     summaries = [summary for _item, summary in pairs]
     table = _table(
@@ -794,7 +809,11 @@ def _project_files(ctx: Context) -> dict:
     if not context_files.check_rows(candidates, maybe_imports=True):
         return _project_files_quiet(ctx)
     rows, _local = claude_md_review.project_file_rows(
-        ctx.config_dir, data, projects=None if ctx.only is None else list(ctx.only)
+        ctx.config_dir,
+        data,
+        projects=None if ctx.only is None else list(ctx.only),
+        claude_root=ctx.claude_root,
+        projects_roots=ctx.projects_roots,
     )
     flagged = context_files.check_rows(rows)
     if not flagged:

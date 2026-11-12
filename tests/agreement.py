@@ -72,14 +72,6 @@ from claudeglass.units import Units
 COUNTING = ("action", "advice")
 
 
-class LayoutError(Exception):
-    """The config folder has no ``projects`` folder beside it that is the one
-    the report reads. The product finds a project's own folder, and so its
-    CLAUDE.md files, under the config folder's parent, so a config copy kept
-    apart from the projects it describes reads as having no files and makes
-    checks disagree that agree on a real install."""
-
-
 class CheckUnavailable(Exception):
     """A check could not run here (Node is not installed): the runner says
     so rather than counting it as agreement."""
@@ -136,17 +128,21 @@ def _copy_model(model):
     return copy.copy(model)
 
 
-def load_inputs(projects_root, config_dir, project=None, *, days: int | None = None) -> Inputs:
+def load_inputs(
+    projects_root, config_dir, project=None, *, days: int | None = None, claude_root=None
+) -> Inputs:
     """The report and the quick-action context for ``project`` (a folder name
     under ``projects_root``; every project when ``None``), built by the CLI's
     own report path (``cli._cmd_report_like``) and the context the dashboard
     gives the checks (``api._quick_context``): the settings in force and
     every project's agents come from one merged snapshot, the ignored cards
     from ``ignores``. ``days`` is a window of the last N days; ``None`` is all time.
-    The config folder must sit beside the projects folder (:class:`LayoutError`)."""
-    if (Path(config_dir).parent / "projects").resolve() != Path(projects_root).resolve():
-        raise LayoutError(f"the projects folder must sit beside the config folder, as in ~/.claude: {projects_root}")
+    ``projects_root`` is the folder the report reads and the CLAUDE.md checks read
+    with it, wherever the config folder is (a copy kept apart from the projects, as
+    in a container, answers as one beside them); ``claude_root`` is Claude's own
+    folder when the config folder's parent is not it."""
     argv = ["check", "--projects-root", str(projects_root), "--config-dir", str(config_dir), "--no-cache", "--quiet"]
+    argv += ["--claude-root", str(claude_root)] if claude_root else []
     argv += ["--days", str(days)] if days else ["--since", "2000-01-01"]
     argv += ["--project", project] if project else ["--all-projects"]
     args = cli._make_parser().parse_args(argv)
@@ -160,6 +156,7 @@ def load_inputs(projects_root, config_dir, project=None, *, days: int | None = N
     if code != 0 or "model" not in box:
         raise RuntimeError(f"the report could not be built (exit {code}): no sessions under the projects folder?")
     model, config_dir = box["model"], Path(config_dir)
+    read_claude_root, read_roots = cli._read_where(args, config_dir)
     snaps = snapshots.load_snapshots(config_dir)
     if project:
         snaps = snapshots.snapshots_for_projects(snaps, box["projects"])
@@ -183,6 +180,8 @@ def load_inputs(projects_root, config_dir, project=None, *, days: int | None = N
         only=cli._report_only(args, box["projects"], config_dir),
         since_ts=box["since"].timestamp() if box["since"] else None,
         until_ts=box["until"].timestamp() if box["until"] else None,
+        claude_root=read_claude_root,
+        projects_roots=tuple(read_roots),
     )
     return Inputs(model=model, ctx=ctx, config_dir=config_dir, projects=box["projects"])
 

@@ -768,3 +768,86 @@ def test_a_file_outside_any_project_is_named_by_its_path_alone():
     [fix, *_rest] = cmr.project_file_fixes(_file_row(name="~/.claude/plans/big.md", project=""), UNITS)
     assert fix["prompt"].startswith("~/.claude/plans/big.md is about 9,000 tokens")
     assert "(in " not in fix["prompt"].split(".", 1)[0]
+
+
+# -- the Claude folder and the projects roots the report read -------------------------------------
+
+
+def _docker_layout(tmp_path: Path):
+    """docs/deploy.md's layout: Claude's folder and its projects at /data/claude, this tool's own
+    config folder at /data/claudeglass, so the config folder's parent is not Claude's folder."""
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True)
+    claude_root.mkdir(parents=True)
+    (claude_root / "CLAUDE.md").write_text("# Global\n\nBe brief.\n", encoding="utf-8")
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("# Demo\n\nUse the demo style.\n", encoding="utf-8")
+    slug = cmr._memory_file(claude_root, project).parent.parent
+    slug.mkdir(parents=True)
+    (slug / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project)}) + "\n", encoding="utf-8")
+    (slug / "memory").mkdir()
+    (slug / "memory" / "MEMORY.md").write_text("- a note\n", encoding="utf-8")
+    return claude_root, config_dir, project
+
+
+def test_the_project_folders_are_read_from_every_projects_root_given(tmp_path):
+    claude_root = tmp_path / ".claude"
+    folders = {}
+    for name, root in (("one", claude_root / "projects"), ("two", tmp_path / "wsl" / "projects")):
+        folders[name] = tmp_path / "work" / name
+        folders[name].mkdir(parents=True)
+        (root / name).mkdir(parents=True)
+        (root / name / "s.jsonl").write_text(json.dumps({"type": "user", "cwd": str(folders[name])}) + "\n",
+                                             encoding="utf-8")
+    assert cmr.project_folders(claude_root) == [folders["one"]]
+    assert cmr.project_folders(claude_root, roots=[claude_root / "projects", tmp_path / "wsl" / "projects"]) == [
+        folders["one"], folders["two"]]
+    # A projects folder somewhere else than beside the Claude folder is the one read, and only it.
+    assert cmr.project_folders(tmp_path / "nowhere", roots=[tmp_path / "wsl" / "projects"]) == [folders["two"]]
+
+
+def test_a_review_reads_the_claude_folder_and_projects_roots_it_is_given(tmp_path):
+    claude_root, config_dir, project = _docker_layout(tmp_path)
+    # Derived from the config folder's parent: nothing there.
+    assert cmr.build_review(config_dir, {}, salt=SALT).files == []
+    review = cmr.build_review(
+        config_dir, {}, salt=SALT, claude_root=claude_root, projects_roots=[claude_root / "projects"]
+    )
+    assert {item.level for item in review.files} == {"User", "Project", "Auto memory"}
+    paths = {item.path for item in review.files}
+    assert claude_root / "CLAUDE.md" in paths and project / "CLAUDE.md" in paths
+    # The Claude folder alone is enough when the projects folder is inside it.
+    assert {item.level for item in cmr.build_review(config_dir, {}, salt=SALT, claude_root=claude_root).files} == {
+        "User", "Project", "Auto memory"}
+
+
+def test_a_projects_root_apart_from_the_claude_folder_is_where_the_auto_memory_is_looked_for(tmp_path):
+    claude_root, config_dir, project = _docker_layout(tmp_path)
+    moved = tmp_path / "elsewhere" / "projects"
+    moved.parent.mkdir()
+    (claude_root / "projects").rename(moved)
+    review = cmr.build_review(config_dir, {}, salt=SALT, claude_root=claude_root, projects_roots=[moved])
+    assert {item.level for item in review.files} == {"User", "Project", "Auto memory"}
+
+
+def test_the_names_of_project_files_come_from_the_roots_given(tmp_path, fresh_names):
+    claude_root, config_dir, project = _docker_layout(tmp_path)
+    (project / "notes.md").write_text("Notes.\n", encoding="utf-8")
+    assert cmr.local_names(config_dir, salt=SALT).names == {}
+    found = cmr.local_names(config_dir, salt=SALT, claude_root=claude_root, projects_roots=[claude_root / "projects"])
+    assert found.names[_hash(project / "notes.md")]["name"] == "notes.md"
+    assert found.names[_hash(claude_root / "CLAUDE.md")]["project"] == ""
+
+
+def test_the_folder_a_project_slug_stands_for_is_found_in_the_projects_root_that_has_it(tmp_path):
+    first, second = tmp_path / "a" / "projects", tmp_path / "b" / "projects"
+    for root, slug in ((first, "one"), (second, "two")):
+        folder = tmp_path / "work" / slug
+        folder.mkdir(parents=True)
+        (root / slug).mkdir(parents=True)
+        (root / slug / "s.jsonl").write_text(json.dumps({"type": "user", "cwd": str(folder)}) + "\n", encoding="utf-8")
+    assert cmr.folders_for_slugs([first, second], ["two", "one", "missing"]) == (
+        tmp_path / "work" / "two", tmp_path / "work" / "one")
+    assert cmr.folders_for_slugs([first], ["two"]) == ()
