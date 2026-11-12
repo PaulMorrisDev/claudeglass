@@ -4652,16 +4652,27 @@ def test_a_claim_released_within_a_moment_is_waited_for(tmp_path, monkeypatch):
     assert not claim.exists()
 
 
-def test_a_claim_that_stays_held_is_given_up_on_after_a_moment(tmp_path):
-    import time
-
+def test_a_claim_that_stays_held_is_given_up_on_after_a_moment(tmp_path, monkeypatch):
+    # Counted, not timed: the clock the wait is read from moves only when the call sleeps, so a loaded machine
+    # can make the wait neither longer nor shorter.
     payload = _scene_big_paste(tmp_path)
     claim = _claim_path(tmp_path)
     claim.parent.mkdir(parents=True, exist_ok=True)
     claim.write_text("", encoding="utf-8")
-    started = time.monotonic()
+    clock = [0.0]
+    sleeps = []
+
+    def slept(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(HOOK.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(HOOK.time, "sleep", slept)
     assert _coach(tmp_path, payload) == ""
-    assert time.monotonic() - started < 1.0 and claim.exists()
+    # It waited between tries, each a poll long, for the wait and no longer, then left the claim alone.
+    assert sleeps and set(sleeps) == {HOOK._CLAIM_POLL_S}
+    assert abs(len(sleeps) - round(HOOK._CLAIM_WAIT_S / HOOK._CLAIM_POLL_S)) <= 1
+    assert claim.exists()
 
 
 def test_plan_fresh_is_moved_only_when_the_status_line_has_been_drawn(tmp_path):
