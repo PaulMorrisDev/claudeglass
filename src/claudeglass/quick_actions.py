@@ -148,7 +148,23 @@ def _result(
 
 
 def _recommendations(ctx: Context, ids: set[str]) -> list:
-    return [rec for rec in getattr(ctx.model, "recommendations", ()) or () if rec.id in ids]
+    """The open cards among ``ids``: a card you ignored leads no check."""
+    return [
+        rec for rec in getattr(ctx.model, "recommendations", ()) or ()
+        if rec.id in ids and rec.key not in ctx.skip_keys
+    ]
+
+
+def _ignored_changes(ctx: Context) -> set[tuple]:
+    """What the cards you ignored suggested, as ``_change_id``s: a card is
+    left out by its key, agent and value, so a new value for the same
+    setting still comes back."""
+    return {
+        _change_id(change.key, change.agent, change.value)
+        for rec in getattr(ctx.model, "recommendations", ()) or ()
+        if rec.key in ctx.skip_keys
+        for change in rec.changes or ()
+    }
 
 
 def _rec_fixes(recs) -> list[dict]:
@@ -220,6 +236,12 @@ def _goal(ctx: Context, goal_id: str) -> dict:
     )
 
 
+def _without_ignored(ctx: Context, draft: dict) -> dict:
+    """``draft`` without the candidates an ignored card already suggested."""
+    ignored = _ignored_changes(ctx)
+    return {**draft, "candidates": [c for c in draft["candidates"] if _change_id(c["key"], c["agent"], c["value"]) not in ignored]}
+
+
 def _goal_fixes(ctx: Context, draft: dict, title: Callable[[dict], str]) -> list[dict]:
     return [_candidate_fix(ctx, c, title(c)) for c in draft["candidates"]]
 
@@ -251,15 +273,7 @@ def _models(ctx: Context) -> dict:
         ],
     )
     draft = _goal(ctx, "models")
-    # A card you ignored is left out by what it suggested (key, agent and
-    # value), so a new value for the same setting still comes back.
-    ignored = {
-        _change_id(change.key, change.agent, change.value)
-        for rec in getattr(ctx.model, "recommendations", ()) or ()
-        if rec.key in ctx.skip_keys
-        for change in rec.changes or ()
-    }
-    draft = {**draft, "candidates": [c for c in draft["candidates"] if _change_id(c["key"], c["agent"], c["value"]) not in ignored]}
+    draft = _without_ignored(ctx, draft)
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
@@ -268,7 +282,7 @@ def _models(ctx: Context) -> dict:
     # own fix is offered either way; an info-level one with no prompt in
     # its fix is a tip instead, its title and why. The cards share ids
     # across agent types, so this is decided per card, not per id.
-    agent_recs = [rec for rec in _recommendations(ctx, _AGENT_MODEL_RECS) if rec.key not in ctx.skip_keys]
+    agent_recs = _recommendations(ctx, _AGENT_MODEL_RECS)
     flagged = [rec for rec in agent_recs if rec.severity != "info"]
     tips += [{"title": rec.title, "text": rec.why or rec.action} for rec in agent_recs
              if rec.severity == "info" and not _recs_with_prompt_fix([rec])]
@@ -404,7 +418,7 @@ def _effort(ctx: Context) -> dict:
         [[_who(r.get("agent_type")), f"{int(whatif._num(r.get('output_tokens')) or 0):,}",
           _pct(r.get("thinking_share"))] for r in rows],
     )
-    draft = _goal(ctx, "thinking")
+    draft = _without_ignored(ctx, _goal(ctx, "thinking"))
     fixes = _merge_fixes(
         _rec_fixes(_recommendations(ctx, {"effort-mismatch"})),
         _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: effort {c['value']}"),
@@ -1541,7 +1555,7 @@ def _habits(ctx: Context) -> dict:
         [("cause", "Replies that went nowhere"), ("turns", "Replies"), ("cost", "Cost"), ("lever", "What helps")],
         [[r["label"], r["turns"], _cell(ctx, r["cost_usd"]), r["lever"]] for r in rows],
     )
-    recs = [rec for rec in _recommendations(ctx, _HABIT_RECS) if rec.key not in ctx.skip_keys]
+    recs = _recommendations(ctx, _HABIT_RECS)
     skip_as_tip = _recs_with_prompt_fix(recs)
     tips = [{"title": rec.title, "text": rec.action or rec.why} for rec in recs if rec.id not in skip_as_tip]
     playbook = _playbook_tips(ctx, tables)

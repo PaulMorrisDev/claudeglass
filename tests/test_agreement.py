@@ -3,14 +3,11 @@
 
 A check returns the disagreements it found, so each test expects the empty
 list. Two halves are expected to fail today, for reasons the plan already
-names, and are marked ``xfail(strict=True)`` so that fixing the cause makes
+names, and is marked ``xfail(strict=True)`` so that fixing the cause makes
 the test fail until the mark is removed:
 
 - check 6 (generated text names only live hints) waits on R1, the text
-  pass: the catalogue's coaching-notes text still describes hints that are off;
-- the second half of check 4 (an ignored card adds nothing to a check) waits
-  on R9: ``quick_actions._recommendations`` hands back ignored cards, and most
-  of its callers do not leave them out.
+  pass: the catalogue's coaching-notes text still describes hints that are off.
 """
 
 from __future__ import annotations
@@ -66,11 +63,6 @@ def test_the_tools_check_counts_what_the_tools_card_counts(built, name):
     assert _disagreements(agreement.check_tools_figures, built(name)) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R9: quick_actions._recommendations returns ignored cards and most of its callers keep them, so the "
-    "Tools, Hooks and Effort checks still offer the fix of a card that is ignored",
-)
 @pytest.mark.parametrize("name", NAMES)
 def test_an_ignored_card_adds_no_fix_tip_or_mention_to_any_check(built, name):
     assert _disagreements(agreement.check_ignored_adds_nothing, built(name)) == []

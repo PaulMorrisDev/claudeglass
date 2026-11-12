@@ -2280,3 +2280,68 @@ def test_models_check_survives_an_ignored_card_whose_value_is_a_list(tmp_path):
     result = qa.run("models", ctx)
     assert "Main session" not in result["summary"]
     assert len(qa.run_all(ctx)) == 20
+
+
+# -- R9: a card you ignored leads no check ------------------------------------
+
+
+def _thinking_rows(model, share):
+    """``_full_model``'s main session spends ``share`` percent of its output thinking."""
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    column = [c.key for c in table.columns].index("thinking_share")
+    for row in table.rows:
+        row[column] = share
+
+
+def _effort_card(**kw):
+    return Recommendation(
+        id="effort-mismatch", key="effort-mismatch:reviewer", severity="advice", title="High effort on easy work",
+        agent_type="reviewer",
+        changes=[SettingChange(target="agent", key="effort", agent="reviewer", value="medium", current="high")],
+        **kw,
+    )
+
+
+def test_the_effort_check_is_ok_when_the_only_card_for_it_is_ignored_and_no_agent_is_over_the_bar(tmp_path):
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    model.recommendations = [_effort_card()]
+    shown = qa.run("effort", _ctx(tmp_path, model=model))
+    assert shown["status"] == "act" and shown["fixes"]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch:reviewer"}))
+    result = qa.run("effort", ctx)
+    assert result["status"] == "ok" and not result["fixes"]
+    row = next(r for r in qa.run_all(ctx) if r["id"] == "effort")
+    assert row["status"] == "ok" and row["fix_count"] == 0
+
+
+def test_the_effort_check_drops_a_thinking_candidate_an_ignored_card_already_suggested(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(
+        id="effort-mismatch", key="effort-mismatch:main", severity="advice", title="High effort on easy work",
+        changes=[SettingChange(target="settings", key="effortLevel", agent=None, value="medium")],
+    )]
+    assert qa.run("effort", _ctx(tmp_path, model=model))["fixes"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch:main"})))
+    assert result["status"] == "ok" and not result["fixes"]
+
+
+@pytest.mark.parametrize("check", [c for c in qa.CHECKS if c.rule_ids], ids=lambda c: c.id)
+def test_an_ignored_card_adds_no_fix_tip_or_title_to_the_check_it_belongs_to(tmp_path, check):
+    cards = [
+        Recommendation(
+            id=rule, key=f"{rule}:x", severity="advice", title=f"Title of {rule}", why="why", action="action",
+            fixes=[{"key": None, "agent": None, "explainer": [], "command": None, "command_warning": None,
+                    "prompt": f"Prompt of {rule}", "title": None}],
+        )
+        for rule in check.rule_ids
+    ]
+    model = _full_model()
+    model.recommendations = cards
+    open_result = qa.run(check.id, _ctx(tmp_path, model=model))
+    ignored = qa.run(check.id, _ctx(tmp_path, model=model, skip_keys=frozenset(c.key for c in cards)))
+    for card in cards:
+        assert not any(fix.get("prompt") == f"Prompt of {card.id}" for fix in ignored["fixes"]), card.id
+        assert card.title not in {tip["title"] for tip in ignored["tips"]}, card.id
+        assert card.title not in ignored["summary"], card.id
+    assert len(ignored["fixes"]) <= len(open_result["fixes"])

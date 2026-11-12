@@ -23,7 +23,7 @@ import pytest
 
 import agreement
 import agreement_profiles as ap
-from claudeglass import capture_catalogue, change_points, fixes, recommend
+from claudeglass import capture_catalogue, change_points, fixes, quick_actions, recommend
 
 import test_service_static
 
@@ -95,11 +95,32 @@ def test_check_4_reports_a_tools_check_that_counts_other_tools_than_the_card(pro
     assert any("the Tools check counts" in p and "the card" in p for p in problems), problems
 
 
-def test_check_4_reports_a_check_that_still_offers_the_fix_of_an_ignored_card(profile):
-    """Not a patch: this is the product as it stands (R9), the second half of
-    check 4 failing on the unbroken profile, in the named card and check."""
+def test_check_4_reports_a_check_that_still_offers_the_fix_of_an_ignored_card(profile, monkeypatch):
+    assert agreement.check_ignored_adds_nothing(profile("capture_off")[1]) == []
+    # The cards each check reads, as they were before R9: ignored ones included.
+    monkeypatch.setattr(
+        quick_actions, "_recommendations",
+        lambda ctx, ids: [rec for rec in getattr(ctx.model, "recommendations", ()) or () if rec.id in ids],
+    )
     problems = agreement.check_ignored_adds_nothing(profile("capture_off")[1])
     assert "tools: still offers the fix of spawn-tools-list:reviewer with that card ignored" in problems
+
+
+def test_check_4_reports_a_summary_that_still_names_an_ignored_card(profile, monkeypatch):
+    inp = profile("capture_off")[1]
+    assert agreement.check_ignored_adds_nothing(inp) == []
+    real = quick_actions.run
+
+    def names_the_card(check_id, ctx):
+        result = real(check_id, ctx)
+        for rec in ctx.model.recommendations:
+            if rec.id in {"spawn-tools-list"} and check_id == "tools" and rec.key in ctx.skip_keys:
+                result["summary"] += f" {rec.title}."
+        return result
+
+    monkeypatch.setattr(quick_actions, "run", names_the_card)
+    problems = agreement.check_ignored_adds_nothing(inp.with_skip(inp.skip))
+    assert any(p.startswith("tools: its summary still names spawn-tools-list:") for p in problems), problems
 
 
 def test_check_5_reports_a_bundle_that_counts_a_standing_rule_as_a_file(profile, monkeypatch):
