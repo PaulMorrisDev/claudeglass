@@ -417,6 +417,50 @@ def summary(
     return out
 
 
+#: Said beside the share of agent runs judged while the judge is waiting
+#: for a sign-in (the hook leaves the ``claude`` command alone for a while
+#: after it finds it signed out: ``capture_hook._judge_signed_out``).
+SIGNED_OUT_NOTE = (
+    "Judging is paused because the claude command is signed out: run claude in a terminal and sign in, "
+    "and judging starts again by itself."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SignedOut:
+    """Whether the judge cannot sign in, as the tag files show it."""
+
+    #: Agent runs whose call found the ``claude`` command signed out.
+    agent_runs: int = 0
+    #: The newest call found it so. The hook then leaves the command alone
+    #: for a while, and judging starts again by itself at the next agent
+    #: run after that, once the command is signed in.
+    paused: bool = False
+
+    @property
+    def runs_text(self) -> str:
+        """Beside the share of agent runs judged; ``""`` when none."""
+        return f"{self.agent_runs} found the claude command signed out" if self.agent_runs else ""
+
+    @property
+    def note(self) -> str:
+        return SIGNED_OUT_NOTE if self.paused else ""
+
+
+def signed_out(config_dir: str | Path | None, *, since: datetime | None = None) -> SignedOut:
+    """:class:`SignedOut` over the tag files from ``since`` on. Read from the
+    lines themselves, not from the hook's wait: a line is a call that found
+    the command signed out (``no_login``), so the count and the pause agree
+    with the totals ``capture status`` prints."""
+    if config_dir is None:
+        return SignedOut()
+    judged = load(config_dir, since=since)
+    return SignedOut(
+        agent_runs=sum(1 for j in judged if j.kind == "agent" and j.error == "no_login"),
+        paused=bool(judged) and judged[-1].error == "no_login",
+    )
+
+
 def prune(config_dir: str | Path, retention_days: int, now: datetime | None = None) -> int:
     """Delete the month files wholly older than ``retention_days``;
     returns how many went."""
@@ -432,4 +476,7 @@ def prune(config_dir: str | Path, retention_days: int, now: datetime | None = No
     return removed
 
 
-__all__ = ["Judged", "Summary", "agent_replies", "apply", "load", "prune", "summary", "tags_dir"]
+__all__ = [
+    "Judged", "SIGNED_OUT_NOTE", "SignedOut", "Summary", "agent_replies", "apply", "load", "prune", "signed_out",
+    "summary", "tags_dir",
+]

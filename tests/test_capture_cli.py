@@ -1988,3 +1988,73 @@ def test_status_cost_lines_ask_a_subagent_for_nothing(tmp_path):
     # While Haiku writes the tags the hook sends no note after a large result either.
     haiku = "\n".join(cli._capture_cost_lines(cat.level_metrics("deep"), "haiku"))
     assert "after each large or web tool result" not in haiku
+
+
+def test_status_adds_the_signed_out_count_and_the_pause_to_the_judged_line(tmp_path):
+    """A tag file whose every call found the claude command signed out: 0% judged, the count beside it and one
+    plain sentence that says what to do."""
+    from claudeglass import haiku_tags
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    folder = tmp_path / cat.JUDGE_DIR
+    folder.mkdir()
+    (folder / "2026-09.jsonl").write_text(
+        "".join(
+            json.dumps({"ts": f"2026-09-27T10:0{n}:00Z", "reply": f"msg_{n}", "agent": "", "err": "no_login"}) + "\n"
+            for n in range(3)
+        ),
+        encoding="utf-8",
+    )
+    use = CaptureUsage(sessions=1, subagents=3, cycles=2, tagged_cycles=2, reports=3, tagged_reports=0)
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False, signed_out=haiku_tags.signed_out(tmp_path))
+    assert (
+        "  Claude tagged 100.0% of your messages; Claude Haiku judged 0.0% of agent runs, and 3 found the claude "
+        "command signed out"
+    ) in lines
+    assert haiku_tags.SIGNED_OUT_NOTE in [line.strip() for line in lines]
+    assert sum("sign" in line for line in lines) == 2
+
+
+def test_status_says_nothing_of_signing_in_when_judged_calls_are_all_there_is(tmp_path):
+    from claudeglass import haiku_tags
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    folder = tmp_path / cat.JUDGE_DIR
+    folder.mkdir()
+    (folder / "2026-09.jsonl").write_text(
+        json.dumps({"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "brief=clear result=done"}) + "\n",
+        encoding="utf-8",
+    )
+    use = CaptureUsage(sessions=1, subagents=1, cycles=2, tagged_cycles=2, reports=1, tagged_reports=1, judged=1)
+    for signed_out in (haiku_tags.signed_out(tmp_path), None):
+        lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False, signed_out=signed_out)
+        assert "  Claude tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
+        assert not any("sign" in line for line in lines)
+
+
+def test_status_while_the_judge_cannot_sign_in_says_so_from_the_tag_files(tmp_path):
+    from claudeglass import haiku_tags
+    from claudeglass.config import set_capture
+
+    config_dir = _claude(tmp_path, {})
+    _api_billing(config_dir)
+    start = _session(config_dir, captured=True)
+    set_capture(config_dir, level="essentials", now=start - timedelta(hours=1))
+    folder = config_dir / cat.JUDGE_DIR
+    folder.mkdir()
+    stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (folder / f"{stamp[:7]}.jsonl").write_text(
+        json.dumps({"ts": stamp, "reply": "msg_1", "agent": "", "err": "no_login"}) + "\n", encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    assert haiku_tags.SIGNED_OUT_NOTE in out
+    # Judged lines that came before a sign-out do not hide it, and a judged one after it clears it.
+    (folder / f"{stamp[:7]}.jsonl").write_text(
+        json.dumps({"ts": stamp, "reply": "msg_1", "agent": "", "err": "no_login"}) + "\n"
+        + json.dumps({"ts": stamp, "reply": "msg_2", "agent": "brief=clear result=done"}) + "\n",
+        encoding="utf-8",
+    )
+    rc, out = _capture(config_dir, "status")
+    assert haiku_tags.SIGNED_OUT_NOTE not in out

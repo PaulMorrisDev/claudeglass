@@ -1798,7 +1798,7 @@ def make_handler(
         }
 
     def _capture_view(config) -> dict:
-        from .. import capture_view
+        from .. import capture_view, haiku_tags
 
         capture = config.capture
         soft = (config.billing, str(config.pricing_path))
@@ -1886,11 +1886,17 @@ def make_handler(
         hooks = hook_health.check_capture(
             hook_health.capture_specs(capture.hook_metrics()), config_dir=options.config_dir
         )
+        signed_out = (
+            haiku_tags.signed_out(options.config_dir, since=datetime.fromisoformat(capture.enabled_at))
+            if use is not None and capture.enabled_at
+            else None
+        )
         return capture_view.view(
             capture, past=past, units=units, use=use, hooks=hooks, signal_sessions=signal_sessions,
             started_since=started, feedback_use=feedback_use, skill=skill, brief_skill=brief_skill, ratings=ratings,
             statusline=statusline, weekly_cost=weekly_cost, dependent_value=dependent_value,
             coaching_use=coaching_use, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
+            signed_out=signed_out,
         )
 
     def _capture_conflict(message: str, commands: list[str]) -> tuple[int, dict]:

@@ -4724,7 +4724,60 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
     return answer
 
 
-def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None, clock=None) -> dict:
+#: How long the judge is left alone after the ``claude`` command is found
+#: signed out, and the longest it is left alone: each further signed-out
+#: result doubles the wait (1, 2, 4, then 6 hours). A call it answers ends
+#: it. There is no cheap sign-in check to wait on instead: the login is a
+#: file on one system and a keychain entry on another, and only starting
+#: the command shows it works.
+_SIGNED_OUT_WAIT_S = 3600.0
+_SIGNED_OUT_WAIT_MAX_S = 6 * 3600.0
+
+
+def _judge_state_path(config_dir: Path, catalogue: dict) -> Path:
+    return config_dir / catalogue["coaching"]["state_file"]
+
+
+def _judge_waiting(config_dir: Path, catalogue: dict, now: float) -> bool:
+    """Whether the judge is in the wait a signed-out result began
+    (:func:`_judge_signed_out`): ``judge.until`` in the coach state is still
+    to come."""
+    row = _read_json(_judge_state_path(config_dir, catalogue)).get("judge")
+    return isinstance(row, dict) and (_number(row.get("until")) or 0.0) > now
+
+
+def _judge_signed_out(config_dir: Path, catalogue: dict, now: float) -> None:
+    """Begin the wait, or lengthen it: an hour, then twice the last wait up
+    to six hours. A worker that finds the wait already begun (it was started
+    before another had found the command signed out) leaves it as it is."""
+    path = _judge_state_path(config_dir, catalogue)
+    with _claimed(path) as held:
+        if not held:
+            return
+        state = _read_json(path)
+        row = state.get("judge") if isinstance(state.get("judge"), dict) else {}
+        if (_number(row.get("until")) or 0.0) > now:
+            return
+        last = _number(row.get("wait_s")) or 0.0
+        wait = min(last * 2, _SIGNED_OUT_WAIT_MAX_S) if last >= _SIGNED_OUT_WAIT_S else _SIGNED_OUT_WAIT_S
+        state["judge"] = {"wait_s": wait, "until": now + wait}
+        _write_json(path, state)
+
+
+def _judge_signed_in(config_dir: Path, catalogue: dict) -> None:
+    """A call the command answered: the wait, if any, is over."""
+    path = _judge_state_path(config_dir, catalogue)
+    if "judge" not in _read_json(path):
+        return
+    with _claimed(path) as held:
+        if not held:
+            return
+        state = _read_json(path)
+        if state.pop("judge", None) is not None:
+            _write_json(path, state)
+
+
+def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None, clock=None, now=None) -> dict:
     """Ask Haiku for ``job``'s tag (``ask``: :func:`ask_haiku`) and log
     the answer, or why there is none, in this month's tag file: the
     line written. Only the tag's words, the reply's id, what the call
@@ -4732,9 +4785,17 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
     run's job is the lean one the hook made: this first waits for the
     agent's transcript (``sleep`` and ``clock`` stand in for the time
     it waits by) and reads it (:func:`prepare_agent_job`), and a run with
-    nothing to judge writes no line (``{}``)."""
+    nothing to judge writes no line (``{}``).
+
+    After a call finds the ``claude`` command signed out, the command is not
+    started again for an hour, and each further signed-out result doubles
+    the wait up to six hours (``now``, in seconds, stands in for the clock
+    it is kept by); a call the command answers ends it. A run that comes
+    while the judge waits is logged as signed out, as a call that found it
+    so is, so the totals add up."""
     import subprocess
 
+    now = time.time() if now is None else now
     judge = catalogue["judge"]
     agent = job.get("kind") == "agent"
     if agent and "excerpt" not in job:
@@ -4753,6 +4814,8 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
     try:
         if job.get("err") == "no_answer":
             raise NoAnswer()
+        if _judge_waiting(config_dir, catalogue, now):
+            raise NoLogin()
         answer = (ask or ask_haiku)(job, judge, config_dir)
     except NoAnswer:
         record["err"] = "no_answer"
@@ -4762,9 +4825,11 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
         record["err"] = "timeout"
     except NoLogin:
         record["err"] = "no_login"
+        _judge_signed_out(config_dir, catalogue, now)
     except (OSError, ValueError):
         record["err"] = "failed"
     else:
+        _judge_signed_in(config_dir, catalogue)
         if agent:
             tag = judge_tag(answer.get("result"), job["keys"], judge, judge["agent"]["vocab"])
             # "retry=none" only says the run was no retry.
