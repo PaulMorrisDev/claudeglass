@@ -2566,3 +2566,26 @@ def test_the_effort_check_counts_the_rows_over_the_bar_in_its_table_not_its_fixe
     result = qa.run("effort", _ctx(tmp_path, model=model))
     assert len(result["fixes"]) > over
     assert result["summary"].startswith("2 of your agents or sessions spent more than 20% of their output thinking."), result["summary"]
+
+def test_the_claude_md_check_finds_and_ranks_the_users_file_beside_the_projects_root(tmp_path):
+    """The service's kind of context in docs/deploy.md's layout: only the projects roots are given,
+    and the user's CLAUDE.md sits in their parent, the Claude home."""
+    import dataclasses
+
+    from claudeglass import parse
+
+    ctx = _docker_context(tmp_path, [_claude_md_card()], give_roots=False)
+    claude_root = tmp_path / "data" / "claude"
+    user = claude_root / "CLAUDE.md"
+    user.write_text("# Mine\n\n" + "Always be careful and brief.\n" * 400, encoding="utf-8")
+    salt = parse.load_or_create_salt(ctx.config_dir)
+    rows = list(ctx.model.context_files["files"]) + [
+        {"hash": parse.path_hash(str(user), salt), "type": "instructions", "sends": 40, "reach": {"main": 40},
+         "cost_by_reach": {"main": 9.0}, "cost_usd": 9.0, "tokens": 3000, "last_seen": "2026-11-01", "weekly": {}}
+    ]
+    ctx.model.context_files = {"files": rows, "transcripts": {"main": 40}}
+    ctx = dataclasses.replace(ctx, projects_roots=(claude_root / "projects",))
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act"
+    assert result["summary"].startswith(str(user)) and "costs most" in result["summary"], result["summary"]
+    assert [row[0] for row in result["table"]["rows"]][0] == str(user)

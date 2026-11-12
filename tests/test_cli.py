@@ -2530,3 +2530,18 @@ def test_a_project_picked_for_review_or_check_is_found_in_the_projects_root_the_
     assert cli._read_where(args, config) == (None, [root])
     given = cli._make_parser().parse_args(base + ["--claude-root", str(tmp_path / "data" / "claude")])
     assert cli._read_where(given, config) == (tmp_path / "data" / "claude", [root])
+
+def test_check_claude_md_finds_the_users_file_beside_the_projects_root(tmp_path, capsys):
+    """docs/deploy.md's layout: the config folder is not in Claude's home, the projects folder is."""
+    home = tmp_path / "data" / "claude"
+    user = home / "CLAUDE.md"
+    user.parent.mkdir(parents=True)
+    user.write_text("# Mine\n\nBe brief.\n", encoding="utf-8")
+    _write_project(home / "projects", "proj-a")
+    exit_code = cli.main(
+        ["check", "claude-md", "--projects-root", str(home / "projects"), "--all-projects",
+         "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert str(user) in out, out

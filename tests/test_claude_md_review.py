@@ -851,3 +851,53 @@ def test_the_folder_a_project_slug_stands_for_is_found_in_the_projects_root_that
     assert cmr.folders_for_slugs([first, second], ["two", "one", "missing"]) == (
         tmp_path / "work" / "two", tmp_path / "work" / "one")
     assert cmr.folders_for_slugs([first], ["two"]) == ()
+
+def test_claudes_folder_is_the_parent_of_the_projects_root_when_none_is_given(tmp_path):
+    """docs/deploy.md: Claude's home is mounted at /data/claude and the config folder is /data/claudeglass,
+    so the user's CLAUDE.md and rules sit beside the projects folder, not beside the config folder."""
+    claude_root, config_dir, project = _docker_layout(tmp_path)
+    (claude_root / "rules").mkdir()
+    (claude_root / "rules" / "style.md").write_text("Use short sentences.\n", encoding="utf-8")
+    review = cmr.build_review(config_dir, {}, salt=SALT, projects_roots=[claude_root / "projects"])
+    assert {item.level for item in review.files} == {"User", "User rule", "Project", "Auto memory"}
+    assert claude_root / "CLAUDE.md" in {item.path for item in review.files}
+    # No roots given: the config folder's parent, as before.
+    assert cmr.build_review(config_dir, {}, salt=SALT).files == []
+    # An explicit Claude folder wins over the projects root's parent.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "CLAUDE.md").write_text("# Other\n\nOther rules.\n", encoding="utf-8")
+    review = cmr.build_review(
+        config_dir, {}, salt=SALT, claude_root=elsewhere, projects_roots=[claude_root / "projects"]
+    )
+    users = {item.path for item in review.files if item.level == "User"}
+    assert users == {elsewhere / "CLAUDE.md"}
+
+
+def test_the_parent_of_each_further_projects_root_is_searched_for_user_files_too(tmp_path):
+    claude_root, config_dir, _project = _docker_layout(tmp_path)
+    wsl = tmp_path / "wsl" / ".claude"
+    (wsl / "projects").mkdir(parents=True)
+    (wsl / "CLAUDE.md").write_text("# Distro\n\nDistro rules.\n", encoding="utf-8")
+    review = cmr.build_review(
+        config_dir, {}, salt=SALT, projects_roots=[claude_root / "projects", wsl / "projects"]
+    )
+    users = {item.path for item in review.files if item.level == "User"}
+    assert users == {claude_root / "CLAUDE.md", wsl / "CLAUDE.md"}
+
+
+def test_a_config_folder_moved_away_from_the_default_layout_finds_the_same_files(tmp_path, fresh_names):
+    config_dir, project = _setup(tmp_path)
+    claude_root = config_dir.parent
+    slug = claude_root / "projects" / "repo-slug"
+    slug.mkdir(parents=True)
+    (slug / "s.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project)}) + "\n", encoding="utf-8")
+    before = cmr.build_review(config_dir, {}, salt=SALT)
+    moved = tmp_path / "moved" / "claudeglass"
+    moved.mkdir(parents=True)
+    roots = [claude_root / "projects"]
+    after = cmr.build_review(moved, {}, salt=SALT, projects_roots=roots)
+    assert {item.path for item in after.files} == {item.path for item in before.files} != set()
+    assert claude_root / "CLAUDE.md" in {item.path for item in after.files}
+    names = cmr.local_names(moved, salt=SALT, projects_roots=roots)
+    assert _hash(claude_root / "CLAUDE.md") in names.names
