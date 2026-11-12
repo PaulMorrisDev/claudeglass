@@ -2422,3 +2422,17 @@ def test_the_claude_md_check_still_leads_with_the_file_that_costs_most_once_one_
     assert [f.usage is not None for f in claude_md_review.build_review(ctx.config_dir, ctx.model.context_files).files] == [True]
     result = qa.run("claude-md", ctx)
     assert result["status"] == "act" and "costs most" in result["summary"]
+
+
+def test_the_compaction_check_drops_a_candidate_an_ignored_card_already_suggested(tmp_path):
+    model = NS(sections=[NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+        {"window": 300000, "compactions_per_session": 2.0, "cost": 75.0, "delta_pct": -25.0},
+        {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
+    ])])], context_files={}, recommendations=[Recommendation(
+        id="compaction-window", key="compaction-window:top-level", severity="advice", title="Summarise earlier",
+        changes=[SettingChange(target="settings", key="autoCompactWindow", agent=None, value=300000)],
+    )])
+    shown = qa.run("compaction", _ctx(tmp_path, model=model))
+    assert shown["status"] == "act" and shown["fixes"]
+    result = qa.run("compaction", _ctx(tmp_path, model=model, skip_keys=frozenset({"compaction-window:top-level"})))
+    assert result["status"] == "ok" and result["fixes"] == []

@@ -225,7 +225,9 @@ def _merge_fixes(*groups: list[dict]) -> list[dict]:
 
 
 def _goal(ctx: Context, goal_id: str) -> dict:
-    return goals.draft(
+    """The goal's draft without the candidates an ignored card already
+    suggested."""
+    draft = goals.draft(
         goal_id,
         ctx.model,
         ctx.units,
@@ -234,10 +236,6 @@ def _goal(ctx: Context, goal_id: str) -> dict:
         period=ctx.period,
         skip_keys=ctx.skip_keys,
     )
-
-
-def _without_ignored(ctx: Context, draft: dict) -> dict:
-    """``draft`` without the candidates an ignored card already suggested."""
     ignored = _ignored_changes(ctx)
     return {**draft, "candidates": [c for c in draft["candidates"] if _change_id(c["key"], c["agent"], c["value"]) not in ignored]}
 
@@ -273,7 +271,6 @@ def _models(ctx: Context) -> dict:
         ],
     )
     draft = _goal(ctx, "models")
-    draft = _without_ignored(ctx, draft)
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
@@ -418,7 +415,7 @@ def _effort(ctx: Context) -> dict:
         [[_who(r.get("agent_type")), f"{int(whatif._num(r.get('output_tokens')) or 0):,}",
           _pct(r.get("thinking_share"))] for r in rows],
     )
-    draft = _without_ignored(ctx, _goal(ctx, "thinking"))
+    draft = _goal(ctx, "thinking")
     fixes = _merge_fixes(
         _rec_fixes(_recommendations(ctx, {"effort-mismatch"})),
         _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: effort {c['value']}"),
