@@ -32,8 +32,9 @@ change, in one place, so every card reads the same way:
   made part-way through it would still be offered at its full saving. A
   change the current config already makes is left out, and a card with
   nothing left to change is dropped. The main session's model is priced
-  only on the sessions since it last changed in their project
-  (``model_swap``), and its card says how many it leaves out.
+  only on the sessions it still decides (``model_swap``): a session already
+  on Sonnet or smaller, or from before its project moved there, is left out,
+  and its card says how many.
 - **Amounts** follow the billing mode (:class:`~claudeglass.units.Units`).
 
 Titles and actions are rewritten here, not in the rules, so the rules'
@@ -240,6 +241,11 @@ def _left_out_note(left_out: list[tuple[str, str]]) -> str:
 # -- consolidation -------------------------------------------------------------
 
 
+def _several_projects(ctx: _Context) -> bool:
+    """Whether the report covers more than one project."""
+    return len(getattr(getattr(ctx.report, "meta", None), "projects", ()) or ()) > 1
+
+
 def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recommendation]:
     tier = [r for r in recs if r.id == "model-tier"]
     if not tier:
@@ -269,8 +275,10 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         if not alt:
             continue
         now = ctx.setting_now("model") if agent == "top-level" else ctx.agent_now(agent, "model")
-        if already_set("model", _family_alias(alt), now):
-            # Already on the cheaper model; the saving is from before the change.
+        if already_set("model", _family_alias(alt), now) and not (agent == "top-level" and _several_projects(ctx)):
+            # Already on the cheaper model. In a view of several projects one
+            # setting can't say what every project ran, so the main card
+            # stays while its saving counts.
             continue
         family = _family_alias(alt)
         main = agent == "top-level"
@@ -316,13 +324,32 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
     rec, _agent, alt, saving, observed = row
     family = _family_alias(alt).capitalize()
     current = ctx.setting_now("model")
-    before = _int(_evidence_value(rec, "from before the model last changed"))
-    since = (
-        f" It leaves out the {before:,} main session{'s' if before != 1 else ''} that started before the model "
-        f"last changed in {'its' if before == 1 else 'their'} project."
-        if before
-        else ""
-    )
+    already = _int(_evidence_value(rec, "already on Sonnet or smaller"))
+    before = _int(_evidence_value(rec, "from before their project moved"))
+    if already and before:
+        since = (
+            f" It leaves out {already + before:,} main sessions: {already:,} already on Sonnet or smaller, and "
+            f"{before:,} from before their project moved there."
+        )
+    elif already:
+        since = (
+            f" It leaves out the {already:,} main session{'s' if already != 1 else ''} already on Sonnet or smaller."
+        )
+    elif before:
+        since = (
+            f" It leaves out the {before:,} main session{'s' if before != 1 else ''} from before "
+            f"{'its' if before == 1 else 'their'} project moved to Sonnet or smaller."
+        )
+    else:
+        since = ""
+    # In a view of several projects the setting may already say the cheaper
+    # model, because one project's sessions ran on a larger one anyway.
+    set_already = already_set("model", _family_alias(alt), current)
+    if set_already:
+        since += (
+            f" Your model setting already says {family}. These sessions ran on a larger model anyway, chosen "
+            "with /model, the model picker or a project's own settings."
+        )
     change = SettingChange(
         target="settings",
         key="model",
@@ -344,13 +371,16 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         )
         + _left_out_note(left_out),
         action=(
-            f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare the "
-            "results before making it your default."
+            f"Pick {family} with /model {_family_alias(alt)} or the model picker for routine work, and compare "
+            "the results."
+            if set_already
+            else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
+            "the results before making it your default."
         ),
         lever="model",
         scope=rec.scope,
         evidence=list(rec.evidence),
-        changes=[change],
+        changes=[] if set_already else [change],
         estimated_saving=ctx.money(saving, prefix="At most "),
         saving_basis=ctx.basis(_TIER_BASIS),
         saving_usd=saving,

@@ -99,31 +99,67 @@ def test_model_tier_cards_merge_into_one_with_a_change_per_agent_type():
     assert "yours to make" in main_card.why
 
 
-def test_the_main_model_card_says_how_many_sessions_from_before_the_change_it_leaves_out():
-    """The main session's saving covers only the sessions since the model last
-    changed in their project: the card says how many it leaves out."""
+def test_the_main_model_card_says_which_sessions_it_leaves_out():
+    """The main session's saving counts only the sessions its setting still
+    decides: the card says how many it leaves out, and why."""
     report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {}})
 
-    def main_why(left_out: int | None) -> str:
+    def main_why(already: int, before: int) -> str:
         rec = _tier("top-level")
-        if left_out is not None:
-            rec.evidence.append((
-                "Main sessions from before the model last changed (not counted)", left_out,
-                "model_swap.model_swap_by_agent_type", "top-level",
-            ))
+        for label, count in (
+            ("Main sessions already on Sonnet or smaller (not counted)", already),
+            ("Main sessions from before their project moved to Sonnet (not counted)", before),
+        ):
+            if count:
+                rec.evidence.append((label, count, "model_swap.model_swap_by_agent_type", "top-level"))
         (card,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "model-tier-main"]
         return card.why
 
     assert (
-        "would cost up to 40% less. It leaves out the 157 main sessions that started before the model last "
-        "changed in their project. It's a quality trade, so it's yours to make."
-    ) in main_why(157)
+        "would cost up to 40% less. It leaves out the 5 main sessions already on Sonnet or smaller. "
+        "It's a quality trade, so it's yours to make."
+    ) in main_why(5, 0)
+    assert "It leaves out the 1 main session from before its project moved to Sonnet or smaller." in main_why(0, 1)
+    assert "It leaves out the 3 main sessions from before their project moved to Sonnet or smaller." in main_why(0, 3)
     assert (
-        "It leaves out the 1 main session that started before the model last changed in its project."
-        in main_why(1)
+        "It leaves out 10 main sessions: 7 already on Sonnet or smaller, and 3 from before their project moved there."
+        in main_why(7, 3)
     )
-    assert "It leaves out" not in main_why(None)
+    assert "It leaves out" not in main_why(0, 0)
+
+
+def test_in_a_view_of_several_projects_the_main_card_stays_when_the_setting_already_says_its_model():
+    """One setting can't say what every project ran: with several projects
+    the card stays, with no change to make, while its saving counts."""
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
+    report.meta.projects = ("C--Dev-a", "C--Dev-b")
+
+    def snap(model: str) -> Snapshot:
+        data = {"agents": {}, "effective": {"model": model}, "effective_provenance": {"model": "user"}}
+        return Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+
+    def main_cards():
+        return [r for r in advice.finish([_tier("top-level")], report, snap(model), Units()) if r.id == "model-tier-main"]
+
+    model = "sonnet"
+    (card,) = main_cards()
+    assert card.changes == [] and card.saving_usd == 30.0
+    assert (
+        "Your model setting already says Sonnet. These sessions ran on a larger model anyway, chosen with /model, "
+        "the model picker or a project's own settings."
+    ) in card.why
+    assert card.action == "Pick Sonnet with /model sonnet or the model picker for routine work, and compare the results."
+    # One project's view is unchanged: the card goes.
+    report.meta.projects = ("C--Dev-a",)
+    assert main_cards() == []
+    # A setting that does not say Sonnet gets the card as before.
+    report.meta.projects = ("C--Dev-a", "C--Dev-b")
+    model = "opus"
+    (card,) = main_cards()
+    (change,) = card.changes
+    assert (change.current, change.value) == ("opus", "sonnet")
+    assert "already says" not in card.why and "Pick Sonnet" not in card.action
 
 
 def test_the_model_tier_card_names_runs_an_agent_file_does_not_decide():
