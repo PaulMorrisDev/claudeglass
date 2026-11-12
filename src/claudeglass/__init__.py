@@ -479,9 +479,11 @@ __version__ = "0.16.0"
 #: ``Turn.coach_tip`` is true when any text block holds the label; and
 #: those two counts are ``None`` where a digest has none; a digest carries
 #: the parser version that wrote it (``TranscriptResult.parser_version``,
-#: ``None`` before 50). A pre-50 digest
+#: ``0`` where a digest has none, ``measured.BEFORE_STAMP``). A pre-50 digest
 #: has the older readings of each. A transcript still on disk is re-read; one
-#: Claude Code deleted keeps its old digest.
+#: Claude Code deleted keeps its old digest. ``measured.FIELD_VERSIONS`` names
+#: the fields each figure leaves out of an older digest; a bump that adds or
+#: redefines one adds it there.
 PARSER_VERSION = 50
 
 #: Bump when the model.py contract changes in a way that invalidates the

@@ -515,3 +515,84 @@ def reminder_led_prompt(typed: str = "") -> str:
     puts a ``<system-reminder>`` block in front of what the user typed
     (``typed``; nothing for a message that is only the reminder)."""
     return "<system-reminder>\nThe user opened the session from a side panel.\n</system-reminder>\n" + typed
+
+
+# -- R10: digests an older parser wrote, whose transcripts are gone ------------
+
+#: The turn keys parsers 47 to 50 added: a 0.16.0 (parser 45) digest holds none.
+OLDER_TURN_KEYS = ("shell_code_write_count", "edit_code_count", "coach_tips", "coach_disowned")
+
+
+def to_older_digest(data: dict, *, reads_before_46: dict[int, int] | None = None) -> dict:
+    """A 0.16.0 (parser 45) digest of the same transcript: no stamp, none of
+    the keys parsers 47-50 added, and ``shell_read_count`` per turn index
+    from ``reads_before_46`` (the older reading of a ``||`` fallback)."""
+    older = json.loads(json.dumps(data))
+    older.pop("parser_version", None)
+    for turn in older["turns"]:
+        for key in OLDER_TURN_KEYS:
+            turn.pop(key, None)
+        if reads_before_46 and turn["turn_index"] in reads_before_46:
+            turn["shell_read_count"] = reads_before_46[turn["turn_index"]]
+    return older
+
+
+def fallback_read_session(session_id: str, when) -> list[dict]:
+    """A session: a human message, a reply with one Bash
+    ``cat a.txt 2>/dev/null || cat b.txt`` (one read today; two before parser
+    46), its tool result and a reply "done". ``when`` is a datetime."""
+    from datetime import timedelta
+
+    def stamp(seconds: int) -> str:
+        return (when + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    common = {"sessionId": session_id, "cwd": "C:/work/proj"}
+    return [
+        user_str_line("look at the config", timestamp=stamp(0), **common),
+        turn_line(
+            content=[tool_use_block("Bash", f"tu_{session_id}", {"command": "cat a.txt 2>/dev/null || cat b.txt"})],
+            timestamp=stamp(1),
+            **common,
+        ),
+        user_block_line([tool_result_block(f"tu_{session_id}", "contents")], timestamp=stamp(2), **common),
+        turn_line(content=[{"type": "text", "text": "done"}], timestamp=stamp(3), **common),
+    ]
+
+
+def store_with_older_sessions(tmp_path: Path, sessions: dict[str, list[dict]], older: set[str]):
+    """A Store (on disk under tmp_path, never service.db) after one
+    FileWatcher tick over ``sessions`` (session id -> JSONL lines), with
+    each id in ``older`` rewritten through :func:`to_older_digest` and its
+    transcript deleted, then a second tick (so ``missing_since`` is set).
+    Returns ``(store, options)``."""
+    import os
+    import time
+
+    from claudeglass.service.contracts import ServeOptions
+    from claudeglass.service.store import Store, decode_digest_blob, encode_digest_blob
+    from claudeglass.service.watcher import FileWatcher
+
+    folder = tmp_path / "projects" / "proj-a"
+    folder.mkdir(parents=True)
+    settled = time.time() - 3600  # past the live-file window, so the watcher reads each file
+    for session_id, lines in sessions.items():
+        path = folder / f"{session_id}.jsonl"
+        write_jsonl(path, lines)
+        os.utime(path, (settled, settled))
+    options = ServeOptions(projects_root=tmp_path / "projects", config_dir=tmp_path / "config")
+    store = Store(tmp_path / "service.db")
+    store.open()
+    FileWatcher(store, options).run_once()
+    conn = store._connection()
+    for session_id in sorted(older):
+        row = conn.execute("SELECT id, digest_blob FROM transcripts WHERE session_id = ?", (session_id,)).fetchone()
+        data = json.loads(decode_digest_blob(row["digest_blob"]))
+        digest = to_older_digest(data, reads_before_46={t["turn_index"]: 2 for t in data["turns"] if t["shell_read_count"] == 1})
+        conn.execute(
+            "UPDATE transcripts SET digest_blob = ?, parser_version = 45 WHERE id = ?",
+            (encode_digest_blob(json.dumps(digest)), row["id"]),
+        )
+        (folder / f"{session_id}.jsonl").unlink()
+    conn.commit()
+    FileWatcher(store, options).run_once()
+    return store, options
