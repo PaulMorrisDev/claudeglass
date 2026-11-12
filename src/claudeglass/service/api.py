@@ -115,6 +115,7 @@ from typing import TYPE_CHECKING, Callable
 from .. import __version__ as _TOOL_VERSION
 from .. import baseline as baseline_mod
 from .. import capture_catalogue, classify, coaching, discovery, helptext, hook_health, ignores, invocation, mod_settings
+from .. import card_marks as card_marks_mod
 from .. import ratings as ratings_mod
 from .. import report as report_mod
 from .. import snapshots as snapshots_mod
@@ -1007,6 +1008,10 @@ def make_handler(
     #: by its key (a calendar window's start moves at local midnight, "since
     #: my last change" at a new change: each a fresh build).
     report_cache: OrderedDict = OrderedDict()
+    #: view (``ignores.ALL_PROJECTS`` or a redacted project slug) -> what the
+    #: landing check last judged it against, ``(store.change_token(), the keys
+    #: its report listed)``: nothing new to judge while it is unchanged.
+    landing_seen: dict = {}
     #: cache key -> the build in progress for it, which later requests
     #: for the same window wait on (see _get_report_model).
     report_building: dict = {}
@@ -3707,6 +3712,76 @@ def make_handler(
 
         return _ok(project_prompt(model.recommendations, skip))
 
+    def _judge_landings(view, project, listed):
+        """The landing check (``card_marks.landing``) for one view's cards that
+        its report no longer lists and whose settings the store has a record
+        of: each is set landed, or cleared, from the view's snapshots. Skipped
+        when neither the store nor the list has changed since the view was last
+        judged. A card that is listed is left alone (marking it just cleared
+        it)."""
+        token = (store.change_token(), frozenset(listed))
+        if landing_seen.get(view) == token:
+            return
+        gone = [row for row in store.card_marks(view) if row["changes"] and row["card_key"] not in listed]
+        if gone:
+            snaps = _snapshots_from_store()
+            snapshots_mod._normalise_tool_lines(snaps)
+            if project:
+                snaps = snapshots_mod.snapshots_for_projects(snaps, project)
+            canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
+            cache: dict = {}
+            for row in gone:
+                shown = snapshots_mod._parse_ts(row["first_shown_at"])
+                found = card_marks_mod.landing(row["changes"], snaps, canonical, shown, cache) if shown else None
+                store.set_card_landed(
+                    row["card_key"],
+                    view,
+                    found[0].strftime("%Y-%m-%dT%H:%M:%SZ") if found else None,
+                    found[1] if found else None,
+                )
+        landing_seen[view] = token
+
+    def route_recommendations_marks(store, query, body):
+        """Record what the dashboard did with recommendation cards:
+        ``{"mark": "shown" | "copied" | "bundle", "keys": [...]}``, for the
+        window and project the page was showing. A card is ``shown`` when its
+        title was drawn, ``copied`` when a button copied its prompt, and
+        ``bundle`` when the project's all-fixes prompt (which holds it) was
+        copied. A key this window's report does not list is skipped: the page
+        posts what it drew, and the report may have been rebuilt since. A
+        ``shown`` mark then judges the view's cards that are no longer listed
+        (``_judge_landings``). It writes the store and nothing else: no file
+        in the config folder, no Claude Code setting."""
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        unknown = sorted(set(body) - {"mark", "keys"})
+        if unknown:
+            return _bad_request(f"unknown field {', '.join(unknown)}; known: keys, mark")
+        mark, keys = body.get("mark"), body.get("keys")
+        if mark not in ("shown", "copied", "bundle"):
+            return _bad_request("'mark' must be one of: shown, copied, bundle")
+        if not isinstance(keys, list) or len(keys) > _MAX_IGNORE_KEYS:
+            return _bad_request(f"'keys' must be a list of up to {_MAX_IGNORE_KEYS} recommendation keys")
+        if not keys and mark != "shown":
+            return _bad_request(f"'keys' must name at least one card to mark {mark}")
+        if not all(isinstance(key, str) and _REC_KEY_RE.match(key) for key in keys):
+            return _bad_request("each key must be a recommendation key: a-z, 0-9, '.', '_', ':' or '-'")
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        model = _get_report_model(*window, project)
+        by_key = {rec.key: rec for rec in model.recommendations}
+        view = _str_query(query, "project") or ignores.ALL_PROJECTS
+        rows = [card_marks_mod.card_row(by_key[key]) for key in dict.fromkeys(keys) if key in by_key]
+        if rows:
+            store.mark_cards(rows, mark=mark, project=view, folders=list(project or ()))
+        if mark == "shown":
+            _judge_landings(view, project, set(by_key))
+        return _ok({"mark": mark, "recorded": len(rows)})
+
     def route_recommendations_ignore(store, query, body):
         """Ignore recommendations, or stop ignoring them: ``{"keys":
         [...], "ignored": true|false}``. Each key must be a recommendation
@@ -3815,6 +3890,7 @@ def make_handler(
         "/api/whatif": route_whatif,
         "/api/predictions/seen": route_predictions_seen,
         "/api/recommendations/ignore": route_recommendations_ignore,
+        "/api/recommendations/marks": route_recommendations_marks,
         "/api/tip-feedback": route_set_tip_feedback,
     }
     post_patterns: tuple[tuple[re.Pattern, Callable], ...] = (

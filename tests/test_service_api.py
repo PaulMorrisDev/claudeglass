@@ -6556,7 +6556,7 @@ def test_recommendations_prompt_bundles_the_open_fixes_and_leaves_out_ignored_on
         resp, body = handle.get_json("/api/recommendations/prompt?project=proj-b")
         assert resp.status == 200 and body["ok"] is True
         data = body["data"]
-        assert set(data) == {"prompt", "files", "several", "other", "cards", "left_out"}
+        assert set(data) == {"prompt", "files", "several", "other", "cards", "keys", "left_out"}
         _resp, rows = handle.get_json("/api/recommendations")
         [card] = [row for row in rows["data"] if row["id"] == "agent-model-inherited"]
         prompt = card["fixes"][0]["prompt"]
@@ -6689,3 +6689,283 @@ def test_the_quick_actions_name_project_files_from_the_projects_folder_the_servi
         check = payload["data"] if route.endswith("project-files") else next(
             item for item in payload["data"]["checks"] if item["id"] == "project-files")
         assert check["status"] == "act" and check["summary"].startswith("docs/context.md is now about 10k tokens"), route
+
+
+# -- what the dashboard shows and copies of the recommendation cards (schema 12) --------------
+
+
+def _snapshot_at(handle, ts, effective, *, slug="proj-a", agents=None):
+    """A config snapshot, as the watcher stores one; ``slug`` is the project
+    the snapshot names in its own digest."""
+    digest = {"schema_version": 2, "project_slug": slug, "effective": effective, "agents": agents or {}}
+    handle.store.upsert_snapshot(
+        project_slug=slug, project_root_path="", ts=ts, schema_version=2, digest_json=json.dumps(digest)
+    )
+
+
+def _model_change(value="sonnet"):
+    return {"target": "settings", "key": "model", "agent": None, "value": value}
+
+
+def _gone_card(key="gone-card", changes=None):
+    """A card the report no longer lists, as the store kept it."""
+    return {
+        "key": key, "rule_id": "model-tier", "agent_type": None,
+        "changes": [_model_change()] if changes is None else changes, "saving_usd": 1.0,
+    }
+
+
+_SEEN_AT = "2026-09-20T00:00:00Z"
+
+
+def _card_server(tmp_path, monkeypatch):
+    handle = _start_agent_model_server(tmp_path, monkeypatch)
+    _seed_agent_model_project(handle)
+    return handle
+
+
+def test_marking_cards_records_them_for_the_view_they_were_shown_in(tmp_path, monkeypatch):
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        _resp, body = handle.get_json("/api/recommendations")
+        card = body["data"][0]
+        key = card["key"]
+
+        resp, body = handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": [key]})
+        assert resp.status == 200 and body["data"] == {"mark": "shown", "recorded": 1}
+        resp, body = handle.post_json("/api/recommendations/marks", {"mark": "copied", "keys": [key]})
+        assert resp.status == 200 and body["data"] == {"mark": "copied", "recorded": 1}
+
+        [row] = handle.store.card_marks()
+        assert (row["card_key"], row["project"], row["folders"]) == (key, "*", [])
+        assert (row["rule_id"], row["agent_type"]) == (card["id"], card["agent_type"])
+        assert row["changes"] == [
+            {name: change[name] for name in ("target", "key", "agent", "value")} for change in card["changes"]
+        ]
+        assert row["copied_at"] and row["first_shown_at"] and row["bundled_at"] is None
+
+        resp, body = handle.post_json("/api/recommendations/marks?project=proj-b", {"mark": "bundle", "keys": [key]})
+        assert resp.status == 200
+        assert [(r["project"], r["folders"]) for r in handle.store.card_marks()] == [("*", []), ("proj-b", ["proj-b"])]
+        [own] = handle.store.card_marks("proj-b")
+        assert own["bundled_at"] and own["copied_at"] is None
+        resp, _body = handle.post_json("/api/recommendations/marks?project=nope", {"mark": "shown", "keys": [key]})
+        assert resp.status == 400
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_card_marks_check_what_they_are_sent(tmp_path, monkeypatch):
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        _resp, body = handle.get_json("/api/recommendations")
+        key = body["data"][0]["key"]
+        for bad in (
+            [],
+            {"mark": "shown"},
+            {"keys": [key]},
+            {"mark": "seen", "keys": [key]},
+            {"mark": "copied", "keys": []},
+            {"mark": "shown", "keys": key},
+            {"mark": "shown", "keys": [key] * 101},
+            {"mark": "shown", "keys": ["../x"]},
+            {"mark": "shown", "keys": [key], "extra": 1},
+        ):
+            resp, body = handle.post_json("/api/recommendations/marks", bad)
+            assert resp.status == 400, bad
+            assert body["error"]["code"] == "bad_request"
+        # A key this window's report does not list is skipped, not an error: the
+        # page posts what it drew and the report may have been rebuilt since.
+        for ok in ({"mark": "shown", "keys": ["no-such-rule"]}, {"mark": "shown", "keys": []}):
+            resp, body = handle.post_json("/api/recommendations/marks", ok)
+            assert resp.status == 200 and body["data"] == {"mark": "shown", "recorded": 0}
+        resp, _raw = handle.request(
+            "POST",
+            "/api/recommendations/marks",
+            body={"mark": "shown", "keys": [key]},
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        assert resp.status == 403
+        assert handle.store.card_marks() == []
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_card_no_longer_listed_whose_setting_moved_is_landed_and_one_still_listed_is_not(tmp_path, monkeypatch):
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        _resp, body = handle.get_json("/api/recommendations")
+        listed_key = body["data"][0]["key"]
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus", "effortLevel": "high"})
+        _snapshot_at(handle, "2026-09-21T12:00:00Z", {"model": "sonnet", "effortLevel": "high"})
+        store = handle.store
+        store.mark_cards([_gone_card()], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        store.mark_cards(
+            [_gone_card("unmoved", [{"target": "settings", "key": "effortLevel", "agent": None, "value": "low"}])],
+            mark="shown", project="*", folders=[], now=_SEEN_AT,
+        )
+        store.mark_cards([_gone_card("a-habit", [])], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        # The listed card names the same moved setting, but the report still lists it.
+        store.mark_cards([{**_gone_card(listed_key)}], mark="shown", project="*", folders=[], now=_SEEN_AT)
+
+        resp, body = handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        assert resp.status == 200 and body["data"] == {"mark": "shown", "recorded": 0}
+
+        rows = {row["card_key"]: row for row in store.card_marks()}
+        assert (rows["gone-card"]["landed_at"], rows["gone-card"]["landed_exact"]) == ("2026-09-21T12:00:00Z", 1)
+        assert rows["unmoved"]["landed_at"] is None
+        assert rows["a-habit"]["landed_at"] is None
+        assert rows[listed_key]["landed_at"] is None
+        # Judging a card is not marking it.
+        assert rows["gone-card"]["updated_at"] == _SEEN_AT
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_landed_card_shown_again_is_no_longer_landed(tmp_path, monkeypatch):
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        _resp, body = handle.get_json("/api/recommendations")
+        key = body["data"][0]["key"]
+        store = handle.store
+        store.mark_cards([_gone_card(key)], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        store.set_card_landed(key, "*", "2026-09-21T12:00:00Z", True)
+        resp, _body = handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": [key]})
+        assert resp.status == 200
+        [row] = store.card_marks()
+        assert (row["landed_at"], row["landed_exact"]) == (None, None)
+        # The card is listed, so the check leaves it alone, whatever the settings did.
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus"})
+        _snapshot_at(handle, "2026-09-25T12:00:00Z", {"model": "sonnet"})
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        assert store.card_marks()[0]["landed_at"] is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_setting_moved_back_unlands_a_landed_card(tmp_path, monkeypatch):
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        store = handle.store
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus"})
+        _snapshot_at(handle, "2026-09-21T12:00:00Z", {"model": "sonnet"})
+        store.mark_cards([_gone_card()], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        assert store.card_marks()[0]["landed_at"] == "2026-09-21T12:00:00Z"
+        _snapshot_at(handle, "2026-09-23T12:00:00Z", {"model": "opus"})
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        assert store.card_marks()[0]["landed_at"] is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_the_landing_check_waits_for_something_new_to_judge(tmp_path, monkeypatch):
+    from claudeglass import card_marks as card_marks_mod
+
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        store = handle.store
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus"})
+        _snapshot_at(handle, "2026-09-21T12:00:00Z", {"model": "sonnet"})
+        store.mark_cards([_gone_card()], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        calls = []
+        real = card_marks_mod.landing
+        monkeypatch.setattr(card_marks_mod, "landing", lambda *args, **kw: calls.append(1) or real(*args, **kw))
+        for _ in range(3):
+            handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        assert len(calls) == 1
+        # A new snapshot is something new to judge; so is a card that was marked.
+        _snapshot_at(handle, "2026-09-22T12:00:00Z", {"model": "sonnet"})
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        assert len(calls) == 2
+        # Only a shown mark judges: a copy does not.
+        _resp, body = handle.get_json("/api/recommendations")
+        handle.post_json("/api/recommendations/marks", {"mark": "copied", "keys": [body["data"][0]["key"]]})
+        assert len(calls) == 2
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_project_views_landing_reads_only_that_projects_snapshots(tmp_path, monkeypatch):
+    from claudeglass import snapshots as snapshots_mod
+
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        store = handle.store
+        own = snapshots_mod.snapshot_project_key("proj-b")
+        other = snapshots_mod.snapshot_project_key("elsewhere")
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus"}, slug=own)
+        _snapshot_at(handle, "2026-09-19T13:00:00Z", {"model": "opus"}, slug=other)
+        # Another project's setting moves; this project's does not.
+        _snapshot_at(handle, "2026-09-21T12:00:00Z", {"model": "sonnet"}, slug=other)
+        store.mark_cards([_gone_card()], mark="shown", project="proj-b", folders=["proj-b"], now=_SEEN_AT)
+        store.mark_cards([_gone_card()], mark="shown", project="*", folders=[], now=_SEEN_AT)
+
+        handle.post_json("/api/recommendations/marks?project=proj-b", {"mark": "shown", "keys": []})
+        landed = {row["project"]: row["landed_at"] for row in store.card_marks()}
+        # The other view was not judged by this request, and this one found no move.
+        assert landed == {"*": None, "proj-b": None}
+
+        _snapshot_at(handle, "2026-09-24T12:00:00Z", {"model": "sonnet"}, slug=own)
+        handle.post_json("/api/recommendations/marks?project=proj-b", {"mark": "shown", "keys": []})
+        landed = {row["project"]: row["landed_at"] for row in store.card_marks()}
+        assert landed == {"*": None, "proj-b": "2026-09-24T12:00:00Z"}
+
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        landed = {row["project"]: row["landed_at"] for row in store.card_marks()}
+        assert landed["*"] == "2026-09-21T12:00:00Z"
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_card_mark_writes_nothing_but_the_store(tmp_path, monkeypatch):
+    # A finished report writes the mod's settings file on its own thread; that is
+    # the report's doing, not the mark's, and would race with the comparison.
+    monkeypatch.setattr(service_api.mod_settings, "write", lambda *args, **kwargs: None)
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        _resp, body = handle.get_json("/api/recommendations")
+        key = body["data"][0]["key"]
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus"})
+        handle.store.mark_cards([_gone_card()], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        folder = handle.options.config_dir
+
+        def state():
+            return {str(p.relative_to(folder)): p.stat().st_mtime_ns for p in folder.rglob("*") if p.is_file()}
+
+        before = state()
+        for mark in ("shown", "copied", "bundle"):
+            resp, _body = handle.post_json("/api/recommendations/marks", {"mark": mark, "keys": [key]})
+            assert resp.status == 200
+        assert state() == before
+        assert not (folder / "ignored-recommendations.json").exists()
+        assert len(handle.store.card_marks()) == 2
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_the_bundle_prompt_names_the_cards_it_holds(tmp_path, monkeypatch):
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        resp, body = handle.get_json("/api/recommendations/prompt?project=proj-b")
+        assert resp.status == 200
+        data = body["data"]
+        assert set(data) == {"prompt", "files", "several", "other", "cards", "keys", "left_out"}
+        _resp, rows = handle.get_json("/api/recommendations")
+        assert data["cards"] >= 1 and len(data["keys"]) == data["cards"]
+        assert set(data["keys"]) <= {row["key"] for row in rows["data"]}
+        # An ignored card is left out of the bundle, so out of its keys.
+        handle.post_json("/api/recommendations/ignore", {"keys": data["keys"][:1], "ignored": True})
+        _resp, body = handle.get_json("/api/recommendations/prompt?project=proj-b")
+        assert data["keys"][0] not in body["data"]["keys"]
+    finally:
+        handle.close()
+        handle.store.close()
