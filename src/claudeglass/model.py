@@ -581,9 +581,14 @@ phase, label, description or path:
   uses, but counted with or without the salt). Repeats are kept, so a
   file written twice counts twice. A target is temp when, normalised like
   the path hashes (``..`` resolved, case and slashes folded, ``/c/`` read
-  as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
-  back for a command that was blocked or denied. A count only, never a
-  path.
+  as ``c:``), it sits under the reading process's own temp folder
+  (``tempfile.gettempdir()``) or at the root of a path of a system temp
+  shape (``parse._TEMP_SHAPE_RE``): a Windows user's ``AppData/Local/Temp``,
+  ``Windows/Temp`` or ``Windows/SystemTemp`` (also as ``/mnt/c/...`` or
+  ``/cygdrive/c/...``), macOS ``/var/folders/<xx>/<id>/t`` and
+  ``/private/tmp``, ``/tmp`` and ``/var/tmp``; a folder only named ``temp``
+  or ``tmp`` inside a project is not. Taken back for a command that was
+  blocked or denied. A count only, never a path.
 - ``Turn.shell_code_write_count: int | None = None`` -- the part of
   ``shell_write_count`` aimed at code: not a document (a
   ``capture_catalogue.DOC_SUFFIXES`` file, a ``.log``, ``.csv``, ``.tsv``

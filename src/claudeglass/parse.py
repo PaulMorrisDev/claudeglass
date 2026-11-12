@@ -332,11 +332,12 @@ from .model import (
 #: Tool names whose first ``input.command`` becomes a turn's ``cmd_prefix``.
 _SHELL_TOOL_NAMES = ("Bash", "PowerShell")
 
-#: tool name -> the input key holding the path to check against the
-#: system temp dir for ``edit_kind`` ("scratch" vs "real"). The test is
-#: ``_is_temp_target``, the one a shell write target gets, so a
-#: backslashed, forward-slash, mixed-case or Git Bash form of the temp
-#: dir all match.
+#: tool name -> the input key holding the path to check against the temp
+#: folders for ``edit_kind`` ("scratch" vs "real"). The test is
+#: ``_is_temp_target``, the one a shell write target gets: the reading
+#: process's own temp folder and the system temp shapes
+#: (``_TEMP_SHAPE_RE``), in a backslashed, forward-slash, mixed-case or
+#: Git Bash form.
 _EDIT_TOOL_PATH_KEYS = {
     "Edit": "file_path",
     "Write": "file_path",

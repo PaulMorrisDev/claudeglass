@@ -486,11 +486,19 @@ __version__ = "0.16.0"
 #: redefines one adds it there.
 #: Bumped to 51: a ``||`` fallback that starts on the next line or in a
 #: subshell is one shell read, and a commit or pull-request message inside
-#: ``"$( ... )"`` is text and not commands (``Turn.shell_read_count``); a
+#: ``"$( ... )"`` is text and not commands (``Turn.shell_read_count``; the
+#: write targets and ``changes_files`` of such a command move with it); a
 #: path in any system's temp folder, found by its shape and not only by the
 #: reading process's own temp folder, is temp
 #: (``Turn.shell_code_write_count``, ``Turn.edit_code_count``). A pre-51
-#: digest has the older readings of each.
+#: digest has the older readings of each. ``Turn.edit_kind`` and
+#: ``Turn.shell_write_count`` (a write under a system temp folder that the
+#: reading process's own temp folder did not cover) and
+#: ``Turn.shell_change_count`` (a write or change that a stray quote in a
+#: ``"$( ... )"`` message hid or invented) changed too and have no row in
+#: ``measured.FIELD_VERSIONS``, on purpose: gating them would drop every
+#: older session whose transcript is gone from the agent-model cards for a
+#: difference no real data shows (0 of 37,438 real write targets moved).
 PARSER_VERSION = 51
 
 #: Bump when the model.py contract changes in a way that invalidates the
