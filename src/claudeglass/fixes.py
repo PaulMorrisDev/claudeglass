@@ -1318,7 +1318,8 @@ _FIX_FILE: dict[str, str] = {
 
 
 #: What a workflow prompt's header is, when it is not a file: ``several``
-#: names a kind of file or a set of them, ``none`` names no file at all.
+#: names a kind of file or a set of them, ``rule`` a standing rule that may
+#: also reach a file or two beyond the one named, ``none`` names no file at all.
 #: Every id and variant left out names one path, or an "A or B" pair of
 #: them (``file``). A scope prompt (:data:`_NOTE_OVERRIDES`) is a ``rule``.
 _FIX_KIND: dict[str, str] = {
@@ -1330,6 +1331,8 @@ _FIX_KIND: dict[str, str] = {
     "hook-context-carry": "several",
     "spawn-tools-list:workflow-script": "several",
     "agent-model-asked": "several",
+    # An instruction in ~/.claude/CLAUDE.md and, when the agent has a file, a line in it.
+    "run-split": "rule",
     "discovery-share": "none",
     "limit-pressure": "none",
 }

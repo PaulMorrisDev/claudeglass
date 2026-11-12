@@ -202,3 +202,36 @@ def test_check_7_reports_a_check_that_sets_what_a_card_sets_to_another_value(pro
     monkeypatch.setattr(quick_actions, "run", other_effort)
     problems = agreement.check_same_setting(inp.with_skip(inp.skip))
     assert any(p.startswith("effort sets effortLevel to effortLevel=low") for p in problems), problems
+
+
+def _with_cards(inp, *recs):
+    return inp.with_recommendations([*inp.recs, *recs])
+
+
+def test_check_2_leaves_a_card_that_sets_a_standing_rule_free_to_name_the_agents_file(profile):
+    """The run-split prompt adds an instruction to ~/.claude/CLAUDE.md and offers a line in
+    the agent's own file when it has one: the card's fix is not one exact file."""
+    from claudeglass.model import Recommendation
+
+    inp = profile("capture_off")[1]
+    assert agreement.check_agent_folders(inp) == []
+    split = Recommendation(id="run-split", key="run-split:reviewer", severity="advice", agent_type="reviewer",
+                           title="Give reviewer smaller tasks", why="Long runs.",
+                           action="Give reviewer one part of a large task per run.", saving_usd=2.0)
+    fixes.attach_fixes([split])
+    assert ".claude/agents/reviewer.md" in split.fixes[0]["prompt"]
+    assert fixes.fix_group(split, None)[1] != "file"
+    assert agreement.check_agent_folders(_with_cards(inp, split)) == []
+
+
+def test_check_2_still_reports_a_card_of_one_exact_file_that_names_the_other_agents_folder(profile):
+    """A settings card (kind file) whose action sends the user to an agents folder."""
+    from claudeglass.model import Recommendation
+
+    inp = profile("capture_off")[1]
+    card = Recommendation(id="ttl-switch", key="ttl-switch", severity="advice", title="Longer cache",
+                          why="Pauses.", action="Set it in .claude/agents/reviewer.md instead.", saving_usd=2.0)
+    fixes.attach_fixes([card])
+    assert fixes.fix_group(card, None)[1] == "file"
+    problems = agreement.check_agent_folders(_with_cards(inp, card))
+    assert any("ttl-switch" in p and "action names .claude/agents/" in p and "settings.json" in p for p in problems), problems

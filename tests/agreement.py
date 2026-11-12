@@ -24,8 +24,8 @@ The seven (numbers as in the plan's "Agreement checks"):
    least the bar's share of its spawns (and, for workflow agents, every
    writing or shell tool any of them called), unless the agent's own line
    already lacks it.
-2. Where a card's action text names an agents folder, it is the folder of
-   that card's fix (``fixes.fix_file``).
+2. Where the action text of a card whose fix is one exact file names an
+   agents folder, it is the folder of that card's fix (``fixes.fix_file``).
 3. The Overview's headline saving and the habits check's saving are built
    only from the levers and the action and advice cards: an info, fixed or
    ignored card adds nothing.
@@ -272,17 +272,22 @@ def _folders(text) -> set[str]:
 
 
 def check_agent_folders(inp: Inputs) -> list[str]:
-    """Check 2. Where a card's action text (or its fix's prompt) names an
-    agents folder (``~/.claude/agents/`` or ``.claude/agents/``), it is a
-    folder the card's fix works in (``fixes.fix_file`` for each of its
-    changes). Two cards for one agent also name one folder between them."""
+    """Check 2. Where a card whose fix is one exact file (or an "A or B" pair:
+    kind ``file`` in ``fixes.fix_group``) names an agents folder
+    (``~/.claude/agents/`` or ``.claude/agents/``) in its action text or its
+    fix's prompt, it is a folder the card's fix works in (``fixes.fix_file``
+    for each of its changes). A card whose fix spans several files or sets a
+    standing rule may name the agent's own file as a second place, so its text
+    is not held to that. Two cards for one agent also name one folder between
+    them."""
     problems: list[str] = []
     single: dict[str, dict[str, str]] = {}
     for rec in inp.recs:
         files = {fixes.fix_file(rec, change) for change in (rec.changes or [None])}
         allowed = set().union(*(_folders(f) for f in files if f))
+        one_file = all(fixes.fix_group(rec, change)[1] == "file" for change in (rec.changes or [None]))
         texts = {"action": rec.action, **{f"prompt {i + 1}": fix.get("prompt") for i, fix in enumerate(rec.fixes)}}
-        for where, text in texts.items():
+        for where, text in texts.items() if one_file else ():
             for folder in sorted(_folders(text) - allowed):
                 problems.append(
                     f"{_who(rec)}: the {where} names {folder} but the fix works in "

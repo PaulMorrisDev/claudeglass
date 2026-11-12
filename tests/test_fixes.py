@@ -670,7 +670,10 @@ def test_project_prompt_counts_an_a_or_b_pair_as_a_file():
 def _header_kind_problems():
     """The ``_FIX_FILE`` ids whose kind is wrong for their header: a header
     is a ``file`` exactly when each of its "A or B" parts is one path (no
-    spaces), so a header added without a kind row cannot count as a file."""
+    spaces), so a header added without a kind row cannot count as a file. A
+    ``rule`` row may sit on a one-path header: its prompt names that path and
+    can reach other files too (``run-split`` adds a line to the agent's own
+    file)."""
     from claudeglass import fixes as fixes_mod
     from claudeglass.model import Recommendation
 
@@ -680,6 +683,8 @@ def _header_kind_problems():
         rec = Recommendation(id=rec_id, variant=variant, agent_type="x")
         header, kind = fixes_mod.fix_group(rec, None)
         one_path = all(re.fullmatch(r"\S+", part) for part in header.split(" or "))
+        if kind == "rule" and one_path:
+            continue
         if (kind == "file") != one_path:
             problems.append((variant_id, header, kind))
     return problems
@@ -737,3 +742,19 @@ def test_every_file_workflow_prompt_resolves_to_a_file():
         rec = Recommendation(id=rec_id, variant=variant, agent_type="x")
         label = fixes_mod.fix_file(rec, None)
         assert label and label != "Other", variant_id
+
+
+def test_a_run_split_card_is_counted_as_a_standing_rule_not_as_a_file_to_edit():
+    """Its prompt adds an instruction to ~/.claude/CLAUDE.md and a line to the
+    agent's own file when there is one, so it is not one exact file."""
+    from claudeglass.fixes import fix_group, project_prompt
+
+    split = _bundle_rec("run-split:reviewer", rec_id="run-split", agent_type="reviewer")
+    assert "agents/reviewer.md" in split.fixes[0]["prompt"]
+    assert fix_group(split, None) == ("~/.claude/CLAUDE.md", "rule")
+    out = project_prompt([split])
+    assert out["files"] == [] and out["several"] == 1 and out["cards"] == 1
+    assert "## ~/.claude/CLAUDE.md" in out["prompt"]
+    # A card that edits only CLAUDE.md is still a file.
+    plan = _bundle_rec("plan", rec_id="plan-handoff")
+    assert fix_group(plan, None) == ("~/.claude/CLAUDE.md", "file")
