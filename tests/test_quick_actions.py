@@ -2632,3 +2632,23 @@ def test_the_skills_check_finds_descriptions_under_the_projects_root_but_not_you
     # Given the Claude folder, the skill is yours.
     (found,) = table_rows(claude_root=claude_root, projects_roots=(claude_root / "projects",))
     assert "Built" not in found[1]
+
+def test_models_check_does_not_say_nothing_else_would_save_when_an_ignored_card_held_a_change(tmp_path):
+    """An advice-level agent-model card is open and the ignored card held the main session's change:
+    the table still shows that saving, so "no change would save a useful amount" would be false."""
+    model = _full_model()
+    model.sections[0].tables[0].rows[1][-3] = None  # Explore has no cheaper alternative
+    flagged = _agent_model_rec("agent-model-inherited", "advice", _INHERITED,
+                               prompt="From now on, set the model on every agent you start.")
+    model.recommendations = [_main_sonnet_card(), flagged]
+    open_result = qa.run("models", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 model change would have cost less")
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert result["status"] == "act"
+    assert result["summary"] == f"{_INHERITED}. The only other change this check would suggest is on a card you ignored."
+    # With no change to ignore, the sentence about the rest is as it was.
+    model.sections[0].tables[0].rows[0][-3] = None
+    model.recommendations = [flagged]
+    assert qa.run("models", _ctx(tmp_path, model=model))["summary"] == (
+        f"{_INHERITED}. Apart from that, no change to an agent file or setting would save a useful amount."
+    )

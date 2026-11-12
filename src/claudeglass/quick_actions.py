@@ -316,7 +316,9 @@ def _models(ctx: Context) -> dict:
     if not fixes:
         return _result(
             "act",
-            f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount.",
+            f"{flagged_text} The only other change this check would suggest is on a card you ignored."
+            if draft["removed"]
+            else f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount.",
             table=table,
             fixes=agent_fixes,
             tips=tips,
