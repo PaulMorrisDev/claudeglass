@@ -12,16 +12,17 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from claudeglass import recache, ttl
+from claudeglass import model_swap, recache, ttl
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import Diagnostics
 from claudeglass.pricing import load_pricing
-from claudeglass.report import _SECTION_ORDER, _apply_autocompact_pct_override, build_report
+from claudeglass.report import _SECTION_ORDER, _apply_autocompact_pct_override, _main_model_lever, build_report
 from claudeglass.render.csv_out import write_csv_dir
 from claudeglass.render.html import render_html
 from claudeglass.render.json_out import render_json
@@ -1700,3 +1701,133 @@ def test_the_prompting_section_gets_what_the_mod_showed(tmp_path, monkeypatch):
     # Without them, none: the section reads as it always did.
     build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w")
     assert seen["mod_events"] is None
+
+
+# -- R11: which main sessions the model setting decides -------------------------
+
+_R11_OPUS, _R11_SONNET, _R11_HAIKU = "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"
+_R11_DAY0 = datetime(2026, 10, 1, 9, 0, 0, tzinfo=timezone.utc)
+
+
+def _main_sessions(root: Path, folder: str, sessions) -> None:
+    """Main sessions in ``root / "projects" / folder``: each a (day, model,
+    replies, entrypoint), its first reply at 09:00 UTC on 1 Oct 2026 plus
+    ``day`` days (a float: 10.1 is two hours and 24 minutes later), its
+    replies four seconds apart."""
+    project = root / "projects" / folder
+    project.mkdir(parents=True, exist_ok=True)
+    for i, (day, model_id, replies, entrypoint) in enumerate(sessions):
+        start = _R11_DAY0 + timedelta(days=day)
+
+        def stamp(at):
+            return at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        lines = [user_str_line("do the work", timestamp=stamp(start - timedelta(seconds=5)))]
+        for n in range(replies):
+            lines.append(turn_line(model=model_id, input_tokens=50, output_tokens=1500, cache_read_input_tokens=30_000,
+                                   timestamp=stamp(start + timedelta(seconds=4 * n))))
+        for line in lines:
+            line["sessionId"] = f"{folder}-{i:02d}"
+            line["entrypoint"] = entrypoint
+            line["cwd"] = "C:\\Dev\\" + folder.split("-")[-1]
+        write_jsonl(project / f"{folder}-{i:02d}.jsonl", lines)
+
+
+def _r11_lever(root: Path, folders, config_dir):
+    """The corpus of ``folders`` under ``root``, the keys of each session's
+    project, the lever for it, and the main transcripts by folder, in order."""
+    corpus = load_corpus([root / "projects" / f for f in folders], since="2000-01-01")
+    keys = {b.top.meta.session_id: snapshot_project_keys(b.slug) for b in corpus.sessions if b.top is not None}
+    lever = _main_model_lever(corpus, config_dir, keys)
+    by_folder: dict[str, list] = {f: [] for f in folders}
+    for bundle in sorted(corpus.sessions, key=lambda b: b.top.meta.session_id):
+        by_folder[bundle.slug].append(bundle.top)
+    return corpus, keys, lever, by_folder
+
+
+def _r11_snapshots(config_dir: Path, folder: str, *moves) -> None:
+    """Snapshots of ``folder``: each a (ts, model, layer) with layer ``user``
+    (a move for every project) or ``project_local`` (the project's own)."""
+    from test_change_points import _snapshot
+
+    for ts, model_name, layer in moves:
+        _snapshot(config_dir, ts, {"model": model_name}, {"model": layer}, slug=snapshot_project_key(folder))
+
+
+def _opus_days(count: int, replies: int = 40):
+    return [(day, _R11_OPUS, replies, "claude-desktop") for day in range(count)]
+
+
+def test_a_session_whose_first_reply_is_at_a_move_down_counts(tmp_path):
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(6))
+    _r11_snapshots(tmp_path / "tl", "C--Dev-alpha", ("20260930T090000Z", "opus", "user"),
+                   ("20261004T090000Z", "sonnet", "user"))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], tmp_path / "tl")
+    got = [lever(tr) for tr in sessions["C--Dev-alpha"]]
+    assert got == [model_swap.BEFORE_CHANGE] * 3 + [None] * 3
+
+
+def test_a_move_back_up_cuts_nothing(tmp_path):
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(6))
+    _r11_snapshots(tmp_path / "tl", "C--Dev-alpha", ("20260930T090000Z", "opus", "user"),
+                   ("20261004T090000Z", "sonnet", "user"), ("20261005T090000Z", "opus", "user"))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], tmp_path / "tl")
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 6
+
+
+def test_a_project_with_no_snapshot_of_its_own(tmp_path):
+    folders = ["C--Dev-alpha", "C--Dev-gamma"]
+    for folder in folders:
+        _main_sessions(tmp_path, folder, _opus_days(6))
+    # Your settings say Sonnet and nothing moved: gamma's Opus sessions all count.
+    first = tmp_path / "tl1"
+    _r11_snapshots(first, "C--Dev-alpha", ("20260930T090000Z", "sonnet", "user"), ("20261004T090000Z", "sonnet", "user"))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, first)
+    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [None] * 6
+    stats = model_swap.compute_model_swap(sessions["C--Dev-gamma"], PRICING, main_lever=lever)
+    assert stats.by_key["top-level"].lever.spawns == 6
+    # Your settings moved down on 4 Oct: it holds for gamma too.
+    second = tmp_path / "tl2"
+    _r11_snapshots(second, "C--Dev-alpha", ("20260930T090000Z", "opus", "user"), ("20261004T090000Z", "sonnet", "user"))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, second)
+    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [model_swap.BEFORE_CHANGE] * 3 + [None] * 3
+    # The same move made in alpha's own files holds in alpha alone.
+    third = tmp_path / "tl3"
+    _r11_snapshots(third, "C--Dev-alpha", ("20260930T090000Z", "opus", "user"),
+                   ("20261004T090000Z", "sonnet", "project_local"))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, third)
+    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [None] * 6
+
+
+def test_a_move_down_only_the_transcripts_show_cuts_the_earlier_sessions(tmp_path):
+    _main_sessions(tmp_path, "C--Dev-alpha",
+                   _opus_days(6) + [(day, _R11_SONNET, 40, "claude-desktop") for day in (6, 7, 8)])
+    (tmp_path / "tl").mkdir()
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], tmp_path / "tl")
+    got = [lever(tr) for tr in sessions["C--Dev-alpha"]]
+    # The Sonnet sessions are left out by their own model (model_swap), not by the lever.
+    assert got == [model_swap.BEFORE_CHANGE] * 6 + [None] * 3
+
+
+def test_a_move_made_only_by_headless_or_short_sessions_cuts_nothing(tmp_path):
+    def later(model_id, counts, entrypoint):
+        return [(day, model_id, replies, entrypoint) for day, replies in zip((10, 10.1, 10.2), counts)]
+
+    cases = (
+        (later(_R11_HAIKU, (3, 3, 3), "sdk-cli"), [None] * 10),
+        (later(_R11_SONNET, (2, 2, 2), "claude-desktop"), [None] * 10),
+        (later(_R11_SONNET, (2, 2, 12), "claude-desktop"), [model_swap.BEFORE_CHANGE] * 10),
+        (later(_R11_HAIKU, (40, 40, 40), "sdk-cli"), [None] * 10),
+    )
+    for n, (extra, expected) in enumerate(cases):
+        root = tmp_path / f"case{n}"
+        _main_sessions(root, "C--Dev-alpha", _opus_days(10) + extra)
+        (root / "tl").mkdir()
+        _corpus, _keys, lever, sessions = _r11_lever(root, ["C--Dev-alpha"], root / "tl")
+        assert [lever(tr) for tr in sessions["C--Dev-alpha"][:10]] == expected, n
+
+
+def test_without_a_config_folder_nothing_is_cut(tmp_path):
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(3))
+    _corpus, _keys, lever, _sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], None)
+    assert lever is None

@@ -1368,49 +1368,66 @@ def _current_window_of(snapshots: list[Snapshot] | None, keys_by_session: dict[s
     return current
 
 
+#: A move of the main model that only sessions' transcripts show counts for
+#: the main-model card when at least one session of the run that made it
+#: was not headless and had at least this many priced replies.
+MOVE_MIN_REPLIES = 10
+
+
+def _steered(bundle: SessionBundle) -> bool:
+    """Whether a main session is one a person steered: not a headless run
+    (``glass_effect.is_headless``) and at least :data:`MOVE_MIN_REPLIES`
+    priced replies."""
+    top = bundle.top
+    return (
+        top is not None
+        and not glass_effect.is_headless(top.meta.entrypoint)
+        and sum(1 for turn in top.turns if turn.turn_index > 0) >= MOVE_MIN_REPLIES
+    )
+
+
 def _main_model_lever(
     corpus: Corpus,
     config_dir: str | Path | None,
-    snapshots: list[Snapshot] | None,
     keys_by_session: dict[str, tuple[str, ...]],
 ) -> Callable[[TranscriptResult], str | None] | None:
-    """For ``model_swap.compute_model_swap``'s ``main_lever``: why the main
-    session's model setting in force now doesn't decide each main session.
-    Each is judged by its own project:
+    """For ``model_swap.compute_model_swap``'s ``main_lever``: whether a main
+    session started before its project's model moved to Sonnet or smaller
+    (``model_swap.BEFORE_CHANGE``), else ``None``. A session already on
+    Sonnet or smaller is left out by its own model, inside ``model_swap``.
 
-    - ``model_swap.BEFORE_CHANGE``: it started (``change_points.session_start``)
-      before the main model last changed there, by any change the Changes
-      page lists that applies there (``change_points.change_points`` with the
-      corpus: an apply or undo, a change to your user settings or the
-      project's own, a new model its transcripts show);
-    - ``model_swap.SETTLED``: its project's model setting now (its newest
-      snapshot; with none of its own, your user settings in the newest
-      snapshot) is already Sonnet or smaller.
+    The move is the newest main-model change point the Changes page lists
+    (``change_points.change_points`` with the corpus: an apply or undo, a
+    change to your user settings or the project's own, a new model its
+    transcripts show) that applies in the session's project. It cuts only
+    when the value it moved the model to is Sonnet or smaller: a newest
+    point to a larger model, a move back included, cuts nothing, and so
+    does a point with no recorded value. A session that started at the
+    point's time counts.
 
-    ``None`` with neither a config folder nor snapshots, so every main
-    session counts. A session whose project no snapshot or change names is
-    judged by the changes made for every project and your user settings."""
-    points = change_points_mod.change_points(config_dir, corpus) if config_dir is not None else []
-    if not points and not snapshots:
+    A move that only the transcripts show is passed over when every session
+    of the run that made it is headless or has fewer than
+    :data:`MOVE_MIN_REPLIES` priced replies; the newest point left is the
+    one read. A session whose project no change names is judged by the
+    changes made for every project. ``None`` without a config folder, so
+    every main session counts."""
+    if config_dir is None:
         return None
-    newest = snapshots[-1] if snapshots else None
-    user = newest.data.get("user_settings") if newest is not None else None
-    user_model = user.get("model") if isinstance(user, dict) else None
-    reasons: dict[str, str | None] = {}
+    points = change_points_mod.change_points(config_dir, corpus)
+    runs = change_points_mod.model_runs(points, corpus)
+    points = [p for i, p in enumerate(points) if i not in runs or any(_steered(b) for b in runs[i])]
+    cut: set[str] = set()
     for bundle in corpus.sessions:
         if bundle.top is None:
             continue
         session_id = bundle.top.meta.session_id
-        keys = keys_by_session.get(session_id) or ()
-        last = change_points_mod.last_change(points, "model", keys)
-        start = change_points_mod.session_start(bundle)
-        if last is not None and (start is None or start < last):
-            reasons[session_id] = model_swap.BEFORE_CHANGE
+        point = change_points_mod.last_change_point(points, "model", keys_by_session.get(session_id) or ())
+        if point is None or not model_swap.at_main_floor(change_points_mod.new_value(point, "model", points)):
             continue
-        snap = snapshots_mod.snapshot_for(_END_OF_TIME, snapshots, keys) if snapshots and keys else None
-        now = snapshots_mod.effective_config(snap).get("model") if snap is not None else user_model
-        reasons[session_id] = model_swap.SETTLED if model_swap.at_main_floor(now) else None
-    return lambda tr: reasons.get(tr.meta.session_id)
+        start = change_points_mod.session_start(bundle)
+        if start is None or start < point.ts:
+            cut.add(session_id)
+    return lambda tr: model_swap.BEFORE_CHANGE if tr.meta.session_id in cut else None
 
 
 # -- build_report -----------------------------------------------------------
@@ -1872,14 +1889,14 @@ def build_report(
     # collected), rather than an incremental per-transcript .add() --------
 
     carry_stats = carry.compute_carry(all_results, pricing.resolve_model, carry_th)
-    # The main session's model setting decides only the sessions since the
-    # model last changed in their project, outside projects already on
+    # The main session's saving counts each session by the model it ran on
+    # (model_swap) and leaves out those from before their project moved to
     # Sonnet or smaller (_main_model_lever).
     model_swap_stats = model_swap.compute_model_swap(
         all_results,
         pricing,
         model_swap_th,
-        main_lever=_main_model_lever(corpus, config_dir, snapshots, session_snapshot_key),
+        main_lever=_main_model_lever(corpus, config_dir, session_snapshot_key),
     )
 
     compaction_sim_stats = compaction_sim.simulate_compaction_windows(
