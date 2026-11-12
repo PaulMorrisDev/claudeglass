@@ -77,6 +77,24 @@ def test_models_goal_evidence_names_the_runs_the_agent_file_decides():
     )
 
 
+def test_the_main_session_evidence_says_how_many_sessions_its_share_is_of():
+    def main_evidence(lever_runs: int) -> str:
+        model = _report()
+        [table] = model.sections[0].tables
+        for key in ("best_cheaper_alternative_model", "saving_pct", "lever_runs", "spawns"):
+            table.columns.append(NS(key=key))
+        table.rows[0] += ["claude-sonnet-4-5", 40.0, lever_runs, 29]
+        table.rows[1] += ["claude-haiku-4-5-20251001", 80.0, 10, 10]
+        out = goals.draft("models", model, UNITS)
+        return next(c for c in out["candidates"] if c["agent"] is None)["evidence"]
+
+    assert main_evidence(24) == (
+        "The replies of 24 of the main session's 29 sessions in this window would have cost 40% less on "
+        "claude-sonnet-4-5."
+    )
+    assert main_evidence(29) == "the main session's replies in this window would have cost 40% less on claude-sonnet-4-5."
+
+
 def _with_plans(observed="claude-opus-5-5", build=100.0, sonnet=60.0):
     model = _model()
     model.sections[0].tables[0].rows[0][1] = observed

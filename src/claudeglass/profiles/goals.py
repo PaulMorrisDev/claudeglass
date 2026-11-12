@@ -187,17 +187,25 @@ def _models(draft: _Draft, tables, *, subagents_only: bool) -> None:
             # its work was mostly reported hard.
             continue
         who = "the main session" if agent == TOP else agent
+        counted, total = whatif._num(row.get("lever_runs")), whatif._num(row.get("spawns"))
+        if agent == TOP and counted is not None and total is not None and counted < total:
+            evidence = (
+                f"The replies of {int(counted):,} of the main session's {int(total):,} sessions in this window "
+                f"would have cost {pct:.0f}% less on {best}."
+            )
+        elif agent == TOP or not _set_elsewhere(row):
+            evidence = f"{who}'s replies in this window would have cost {pct:.0f}% less on {best}."
+        else:
+            evidence = (
+                f"The replies of {agent}'s runs started without a model of their own would have cost "
+                f"{pct:.0f}% less on {best} in this window."
+            )
         draft.add(
             "model",
             None if agent == TOP else agent,
             _alias(best),
             ticked=agent != TOP and pct >= 20.0,
-            evidence=(
-                f"{who}'s replies in this window would have cost {pct:.0f}% less on {best}."
-                if agent == TOP or not _set_elsewhere(row)
-                else f"The replies of {agent}'s runs started without a model of their own would have cost "
-                f"{pct:.0f}% less on {best} in this window."
-            ),
+            evidence=evidence,
         )
 
 
