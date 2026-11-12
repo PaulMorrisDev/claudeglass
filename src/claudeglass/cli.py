@@ -3960,6 +3960,10 @@ def _capture_settings_step(
         for script in hook_health.CAPTURE_SCRIPTS:
             hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[script])
         load_or_create_salt(config_dir)
+        if hook_health.missing_capture_scripts(config_dir, wanted):
+            # An entry for a script that is not there makes every hook call exit 2, a blocking error.
+            stdout.write(f"{hook_health.HOOK_FILES_INCOMPLETE_TEXT}\n")
+            return False
     commands = _capture_hook_commands(config_dir)
     if any(commands[spec.script] is None for spec in wanted):
         # ROB-P9: the Python or a hook script's own path can't be safely

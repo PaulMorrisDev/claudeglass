@@ -1176,6 +1176,24 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     return written
 
 
+#: Said when an install could not put a capture script where Claude Code
+#: runs it from. Settings is left alone: an entry that points at a file
+#: that is not there makes every hook call exit with code 2, which Claude
+#: Code treats as a blocking error.
+HOOK_FILES_INCOMPLETE_TEXT = (
+    "Could not finish copying the capture hook files (another program may be using one), so settings.json "
+    "was left unchanged. Run 'claudeglass capture connect' again."
+)
+
+
+def missing_capture_scripts(config_dir: str | Path, wanted: Iterable[HookSpec]) -> tuple[str, ...]:
+    """The capture scripts ``wanted`` runs that are not on disk under
+    ``<config_dir>/hooks``, after an install. A settings entry may be
+    written only for a script that is there."""
+    hooks_dir = Path(config_dir) / "hooks"
+    return tuple(script for script in dict.fromkeys(spec.script for spec in wanted) if not (hooks_dir / script).is_file())
+
+
 def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     """Re-copy each packaged hook file already installed under
     ``<config_dir>/hooks`` (:data:`ALL_HOOK_FILES`) whose on-disk copy is
@@ -1188,8 +1206,9 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     is left alone, except that a capture script that is installed and
     isn't hand-edited gets back any of its own files that are missing: an
     install from before the hook moved into a module has none, and the
-    launcher that replaces its script needs one. Returns the paths
-    actually rewritten."""
+    launcher that replaces its script needs one. A launcher that is gone
+    comes back while its module is there. Returns the paths actually
+    rewritten."""
     dest_dir = Path(config_dir) / "hooks"
     if not dest_dir.is_dir():
         return []
@@ -1206,7 +1225,11 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
         elif state == "outdated":
             stale.append(name)
     for script, names in CAPTURE_FILES.items():
-        if states.get(script) in ("missing", "modified"):
+        if states.get(script) == "modified":
+            continue
+        # A launcher that is gone comes back only while the module it starts is there: with neither, nothing
+        # is installed (or an install was cut short, and 'capture connect' finishes it).
+        if states.get(script) == "missing" and states[capture_catalogue.HOOK_MODULE] == "missing":
             continue
         stale += [name for name in names if states[name] == "missing" and name not in stale]
     if healed and not stale:
@@ -1742,6 +1765,7 @@ __all__ = [
     "HookErrorStat",
     "HookHealth",
     "HookOverhead",
+    "HOOK_FILES_INCOMPLETE_TEXT",
     "HookOverheadRow",
     "HookSpec",
     "POLICY_ALL_OFF",
@@ -1761,6 +1785,7 @@ __all__ = [
     "installed_specs",
     "managed_settings_dir",
     "measure_hook_overhead",
+    "missing_capture_scripts",
     "plan_capture",
     "plan_connect",
     "refresh_hook_files",

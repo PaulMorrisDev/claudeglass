@@ -1988,3 +1988,92 @@ def test_status_cost_lines_ask_a_subagent_for_nothing(tmp_path):
     # While Haiku writes the tags the hook sends no note after a large result either.
     haiku = "\n".join(cli._capture_cost_lines(cat.level_metrics("deep"), "haiku"))
     assert "after each large or web tool result" not in haiku
+
+
+# -- M8: a hook entry is written only for a hook file that is on disk --------
+
+
+def _fail_replace_of(monkeypatch, name: str) -> None:
+    """The final rename of ``name`` fails, as it does when Windows holds the file open."""
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if Path(dst).name == name:
+            raise PermissionError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _boom)
+
+
+def _capture_commands_in(settings: dict) -> list[str]:
+    return [entry["command"] for _event, _matcher, entry in _entries(settings) if cat.HOOK_SCRIPT in entry["command"]]
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_capture_connect_writes_no_entry_for_a_launcher_that_could_not_be_installed(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    real_replace = os.replace
+    _fail_replace_of(monkeypatch, missing)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
+    # Every entry would call a file that is not there, and Claude Code treats the exit code 2 as a blocking error.
+    assert _capture_commands_in(_settings(config_dir)) == []
+    assert _settings(config_dir) == {"model": "opus"}
+    assert "claudeglass capture connect" in out and "again" in out
+    # Run again once the file can be written: it goes through.
+    monkeypatch.setattr(hook_health.os, "replace", real_replace)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert (config_dir / "hooks" / cat.HOOK_SCRIPT).is_file()
+    assert _capture_commands_in(_settings(config_dir))
+
+
+def test_capture_connect_writes_the_entries_when_only_the_catalogue_could_not_be_installed(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _fail_replace_of(monkeypatch, cat.CATALOGUE_FILE)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    # The launcher and its module are there, and the hook falls back to plain wording without the catalogue.
+    assert (config_dir / "hooks" / cat.HOOK_SCRIPT).is_file()
+    assert _capture_commands_in(_settings(config_dir))
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_setup_writes_no_capture_entry_for_a_launcher_that_could_not_be_installed(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_replace_of(monkeypatch, missing)
+    args = cli._make_parser().parse_args(
+        ["init", "--config-dir", str(config_dir), "--non-interactive", "--connect", "--no-service",
+         "--capture-level", "essentials"]
+    )
+    out = io.StringIO()
+    setup_flow.run(*cli._setup_flow_inputs(args), stdin=io.StringIO(""), stdout=out, now=NOW)
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
+    assert _capture_commands_in(_settings(config_dir)) == []
+    # What setup could do was done: the snapshot hook is connected.
+    assert hook_health.check(config_dir, claude_root=config_dir.parent).command is not None
+    assert "claudeglass capture connect" in out.getvalue() and "again" in out.getvalue()
+
+
+def test_refresh_hook_files_restores_a_launcher_that_is_missing_while_its_module_is_there(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_SCRIPT).unlink()
+    refreshed = hook_health.refresh_hook_files(config_dir)
+    assert [p.name for p in refreshed] == [cat.HOOK_SCRIPT]
+    assert (hooks_dir / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    assert hook_health.refresh_hook_files(config_dir) == []
+
+
+def test_refresh_hook_files_leaves_a_missing_launcher_alone_when_its_module_is_missing_too(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_SCRIPT).unlink()
+    (hooks_dir / cat.HOOK_MODULE).unlink()
+    assert hook_health.refresh_hook_files(config_dir) == []
+    assert not (hooks_dir / cat.HOOK_SCRIPT).exists()

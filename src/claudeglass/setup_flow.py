@@ -653,6 +653,18 @@ def _apply(setup: _Setup, opts: Options, tools: Tools, *, stdout, now, sleep, cl
             for script in hook_health.CAPTURE_SCRIPTS:
                 hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[script])
             load_or_create_salt(config_dir)
+            if hook_health.missing_capture_scripts(config_dir, setup.capture_specs):
+                # No entry for a script that is not there: every hook call would exit 2, a blocking error. The
+                # rest of the change is made, and the capture entries stay as they are.
+                stdout.write(f"{hook_health.HOOK_FILES_INCOMPLETE_TEXT}\n")
+                rc = 2
+                if setup.settings is not None:
+                    setup.settings = hook_health.plan_connect(
+                        config_dir,
+                        hook_command=tools.hook_command or "",
+                        statusline_command=tools.statusline_command,
+                        claude_root=opts.claude_root,
+                    )
         tools.install_hook(Path(config_dir).resolve())
         if setup.settings is not None and setup.settings.new_text is not None:
             try:
