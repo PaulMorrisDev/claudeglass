@@ -94,7 +94,7 @@ entirely, the affected row reports "unknown tier" instead of guessing
 at a stale id.
 
 Today's packaged rate card points `fable` and `best` at
-`claude-fable-5-1`, `opus` at `claude-opus-5-5`, `sonnet` and
+`claude-fable-5-2`, `opus` at `claude-opus-5-5`, `sonnet` and
 `sonnet[1m]` at `claude-sonnet-5-5`, and `haiku` at
 `claude-haiku-5-5`. The `sonnet` aliases moved from
 `claude-sonnet-5` to `claude-sonnet-5-5` with the card dated 2026-10-01;
@@ -102,8 +102,10 @@ Today's packaged rate card points `fable` and `best` at
 ran on it are still priced as themselves. The `haiku` alias moved from
 `claude-haiku-4-5-20251001` to `claude-haiku-5-5` with the card dated
 2026-10-30; Haiku 4.5 keeps its own row, so sessions that ran on it are
-still priced as themselves. A rate card of your own sets its own
-aliases.
+still priced as themselves. The `fable` and `best` aliases moved from
+`claude-fable-5-1` to `claude-fable-5-2` with the card dated 2026-11-12;
+Fable 5.1 keeps its own row, so sessions that ran on it are still priced
+as themselves. A rate card of your own sets its own aliases.
 
 ## The `model_swap` report section
 
