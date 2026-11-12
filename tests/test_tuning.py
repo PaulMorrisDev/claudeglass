@@ -416,7 +416,7 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
             return [fill(node.item)] * node.limit
         keys = node.keys
         names = (
-            sorted(keys.words)
+            sorted(keys.words)[: node.limit]
             if isinstance(keys, tuning.Closed)
             else weeks(node.limit)
             if isinstance(keys, tuning.Weeks)
@@ -938,7 +938,7 @@ class World:
 #: Names that live only in the world's transcripts, tag files and folders: none may reach the document.
 PRIVATE = (
     "my-private-reviewer", "proj-alpha", "proj-beta", "src/app.py", "src/lib.py", "src/fetch.py", "login", "logout",
-    "msg_wake", "msg_a1", "msg_a2", "msg_l1", "claude-haiku-4-5", "claude-sonnet-5", "workflow-subagent-1", "wf_1",
+    "msg_wake", "msg_a1", "msg_a2", "msg_l1", "workflow-subagent-1", "wf_1",
     "timeouts", "retry logic", "agent-a1", "bg1",
 )  # fmt: skip
 
@@ -1153,7 +1153,7 @@ def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert tuning.validate(doc) == []
     assert list(doc) == [
         *tuning._HEADER,
-        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions"),
+        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions", "figures"),
     ]
     assert doc["kind"] == "claudeglass-tuning" and doc["format"] == 1
     assert doc["tool_version"] == re.match(r"\d+(?:\.\d+)+", __version__).group(0)
@@ -2212,12 +2212,15 @@ def test_the_compactions_block_is_counts_alone_without_a_rate_card(tmp_path):
 def test_the_built_document_has_a_compactions_block_and_the_model_choice_and_nothing_that_names_anything(tmp_path):
     w = _mini_world(tmp_path)
     doc = tuning.build(w.corpus, w.config, w.pricing, config_dir=w.config_dir, days=DAYS, today=TODAY, claude_root=w.claude_root)
-    assert list(doc)[-1] == "compactions" and doc["compactions"]["summaries"] == 3
+    assert list(doc)[-1] == "figures" and doc["compactions"]["summaries"] == 3
     assert len(doc["agents"]["model_choice"]) == 4 and doc["agents"]["launches"]["foreground"]["agents"] == 3
     assert_privacy_deep(doc)
     text = tuning.dumps(doc)
-    for name in ("my-private-reviewer", "proj-mini", "claude-opus-4-1", "mystery-trigger", "agent-fi", "s1", str(w.root)):
+    for name in ("my-private-reviewer", "proj-mini", "mystery-trigger", "agent-fi", "s1", str(w.root)):
         assert name not in text, name
+    # The agents' model id is named only as a key of figures.models, where it is the packaged card's own id.
+    assert "claude-opus-4-1" in doc["figures"]["models"]
+    assert set(re.findall(r"claude-opus-4-1[\w.-]*", text)) <= set(doc["figures"]["models"])
     assert tuning.validate(json.loads(text)) == []
 
 
