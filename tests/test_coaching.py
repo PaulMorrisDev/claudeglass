@@ -3944,6 +3944,117 @@ def test_a_claim_that_windows_always_refuses_is_given_up_on_after_the_wait(tmp_p
     assert seen.opens > 1 and seen.sleeps >= seen.opens - 1 and seen.stale == 0
 
 
+class _Replace:
+    """Counts what ``_write_json`` does to a replace that Windows refuses: the ``os.replace`` calls (the first
+    ``refuse`` of them raise ``PermissionError``, or ``error`` when one is given) and the ``time.sleep`` calls
+    between them, which pass at once. Counted, not timed."""
+
+    def __init__(self, monkeypatch, refuse, error=PermissionError):
+        self.refuse, self.error, self.calls, self.sleeps = refuse, error, 0, 0
+        real = os.replace
+
+        def replace(src, dst):
+            self.calls += 1
+            if self.calls <= self.refuse:
+                raise self.error("in use")
+            return real(src, dst)
+
+        def slept(seconds):
+            self.sleeps += 1
+
+        monkeypatch.setattr(HOOK.os, "replace", replace)
+        monkeypatch.setattr(HOOK.time, "sleep", slept)
+
+
+def test_a_write_that_windows_refuses_twice_lands_on_the_third_try(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    target.write_text('{"old":1}', encoding="utf-8")
+    seen = _Replace(monkeypatch, refuse=2)
+    assert HOOK._write_json(target, {"new": 2}) is True
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
+    assert (seen.calls, seen.sleeps) == (3, 2)
+    assert not list(target.parent.glob("*.tmp"))
+
+
+def test_a_write_that_windows_always_refuses_gives_up_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    target.write_text('{"old":1}', encoding="utf-8")
+    seen = _Replace(monkeypatch, refuse=10**9)
+    assert HOOK._write_json(target, {"new": 2}) is False
+    assert target.read_text(encoding="utf-8") == '{"old":1}'
+    assert not list(target.parent.glob("*.tmp"))
+    # It tried a fixed number of times, waiting between tries.
+    assert (seen.calls, seen.sleeps) == (HOOK._REPLACE_TRIES, HOOK._REPLACE_TRIES - 1)
+
+
+def test_a_replace_refused_for_any_other_reason_is_not_retried(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    seen = _Replace(monkeypatch, refuse=10**9, error=OSError)
+    assert HOOK._write_json(target, {"new": 2}) is False
+    assert (seen.calls, seen.sleeps) == (1, 0)
+    assert not target.exists() and not list(target.parent.glob("*.tmp"))
+
+
+def test_a_write_to_a_folder_that_is_not_there_reads_as_not_landed(tmp_path):
+    assert HOOK._write_json(tmp_path / "missing" / cat.COACH_STATE_FILE, {"new": 2}) is False
+
+
+def test_a_hint_whose_stamp_did_not_land_is_not_given(tmp_path, monkeypatch):
+    payload = _scene_big_paste(tmp_path)
+    state = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    writes = []
+    with monkeypatch.context() as refusing:
+        refusing.setattr(HOOK, "_write_json", lambda path, data: writes.append(path) is not None and False)
+        assert _coach(tmp_path, payload) == ""
+    assert writes == [state] and not state.exists()
+    # Once the write lands again the hint is given: it was skipped, not spent.
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+
+
+def test_a_hint_whose_stamp_windows_refused_leaves_the_state_as_it_was(tmp_path, monkeypatch):
+    payload = _scene_big_paste(tmp_path)
+    state = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    state.write_text('{"sessions":{}}', encoding="utf-8")
+    _Replace(monkeypatch, refuse=10**9)
+    assert _coach(tmp_path, payload) == ""
+    assert state.read_text(encoding="utf-8") == '{"sessions":{}}'
+    assert not list(state.parent.glob("*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a file held open refuses a replace on Windows only")
+def test_a_write_to_a_file_another_call_has_open_lands_once_it_is_closed(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    target.write_text('{"old":1}', encoding="utf-8")
+    holder = open(target, "rb")
+    seen = {"refused": 0, "sleeps": 0}
+    real_replace, real_sleep = os.replace, HOOK.time.sleep
+
+    def replace(src, dst):
+        try:
+            return real_replace(src, dst)
+        except PermissionError:
+            seen["refused"] += 1
+            raise
+
+    def slept(seconds):
+        # The other call lets go while this one waits: not on a timer, so a slow machine cannot make it late.
+        seen["sleeps"] += 1
+        if seen["sleeps"] == 3:
+            holder.close()
+        return real_sleep(seconds)
+
+    monkeypatch.setattr(HOOK.os, "replace", replace)
+    monkeypatch.setattr(HOOK.time, "sleep", slept)
+    try:
+        assert HOOK._write_json(target, {"new": 2}) is True
+    finally:
+        holder.close()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
+    # Windows itself refused the replace while the file was open, as the patched tests assume.
+    assert seen["refused"] == 3
+    assert not list(target.parent.glob("*.tmp"))
+
+
 def _delete_pending(path):
     """Marks ``path`` for deletion the way a call that is deleting its claim does, so that the name stays, refusing
     a create, until the handle closes: returns the function that closes it. (A plain delete removes the name

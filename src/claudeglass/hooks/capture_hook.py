@@ -859,22 +859,54 @@ def _read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _write_json(path: Path, data: dict) -> None:
-    """Best-effort atomic write (a temp file, then ``os.replace``). Every
-    coach-state read-modify-write (:func:`coaching_for`'s decision,
-    :func:`keep_run`, :func:`keep_reply`, :func:`feedback_note_for`) re-reads
-    the file under :func:`_claimed` and writes it whole, and a caller that
-    finds the claim held skips its write, so two hook calls never put back
-    a copy that lacks the other's change."""
+#: How often :func:`_replace` tries a replace that Windows refuses, and how
+#: long it waits between tries: the other call's hold on the file is short.
+_REPLACE_TRIES = 20
+_REPLACE_WAIT_S = 0.002
+
+
+def _replace(tmp: Path, path: Path, tries: int = _REPLACE_TRIES, wait_s: float = _REPLACE_WAIT_S) -> bool:
+    """Moves ``tmp`` over ``path``; whether it landed. On Windows another
+    call that has ``path`` open refuses the replace (a ``PermissionError``)
+    until it lets go, so that error alone is tried again, up to ``tries``
+    times ``wait_s`` apart. Any other error, or the last refusal, gives up
+    and removes ``tmp``."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return True
+        except PermissionError:
+            if attempt + 1 < tries:
+                time.sleep(wait_s)
+        except OSError:
+            break
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return False
+
+
+def _write_json(path: Path, data: dict) -> bool:
+    """Best-effort atomic write (a temp file, then :func:`_replace`);
+    whether it landed. Every coach-state read-modify-write
+    (:func:`coaching_for`'s decision, :func:`keep_run`, :func:`keep_reply`,
+    :func:`feedback_note_for`) re-reads the file under :func:`_claimed` and
+    writes it whole, and a caller that finds the claim held skips its
+    write, so two hook calls never put back a copy that lacks the other's
+    change. A call that stamps a note it is about to give gives none when
+    the stamp did not land, so the hint is skipped rather than repeated;
+    upkeep-only writes ignore the result."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
     except OSError:
         try:
             tmp.unlink()
         except OSError:
             pass
+        return False
+    return _replace(tmp, path)
 
 
 #: A claim file older than this is left by a hook call that was killed
@@ -2770,7 +2802,9 @@ def _coaching_for(
                 for other in _FRESH_START_HINTS:
                     if other != hint:
                         _rest_beside(state, session, other, now_ts, th)
-            _write_json(state_path, state)
+            if not _write_json(state_path, state):
+                # The stamp is lost: a note given now would come again.
+                return "", ""
             fields = {**how, **fields}
             text = coaching["text"].get(hint) or ""
             note = f"{coaching['marker']}{coaching['version']} {hint}\n{text.format(**fields)}" if text else ""
@@ -3288,8 +3322,9 @@ def feedback_note_for(
                 # notes, so whether it runs changes nothing here.
                 note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
             dirty = dirty or bool(note)
-        if dirty:
-            _write_json(state_path, state)
+        if dirty and not _write_json(state_path, state) and note:
+            # The stamp is lost: a note given now would come again.
+            return ""
     return note
 
 
