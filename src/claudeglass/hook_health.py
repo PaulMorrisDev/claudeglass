@@ -51,12 +51,12 @@ import hashlib
 import importlib.resources
 import json
 import os
-import time
 import re
 import shutil
 import statistics
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
