@@ -141,18 +141,19 @@ _ALREADY_CHEAPEST_LABEL = "already on the cheapest model"
 _MAIN_SESSION_BELOW_FLOOR = frozenset({"haiku"})
 _MAIN_FLOOR_LABEL = "Sonnet is the smallest model suggested for your main session"
 
-#: Why the main session's model setting in force now doesn't decide a main
-#: session (``compute_model_swap``'s ``main_lever``): it started before the
-#: model last changed in its project, or its project's model is already
-#: Sonnet or smaller, below which the main session is never moved.
+#: Why a main session is left off the lever: it started before its
+#: project's model moved to Sonnet or smaller (``BEFORE_CHANGE``, from
+#: ``compute_model_swap``'s ``main_lever``), or its own model is Sonnet or
+#: smaller already (``SETTLED``).
 BEFORE_CHANGE = "before_change"
 SETTLED = "settled"
-_BEFORE_CHANGE_LABEL = "every main session started before the model last changed in its project"
+_BEFORE_CHANGE_LABEL = "every main session started before its project moved to Sonnet or smaller"
+_LEFT_OUT_LABEL = "every main session ran on Sonnet or smaller, or started before its project moved there"
 
 
 def at_main_floor(model: object) -> bool:
-    """Whether a main-session ``model`` setting (an alias or an id) is
-    already Sonnet or smaller, so nothing cheaper is suggested for it."""
+    """Whether a main-session model (a setting such as ``sonnet[1m]`` or a
+    model id) is Sonnet or smaller, so nothing cheaper is suggested for it."""
     return isinstance(model, str) and 0 <= workstyle.model_tier(model) <= _TIER_FAMILIES.index("sonnet")
 
 #: Agent types no agent file sets the model for: a workflow script
@@ -197,6 +198,17 @@ def _priced_turns(result: TranscriptResult) -> list[Turn]:
     for the same "small private helper, not worth a cross-module
     import" reason given in the module docstring."""
     return [t for t in result.turns if t.turn_index > 0]
+
+
+def _session_model(result: TranscriptResult) -> str | None:
+    """The model of most of a transcript's priced replies (ties: the
+    lexically larger id, as :func:`_dominant_label`); ``None`` when none
+    names one."""
+    counts: dict[str, int] = {}
+    for turn in _priced_turns(result):
+        if turn.model:
+            counts[turn.model] = counts.get(turn.model, 0) + 1
+    return _dominant_label(counts)
 
 
 def _agent_type_label(result: TranscriptResult) -> str:
@@ -335,8 +347,8 @@ class TierVerdict:
 
     ``state`` is one of ``"cheaper_available"`` / ``"already_cheapest"``
     / ``"main_floor"`` (the main session on Sonnet: never moved to Haiku)
-    / ``"before_change"`` (every main session started before its model last
-    changed)
+    / ``"before_change"`` (no main session counts, and some started before
+    their project moved to Sonnet or smaller)
     / ``"unknown_tier"`` / ``"no_data"`` / ``"set_elsewhere"`` (a named
     agent type none of whose runs followed its agent file's model: a
     workflow script or the spawn named it) / ``"no_lever"`` (a workflow
@@ -371,13 +383,12 @@ def _set_elsewhere_text(stats: "ModelSwapTypeStats") -> str:
 
 def _reach_suffix(stats: "ModelSwapTypeStats") -> str:
     """", on the 21 runs its agent file sets" when a subagent type's
-    saving covers only some of its runs; ", on the 7 main sessions since the
-    model last changed" when the main session's covers only the sessions
-    since then; empty otherwise."""
+    saving covers only some of its runs; ", on 24 of 29 main sessions" when
+    the main session's covers only some of its sessions; empty otherwise."""
     lever_runs = stats.lever.spawns if stats.lever is not None else stats.spawns
     if stats.key == "top-level":
-        if stats.before_change_runs and lever_runs:
-            return f", on the {lever_runs} main session{'s' if lever_runs != 1 else ''} since the model last changed"
+        if 0 < lever_runs < stats.spawns:
+            return f", on {lever_runs} of {stats.spawns} main sessions"
         return ""
     if lever_runs >= stats.spawns:
         return ""
@@ -393,7 +404,8 @@ def _tier_verdict(row: "ModelSwapTypeStats", pricing: Pricing) -> TierVerdict:
     stats = row.lever if row.lever is not None else row
     if row.key == "top-level" and stats.spawns == 0 and row.spawns > 0:
         if row.before_change_runs:
-            return TierVerdict("before_change", None, 0.0, 0.0, _BEFORE_CHANGE_LABEL)
+            label = _LEFT_OUT_LABEL if row.settled_runs else _BEFORE_CHANGE_LABEL
+            return TierVerdict("before_change", None, 0.0, 0.0, label)
         return TierVerdict("main_floor", None, 0.0, 0.0, _MAIN_FLOOR_LABEL)
     if stats.spawns == 0 and row.spawns > 0:
         return TierVerdict(
@@ -478,9 +490,9 @@ class ModelSwapTypeStats:
         default_factory=lambda: TierVerdict("no_data", None, 0.0, 0.0, "no priced turns")
     )
     #: The same totals for only the runs this row's lever decides
-    #: (:func:`model_set_by`): the main session's runs the model setting
-    #: in force now decides (``main_lever`` leaves the others off), and a
-    #: subagent type's runs started without a model of their own. The
+    #: (:func:`model_set_by`): the main session's runs not already on
+    #: Sonnet or smaller and not from before their project moved there, and
+    #: a subagent type's runs started without a model of their own. The
     #: tier verdict is worked out on these. ``None`` on the lever's own
     #: stats.
     lever: "ModelSwapTypeStats | None" = None
@@ -488,9 +500,10 @@ class ModelSwapTypeStats:
     #: model: the agent file's model line decides neither.
     workflow_runs: int = 0
     spawn_model_runs: int = 0
-    #: Main sessions the model setting in force now doesn't decide
-    #: (``compute_model_swap``'s ``main_lever``): counted on the row, not on
-    #: the lever.
+    #: Main sessions the lever leaves out, counted on the row, not on the
+    #: lever: those from before their project moved to Sonnet or smaller
+    #: (``compute_model_swap``'s ``main_lever``), and those already on
+    #: Sonnet or smaller.
     before_change_runs: int = 0
     settled_runs: int = 0
 
@@ -549,11 +562,12 @@ def compute_model_swap(
     model is even considered as an alternative) has somewhere to land
     without changing this function's signature again.
 
-    ``main_lever``, when given, says for a main-session transcript why the
-    model setting in force now doesn't decide it (:data:`BEFORE_CHANGE`,
-    :data:`SETTLED`), or ``None`` when it does. Such a run counts on its row
-    but not on the lever, as a workflow run does on a subagent's row.
-    Without it every main session is the setting's.
+    A main session whose own model is Sonnet or smaller counts on its row
+    but not on the lever (:data:`SETTLED`): it is already where the card
+    would move it. ``main_lever``, when given, says for the others whether
+    one started before its project's model moved to Sonnet or smaller
+    (:data:`BEFORE_CHANGE`) or ``None``. Such a run counts on its row but
+    not on the lever, as a workflow run does on a subagent's row.
     """
     del thresholds  # see docstring: accepted for signature symmetry only
 
@@ -564,7 +578,12 @@ def compute_model_swap(
         if stats is None:
             stats = by_key[key] = ModelSwapTypeStats(key=key, lever=ModelSwapTypeStats(key=key))
         setter = model_set_by(result)
-        reason = main_lever(result) if setter == "settings" and main_lever is not None else None
+        reason = None
+        if setter == "settings":
+            if at_main_floor(_session_model(result)):
+                reason = SETTLED
+            elif main_lever is not None:
+                reason = main_lever(result)
         if setter == "workflow":
             stats.workflow_runs += 1
         elif setter == "spawn":
@@ -669,8 +688,8 @@ def build_section(
             Column(key="lever_cost", label="Cost of those runs", kind="money"),
             Column(key="workflow_runs", label="Runs a workflow script started", kind="int"),
             Column(key="spawn_model_runs", label="Runs given a model when started", kind="int"),
-            Column(key="before_change_runs", label="Main sessions from before the model last changed", kind="int"),
-            Column(key="settled_runs", label="Main sessions in projects already on Sonnet", kind="int"),
+            Column(key="before_change_runs", label="Main sessions from before their project moved to Sonnet", kind="int"),
+            Column(key="settled_runs", label="Main sessions already on Sonnet or smaller", kind="int"),
         ]
     )
 
@@ -739,8 +758,9 @@ def build_section(
     )
 
     # The runs each model setting decides (an agent file's model line; the
-    # main session's model setting since it last changed), repriced at every
-    # model: what a what-if for that setting prices, whatever model it names.
+    # main session's model setting on the sessions it counts), repriced at
+    # every model: what a what-if for that setting prices, whatever model it
+    # names.
     file_table = Table(
         name="model_swap_agent_file_runs",
         title="Runs each model setting decides, at other models",
@@ -1041,8 +1061,8 @@ def _rule_model_tier(
                         for label, count in (
                             ("Runs a workflow script started (not counted)", workflow_runs),
                             ("Runs given a model when started (not counted)", spawn_model_runs),
-                            ("Main sessions from before the model last changed (not counted)", before_change_runs),
-                            ("Main sessions in projects already on Sonnet (not counted)", settled_runs),
+                            ("Main sessions from before their project moved to Sonnet (not counted)", before_change_runs),
+                            ("Main sessions already on Sonnet or smaller (not counted)", settled_runs),
                         )
                         if count
                     ),

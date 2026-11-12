@@ -312,9 +312,9 @@ def test_runs_given_a_model_when_started_are_left_out_of_the_agent_file_saving()
 
 
 def _two_main_sessions(reason_of_early: str):
-    """Two Opus main sessions, the first of which the model setting in force
-    now doesn't decide (``reason_of_early``): the stats, the same for the
-    second alone, and the rendered section."""
+    """Two Opus main sessions, the first of which ``main_lever`` leaves off
+    the lever (``reason_of_early``): the stats, the same for the second
+    alone, and the rendered section."""
     early, late = _run(OPUS, "", kind="top-level"), _run(OPUS, "", kind="top-level")
     stats = model_swap.compute_model_swap(
         [early, late], PRICING, main_lever=lambda tr: reason_of_early if tr is early else None
@@ -323,14 +323,48 @@ def _two_main_sessions(reason_of_early: str):
     return stats.by_key["top-level"], alone, model_swap.build_section(stats)
 
 
-def test_a_main_session_from_before_the_model_last_changed_counts_on_the_row_not_the_lever():
+def _main_rule(section: Section):
+    report = _report_with_section(section)
+    return report, model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None)
+
+
+def test_a_main_session_on_sonnet_or_smaller_is_left_off_the_lever_whatever_the_settings():
+    opus, sonnet, haiku = (_run(m, "", kind="top-level") for m in (OPUS, SONNET, HAIKU))
+    stats = model_swap.compute_model_swap([opus, sonnet, haiku], PRICING)
+    alone = model_swap.compute_model_swap([opus], PRICING).by_key["top-level"]
+    row = stats.by_key["top-level"]
+
+    assert row.spawns == 3 and row.lever.spawns == 1
+    assert (row.before_change_runs, row.settled_runs) == (0, 2)
+    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
+    assert row.tier_verdict.label.endswith(", on 1 of 3 main sessions)")
+
+    section = model_swap.build_section(stats)
+    report, recs = _main_rule(section)
+    (rec,) = recs
+    assert (
+        "Main sessions already on Sonnet or smaller (not counted)", 2,
+        "model_swap.model_swap_by_agent_type", "top-level",
+    ) in rec.evidence
+    _assert_evidence_resolves(report, rec)
+
+
+def test_a_session_on_sonnet_is_already_there_even_when_the_lever_would_cut_it():
+    sonnet = _run(SONNET, "", kind="top-level")
+    row = model_swap.compute_model_swap(
+        [sonnet], PRICING, main_lever=lambda tr: model_swap.BEFORE_CHANGE
+    ).by_key["top-level"]
+    assert (row.before_change_runs, row.settled_runs) == (0, 1)
+
+
+def test_a_main_session_from_before_a_move_down_counts_on_the_row_not_the_lever():
     row, alone, section = _two_main_sessions(model_swap.BEFORE_CHANGE)
 
     assert row.spawns == 2 and row.lever.spawns == 1
     assert (row.before_change_runs, row.settled_runs) == (1, 0)
     assert row.observed_cost == pytest.approx(2 * alone.observed_cost)
     assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
-    assert row.tier_verdict.label.endswith(", on the 1 main session since the model last changed)")
+    assert row.tier_verdict.label.endswith(", on 1 of 2 main sessions)")
 
     cells = _row_cells(section, "top-level")
     assert (cells["spawns"], cells["lever_runs"], cells["before_change_runs"], cells["settled_runs"]) == (2, 1, 1, 0)
@@ -338,51 +372,38 @@ def test_a_main_session_from_before_the_model_last_changed_counts_on_the_row_not
     assert file_cells["runs"] == 1
     assert file_cells[f"cost_{SONNET}"] == pytest.approx(alone.cost_by_model[SONNET])
 
-    report = _report_with_section(section)
-    (rec,) = model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None)
+    report, recs = _main_rule(section)
+    (rec,) = recs
     assert (
-        "Main sessions from before the model last changed (not counted)", 1,
+        "Main sessions from before their project moved to Sonnet (not counted)", 1,
         "model_swap.model_swap_by_agent_type", "top-level",
     ) in rec.evidence
     _assert_evidence_resolves(report, rec)
 
 
-def test_a_main_session_in_a_project_already_on_sonnet_is_left_off_the_lever():
-    row, alone, section = _two_main_sessions(model_swap.SETTLED)
+def test_with_every_main_session_left_out_there_is_no_saving_and_no_card():
+    def sessions(*models):
+        return [_run(m, "", kind="top-level") for m in models]
 
-    assert row.spawns == 2 and row.lever.spawns == 1
-    assert (row.before_change_runs, row.settled_runs) == (0, 1)
-    assert row.observed_cost == pytest.approx(2 * alone.observed_cost)
-    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
-    assert "since the model last changed" not in row.tier_verdict.label
-
-    report = _report_with_section(section)
-    (rec,) = model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None)
-    assert (
-        "Main sessions in projects already on Sonnet (not counted)", 1,
-        "model_swap.model_swap_by_agent_type", "top-level",
-    ) in rec.evidence
-    _assert_evidence_resolves(report, rec)
-
-
-def test_with_every_main_session_cut_there_is_no_saving_and_no_card():
-    sessions = [_run(OPUS, "", kind="top-level"), _run(OPUS, "", kind="top-level")]
-    for reason, state, label in (
-        (
-            model_swap.BEFORE_CHANGE, "before_change",
-            "every main session started before the model last changed in its project",
-        ),
-        (model_swap.SETTLED, "main_floor", "Sonnet is the smallest model suggested for your main session"),
-    ):
-        stats = model_swap.compute_model_swap(sessions, PRICING, main_lever=lambda tr, reason=reason: reason)
+    cut = lambda tr: model_swap.BEFORE_CHANGE  # noqa: E731
+    cut_opus = lambda tr: model_swap.BEFORE_CHANGE if OPUS in tr.turns[0].model else None  # noqa: E731
+    cases = (
+        (sessions(OPUS, OPUS), cut, "before_change",
+         "every main session started before its project moved to Sonnet or smaller"),
+        (sessions(SONNET, SONNET), None, "main_floor",
+         "Sonnet is the smallest model suggested for your main session"),
+        (sessions(SONNET, OPUS), cut_opus, "before_change",
+         "every main session ran on Sonnet or smaller, or started before its project moved there"),
+    )
+    for results, lever, state, label in cases:
+        stats = model_swap.compute_model_swap(results, PRICING, main_lever=lever)
         verdict = stats.by_key["top-level"].tier_verdict
         assert verdict.state == state and verdict.alt_model is None and verdict.saving_usd == 0.0
         assert verdict.label == label
         section = model_swap.build_section(stats)
         assert not [r for r in next(t for t in section.tables if t.name == "model_swap_agent_file_runs").rows
                     if r[0] == "top-level"]
-        report = _report_with_section(section)
-        assert model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None) == []
+        assert _main_rule(section)[1] == []
 
 
 def test_at_main_floor_is_sonnet_or_smaller():
