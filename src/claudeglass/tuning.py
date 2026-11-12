@@ -58,7 +58,7 @@ from collections import Counter
 from datetime import date, timedelta
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from . import PARSER_VERSION, __version__
 from . import capture as capture_mod
@@ -1279,17 +1279,11 @@ def _cache_ttl_s(replies: list) -> int:
     return _TTL_1H_S if any(t.cc_1h > 0 for t in replies[-_TTL_REPLIES:]) else _TTL_5M_S
 
 
-def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
-    """``([cold returns, cache-write tokens], [wake-ups, cache-write
-    tokens])`` over the main sessions' replies. No report-side count
-    existed, so this mirrors the capture hook's. A cold return is a
-    message you typed after a gap longer than the cache the reply before it
-    wrote lasts (``_cold_hint``), with a context of ``cold_min_tokens`` or
-    more, and not a wait for a usage limit or a gap across a compaction. A
-    wake-up is a reply that starts at a background task's notice an hour or
-    more after the reply before it. The tokens are the cache writes of the
-    reply that followed."""
-    cold, wake = [0, 0], [0, 0]
+def _break_turns(ctx: _Ctx) -> Iterator[tuple[_Session, str, Any, Any]]:
+    """``(session, kind, reply before, turn)`` for each break in the main
+    sessions' replies: ``kind`` is ``"cold"`` for a cold return and
+    ``"wake"`` for a wake-up (see :func:`_breaks`). The one place the rule is
+    written, for the pieces block and the figures block both."""
     minimum = ctx.thresholds["cold_min_tokens"]
     for s in ctx.sessions:
         before: list = []
@@ -1313,12 +1307,27 @@ def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
                     and gap > _cache_ttl_s(before)
                     and last.ctx + last.output_tokens >= minimum
                 ):
-                    cold[0] += 1
-                    cold[1] += turn.cache_creation_tokens
+                    yield s, "cold", last, turn
                 elif habits_mod.is_wake_up(turn, gap):
-                    wake[0] += 1
-                    wake[1] += turn.cache_creation_tokens
+                    yield s, "wake", last, turn
             before.append(turn)
+
+
+def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
+    """``([cold returns, cache-write tokens], [wake-ups, cache-write
+    tokens])`` over the main sessions' replies. No report-side count
+    existed, so this mirrors the capture hook's. A cold return is a
+    message you typed after a gap longer than the cache the reply before it
+    wrote lasts (``_cold_hint``), with a context of ``cold_min_tokens`` or
+    more, and not a wait for a usage limit or a gap across a compaction. A
+    wake-up is a reply that starts at a background task's notice an hour or
+    more after the reply before it. The tokens are the cache writes of the
+    reply that followed."""
+    cold, wake = [0, 0], [0, 0]
+    for _s, kind, _last, turn in _break_turns(ctx):
+        count = cold if kind == "cold" else wake
+        count[0] += 1
+        count[1] += turn.cache_creation_tokens
     return cold, wake
 
 

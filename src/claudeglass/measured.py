@@ -33,6 +33,8 @@ FIELD_VERSIONS: dict[str, int] = {
     "coach_tip": 50,
     "coach_tips": 50,
     "coach_disowned": 49,
+    "estimated": 45,
+    "queued_correction": 37,
 }
 #: The version a digest must be from to measure every field above.
 NEWEST = max(FIELD_VERSIONS.values())
