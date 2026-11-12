@@ -1791,7 +1791,7 @@ def _tool_name(entry: str) -> str:
     return AGENT_TOOLS[0] if base in AGENT_TOOLS else base
 
 
-def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
+def _read_entries(value, *, keep_cut_base: bool = False) -> tuple[list[tuple[str, bool]], bool]:
     """The entries of a stored ``tools`` or ``disallowedTools`` value, each
     with whether the hook cut it inside its parentheses (it is then its base
     name, ``Agent`` for ``Agent(worker-one, ...``), and whether they are the
@@ -1800,7 +1800,10 @@ def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
     masked as a path or URL, is a tool that cannot be read. A string comes
     from a hook that cut the whole line at 64 characters: one that ends in
     ``...`` at that length, or holds the masked-path marker, is not the whole
-    line."""
+    line. With ``keep_cut_base`` (a line that withholds tools) a last entry cut
+    inside its parentheses is kept as its base name, as a list entry is: it
+    still withholds that tool; a ``tools:`` line leaves it out, as it does not
+    list a tool it cannot read whole."""
     if isinstance(value, str) and value != _CURRENT_UNKNOWN:
         if NAME_REDACTED in value:
             return [], False
@@ -1809,7 +1812,9 @@ def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
             entries = split_tool_line(body)
             # The last entry may be cut short; one that ended at a comma was not.
             if entries and not body.rstrip().endswith(","):
-                entries.pop()
+                last = entries.pop()
+                if keep_cut_base and "(" in last:
+                    entries.append(last.split("(", 1)[0].strip())
             return [(entry, False) for entry in entries], False
         return [(entry, False) for entry in split_tool_line(value)], True
     if isinstance(value, (list, tuple)):
@@ -1915,7 +1920,7 @@ def read_agent_tools(tools, disallowed=None) -> AgentTools:
     no config snapshot, no ``tools:`` line (the agent gets every tool), an
     empty one, or one the hook cut off (:func:`_read_entries`)."""
     entries, whole = _read_entries(tools)
-    denied, denied_whole = _read_entries(disallowed)
+    denied, denied_whole = _read_entries(disallowed, keep_cut_base=True)
     known = whole and bool(entries)
     return AgentTools(
         allow=tuple(entry for entry, _cut in entries) if known else None,

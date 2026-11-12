@@ -271,3 +271,24 @@ def test_a_deny_line_the_hook_cut_off_still_denies_what_it_shows():
     cut = "Write, Edit, NotebookEdit, MultiEdit, Bash, PowerShell, WebFetch, WebSearch"[:61] + "..."
     line = read_agent_tools(None, cut)
     assert not line.offered("Bash") and line.offered("Read")
+
+def test_a_deny_string_cut_inside_its_last_entrys_parentheses_still_withholds_that_tool():
+    """The old hook stored the line as one string cut at 64 characters. Its last entry may be cut inside the
+    parentheses, and then it is its base name, as a list entry is."""
+    long_entry = "Bash(rm -rf /tmp/a-very-long-path-that-the-hook-cuts-somewhere-in-the-middle)"
+    stored = ("Read, Grep, " + long_entry)[:61] + "..."
+    assert len(stored) == 64 and "(" in stored and ")" not in stored
+    tools = read_agent_tools(None, stored)
+    assert tools.deny == ("Read", "Grep", "Bash")
+    assert tools.denied("Bash") and not tools.offered("Bash") and not tools.deny_whole
+    # The list form says the same for one entry cut at the cap.
+    assert read_agent_tools(None, ["Read", ("Bash(" + "x" * 70)[:61] + "..."]).denied("Bash")
+    # A cut before any parenthesis is still not counted: that entry is unknown.
+    assert read_agent_tools(None, "Write, Edit, NotebookEdit, MultiEdit, Bash, PowerShell, WebFetch, WebSearch"[:61] + "...").deny == (
+        "Write", "Edit", "NotebookEdit", "MultiEdit", "Bash", "PowerShell")
+
+
+def test_a_tools_string_cut_inside_its_last_entrys_parentheses_is_still_not_known():
+    stored = ("Read, Grep, Agent(worker-one, worker-two, worker-three, worker-four, worker-five)")[:61] + "..."
+    assert len(stored) == 64 and "(" in stored and ")" not in stored
+    assert read_agent_tools(stored).allow is None
