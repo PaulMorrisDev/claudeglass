@@ -430,3 +430,23 @@ def test_no_command_writes_to_the_store_not_even_into_its_wal(tmp_path, capsys):
         code, _out, _err = run_cli(world, command, *extra, capsys=capsys)
         assert code == 0, command
         assert store_state(world[1]) == before, command
+
+
+def test_project_names_match_the_store_slugs_whatever_their_case(tmp_path, capsys):
+    """The store was fed from ``c--Dev-x``; the folder is now ``C--Dev-x``."""
+    world = store_with_gone_sessions(
+        tmp_path,
+        {"c--Dev-x": {"keep": S("keep", 1), "gone-a": S("gone-a", 2), "gone-b": S("gone-b", 3)}},
+        {"gone-a", "gone-b"},
+    )
+    projects = world[0]
+    (projects / "c--Dev-x").rename(projects / "tmp-case")
+    (projects / "tmp-case").rename(projects / "C--Dev-x")
+    assert [p.name for p in projects.iterdir()] == ["C--Dev-x"]
+    out = tmp_path / "figures.json"
+    code, _stdout, _err = tuning_export(world, out, "--project", "C--Dev-x", capsys=capsys)
+    assert code == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["coverage"] == {"sessions": 3, "read": 1, "stored": 2, "older": 0}
+    code, text, _err = run_cli(world, ["report"], "--project", "C--Dev-x", "--days", "30", "--json", capsys=capsys)
+    assert code == 0
+    assert json.loads(text)["report"]["meta"]["sessions_left_out"] == 2
