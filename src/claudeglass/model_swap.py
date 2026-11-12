@@ -201,14 +201,17 @@ def _priced_turns(result: TranscriptResult) -> list[Turn]:
 
 
 def _session_model(result: TranscriptResult) -> str | None:
-    """The model of most of a transcript's priced replies (ties: the
-    lexically larger id, as :func:`_dominant_label`); ``None`` when none
-    names one."""
+    """The model of most of a transcript's priced replies; of two with as
+    many, the larger tier (``workstyle.model_tier``), so a session with as
+    many Opus replies as Sonnet ones is not already on Sonnet. ``None``
+    when none names one."""
     counts: dict[str, int] = {}
     for turn in _priced_turns(result):
         if turn.model:
             counts[turn.model] = counts.get(turn.model, 0) + 1
-    return _dominant_label(counts)
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: (kv[1], workstyle.model_tier(kv[0]), kv[0]))[0]
 
 
 def _agent_type_label(result: TranscriptResult) -> str:
@@ -573,11 +576,15 @@ def compute_model_swap(
 
     by_key: dict[str, ModelSwapTypeStats] = {}
     for result in results:
+        setter = model_set_by(result)
+        if setter == "settings" and _session_model(result) is None:
+            # A main session with no priced reply has no model to move and
+            # nothing to price: it is on no row.
+            continue
         key = _agent_type_label(result)
         stats = by_key.get(key)
         if stats is None:
             stats = by_key[key] = ModelSwapTypeStats(key=key, lever=ModelSwapTypeStats(key=key))
-        setter = model_set_by(result)
         reason = None
         if setter == "settings":
             if at_main_floor(_session_model(result)):

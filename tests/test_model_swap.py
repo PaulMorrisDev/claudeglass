@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import model, model_swap
+from claudeglass import helptext, model, model_swap
 from claudeglass.model import (
     Diagnostics,
     PricingMeta,
@@ -409,7 +409,7 @@ def test_with_every_main_session_left_out_there_is_no_saving_and_no_card():
 def test_at_main_floor_is_sonnet_or_smaller():
     for setting in ("sonnet", "claude-sonnet-5-5", "sonnet[1m]", "haiku"):
         assert model_swap.at_main_floor(setting), setting
-    for setting in ("opus", "opusplan", "fable[1m]", "default", None):
+    for setting in ("opus", "opusplan", "fable[1m]", "default", None, "", "a-model-nobody-knows"):
         assert not model_swap.at_main_floor(setting), setting
 
 
@@ -793,3 +793,24 @@ def test_measured_work_is_cited_but_never_changes_the_saving():
         ("Calls before the first edit", 0.0, "habits.habits_agents", "claude-implementer")
     ]
     assert before_edit_evidence(None) == []
+
+
+def test_a_main_session_with_as_many_replies_on_a_larger_model_is_not_already_on_sonnet():
+    def session(*models):
+        return _transcript([_turn(model=m, input_tokens=1_000_000, output_tokens=1_000_000) for m in models])
+
+    for models, settled in (((OPUS, SONNET), 0), ((HAIKU, OPUS), 0), ((SONNET, SONNET, OPUS), 1)):
+        row = model_swap.compute_model_swap([session(*models)], PRICING).by_key["top-level"]
+        assert (row.settled_runs, row.lever.spawns) == (settled, 1 - settled), models
+
+
+def test_a_main_session_with_no_priced_reply_is_on_no_row():
+    empty = _transcript([_turn(turn_index=0)])
+    stats = model_swap.compute_model_swap([_run(OPUS, "", kind="top-level"), empty], PRICING)
+    row = stats.by_key["top-level"]
+    assert (row.spawns, row.lever.spawns, row.settled_runs, row.before_change_runs) == (1, 1, 0, 0)
+    assert "top-level" not in model_swap.compute_model_swap([empty], PRICING).by_key
+
+
+def test_the_file_runs_tables_main_session_row_reads_main_session():
+    assert helptext.TABLE_COPY["model_swap_agent_file_runs"].value_labels == {"top-level": "Main session"}
