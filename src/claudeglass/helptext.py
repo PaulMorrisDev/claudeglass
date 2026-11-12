@@ -4856,6 +4856,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Whether CLAUDE_CODE_SUBAGENT_MODEL is set now: if it is, agents that name no model run on the one "
                 "it names.",
             ),
+            "sessions_measured": (
+                "Sessions measured",
+                "On a decided-and-changed-code row: the sessions whose replies were read by this version, when under "
+                "half of the window.",
+            ),
         },
         # The row key ("workflow-subagent:inherited") is labelled by the
         # table itself, one label per row, since agent types are open-ended.

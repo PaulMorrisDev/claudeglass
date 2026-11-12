@@ -19,6 +19,8 @@ from pathlib import Path
 from claudeglass import agent_models
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
+from claudeglass.measured import BEFORE_STAMP
+from claudeglass.render.markdown import render_markdown
 from claudeglass.pricing import load_pricing
 from claudeglass.report import build_report
 from claudeglass.snapshots import Snapshot
@@ -276,6 +278,41 @@ def test_asked_and_decide_apply_cards_fire_beside_the_inherited_one(tmp_path):
     assert severities == {"agent-model-inherited": "advice", "agent-model-asked": "info", "agent-decide-apply": "info"}
     (decide,) = _recs(model, "agent-decide-apply")
     assert decide.saving_usd is None
+
+
+def test_the_decide_apply_card_cites_the_sessions_measured_when_under_half_were(tmp_path):
+    project_dir = _corpus(tmp_path)
+    _write_subagent(
+        project_dir, "agent-audit1", {"agentType": "general-purpose", "description": "Audit the module"}, OPUS, edits=3
+    )
+
+    def built(older_sessions: int):
+        corpus = load_corpus([project_dir])
+        # Sessions 1 to N hold a digest an older parser wrote; session 0, with the agent, is current.
+        for bundle in corpus.sessions:
+            if 1 <= int(bundle.session_id.rsplit("-", 1)[1]) <= older_sessions:
+                bundle.top.parser_version = BEFORE_STAMP
+        model = build_report(corpus, PRICING, Config(), projects=(PROJECT,), window="agent models test")
+        (decide,) = _recs(model, "agent-decide-apply")
+        return model, decide
+
+    # Every transcript read by this version, or half of them: the table has no such column, the card no such row.
+    for older in (0, 3):
+        model, decide = built(older)
+        (row,) = _agent_models_rows(model)
+        assert "sessions_measured" not in row, older
+        assert "Sessions measured" not in [label for label, *_ in decide.evidence], older
+    # Four of six sessions older: two were measured, under half.
+    model, decide = built(4)
+    assert (model.meta.older_sessions, model.meta.sessions) == (4, 6)
+    (row,) = _agent_models_rows(model)
+    assert row["verdict"] == "decide-apply" and row["sessions_measured"] == "2 of 6"
+    assert decide.evidence[-1] == ("Sessions measured", "2 of 6", f"model_swap.{_TABLE}", "general-purpose:decide-apply")
+    # The markdown report reads it as the other evidence rows do.
+    assert (
+        "- Sessions measured: 2 of 6 (from Agents that ran on a larger model than their work needed, "
+        "general-purpose agents, decided and changed code)"
+    ) in render_markdown(model)
 
 
 def test_every_evidence_row_the_cards_cite_is_a_row_of_the_table(tmp_path):

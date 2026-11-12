@@ -675,7 +675,10 @@ changes a figure.
   smaller: the same kind for `inherited`, the same Agent-tool type
   whose call named the model for `asked`; empty when not measured) and `env_var_set` (`yes` or `no`:
   `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's
-  environment variable names). It holds agent types, role words,
+  environment variable names). A last column, `sessions_measured` (`9 of 82`),
+  is there only when fewer than half of the window's sessions were read by
+  this version and a `decide-apply` row stands: that row's cell says how many
+  were, and the card cites it. It holds agent types, role words,
   counts, models, amounts and dates, and nothing else.
 
 `recommend.recommend()` runs the `model-tier` rule

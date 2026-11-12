@@ -1996,7 +1996,7 @@ def build_report(
         sections.append(
             dataclasses.replace(
                 model_swap_section,
-                tables=[*model_swap_section.tables, agent_models.build_table(agent_models_stats)],
+                tables=[*model_swap_section.tables, agent_models.build_table(agent_models_stats, older=(older_n, sessions_m))],
             )
         )
 

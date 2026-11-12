@@ -173,6 +173,7 @@ def test_not_yet_covered_list_only_shrinks(report):
 AGENT_MODEL_COLUMNS = [
     "case", "agent_type", "verdict", "runs", "roles", "model", "cost_usd", "cost_on_sonnet_usd", "saving_usd",
     "saving_pct", "write_turns", "workflow_runs", "first_seen", "last_seen", "later_compliant", "env_var_set",
+    "sessions_measured",
 ]
 
 
