@@ -977,7 +977,9 @@ has deleted: the newer figures leave that session out. Its value is
 `"<n> of <m>"` (sessions read by an older version, of the window's sessions
 with a main transcript; the report's `meta.older_sessions` and
 `meta.sessions`) and its meaning is one sentence saying so. With a
-`project`, `n` and `m` are that project's.
+`project`, `n` and `m` are that project's. While the watcher's first scan
+runs (`/api/health` says `starting`) the row is left out, since an older
+session's transcript may still be on disk and about to be read again.
 
 ### `GET /api/profiles`
 

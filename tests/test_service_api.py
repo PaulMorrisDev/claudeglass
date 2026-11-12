@@ -2555,9 +2555,18 @@ def test_diagnostics_route_carries_the_older_sessions_row(tmp_path):
 
     when = datetime.now(timezone.utc) - timedelta(days=2)
     sessions = {sid: fallback_read_session(sid, when) for sid in ("sess-new", "sess-old")}
-    for name, older, expected in (("with", {"sess-old"}, "1 of 2"), ("without", set(), None)):
+    finished = WatcherState(running=True, last_success_at="2026-09-23T11:59:30Z")
+    first_scan = WatcherState(running=True, scanning=True, phase="reading", done=1, total=9)
+    # While the first scan runs, the files may be on disk and about to be read again: the line waits for it.
+    for name, older, expected, state in (
+        ("with", {"sess-old"}, "1 of 2", finished),
+        ("without", set(), None, finished),
+        ("scanning", {"sess-old"}, None, first_scan),
+    ):
         store, options = store_with_older_sessions(tmp_path / name, sessions, older)
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), service_api.make_handler(store, options))
+        httpd = ThreadingHTTPServer(
+            ("127.0.0.1", 0), service_api.make_handler(store, options, watcher_state=lambda state=state: state)
+        )
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         handle = _ServerHandle(httpd, thread, corpus=None, store=store, options=options)
