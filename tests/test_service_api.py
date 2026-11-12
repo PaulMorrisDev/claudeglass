@@ -3833,6 +3833,31 @@ def test_capture_lists_every_metric_with_what_why_and_cost(server):
     assert "uses your tokens" in data["warning"]
 
 
+@pytest.mark.parametrize("enabled_at", ["2026-11-01", "2026-11-01T10:00:00"])
+def test_a_capture_start_with_no_time_zone_is_read_as_utc_by_the_signed_out_count(server, enabled_at):
+    """``config.py`` reads a hand-written ``enabled_at`` with no zone as UTC: the Capture view counts the tag
+    files from it the same way instead of failing."""
+    from claudeglass import capture_catalogue, haiku_tags
+
+    resp, _payload = server.post_json("/api/capture", {"level": "essentials"})
+    assert resp.status == 200
+    path = server.options.config_dir / "config.toml"
+    text = path.read_text(encoding="utf-8")
+    stamp = next(line for line in text.splitlines() if line.startswith("enabled_at"))
+    path.write_text(text.replace(stamp, f'enabled_at = "{enabled_at}"'), encoding="utf-8")
+    folder = server.options.config_dir / capture_catalogue.JUDGE_DIR
+    folder.mkdir()
+    (folder / "2026-11.jsonl").write_text(
+        json.dumps({"ts": "2026-11-05T10:00:00Z", "reply": "msg_1", "agent": "", "err": "no_login"}) + "\n",
+        encoding="utf-8",
+    )
+    resp, body = server.get_json("/api/capture")
+    assert resp.status == 200 and body["ok"] is True
+    measured = body["data"]["measured"]
+    assert measured["report_signed_out"] == 1
+    assert measured["judge_paused_text"] == haiku_tags.SignedOut(agent_runs=1, paused=True).note
+
+
 def test_post_capture_saves_the_level_and_names_the_hooks_it_needs(server):
     resp, payload = server.post_json("/api/capture", {"level": "essentials"})
     assert resp.status == 200

@@ -4356,3 +4356,12 @@ def test_the_project_bundle_line_counts_fixes_in_one_unit() -> None:
     assert "data.cards +" not in actions
     assert "n + f.fixes" in actions
     assert "with no file to edit" in actions
+
+
+def test_capture_segment_shows_the_signed_out_count_and_the_pause_beside_the_judged_share() -> None:
+    """``capture status`` words these lines in ``cli._capture_usage_lines``; the page puts the server's words
+    in the same places."""
+    render = _function_source(_static_text("page-capture.js"), "renderCaptureData")
+    judged = 'of agent runs" + (measured.report_signed_out_text ? ", and " + measured.report_signed_out_text : "")'
+    assert judged in render
+    assert "if (measured.judge_paused_text)" in render and "measured.judge_paused_text" in render

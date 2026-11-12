@@ -62,6 +62,7 @@ from .capture_catalogue import (
     JUDGE_ERRORS,
     JUDGE_WRITER,
     JUDGE_WRITERS,
+    NO_LOGIN_REASON,
     RESULT_WORDS,
     RETIRED_AGENT_KEYS,
     RETRY_REASONS,
@@ -417,6 +418,61 @@ def summary(
     return out
 
 
+#: What is said beside the share of agent runs judged while the judge is
+#: waiting for a sign-in (the hook leaves the ``claude`` command alone for an
+#: hour after it finds it signed out: ``capture_hook._judge_signed_out``), in
+#: three sentences. The advice is the one ``capture status`` gives beside
+#: "No verdict for N" (``NO_LOGIN_REASON``), as a sentence of its own.
+SIGNED_OUT_WHAT = (
+    "Claude Haiku isn't being asked for now: the claude command wasn't signed in when ClaudeGlass last tried."
+)
+_ADVICE = NO_LOGIN_REASON.partition(": ")[2]
+SIGNED_OUT_HOW = f"{_ADVICE[:1].upper()}{_ADVICE[1:]}."
+SIGNED_OUT_RETRY = "ClaudeGlass tries again by itself, at most once an hour."
+
+
+@dataclass(frozen=True, slots=True)
+class SignedOut:
+    """Whether the judge cannot sign in, as the tag files show it."""
+
+    #: Agent runs whose call found the ``claude`` command signed out.
+    agent_runs: int = 0
+    #: The newest call found it so. The hook then leaves the command alone
+    #: for a while, and judging starts again by itself at the next agent
+    #: run after that, once the command is signed in.
+    paused: bool = False
+
+    @property
+    def runs_text(self) -> str:
+        """Beside the share of agent runs judged; ``""`` when none."""
+        return f"{self.agent_runs} found the claude command signed out" if self.agent_runs else ""
+
+    @property
+    def note(self) -> str:
+        """What, how and retry: for the Capture page."""
+        return f"{SIGNED_OUT_WHAT} {SIGNED_OUT_HOW} {SIGNED_OUT_RETRY}" if self.paused else ""
+
+    @property
+    def status_note(self) -> str:
+        """What and retry: for ``capture status``, whose "No verdict for N"
+        lines just above already give the advice."""
+        return f"{SIGNED_OUT_WHAT} {SIGNED_OUT_RETRY}" if self.paused else ""
+
+
+def signed_out(config_dir: str | Path | None, *, since: datetime | None = None) -> SignedOut:
+    """:class:`SignedOut` over the tag files from ``since`` on. Read from the
+    lines themselves, not from the hook's wait: a line is a call that found
+    the command signed out (``no_login``), so the count and the pause agree
+    with the totals ``capture status`` prints."""
+    if config_dir is None:
+        return SignedOut()
+    judged = load(config_dir, since=since)
+    return SignedOut(
+        agent_runs=sum(1 for j in judged if j.kind == "agent" and j.error == "no_login"),
+        paused=bool(judged) and judged[-1].error == "no_login",
+    )
+
+
 def prune(config_dir: str | Path, retention_days: int, now: datetime | None = None) -> int:
     """Delete the month files wholly older than ``retention_days``;
     returns how many went."""
@@ -432,4 +488,7 @@ def prune(config_dir: str | Path, retention_days: int, now: datetime | None = No
     return removed
 
 
-__all__ = ["Judged", "Summary", "agent_replies", "apply", "load", "prune", "summary", "tags_dir"]
+__all__ = [
+    "Judged", "SIGNED_OUT_HOW", "SIGNED_OUT_RETRY", "SIGNED_OUT_WHAT", "SignedOut", "Summary", "agent_replies", "apply", "load", "prune", "signed_out",
+    "summary", "tags_dir",
+]

@@ -2453,3 +2453,224 @@ def test_the_stop_hook_hands_a_fallback_to_the_worker_unless_a_script_is_running
     stop("claude-desktop", tagged)
     stop("sdk-cli", untagged)
     assert spawned == []
+
+
+# -- the judge that cannot sign in -------------------------------------------------
+
+HOUR_S = 3600.0
+#: When the worker runs, as the seconds ``time.time`` gives: passed in, so no test sleeps.
+T0 = 1_790_000_000.0
+#: The three sentences the pause says, in the order the Capture page shows them.
+WHAT = "Claude Haiku isn't being asked for now: the claude command wasn't signed in when ClaudeGlass last tried."
+HOW = "Sign in to the claude command in a terminal (the desktop app keeps its own login)."
+RETRY = "ClaudeGlass tries again by itself, at most once an hour."
+
+
+def _lean_agent_job(n: int) -> dict:
+    return {"kind": "agent", "ts": "2026-09-27T10:00:00Z", "reply": f"msg_{n}", "keys": ["result"], "excerpt": "x"}
+
+
+class _Claude:
+    """Stands in for the claude command: counts the calls it is started for. Signed out (it raises
+    ``NoLogin``) unless it is given an ``error`` to raise instead, or ``answers`` is true."""
+
+    def __init__(self, *, answers=False, error=None):
+        self.calls, self.answers, self.error = 0, answers, error
+
+    def __call__(self, job, judge, cwd):
+        self.calls += 1
+        if self.answers:
+            return _answer("[cg: brief=clear missing=none result=done]")
+        raise self.error or HOOK.NoLogin()
+
+
+def _judge_state(config_dir: Path) -> dict:
+    path = config_dir / cat.COACH_STATE_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _lines(config_dir: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for path in sorted((config_dir / cat.JUDGE_DIR).glob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def test_a_judge_that_found_the_claude_command_signed_out_is_not_started_at_the_next_agent_stop(tmp_path, monkeypatch):
+    claude = _Claude()
+    first = HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=claude)
+    assert first["err"] == "no_login"
+    claims = []
+    real = HOOK._claimed
+    monkeypatch.setattr(HOOK, "_claimed", lambda path: (claims.append(path), real(path))[1])
+    # Five more runs inside the wait: no command, no line, no claim on the coach state.
+    for n in range(2, 7):
+        assert HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(n), ask=claude) == {}
+    assert claude.calls == 1 and claims == []
+    [only] = _lines(tmp_path)
+    assert only == {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "", "err": "no_login"}
+    # The count is of calls that found the command signed out, so the skipped runs are not in it.
+    assert haiku_tags.signed_out(tmp_path).agent_runs == 1
+
+
+def test_a_skipped_run_does_not_even_read_the_agents_transcript(tmp_path):
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=_Claude(), now=T0)
+    # A lean job names a transcript that is not there: reading it would have gone looking for it.
+    lean = {"kind": "agent", "ts": "2026-09-27T10:00:00Z", "reply": "", "keys": ["result"],
+            "payload": {"agent_transcript_path": str(tmp_path / "gone.jsonl")}}
+    waited = lambda seconds: pytest.fail("waited for the agent's transcript")  # noqa: E731
+    assert HOOK.run_judge(tmp_path, CATALOGUE, lean, ask=_Claude(), sleep=waited, now=T0 + 60) == {}
+    assert len(_lines(tmp_path)) == 1
+
+
+def test_the_wait_is_one_hour_each_time_the_command_is_found_signed_out(tmp_path):
+    now = T0
+    for _ in range(5):
+        claude = _Claude()
+        record = HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=claude, now=now)
+        # The wait was over, so the command was started again; and it found the same.
+        assert claude.calls == 1 and record["err"] == "no_login"
+        assert _judge_state(tmp_path)["judge"] == {"until": now + HOUR_S}
+        waiting = _Claude()
+        assert HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(2), ask=waiting, now=now + HOUR_S - 1) == {}
+        assert waiting.calls == 0
+        now += HOUR_S
+
+
+def test_a_judged_call_clears_the_wait(tmp_path):
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=_Claude(), now=T0)
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(2), ask=_Claude(), now=T0 + HOUR_S)
+    assert _judge_state(tmp_path)["judge"] == {"until": T0 + 2 * HOUR_S}
+    # Signed in again: the wait is over, the call is judged, and nothing is left of the pause.
+    answering = _Claude(answers=True)
+    record = HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(3), ask=answering, now=T0 + 2 * HOUR_S)
+    assert answering.calls == 1 and record["agent"] == "result=done"
+    assert "judge" not in _judge_state(tmp_path)
+    # A later sign-out starts a wait of an hour.
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(4), ask=_Claude(), now=T0 + 3 * HOUR_S)
+    assert _judge_state(tmp_path)["judge"] == {"until": T0 + 4 * HOUR_S}
+
+
+def test_a_call_that_fails_for_another_reason_starts_no_wait(tmp_path):
+    for error in (subprocess.TimeoutExpired("claude", 60), ValueError("failed"), FileNotFoundError("claude")):
+        claude = _Claude(error=error)
+        HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=claude, now=T0)
+        HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(2), ask=claude, now=T0 + 1)
+        assert claude.calls == 2
+    assert "judge" not in _judge_state(tmp_path)
+
+
+def test_two_workers_that_find_it_signed_out_together_start_one_wait(tmp_path):
+    def both(job, judge, cwd):
+        # The second worker was started before the first one had found it out.
+        HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(2), ask=_Claude(), now=T0)
+        raise HOOK.NoLogin()
+
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=both, now=T0)
+    assert _judge_state(tmp_path)["judge"] == {"until": T0 + HOUR_S}
+
+
+def test_the_wait_is_kept_in_the_coach_state_beside_what_is_there(tmp_path):
+    (tmp_path / cat.COACH_STATE_FILE).write_text('{"sessions":{"s1":{"touched_at":1}}}', encoding="utf-8")
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=_Claude(), now=T0)
+    assert _judge_state(tmp_path) == {"sessions": {"s1": {"touched_at": 1}}, "judge": {"until": T0 + HOUR_S}}
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(2), ask=_Claude(answers=True), now=T0 + HOUR_S)
+    assert _judge_state(tmp_path) == {"sessions": {"s1": {"touched_at": 1}}}
+
+
+@pytest.mark.parametrize(
+    "stored",
+    ["1821539600", "Infinity", "1e308", "-Infinity", "NaN", '"soon"', "true", "[1]"],
+    ids=["a year ahead", "Infinity", "1e308", "-Infinity", "NaN", "a string", "a boolean", "a list"],
+)
+def test_a_stored_wait_end_that_cannot_be_right_is_no_wait(tmp_path, stored):
+    (tmp_path / cat.COACH_STATE_FILE).write_text('{"judge":{"until":%s}}' % stored, encoding="utf-8")
+    claude = _Claude(answers=True)
+    record = HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=claude, now=1_790_000_000.0)
+    assert claude.calls == 1 and record["agent"] == "result=done"
+
+
+def test_a_stored_wait_end_an_hour_ahead_at_most_is_a_wait(tmp_path):
+    for until, waits in ((T0 + HOUR_S, True), (T0 + HOUR_S + 1, False), (T0 + 1, True), (T0, False), (T0 - 5, False)):
+        (tmp_path / cat.COACH_STATE_FILE).write_text(json.dumps({"judge": {"until": until}}), encoding="utf-8")
+        claude = _Claude(answers=True)
+        HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=claude, now=T0)
+        assert claude.calls == (0 if waits else 1), until
+
+
+def test_a_sign_out_found_after_a_wait_that_cannot_be_right_starts_a_new_one(tmp_path):
+    (tmp_path / cat.COACH_STATE_FILE).write_text('{"judge":{"until":1e308,"wait_s":21600}}', encoding="utf-8")
+    HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=_Claude(), now=T0)
+    assert _judge_state(tmp_path)["judge"] == {"until": T0 + HOUR_S}
+
+
+def test_a_turn_of_the_main_session_waits_too(tmp_path):
+    job = HOOK.judge_job(_stop(_turn(tmp_path)), HAIKU, CATALOGUE)
+    claude = _Claude()
+    HOOK.run_judge(tmp_path, CATALOGUE, job, ask=claude, now=T0)
+    assert HOOK.run_judge(tmp_path, CATALOGUE, job, ask=claude, now=T0 + 60) == {}
+    assert HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=claude, now=T0 + 120) == {}
+    assert claude.calls == 1
+    # Only the call that found the command signed out has a line.
+    both = haiku_tags.summary(tmp_path)
+    assert (both.calls, both.errors) == (1, {"no_login": 1})
+
+
+def test_a_config_folder_with_no_state_yet_judges_as_before(tmp_path):
+    claude = _Claude(answers=True)
+    record = HOOK.run_judge(tmp_path, CATALOGUE, _lean_agent_job(1), ask=claude, now=T0)
+    assert claude.calls == 1 and "err" not in record and not (tmp_path / cat.COACH_STATE_FILE).exists()
+
+
+def test_the_pause_is_said_in_three_sentences_from_three_constants():
+    assert (haiku_tags.SIGNED_OUT_WHAT, haiku_tags.SIGNED_OUT_HOW, haiku_tags.SIGNED_OUT_RETRY) == (WHAT, HOW, RETRY)
+    # The advice is the one `capture status` gives beside "No verdict for N", word for word.
+    assert HOW[0].lower() + HOW[1:-1] in cat.NO_LOGIN_REASON
+    paused = haiku_tags.SignedOut(agent_runs=2, paused=True)
+    assert paused.note == f"{WHAT} {HOW} {RETRY}"
+    # `capture status` gives the advice in its "No verdict" line already, so it keeps to what and retry.
+    assert paused.status_note == f"{WHAT} {RETRY}"
+    assert haiku_tags.SignedOut(agent_runs=2).note == haiku_tags.SignedOut(agent_runs=2).status_note == ""
+
+
+def test_a_tag_file_where_every_call_was_signed_out_reads_as_paused(tmp_path):
+    _tag_file(
+        tmp_path,
+        {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "", "err": "no_login"},
+        {"ts": "2026-09-27T10:01:00Z", "reply": "msg_2", "agent": "", "err": "no_login"},
+        {"ts": "2026-09-27T10:02:00Z", "reply": "msg_3", "err": "no_login"},
+    )
+    seen = haiku_tags.signed_out(tmp_path)
+    assert (seen.agent_runs, seen.paused) == (2, True)
+    assert seen.runs_text == "2 found the claude command signed out" and seen.note == f"{WHAT} {HOW} {RETRY}"
+    assert haiku_tags.signed_out(tmp_path, since=datetime(2026, 9, 27, 10, 1, 30, tzinfo=timezone.utc)).agent_runs == 0
+
+
+def test_a_tag_file_with_judged_calls_and_no_pause_says_nothing_about_signing_in(tmp_path):
+    _tag_file(
+        tmp_path,
+        {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "brief=clear result=done"},
+        {"ts": "2026-09-27T10:01:00Z", "reply": "msg_2", "tl": "task=bugfix brief=clear"},
+    )
+    seen = haiku_tags.signed_out(tmp_path)
+    assert (seen.agent_runs, seen.paused, seen.runs_text, seen.note, seen.status_note) == (0, False, "", "", "")
+    assert haiku_tags.signed_out(tmp_path / "missing") == haiku_tags.SignedOut()
+
+
+def test_signing_in_again_ends_the_pause_in_the_tag_file_but_the_signed_out_runs_stay_counted(tmp_path):
+    _tag_file(
+        tmp_path,
+        {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "", "err": "no_login"},
+        {"ts": "2026-09-27T10:01:00Z", "reply": "msg_2", "agent": "brief=clear result=done"},
+    )
+    seen = haiku_tags.signed_out(tmp_path)
+    assert (seen.agent_runs, seen.paused, seen.note) == (1, False, "")
+    assert seen.runs_text == "1 found the claude command signed out"
+    # Signed out again after that: paused again.
+    _tag_file(
+        tmp_path,
+        {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "brief=clear result=done"},
+        {"ts": "2026-09-27T10:01:00Z", "reply": "msg_2", "agent": "", "err": "no_login"},
+    )
+    assert haiku_tags.signed_out(tmp_path).paused is True
