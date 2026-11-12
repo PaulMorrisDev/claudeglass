@@ -2345,3 +2345,25 @@ def test_an_ignored_card_adds_no_fix_tip_or_title_to_the_check_it_belongs_to(tmp
         assert card.title not in {tip["title"] for tip in ignored["tips"]}, card.id
         assert card.title not in ignored["summary"], card.id
     assert len(ignored["fixes"]) <= len(open_result["fixes"])
+
+
+def test_the_tools_check_counts_what_the_card_counts_for_an_agent_with_a_deny_line(tmp_path):
+    """The agent's lines come as the snapshot stores them (``agents[name]``),
+    not from ``effective_agents``."""
+    from test_spawn_parts import _diet_acc, _recs, _report, _snapshot, _tools_rec
+
+    report = _report(_diet_acc("searcher"))
+    line = ["Read", "Grep", "Bash", "Skill", "WebFetch", "NotebookEdit"]
+
+    def counted(denied):
+        agents = {"searcher": {"source": "user", "tools": line, **({"disallowedTools": denied} if denied else {})}}
+        report.recommendations = _recs(report, snapshot=_snapshot(agents), units=UNITS)
+        card = _tools_rec(report.recommendations, "searcher")
+        result = qa.run("tools", _ctx(tmp_path, model=report, agents=agents))
+        (row,) = [r for r in result["table"]["rows"] if r[0] == "searcher"]
+        return card, row[4]
+
+    open_card, open_cell = counted(None)
+    denied_card, denied_cell = counted(["WebFetch"])
+    assert open_cell.startswith("3 (") and denied_cell.startswith("2 (")
+    assert "WebFetch" in open_card.action.split("Rarely used")[1] and "WebFetch" not in denied_card.action.split("Rarely used")[1]

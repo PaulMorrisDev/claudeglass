@@ -569,10 +569,11 @@ def _tools(ctx: Context) -> dict:
         row = diet.get(agent_type)
         if row is None:
             return "none"
-        # Only what the agent's file still lists is sent, as the card counts it:
-        # the line is in the snapshot's agents map, not in effective_agents.
+        # Only what the agent's file still offers is sent, as the card counts it:
+        # the lines are in the snapshot's agents map, not in effective_agents.
         entry = ctx.agents.get(agent_type)
-        row = current_diet(row, entry.get("tools") if isinstance(entry, dict) else None)
+        entry = entry if isinstance(entry, dict) else {}
+        row = current_diet(row, entry.get("tools"), entry.get("disallowedTools"))
         count = len([name for name in str(row.get("rare_tools") or "").split(", ") if name])
         left_out = sum(
             whatif._num(row.get(key)) or 0.0

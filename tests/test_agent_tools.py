@@ -214,3 +214,52 @@ def test_a_line_that_changes_is_an_edit_whether_stored_as_a_string_or_a_list(tmp
     _write_snapshot(tmp_path, "20260902T100000Z", ["Read", "Grep", "Bash"])
     [point] = change_points.change_points(tmp_path)
     assert point.keys == ["agents.overseer.tools"]
+
+
+# -- deny first: a tool on disallowedTools is not offered, whatever tools says -
+
+
+@pytest.mark.parametrize(
+    "deny, name, offered",
+    [
+        ("Skill", "Skill", False),
+        ("Skill", "Read", True),
+        (["Write", "Edit"], "Edit", False),
+        # Task is Agent under its old name, on either line.
+        ("Task", "Agent", False),
+        ("Agent", "Task", False),
+        # mcp__X and mcp__X__* withhold server X, and each of its tools.
+        ("mcp__github", "mcp__github__*", False),
+        ("mcp__github__*", "mcp__github__*", False),
+        ("mcp__github", "mcp__github__create_issue", False),
+        ("mcp__github", "mcp__gitlab__*", True),
+        ("mcp__git", "mcp__github__*", True),
+        # mcp__* withholds every MCP tool and no other.
+        ("mcp__*", "mcp__github__*", False),
+        ("mcp__*", "mcp__github__create_issue", False),
+        ("mcp__*", "Read", True),
+        # mcp__X__tool withholds that tool only: the server stays offered.
+        ("mcp__github__create_issue", "mcp__github__create_issue", False),
+        ("mcp__github__create_issue", "mcp__github__*", True),
+        ("mcp__github__create_issue", "mcp__github__list_issues", True),
+        # An entry with a specifier is a rule about some calls, not the whole tool.
+        ("Bash(rm *)", "Bash", True),
+    ],
+)
+def test_a_denied_tool_is_not_offered_with_no_tools_line(deny, name, offered):
+    assert read_agent_tools(None, deny).offered(name) is offered
+
+
+@pytest.mark.parametrize("tools", ["Read, Skill, mcp__github__*", ["Read", "Skill", "mcp__github__*"]])
+def test_a_tool_on_both_lines_is_removed(tools):
+    line = read_agent_tools(tools, "Skill, mcp__github")
+    assert line.offered("Read")
+    assert not line.offered("Skill") and not line.offered("mcp__github__*")
+    # A tool the tools line lacks stays absent whatever the deny line says.
+    assert not read_agent_tools("Read", "Write").offered("Bash")
+
+
+def test_a_deny_line_the_hook_cut_off_still_denies_what_it_shows():
+    cut = "Write, Edit, NotebookEdit, MultiEdit, Bash, PowerShell, WebFetch, WebSearch"[:61] + "..."
+    line = read_agent_tools(None, cut)
+    assert not line.offered("Bash") and line.offered("Read")

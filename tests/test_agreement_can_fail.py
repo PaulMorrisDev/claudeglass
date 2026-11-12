@@ -17,6 +17,7 @@ the Changes page's.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 
 import pytest
@@ -49,6 +50,21 @@ def test_check_1_reports_a_tools_card_that_leaves_out_a_tool_the_agent_called(pr
     monkeypatch.setattr(recommend, "tools_list_offer", drops_read)
     problems = agreement.check_tools_lines(_rebuilt(profile, "capture_off"))
     assert any("leaves out Read" in p and "spawn-tools-list:reviewer" in p for p in problems), problems
+
+
+def test_check_1_does_not_ask_for_a_tool_the_agents_disallowed_tools_withhold(profile):
+    """Edit clears the bar on the reviewer's spawns and is not on its card's line,
+    because the reviewer's file withholds it: not a disagreement. The same agent
+    with no deny line is one."""
+    denied = profile("denied")[1]
+    assert agreement.check_tools_lines(denied) == []
+    card = [r for r in denied.recs if r.id == "spawn-tools-list" and r.agent_type == "reviewer"][0]
+    assert "Edit" not in card.changes[0].value
+    # The same report and cards, read as if the file did not say so.
+    agents = {name: {k: v for k, v in entry.items() if k != "disallowedTools"} for name, entry in denied.agents.items()}
+    bare = dataclasses.replace(denied, ctx=dataclasses.replace(denied.ctx, agents=agents))
+    problems = agreement.check_tools_lines(bare)
+    assert any("spawn-tools-list:reviewer" in p and "leaves out Edit" in p for p in problems), problems
 
 
 def test_check_2_reports_a_card_that_names_a_different_agents_folder_than_its_fix(profile, monkeypatch):
@@ -84,8 +100,8 @@ def test_check_4_reports_a_tools_check_that_counts_other_tools_than_the_card(pro
     assert agreement.check_tools_figures(profile("capture_off")[1]) == []
     real = recommend.current_diet
 
-    def one_fewer(diet, current):
-        row = dict(real(diet, current))
+    def one_fewer(diet, current, disallowed=None):
+        row = dict(real(diet, current, disallowed))
         row["rare_tools"] = ", ".join(agreement._names(row.get("rare_tools"))[:-1])
         return row
 

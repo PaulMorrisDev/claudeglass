@@ -1322,3 +1322,122 @@ def test_calls_recorded_as_task_count_for_a_line_that_says_agent():
     snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
     rec = _tools_rec(_recs(_report(acc), snapshot=snap, units=Units()), "orchestrator")
     assert sorted(rec.changes[0].value) == ["Agent", "Grep", "Read"]
+
+
+# -- R3: deny first ---------------------------------------------------------
+
+
+def _tools_card_for(line=None, denied=None, **acc_kwargs):
+    entry = {"source": "user"}
+    if line is not None:
+        entry["tools"] = line
+    if denied is not None:
+        entry["disallowedTools"] = denied
+    report = _report(_diet_acc("searcher", **acc_kwargs))
+    recs = _recs(report, snapshot=_snapshot({"searcher": entry}), units=Units())
+    return recs, _tools_rec(recs, "searcher")
+
+
+def _rare_part(card):
+    return card.action.split("Rarely used")[1].split("Claude Code adds")[0]
+
+
+def test_a_denied_rare_tool_adds_nothing_to_the_tools_cards_saving():
+    _open_recs, open_card = _tools_card_for()
+    _denied_recs, card = _tools_card_for(denied="WebFetch")
+    assert "WebFetch" in _rare_part(open_card) and "WebFetch" not in _rare_part(card)
+    assert 0 < card.saving_usd < open_card.saving_usd
+    # The same price as a known line that already lacks the tool.
+    line = ["Read", "Grep", "Bash", "Skill", "NotebookEdit"]
+    _line_recs, lacking = _tools_card_for(line=line)
+    assert card.saving_usd == pytest.approx(lacking.saving_usd)
+
+
+def test_a_denied_tool_is_not_put_on_the_suggested_line():
+    # Bash is called in 2 of 20 spawns, so the diet keeps it, but the file withholds it.
+    _recs_denied, card = _tools_card_for(denied="Bash")
+    assert card.changes[0].value == ["Grep", "Read"]
+    assert "tools: Grep, Read" in card.action
+
+
+def test_skill_on_disallowed_tools_gives_no_skills_card_and_takes_nothing_off_the_tools_card():
+    recs, card = _tools_card_for(denied=["Skill"])
+    assert not any(r.id == "spawn-unused-skills" for r in recs)
+    assert "Skill" not in _rare_part(card)
+    assert "skills list" not in card.why
+    # Without the deny line the skills card is there.
+    open_recs, _open_card = _tools_card_for()
+    assert any(r.id == "spawn-unused-skills" for r in open_recs)
+
+
+_SERVERS = {"github": (0, 25_000.0, 800.0, 300.0), "sentry": (0, 20_000.0, 500.0, 200.0)}
+
+
+def test_a_denied_server_is_not_on_the_mcp_card():
+    for denied in ("mcp__github", ["mcp__github__*"], ["Read", "mcp__github"]):
+        recs, _card = _tools_card_for(denied=denied, spawns=50, servers=_SERVERS)
+        (mcp,) = [r for r in recs if r.id == "spawn-unused-mcp"]
+        assert "sentry" in mcp.action and "github" not in mcp.action, denied
+    # mcp__* withholds them all, so there is no card.
+    recs, _card = _tools_card_for(denied="mcp__*", spawns=50, servers=_SERVERS)
+    assert not any(r.id == "spawn-unused-mcp" for r in recs)
+    # One denied tool of a server leaves the server on the card.
+    recs, _card = _tools_card_for(denied="mcp__github__create_issue", spawns=50, servers=_SERVERS)
+    (mcp,) = [r for r in recs if r.id == "spawn-unused-mcp"]
+    assert "github" in mcp.action and "sentry" in mcp.action
+
+
+def test_a_denied_server_is_not_priced_into_the_tools_card():
+    _open_recs, open_card = _tools_card_for(spawns=50, servers=_SERVERS)
+    _recs_denied, card = _tools_card_for(denied="mcp__github", spawns=50, servers=_SERVERS)
+    assert "mcp__github__*" in _rare_part(open_card) and "mcp__github__*" not in _rare_part(card)
+    assert card.saving_usd < open_card.saving_usd
+
+
+def test_the_price_path_and_the_tuning_export_read_the_deny_line_as_the_card_does():
+    from claudeglass import tuning
+
+    row = _diet_row(_report(_diet_acc("searcher")), "searcher")
+    open_diet = recommend_mod.current_diet(row, None)
+    denied = recommend_mod.current_diet(row, None, "WebFetch")
+    assert "WebFetch" in open_diet["rare_tools"] and "WebFetch" not in denied["rare_tools"]
+    assert 0 < denied["saving_usd"] < open_diet["saving_usd"]
+    # Every rare tool denied: nothing to leave out, so no offer.
+    every = ["NotebookEdit", "WebFetch", "Skill"]
+    assert recommend_mod.current_diet(row, None, every)["rare_tools"] == ""
+    assert recommend_mod.tools_list_offer("searcher", row, current=None, disallowed=every) is None
+    stats = context_budget.ContextBudgetStats()
+    stats.agents["searcher"] = _diet_acc("searcher")
+    full = tuning._startup_diet_usd(stats)["custom"]
+    assert tuning._startup_diet_usd(stats, {}, {"searcher": "WebFetch"})["custom"] == pytest.approx(denied["saving_usd"])
+    assert tuning._startup_diet_usd(stats, {}, {"searcher": "WebFetch"})["custom"] < full
+    assert tuning._startup_diet_usd(stats, {}, {"searcher": every}) == {}
+
+
+def test_the_tuning_context_reads_the_deny_line_from_the_merged_snapshot(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from claudeglass import tuning
+
+    folder = tmp_path / "snapshots"
+    folder.mkdir()
+    doc = {"ts": "20260901T100000Z", "schema": 2, "project_slug": "slug:abc",
+           "agents": {"searcher": {"source": "user", "tools": ["Read", "Grep"], "disallowedTools": "Skill, Write"},
+                      "other": {"source": "user"}}}
+    (folder / "20260901T100000Z.json").write_text(json.dumps(doc), encoding="utf-8")
+    ctx = tuning._Ctx.__new__(tuning._Ctx)
+    ctx.config_dir = tmp_path
+    ctx.corpus = SimpleNamespace(sessions=[])
+    assert ctx.agent_tools == {"searcher": ["Read", "Grep"]}
+    assert ctx.agent_denied == {"searcher": ["Skill", "Write"]}
+
+
+def test_the_single_mcp_tool_on_a_kept_server_is_suggested_as_that_tool_and_not_the_whole_server():
+    line = "mcp__github__create_issue, Read, WebFetch"
+    servers = {"github": (5, 25_000.0, 800.0, 300.0)}
+    recs, card = _tools_card_for(line=line, uses={"Read": 20}, chars={"Read": 1500, "WebFetch": 40000},
+                                 spawns=20, servers=servers)
+    assert card is not None
+    assert "mcp__github__create_issue" in card.changes[0].value and "mcp__github__*" not in card.changes[0].value
+    assert "tools: Read, mcp__github__create_issue." in card.action and "mcp__github__*" not in card.action.split("Rarely used")[0]
