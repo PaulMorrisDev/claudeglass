@@ -283,22 +283,21 @@ def _folders(text) -> set[str]:
 
 
 def check_agent_folders(inp: Inputs) -> list[str]:
-    """Check 2. Where a card whose fix is one exact file (or an "A or B" pair:
-    kind ``file`` in ``fixes.fix_group``) names an agents folder
-    (``~/.claude/agents/`` or ``.claude/agents/``) in its action text or its
-    fix's prompt, it is a folder the card's fix works in (``fixes.fix_file``
-    for each of its changes). A card whose fix spans several files or sets a
-    standing rule may name the agent's own file as a second place, so its text
-    is not held to that. Two cards for one agent also name one folder between
-    them."""
+    """Check 2. Where a card names an agents folder (``~/.claude/agents/`` or
+    ``.claude/agents/``) in its action text or its fix's prompt, it is a folder
+    the card's fix works in (``fixes.fix_file`` for each of its changes). A card
+    that sets a standing rule (kind ``rule`` in ``fixes.fix_group``) may name the
+    agent's own file as a second place, so its text is not held to that; every
+    other card is, one exact file, an "A or B" pair or several files. Two cards
+    for one agent also name one folder between them."""
     problems: list[str] = []
     single: dict[str, dict[str, str]] = {}
     for rec in inp.recs:
         files = {fixes.fix_file(rec, change) for change in (rec.changes or [None])}
         allowed = set().union(*(_folders(f) for f in files if f))
-        one_file = all(fixes.fix_group(rec, change)[1] == "file" for change in (rec.changes or [None]))
+        standing_rule = any(fixes.fix_group(rec, change)[1] == "rule" for change in (rec.changes or [None]))
         texts = {"action": rec.action, **{f"prompt {i + 1}": fix.get("prompt") for i, fix in enumerate(rec.fixes)}}
-        for where, text in texts.items() if one_file else ():
+        for where, text in () if standing_rule else texts.items():
             for folder in sorted(_folders(text) - allowed):
                 problems.append(
                     f"{_who(rec)}: the {where} names {folder} but the fix works in "

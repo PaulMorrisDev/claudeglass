@@ -237,6 +237,20 @@ def test_check_2_still_reports_a_card_of_one_exact_file_that_names_the_other_age
     assert any("ttl-switch" in p and "action names .claude/agents/" in p and "settings.json" in p for p in problems), problems
 
 
+def test_check_2_also_judges_a_card_whose_fix_spans_several_files(profile):
+    """Only a card that sets a standing rule may name the agent's own file as a second place.
+    One whose fix spans several files (here the MCP servers and plugins) works in those files."""
+    from claudeglass.model import Recommendation
+
+    inp = profile("capture_off")[1]
+    card = Recommendation(id="baseline-bloat", key="baseline-bloat", severity="advice", title="Big start",
+                          why="Tools.", action="Trim it in .claude/agents/reviewer.md instead.", saving_usd=2.0)
+    fixes.attach_fixes([card])
+    assert fixes.fix_group(card, None)[1] == "several"
+    problems = agreement.check_agent_folders(_with_cards(inp, card))
+    assert any("baseline-bloat" in p and "action names .claude/agents/" in p for p in problems), problems
+
+
 def test_check_7_reports_a_check_that_says_no_data_while_an_open_card_for_its_rules_changes_a_setting(profile, monkeypatch):
     base = profile("capture_off")[1]
     # The profile's CLAUDE.md cards are information only; one of them as advice is an open card.
