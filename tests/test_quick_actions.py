@@ -2652,3 +2652,73 @@ def test_models_check_does_not_say_nothing_else_would_save_when_an_ignored_card_
     assert qa.run("models", _ctx(tmp_path, model=model))["summary"] == (
         f"{_INHERITED}. Apart from that, no change to an agent file or setting would save a useful amount."
     )
+
+def test_the_project_files_check_names_files_from_the_projects_roots_it_is_given(tmp_path, pf_names):
+    """The sessions' folders are found under the projects root, which need not be beside the config folder."""
+    ctx, project, salt = _pf_setup(tmp_path)
+    apart = tmp_path / "mount" / "projects"
+    apart.parent.mkdir()
+    (ctx.config_dir.parent / "projects").rename(apart)
+    data = _pf_data(_pf_read(_pf_hash(project / "docs" / "context.md", salt)))
+    lost = _pf_run(ctx, data)
+    assert not lost["summary"].startswith("docs/context.md")
+    ctx.projects_roots = (apart,)
+    found = _pf_run(ctx, data)
+    assert found["status"] == "act" and found["summary"].startswith("docs/context.md is now about 9k tokens")
+
+
+def _ttl_rows(model, rows):
+    """``_full_model``'s cache-lifetime table with these ``(agent, observed, all 5m, all 1h)`` rows."""
+    (table,) = [t for s in model.sections if s.key == "ttl" for t in s.tables if t.name == "ttl_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    table.rows[:] = [[{"agent_type": a, "cost_observed": o, "cost_all_5m": m5, "cost_all_1h": h1}[k] for k in keys]
+                     for a, o, m5, h1 in rows]
+
+
+def _ttl_card(*changes):
+    return Recommendation(id="ttl-switch", key="ttl-switch", severity="advice", title="Longer cache",
+                          changes=list(changes))
+
+
+def test_the_cache_check_counts_an_ignored_settings_candidate_as_removed(tmp_path):
+    """Only the main session would save (a settings candidate); no agent would. Its card is ignored."""
+    model = _full_model()
+    _ttl_rows(model, [("top-level", 50.0, 55.0, 45.0), ("Explore", 5.0, 5.0, 6.0), ("Plan", 3.0, 3.0, 3.5)])
+    model.recommendations = [_ttl_card(SettingChange(target="settings", key="promptCacheTtl", agent=None, value="1h"))]
+    open_result = qa.run("cache", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 cache lifetime change would")
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["summary"] == IGNORED_ONLY
+
+
+def test_the_cache_check_counts_an_ignored_per_agent_candidate_as_removed(tmp_path):
+    """Only Explore would save; the agents together and the main session would not. Its card is ignored."""
+    model = _full_model()
+    _ttl_rows(model, [("top-level", 50.0, 50.0, 55.0), ("Explore", 10.0, 5.0, 12.0), ("Plan", 10.0, 15.0, 10.0)])
+    model.recommendations = [_ttl_card(
+        SettingChange(target="agent", key="experimental.cacheTtl", agent="Explore", value="5m"))]
+    open_result = qa.run("cache", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 cache lifetime change would")
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["summary"] == IGNORED_ONLY
+    # With nothing ignored and nothing to change, the lifetimes are said to be within a few percent.
+    _ttl_rows(model, [("top-level", 50.0, 50.0, 55.0), ("Explore", 10.0, 10.0, 12.0)])
+    model.recommendations = []
+    assert qa.run("cache", _ctx(tmp_path, model=model))["summary"] == (
+        "Your cache lifetimes are within a few percent of the cheapest replayed.")
+
+
+def test_the_effort_check_counts_its_changes_when_no_row_is_over_the_bar(tmp_path):
+    """No agent is over the bar, so the sentence cannot say how many are; it says how many changes there are."""
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    other = _effort_card()
+    other.key, other.agent_type = "effort-mismatch:tester", "tester"
+    other.changes = [SettingChange(target="agent", key="effort", agent="tester", value="medium", current="high")]
+    model.recommendations = [_effort_card()]
+    prefix = " Thinking is billed as output; a lower effort thinks less"
+    summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
+    assert summary.startswith("1 effort change would think less." + prefix), summary
+    model.recommendations = [_effort_card(), other]
+    summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
+    assert summary.startswith("2 effort changes would think less." + prefix), summary

@@ -322,3 +322,19 @@ def test_a_project_slug_is_found_in_the_projects_root_it_was_given(tmp_path):
     assert skills_review.project_folders_for(elsewhere, ["C--repo", "C--gone"], roots=[claude_root / "projects"]) == (
         project,
     )
+
+def test_skill_descriptions_are_read_from_the_listings_under_each_root_given(tmp_path):
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    elsewhere = tmp_path / "elsewhere" / "projects"
+    (elsewhere / "C--repo").mkdir(parents=True)
+    write_jsonl(elsewhere / "C--repo" / "s1.jsonl", [listing])
+    # Beside the Claude folder when no roots are given, and there is nothing there.
+    assert skills_review.descriptions(claude_root) == {}
+    assert skills_review.descriptions(claude_root, roots=[elsewhere]) == {"grill-me": "Interview the user about a plan."}
+    # Every root is read, not only the first.
+    (tmp_path / "empty" / "projects").mkdir(parents=True)
+    assert skills_review.descriptions(claude_root, roots=[tmp_path / "empty" / "projects", elsewhere]) == {
+        "grill-me": "Interview the user about a plan."}

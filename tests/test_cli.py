@@ -2566,3 +2566,20 @@ def test_review_skills_finds_descriptions_under_the_projects_root_and_your_skill
     assert "Interview the user about a plan." in out and "Built into Claude Code" in out, out
     assert cli.main(argv + ["--claude-root", str(home)]) == 0
     assert "Built into Claude Code" not in capsys.readouterr().out
+
+def test_review_claude_md_reads_the_projects_roots_it_was_given(tmp_path, capsys):
+    """The Claude folder is not above the projects root (a mount, or a WSL distro's): the project's own
+    folder and its auto memory are found under --projects-root."""
+    claude = tmp_path / "me" / ".claude"
+    claude.mkdir(parents=True)
+    root = tmp_path / "mount" / "projects"
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("# Demo\n\nUse the demo style.\n", encoding="utf-8")
+    slug = _write_project(root, "proj-a")
+    (slug / "folder.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project)}) + "\n", encoding="utf-8")
+    argv = ["review", "claude-md", "--projects-root", str(root), "--all-projects",
+            "--config-dir", str(tmp_path / "cg"), "--claude-root", str(claude)]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert str(project / "CLAUDE.md") in out, out

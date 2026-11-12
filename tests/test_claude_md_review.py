@@ -902,3 +902,62 @@ def test_a_projects_root_with_an_unrelated_parent_leaves_your_own_files_alone(tm
     names = cmr.local_names(config_dir, salt=SALT, projects=[project], projects_roots=roots)
     assert _hash(claude_root / "CLAUDE.md") in names.names
     assert _hash(top / "CLAUDE.md") not in names.names and _hash(top / "rules" / "minutes.md") not in names.names
+
+def _memory_in_another_root(tmp_path: Path):
+    """A project whose auto memory is under the second of two projects roots, none under the first."""
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    first, second = tmp_path / "a" / "projects", tmp_path / "b" / "projects"
+    first.mkdir(parents=True)
+    slug = cmr._memory_file(claude_root, project).parent.parent.name
+    memory = second / slug / "memory"
+    memory.mkdir(parents=True)
+    return config_dir, claude_root, project, first, second, memory
+
+
+def test_auto_memory_is_looked_for_under_every_projects_root_not_only_the_first(tmp_path):
+    config_dir, claude_root, project, first, second, memory = _memory_in_another_root(tmp_path)
+    (memory / "MEMORY.md").write_text("- a note\n", encoding="utf-8")
+    assert cmr._memory_file(claude_root, project, [first, second]) == memory / "MEMORY.md"
+    # None has it: the first root's path, where Claude Code would write it.
+    nowhere = tmp_path / "c" / "projects"
+    assert cmr._memory_file(claude_root, project, [first, nowhere]) == first / memory.parent.name / "memory" / "MEMORY.md"
+    review = cmr.build_review(
+        config_dir, {}, salt=SALT, projects=[project], claude_root=claude_root, projects_roots=[first, second]
+    )
+    assert [item.path for item in review.files if item.level == "Auto memory"] == [memory / "MEMORY.md"]
+
+
+def test_the_names_lookup_reads_the_auto_memory_under_every_root_for_what_it_imports(tmp_path, fresh_names):
+    """The imports of a CLAUDE.md-family file are found by ``discover``, which has to be given the roots."""
+    config_dir, claude_root, project, first, second, memory = _memory_in_another_root(tmp_path)
+    shared = project / "shared.md"
+    shared.write_text("S" * 400, encoding="utf-8")
+    (memory / "MEMORY.md").write_text(f"See @{shared.as_posix()} for it.\n", encoding="utf-8")
+    found = cmr.local_names(
+        config_dir, salt=SALT, projects=[project], claude_root=claude_root, projects_roots=[first, second]
+    )
+    assert found.imports == {_hash(shared)}
+    assert found.inlined[_hash(shared)]["parent"] == _hash(memory / "MEMORY.md")
+
+
+def test_the_names_cache_is_not_answered_for_other_roots_or_other_folders(tmp_path, fresh_names):
+    config_dir, claude_root, project, first, second, memory = _memory_in_another_root(tmp_path)
+    (memory / "MEMORY.md").write_text("- a note\n", encoding="utf-8")
+    note = _hash(memory / "MEMORY.md")
+    ask = dict(salt=SALT, projects=[project], claude_root=claude_root)
+    # The same project and Claude folder, other roots: the memory is named only where the roots hold it.
+    assert note not in cmr.local_names(config_dir, projects_roots=[first], **ask).names
+    assert note in cmr.local_names(config_dir, projects_roots=[first, second], **ask).names
+    assert note not in cmr.local_names(config_dir, projects_roots=[first], **ask).names
+    # The same roots, other project folders.
+    other = tmp_path / "work" / "other"
+    other.mkdir()
+    (other / "notes.md").write_text("Notes.\n", encoding="utf-8")
+    ask = dict(salt=SALT, claude_root=claude_root, projects_roots=[first])
+    assert _hash(other / "notes.md") not in cmr.local_names(config_dir, projects=[project], **ask).names
+    assert cmr.local_names(config_dir, projects=[other], **ask).names[_hash(other / "notes.md")]["name"] == "notes.md"

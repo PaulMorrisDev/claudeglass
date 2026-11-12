@@ -6637,3 +6637,30 @@ def test_skills_route_finds_descriptions_under_the_projects_folder_the_service_i
     assert resp.status == 200, payload
     row = next(item for item in payload["data"]["skills"] if item["name"] == "grill-me")
     assert row["source"] == "built-in" and row["description"] == "Interview the user about a plan."
+
+def _move_the_projects_apart(handle, tmp_path):
+    """The projects folder the service is given is not beside its config folder (docs/deploy.md's mount)."""
+    apart = tmp_path / "mount" / "projects"
+    apart.parent.mkdir()
+    (tmp_path / "projects").rename(apart)
+    handle.options.projects_root = apart
+
+
+def test_project_files_route_names_files_from_the_projects_folder_the_service_is_given(project_files_server, tmp_path):
+    _move_the_projects_apart(project_files_server, tmp_path)
+    resp, payload = project_files_server.get_json("/api/project-files")
+    assert resp.status == 200
+    assert payload["data"]["named"] == 1
+    assert payload["data"]["files"][0]["name"] == "docs/context.md"
+
+
+def test_the_quick_actions_name_project_files_from_the_projects_folder_the_service_is_given(
+    project_files_server, tmp_path
+):
+    _move_the_projects_apart(project_files_server, tmp_path)
+    for route in ("/api/quick-actions/project-files", "/api/quick-actions"):
+        resp, payload = project_files_server.get_json(route)
+        assert resp.status == 200, route
+        check = payload["data"] if route.endswith("project-files") else next(
+            item for item in payload["data"]["checks"] if item["id"] == "project-files")
+        assert check["status"] == "act" and check["summary"].startswith("docs/context.md is now about 10k tokens"), route
