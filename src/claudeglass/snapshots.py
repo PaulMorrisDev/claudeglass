@@ -741,6 +741,38 @@ def latest_snapshot_per_project(
     return latest
 
 
+#: The settings layers a project's own files hold (as ``change_points``' own).
+_PROJECT_LAYERS = ("project_local", "project_shared")
+
+
+def spans_projects(snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None) -> bool:
+    """Whether ``snapshots`` come from more than one project (rows from
+    before snapshots named their project aside): a view of several projects."""
+    return len(set(latest_snapshot_per_project(snapshots, canonical)) - {_UNKNOWN_PROJECT}) > 1
+
+
+def _user_settings_for_project_levers(data: dict) -> None:
+    """In ``data`` (a copy of one snapshot's), each settings lever that
+    snapshot's own project files set reads as your user settings set it:
+    their value, or unset when they set none. A project's own setting holds
+    in that project alone. ``effective`` and ``effective_provenance`` are
+    replaced, never changed in place."""
+    effective, provenance = data.get("effective"), data.get("effective_provenance")
+    if not isinstance(effective, dict) or not isinstance(provenance, dict):
+        return
+    user = data.get("user_settings") if isinstance(data.get("user_settings"), dict) else {}
+    effective, provenance = dict(effective), dict(provenance)
+    for key, layer in list(provenance.items()):
+        if layer not in _PROJECT_LAYERS:
+            continue
+        if key in user:
+            effective[key], provenance[key] = user[key], "user"
+        else:
+            effective.pop(key, None)
+            del provenance[key]
+    data["effective"], data["effective_provenance"] = effective, provenance
+
+
 def with_every_project_agents(
     snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None
 ) -> Snapshot | None:
@@ -760,8 +792,11 @@ def with_every_project_agents(
     snapshot's agents map, when it has one, is the whole list of them:
     another project's older snapshot cannot bring back a user agent deleted
     since (a built-in it overrode would still read as overridden). Settings,
-    provenance and managed keys stay the newest snapshot's.
-    ``None`` when ``snapshots`` is empty.
+    provenance and managed keys stay the newest snapshot's, but when
+    ``snapshots`` come from more than one project (:func:`spans_projects`) a
+    setting that snapshot's own project files set reads as your user settings
+    set it (:func:`_user_settings_for_project_levers`): it holds in that
+    project alone. ``None`` when ``snapshots`` is empty.
     """
     base = next((s for s in reversed(snapshots) if isinstance(s.data.get("effective"), dict)), None)
     if base is None:
@@ -797,6 +832,8 @@ def with_every_project_agents(
     for section, entries in merged.items():
         if entries or section in data:
             data[section] = entries
+    if spans_projects(snapshots, canonical):
+        _user_settings_for_project_levers(data)
     return Snapshot(path=base.path, ts=base.ts, data=data)
 
 
@@ -1669,6 +1706,7 @@ __all__ = [
     "effective_provenance",
     "layers",
     "latest_snapshot_per_project",
+    "spans_projects",
     "build_effective_config_table",
     "build_config_layers_table",
     "build_config_groups_table",

@@ -141,6 +141,20 @@ _ALREADY_CHEAPEST_LABEL = "already on the cheapest model"
 _MAIN_SESSION_BELOW_FLOOR = frozenset({"haiku"})
 _MAIN_FLOOR_LABEL = "Sonnet is the smallest model suggested for your main session"
 
+#: Why the main session's model setting in force now doesn't decide a main
+#: session (``compute_model_swap``'s ``main_lever``): it started before the
+#: model last changed in its project, or its project's model is already
+#: Sonnet or smaller, below which the main session is never moved.
+BEFORE_CHANGE = "before_change"
+SETTLED = "settled"
+_BEFORE_CHANGE_LABEL = "every main session started before the model last changed in its project"
+
+
+def at_main_floor(model: object) -> bool:
+    """Whether a main-session ``model`` setting (an alias or an id) is
+    already Sonnet or smaller, so nothing cheaper is suggested for it."""
+    return isinstance(model, str) and 0 <= workstyle.model_tier(model) <= _TIER_FAMILIES.index("sonnet")
+
 #: Agent types no agent file sets the model for: a workflow script
 #: starts ``workflow-subagent`` runs, and Claude Code starts forks and
 #: untyped subagents itself.
@@ -321,6 +335,8 @@ class TierVerdict:
 
     ``state`` is one of ``"cheaper_available"`` / ``"already_cheapest"``
     / ``"main_floor"`` (the main session on Sonnet: never moved to Haiku)
+    / ``"before_change"`` (every main session started before its model last
+    changed)
     / ``"unknown_tier"`` / ``"no_data"`` / ``"set_elsewhere"`` (a named
     agent type none of whose runs followed its agent file's model: a
     workflow script or the spawn named it) / ``"no_lever"`` (a workflow
@@ -355,9 +371,15 @@ def _set_elsewhere_text(stats: "ModelSwapTypeStats") -> str:
 
 def _reach_suffix(stats: "ModelSwapTypeStats") -> str:
     """", on the 21 runs its agent file sets" when a subagent type's
-    saving covers only some of its runs; empty otherwise."""
+    saving covers only some of its runs; ", on the 7 main sessions since the
+    model last changed" when the main session's covers only the sessions
+    since then; empty otherwise."""
     lever_runs = stats.lever.spawns if stats.lever is not None else stats.spawns
-    if stats.key == "top-level" or lever_runs >= stats.spawns:
+    if stats.key == "top-level":
+        if stats.before_change_runs and lever_runs:
+            return f", on the {lever_runs} main session{'s' if lever_runs != 1 else ''} since the model last changed"
+        return ""
+    if lever_runs >= stats.spawns:
         return ""
     return f", on the {lever_runs} run{'s' if lever_runs != 1 else ''} its agent file sets"
 
@@ -369,6 +391,10 @@ def _tier_verdict(row: "ModelSwapTypeStats", pricing: Pricing) -> TierVerdict:
         setter = "a workflow script" if row.workflow_runs and row.workflow_runs >= row.spawns else "Claude Code"
         return TierVerdict("no_lever", None, 0.0, 0.0, f"{setter} sets its model, so there is no agent file to change")
     stats = row.lever if row.lever is not None else row
+    if row.key == "top-level" and stats.spawns == 0 and row.spawns > 0:
+        if row.before_change_runs:
+            return TierVerdict("before_change", None, 0.0, 0.0, _BEFORE_CHANGE_LABEL)
+        return TierVerdict("main_floor", None, 0.0, 0.0, _MAIN_FLOOR_LABEL)
     if stats.spawns == 0 and row.spawns > 0:
         return TierVerdict(
             "set_elsewhere", None, 0.0, 0.0,
@@ -452,7 +478,8 @@ class ModelSwapTypeStats:
         default_factory=lambda: TierVerdict("no_data", None, 0.0, 0.0, "no priced turns")
     )
     #: The same totals for only the runs this row's lever decides
-    #: (:func:`model_set_by`): every run of the main session, and a
+    #: (:func:`model_set_by`): the main session's runs the model setting
+    #: in force now decides (``main_lever`` leaves the others off), and a
     #: subagent type's runs started without a model of their own. The
     #: tier verdict is worked out on these. ``None`` on the lever's own
     #: stats.
@@ -461,6 +488,11 @@ class ModelSwapTypeStats:
     #: model: the agent file's model line decides neither.
     workflow_runs: int = 0
     spawn_model_runs: int = 0
+    #: Main sessions the model setting in force now doesn't decide
+    #: (``compute_model_swap``'s ``main_lever``): counted on the row, not on
+    #: the lever.
+    before_change_runs: int = 0
+    settled_runs: int = 0
 
     @property
     def observed_model(self) -> str | None:
@@ -500,6 +532,8 @@ def compute_model_swap(
     results: Sequence[TranscriptResult],
     pricing: Pricing,
     thresholds: ModelSwapThresholds | None = None,
+    *,
+    main_lever: Callable[[TranscriptResult], str | None] | None = None,
 ) -> ModelSwapStats:
     """Fold every transcript in ``results`` (top-level and subagent
     alike -- pass the whole corpus's transcripts, one entry per
@@ -514,6 +548,12 @@ def compute_model_swap(
     that *does* affect accumulation (e.g. a minimum-turn floor before a
     model is even considered as an alternative) has somewhere to land
     without changing this function's signature again.
+
+    ``main_lever``, when given, says for a main-session transcript why the
+    model setting in force now doesn't decide it (:data:`BEFORE_CHANGE`,
+    :data:`SETTLED`), or ``None`` when it does. Such a run counts on its row
+    but not on the lever, as a workflow run does on a subagent's row.
+    Without it every main session is the setting's.
     """
     del thresholds  # see docstring: accepted for signature symmetry only
 
@@ -524,13 +564,18 @@ def compute_model_swap(
         if stats is None:
             stats = by_key[key] = ModelSwapTypeStats(key=key, lever=ModelSwapTypeStats(key=key))
         setter = model_set_by(result)
+        reason = main_lever(result) if setter == "settings" and main_lever is not None else None
         if setter == "workflow":
             stats.workflow_runs += 1
         elif setter == "spawn":
             stats.spawn_model_runs += 1
+        elif reason == BEFORE_CHANGE:
+            stats.before_change_runs += 1
+        elif reason == SETTLED:
+            stats.settled_runs += 1
         # A run the lever decides counts on both, each in the same order,
         # so the row's own totals add up exactly as they would alone.
-        targets = (stats, stats.lever) if setter in _LEVER_SETTERS else (stats,)
+        targets = (stats, stats.lever) if setter in _LEVER_SETTERS and reason is None else (stats,)
 
         alias = result.meta.agent_model_alias
         for target in targets:
@@ -624,6 +669,8 @@ def build_section(
             Column(key="lever_cost", label="Cost of those runs", kind="money"),
             Column(key="workflow_runs", label="Runs a workflow script started", kind="int"),
             Column(key="spawn_model_runs", label="Runs given a model when started", kind="int"),
+            Column(key="before_change_runs", label="Main sessions from before the model last changed", kind="int"),
+            Column(key="settled_runs", label="Main sessions in projects already on Sonnet", kind="int"),
         ]
     )
 
@@ -665,12 +712,14 @@ def build_section(
                 lever_stats.observed_cost,
                 row_stats.workflow_runs,
                 row_stats.spawn_model_runs,
+                row_stats.before_change_runs,
+                row_stats.settled_runs,
             ]
         )
         rows.append(row)
         if row_stats.unpriced_turns > 0:
             any_unpriced = True
-        if key != "top-level" and key not in _NO_AGENT_FILE and lever_stats.spawns:
+        if key not in _NO_AGENT_FILE and lever_stats.spawns:
             file_rows.append(
                 [
                     key,
@@ -689,11 +738,12 @@ def build_section(
         rows=rows,
     )
 
-    # The runs each agent file's model line decides, repriced at every
-    # model: what a what-if for that line prices, whatever model it names.
+    # The runs each model setting decides (an agent file's model line; the
+    # main session's model setting since it last changed), repriced at every
+    # model: what a what-if for that setting prices, whatever model it names.
     file_table = Table(
         name="model_swap_agent_file_runs",
-        title="Runs each agent file's model decides, at other models",
+        title="Runs each model setting decides, at other models",
         columns=[
             Column(key="agent_type", label="Agent type", kind="str"),
             Column(key="runs", label="Runs", kind="int"),
@@ -906,6 +956,8 @@ def _rule_model_tier(
         observed_model_idx = _col_index(table, "observed_model")
     workflow_idx = _col_index(table, "workflow_runs")
     spawn_model_idx = _col_index(table, "spawn_model_runs")
+    before_change_idx = _col_index(table, "before_change_runs")
+    settled_idx = _col_index(table, "settled_runs")
     alt_model_idx = _col_index(table, "best_cheaper_alternative_model")
     alt_label_idx = _col_index(table, "best_cheaper_alternative")
     saving_usd_idx = _col_index(table, "saving_usd")
@@ -944,6 +996,8 @@ def _rule_model_tier(
         scope = _scope_for(agent_type, snapshot)
         workflow_runs = _count(row, workflow_idx)
         spawn_model_runs = _count(row, spawn_model_idx)
+        before_change_runs = _count(row, before_change_idx)
+        settled_runs = _count(row, settled_idx)
         if agent_type == "top-level":
             frontmatter_note = f'Set "model": "{alt_model}" in settings.json'
             reach = ""
@@ -987,6 +1041,8 @@ def _rule_model_tier(
                         for label, count in (
                             ("Runs a workflow script started (not counted)", workflow_runs),
                             ("Runs given a model when started (not counted)", spawn_model_runs),
+                            ("Main sessions from before the model last changed (not counted)", before_change_runs),
+                            ("Main sessions in projects already on Sonnet (not counted)", settled_runs),
                         )
                         if count
                     ),
@@ -1073,6 +1129,9 @@ __all__ = [
     "ModelSwapStats",
     "TierVerdict",
     "RULES",
+    "BEFORE_CHANGE",
+    "SETTLED",
+    "at_main_floor",
     "compute_model_swap",
     "model_set_by",
     "set_elsewhere_sentence",

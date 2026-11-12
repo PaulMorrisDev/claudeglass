@@ -311,6 +311,87 @@ def test_runs_given_a_model_when_started_are_left_out_of_the_agent_file_saving()
     assert only_named.tier_verdict.state == "set_elsewhere"
 
 
+def _two_main_sessions(reason_of_early: str):
+    """Two Opus main sessions, the first of which the model setting in force
+    now doesn't decide (``reason_of_early``): the stats, the same for the
+    second alone, and the rendered section."""
+    early, late = _run(OPUS, "", kind="top-level"), _run(OPUS, "", kind="top-level")
+    stats = model_swap.compute_model_swap(
+        [early, late], PRICING, main_lever=lambda tr: reason_of_early if tr is early else None
+    )
+    alone = model_swap.compute_model_swap([late], PRICING).by_key["top-level"]
+    return stats.by_key["top-level"], alone, model_swap.build_section(stats)
+
+
+def test_a_main_session_from_before_the_model_last_changed_counts_on_the_row_not_the_lever():
+    row, alone, section = _two_main_sessions(model_swap.BEFORE_CHANGE)
+
+    assert row.spawns == 2 and row.lever.spawns == 1
+    assert (row.before_change_runs, row.settled_runs) == (1, 0)
+    assert row.observed_cost == pytest.approx(2 * alone.observed_cost)
+    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
+    assert row.tier_verdict.label.endswith(", on the 1 main session since the model last changed)")
+
+    cells = _row_cells(section, "top-level")
+    assert (cells["spawns"], cells["lever_runs"], cells["before_change_runs"], cells["settled_runs"]) == (2, 1, 1, 0)
+    file_cells = _row_cells(section, "top-level", "model_swap_agent_file_runs")
+    assert file_cells["runs"] == 1
+    assert file_cells[f"cost_{SONNET}"] == pytest.approx(alone.cost_by_model[SONNET])
+
+    report = _report_with_section(section)
+    (rec,) = model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None)
+    assert (
+        "Main sessions from before the model last changed (not counted)", 1,
+        "model_swap.model_swap_by_agent_type", "top-level",
+    ) in rec.evidence
+    _assert_evidence_resolves(report, rec)
+
+
+def test_a_main_session_in_a_project_already_on_sonnet_is_left_off_the_lever():
+    row, alone, section = _two_main_sessions(model_swap.SETTLED)
+
+    assert row.spawns == 2 and row.lever.spawns == 1
+    assert (row.before_change_runs, row.settled_runs) == (0, 1)
+    assert row.observed_cost == pytest.approx(2 * alone.observed_cost)
+    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
+    assert "since the model last changed" not in row.tier_verdict.label
+
+    report = _report_with_section(section)
+    (rec,) = model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None)
+    assert (
+        "Main sessions in projects already on Sonnet (not counted)", 1,
+        "model_swap.model_swap_by_agent_type", "top-level",
+    ) in rec.evidence
+    _assert_evidence_resolves(report, rec)
+
+
+def test_with_every_main_session_cut_there_is_no_saving_and_no_card():
+    sessions = [_run(OPUS, "", kind="top-level"), _run(OPUS, "", kind="top-level")]
+    for reason, state, label in (
+        (
+            model_swap.BEFORE_CHANGE, "before_change",
+            "every main session started before the model last changed in its project",
+        ),
+        (model_swap.SETTLED, "main_floor", "Sonnet is the smallest model suggested for your main session"),
+    ):
+        stats = model_swap.compute_model_swap(sessions, PRICING, main_lever=lambda tr, reason=reason: reason)
+        verdict = stats.by_key["top-level"].tier_verdict
+        assert verdict.state == state and verdict.alt_model is None and verdict.saving_usd == 0.0
+        assert verdict.label == label
+        section = model_swap.build_section(stats)
+        assert not [r for r in next(t for t in section.tables if t.name == "model_swap_agent_file_runs").rows
+                    if r[0] == "top-level"]
+        report = _report_with_section(section)
+        assert model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None) == []
+
+
+def test_at_main_floor_is_sonnet_or_smaller():
+    for setting in ("sonnet", "claude-sonnet-5-5", "sonnet[1m]", "haiku"):
+        assert model_swap.at_main_floor(setting), setting
+    for setting in ("opus", "opusplan", "fable[1m]", "default", None):
+        assert not model_swap.at_main_floor(setting), setting
+
+
 def test_workflow_subagents_have_no_agent_file_lever():
     stats = model_swap.compute_model_swap([_run(OPUS, "workflow-subagent", kind="workflow-agent")], PRICING)
     row = stats.by_key["workflow-subagent"]

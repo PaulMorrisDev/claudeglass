@@ -140,6 +140,7 @@ from . import __version__ as _TOOL_VERSION
 from . import (
     agent_models,
     carry,
+    change_points as change_points_mod,
     classify,
     compaction,
     compaction_sim,
@@ -1367,6 +1368,51 @@ def _current_window_of(snapshots: list[Snapshot] | None, keys_by_session: dict[s
     return current
 
 
+def _main_model_lever(
+    corpus: Corpus,
+    config_dir: str | Path | None,
+    snapshots: list[Snapshot] | None,
+    keys_by_session: dict[str, tuple[str, ...]],
+) -> Callable[[TranscriptResult], str | None] | None:
+    """For ``model_swap.compute_model_swap``'s ``main_lever``: why the main
+    session's model setting in force now doesn't decide each main session.
+    Each is judged by its own project:
+
+    - ``model_swap.BEFORE_CHANGE``: it started (``change_points.session_start``)
+      before the main model last changed there, by any change the Changes
+      page lists that applies there (``change_points.change_points`` with the
+      corpus: an apply or undo, a change to your user settings or the
+      project's own, a new model its transcripts show);
+    - ``model_swap.SETTLED``: its project's model setting now (its newest
+      snapshot; with none of its own, your user settings in the newest
+      snapshot) is already Sonnet or smaller.
+
+    ``None`` with neither a config folder nor snapshots, so every main
+    session counts. A session whose project no snapshot or change names is
+    judged by the changes made for every project and your user settings."""
+    points = change_points_mod.change_points(config_dir, corpus) if config_dir is not None else []
+    if not points and not snapshots:
+        return None
+    newest = snapshots[-1] if snapshots else None
+    user = newest.data.get("user_settings") if newest is not None else None
+    user_model = user.get("model") if isinstance(user, dict) else None
+    reasons: dict[str, str | None] = {}
+    for bundle in corpus.sessions:
+        if bundle.top is None:
+            continue
+        session_id = bundle.top.meta.session_id
+        keys = keys_by_session.get(session_id) or ()
+        last = change_points_mod.last_change(points, "model", keys)
+        start = change_points_mod.session_start(bundle)
+        if last is not None and (start is None or start < last):
+            reasons[session_id] = model_swap.BEFORE_CHANGE
+            continue
+        snap = snapshots_mod.snapshot_for(_END_OF_TIME, snapshots, keys) if snapshots and keys else None
+        now = snapshots_mod.effective_config(snap).get("model") if snap is not None else user_model
+        reasons[session_id] = model_swap.SETTLED if model_swap.at_main_floor(now) else None
+    return lambda tr: reasons.get(tr.meta.session_id)
+
+
 # -- build_report -----------------------------------------------------------
 
 
@@ -1826,7 +1872,15 @@ def build_report(
     # collected), rather than an incremental per-transcript .add() --------
 
     carry_stats = carry.compute_carry(all_results, pricing.resolve_model, carry_th)
-    model_swap_stats = model_swap.compute_model_swap(all_results, pricing, model_swap_th)
+    # The main session's model setting decides only the sessions since the
+    # model last changed in their project, outside projects already on
+    # Sonnet or smaller (_main_model_lever).
+    model_swap_stats = model_swap.compute_model_swap(
+        all_results,
+        pricing,
+        model_swap_th,
+        main_lever=_main_model_lever(corpus, config_dir, snapshots, session_snapshot_key),
+    )
 
     compaction_sim_stats = compaction_sim.simulate_compaction_windows(
         all_results, pricing.resolve_model, snapshot_windows, compaction_sim_th

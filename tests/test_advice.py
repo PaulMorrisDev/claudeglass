@@ -99,6 +99,33 @@ def test_model_tier_cards_merge_into_one_with_a_change_per_agent_type():
     assert "yours to make" in main_card.why
 
 
+def test_the_main_model_card_says_how_many_sessions_from_before_the_change_it_leaves_out():
+    """The main session's saving covers only the sessions since the model last
+    changed in their project: the card says how many it leaves out."""
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {}})
+
+    def main_why(left_out: int | None) -> str:
+        rec = _tier("top-level")
+        if left_out is not None:
+            rec.evidence.append((
+                "Main sessions from before the model last changed (not counted)", left_out,
+                "model_swap.model_swap_by_agent_type", "top-level",
+            ))
+        (card,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "model-tier-main"]
+        return card.why
+
+    assert (
+        "would cost up to 40% less. It leaves out the 157 main sessions that started before the model last "
+        "changed in their project. It's a quality trade, so it's yours to make."
+    ) in main_why(157)
+    assert (
+        "It leaves out the 1 main session that started before the model last changed in its project."
+        in main_why(1)
+    )
+    assert "It leaves out" not in main_why(None)
+
+
 def test_the_model_tier_card_names_runs_an_agent_file_does_not_decide():
     """A workflow script or a model named at spawn sets some runs' model:
     the card says how many and where that model is really set, and names

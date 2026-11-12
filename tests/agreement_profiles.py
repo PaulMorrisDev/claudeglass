@@ -1,4 +1,4 @@
-"""Six synthetic profiles for the agreement checks (``agreement.py``): a
+"""Seven synthetic profiles for the agreement checks (``agreement.py``): a
 projects folder and a config folder each, built on ``helpers.py`` and
 nothing else.
 
@@ -12,7 +12,7 @@ a card with a standing rule, and (in the API profile) a stored ignore. A
 profile that stops building one of them fails ``test_agreement_profiles``,
 rather than letting a check pass over nothing.
 
-The six, each a :class:`Spec`:
+The seven, each a :class:`Spec`:
 
 - ``api``: API billing, the desktop app, a status line absent;
 - ``cli_status``: the CLI with a status line (``usage-log.csv``) on a subscription;
@@ -20,7 +20,11 @@ The six, each a :class:`Spec`:
 - ``old_version``: Claude Code before 2.1.308, which writes no
   ``api-request-shape`` lines;
 - ``capture_on``: metrics capture on, replies tagged ``[cg: ...]``;
-- ``capture_off``: the same work with capture off.
+- ``capture_off``: the same work with capture off;
+- ``two_projects``: two projects, read in the all-projects view. In the first,
+  the project's own settings move the main model from Opus to Sonnet before
+  its fifth session, and its sessions run Sonnet from then; the second stays
+  on Opus and has the newest snapshot.
 
 No randomness, and every date is fixed.
 """
@@ -48,6 +52,7 @@ from helpers import (
 
 START = datetime(2026, 10, 26, 9, 0, 0, tzinfo=timezone.utc)
 SLUG = "C--Dev-demo-app"
+SLUG_B = "C--Dev-demo-api"
 OPUS = "claude-opus-5"
 SONNET = "claude-sonnet-5"
 HAIKU = "claude-haiku-4-5-20251001"
@@ -77,6 +82,15 @@ class Spec:
     changed_later: bool = False
     #: Ignore these recommendation ids (one card each) once the first report is built.
     ignore_ids: tuple[str, ...] = ()
+    #: A second project, ``SLUG_B``, with the same sessions on the same days,
+    #: and the first project's own settings moving its main model to Sonnet
+    #: part-way (see :func:`_main_model`). Read in the all-projects view.
+    second_project: bool = False
+    #: With ``second_project``: the first project moves to Sonnet before its
+    #: third session and back to Opus, in your user settings, before its sixth.
+    model_back: bool = False
+    #: With ``second_project``: the first project's snapshot is the newest.
+    a_newest: bool = False
 
 
 SPECS: dict[str, Spec] = {
@@ -86,6 +100,7 @@ SPECS: dict[str, Spec] = {
     "old_version": Spec("old_version", version="2.1.300", request_lines=False),
     "capture_on": Spec("capture_on", capture=True),
     "capture_off": Spec("capture_off"),
+    "two_projects": Spec("two_projects", custom_agents=False, workflows=False, second_project=True),
 }
 
 
@@ -294,11 +309,23 @@ def _capture_note() -> str:
     return catalogue.note_text(["task", "brief", "level", "shift"], "main")
 
 
-def main_session(spec: Spec, root: Path, index: int, counts: dict[str, int]) -> dict:
-    sid = f"sess-{index:03d}"
+def _main_model(spec: Spec, slug: str, index: int) -> str:
+    """The model a main session ran on: Opus, every fourth on Sonnet. In a
+    two-project profile the first project's sessions run Sonnet while its
+    own settings set it: from its fifth session, or (``model_back``) its
+    third to fifth."""
+    if spec.second_project and slug == SLUG:
+        if index in (range(2, 5) if spec.model_back else range(4, spec.sessions)):
+            return SONNET
+    return OPUS if index % 4 != 3 else SONNET
+
+
+def main_session(spec: Spec, root: Path, index: int, counts: dict[str, int], slug: str = SLUG,
+                 sid_prefix: str = "sess") -> dict:
+    sid = f"{sid_prefix}-{index:03d}"
     clock = Clock(START + timedelta(days=index, hours=(index * 3) % 7))
-    pdir = root / "projects" / SLUG
-    model = OPUS if index % 4 != 3 else SONNET
+    pdir = root / "projects" / slug
+    model = _main_model(spec, slug, index)
     effort = "high" if index % 5 != 4 else "medium"
     lines: list[dict] = []
     if spec.capture:
@@ -468,13 +495,14 @@ def _agent_files(spec: Spec, *, reviewer_line: str = REVIEWER_LINE) -> dict:
     }
 
 
-def _snapshot(spec: Spec, ts: datetime, agents: dict, model: str) -> dict:
+def _snapshot(spec: Spec, ts: datetime, agents: dict, model: str, *, slug: str = SLUG,
+              project_model: str | None = None) -> dict:
     from claudeglass.snapshots import snapshot_project_key
 
     effective_agents = {name: {k: v for k, v in entry.items() if k != "tools"} for name, entry in agents.items()}
-    return {
+    snap = {
         "schema": 2, "ts": ts.strftime("%Y%m%dT%H%M%SZ"), "session_id": None, "claude_version": spec.version,
-        "cwd_hash": "sha256:" + "a" * 64, "project_slug": snapshot_project_key(SLUG),
+        "cwd_hash": "sha256:" + "a" * 64, "project_slug": snapshot_project_key(slug),
         "user_settings": {"model": model, "effortLevel": "high", "permissions": "dict(3)"},
         "project_settings": {"hooks": "dict(2)"},
         "settings_layers": {"user": {"model": model, "effortLevel": "high"}, "project_shared": {},
@@ -488,6 +516,16 @@ def _snapshot(spec: Spec, ts: datetime, agents: dict, model: str) -> dict:
                            "rules": {"bytes": 16000, "unscoped_bytes": 4000}, "agents_summary": {"count": len(agents)}},
         "content_hash": "sha256:" + "2" * 64 if model == "opus" else "sha256:" + "3" * 64,
     }
+    if spec.second_project:
+        # The project's own settings (``project_model``) win over your user settings.
+        effective_model = project_model or model
+        snap["effective"]["model"] = effective_model
+        snap["effective_provenance"] = {"model": "project_local" if project_model else "user", "effortLevel": "user"}
+        if project_model:
+            snap["project_settings"]["model"] = project_model
+            snap["settings_layers"]["project_local"] = {"model": project_model}
+        snap["content_hash"] = "sha256:" + ("2" if effective_model == "opus" else "3") * 64
+    return snap
 
 
 def write_config(spec: Spec, root: Path, sessions: list[dict]) -> dict:
@@ -496,6 +534,22 @@ def write_config(spec: Spec, root: Path, sessions: list[dict]) -> dict:
     (cfg / "config.toml").write_text(f'billing = "{spec.billing}"\n', encoding="utf-8")
     agents = _agent_files(spec)
     snaps = [(START - timedelta(days=1), agents, "opus")]
+    if spec.second_project:
+        # (when, project, your user settings' model, the project's own model)
+        day = timedelta(days=1)
+        two = [(START - day, SLUG, "opus", None), (START - day, SLUG_B, "opus", None)]
+        if spec.model_back:
+            two += [(START + 2 * day, SLUG, "opus", "sonnet"), (START + 5 * day, SLUG, "opus", None)]
+        else:
+            two += [(START + 4 * day, SLUG, "opus", "sonnet")]
+        two.append((START + 7 * day + timedelta(hours=1), SLUG_B, "opus", None))
+        if spec.a_newest:
+            two.append((START + 7 * day + timedelta(hours=2), SLUG, "opus", "sonnet"))
+        for ts, slug, model, project_model in two:
+            snap = _snapshot(spec, ts, agents, model, slug=slug, project_model=project_model)
+            name = f"{snap['ts']}-{'a' if slug == SLUG else 'b'}.json"
+            (cfg / "snapshots" / name).write_text(json.dumps(snap), encoding="utf-8")
+        return agents
     if spec.changed_later:
         # Later, the reviewer's line loses Edit (which most of its spawns called)
         # and the main model is set to Sonnet.
@@ -533,6 +587,10 @@ def build(spec: Spec, root: Path) -> Profile:
         shutil.rmtree(root)
     counts: dict[str, int] = {}
     sessions = [main_session(spec, root, i, counts) for i in range(spec.sessions)]
+    if spec.second_project:
+        counts_b: dict[str, int] = {}
+        for i in range(spec.sessions):
+            main_session(spec, root, i, counts_b, slug=SLUG_B, sid_prefix="sesb")
     if spec.workflows:
         first = 0
         for index in (2, 4, 5, 7):
@@ -560,10 +618,11 @@ def profile_inputs(name: str, tmp_path_factory):
 
         spec = SPECS[name]
         profile = build(spec, tmp_path_factory.mktemp(f"agree_{name}"))
-        inputs = agreement.load_inputs(profile.projects_root, profile.config_dir, SLUG)
+        project = None if spec.second_project else SLUG
+        inputs = agreement.load_inputs(profile.projects_root, profile.config_dir, project)
         if spec.ignore_ids:
             wanted = [rec for rec in inputs.recs if rec.id in spec.ignore_ids]
-            ignores.set_ignored(profile.config_dir, wanted, ignored=True, project=SLUG)
-            inputs = agreement.load_inputs(profile.projects_root, profile.config_dir, SLUG)
+            ignores.set_ignored(profile.config_dir, wanted, ignored=True, project=project)
+            inputs = agreement.load_inputs(profile.projects_root, profile.config_dir, project)
         _BUILT[name] = (profile, inputs)
     return _BUILT[name]

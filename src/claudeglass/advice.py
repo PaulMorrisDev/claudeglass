@@ -31,7 +31,9 @@ change, in one place, so every card reads the same way:
 - **Already applied.** The rules measure the whole period, so a change
   made part-way through it would still be offered at its full saving. A
   change the current config already makes is left out, and a card with
-  nothing left to change is dropped.
+  nothing left to change is dropped. The main session's model is priced
+  only on the sessions since it last changed in their project
+  (``model_swap``), and its card says how many it leaves out.
 - **Amounts** follow the billing mode (:class:`~claudeglass.units.Units`).
 
 Titles and actions are rewritten here, not in the rules, so the rules'
@@ -314,6 +316,13 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
     rec, _agent, alt, saving, observed = row
     family = _family_alias(alt).capitalize()
     current = ctx.setting_now("model")
+    before = _int(_evidence_value(rec, "from before the model last changed"))
+    since = (
+        f" It leaves out the {before:,} main session{'s' if before != 1 else ''} that started before the model "
+        f"last changed in {'its' if before == 1 else 'their'} project."
+        if before
+        else ""
+    )
     change = SettingChange(
         target="settings",
         key="model",
@@ -330,8 +339,8 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         title=f"Your main session could run on {family}",
         why=(
             f"Your main session ran on {_model_prose(observed) if observed else 'a larger model'}, and the same "
-            f"work priced at {family} would cost {_percent(saving, rec)}. It's a quality trade, so it's yours "
-            "to make."
+            f"work priced at {family} would cost {_percent(saving, rec)}.{since} It's a quality trade, so it's "
+            "yours to make."
         )
         + _left_out_note(left_out),
         action=(

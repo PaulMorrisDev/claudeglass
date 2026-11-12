@@ -6,10 +6,12 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from claudeglass import change_points, snapshots
+from claudeglass.model import TranscriptMeta, TranscriptResult, Turn
 from claudeglass.profiles import apply as apply_mod
 from claudeglass.profiles.schema import load_dict
 
@@ -842,3 +844,55 @@ def test_without_a_corpus_transcript_points_are_left_out(tmp_path):
     without one, so it just doesn't try."""
     assert change_points.change_points(tmp_path) == []
     assert change_points.change_points(tmp_path, corpus=None) == []
+
+
+# -- the main model's last change, and when a session started ---------------------
+
+
+@pytest.mark.parametrize(
+    "label, named",
+    [
+        ("model", True),
+        ("effective.model", True),
+        ("user_settings.model", True),
+        ("project_settings.model", True),
+        ("reviewer: model", False),
+        ("agents.reviewer.model", False),
+        ("effective.effortLevel", False),
+    ],
+)
+def test_a_change_to_the_main_model_is_named_in_every_way_a_point_names_it(label, named):
+    point = change_points.ChangePoint(ts=datetime(2026, 9, 22, tzinfo=timezone.utc), source="config", label="x",
+                                      keys=[label])
+    assert change_points.changes_setting(point, "model") is named
+
+
+def test_the_last_change_in_a_project_is_the_newest_that_applies_there(tmp_path):
+    config_dir = tmp_path / "tl"
+    _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"}, slug="slug:a")
+    _snapshot(config_dir, "20260922T100000Z", {"model": "sonnet"}, {"model": "project_local"}, slug="slug:a")
+    points = change_points.change_points(config_dir)
+    assert change_points.last_change(points, "model", "slug:a") == datetime(2026, 9, 22, 10, tzinfo=timezone.utc)
+    assert change_points.last_change(points, "model", "slug:b") is None
+    assert change_points.last_change(points, "effortLevel", "slug:a") is None
+    # A change made for every project applies in each one, and the newest counts.
+    _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"}, slug="slug:b")
+    _snapshot(config_dir, "20260923T100000Z", {"model": "fable"}, {"model": "user"}, slug="slug:b")
+    points = change_points.change_points(config_dir)
+    expected = datetime(2026, 9, 23, 10, tzinfo=timezone.utc)
+    assert change_points.last_change(points, "model", "slug:a") == expected
+    assert change_points.last_change(points, "model", "slug:zzz") == expected
+
+
+def test_a_session_starts_at_its_first_priced_reply():
+    def turn(index: int, ts: str) -> Turn:
+        return Turn(turn_index=index, ts=ts)
+
+    meta = TranscriptMeta(path="x", kind="top-level", session_id="s")
+    both = SimpleNamespace(top=TranscriptResult(meta=meta, turns=[
+        turn(0, "2026-09-22T09:00:00.000Z"), turn(1, "2026-09-22T09:05:00.000Z"),
+    ]))
+    assert change_points.session_start(both) == datetime(2026, 9, 22, 9, 5, tzinfo=timezone.utc)
+    unpriced = SimpleNamespace(top=TranscriptResult(meta=meta, turns=[turn(0, "2026-09-22T09:00:00.000Z")]))
+    assert change_points.session_start(unpriced) == datetime(2026, 9, 22, 9, 0, tzinfo=timezone.utc)
+    assert change_points.session_start(SimpleNamespace(top=None)) is None

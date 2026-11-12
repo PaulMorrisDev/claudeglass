@@ -1050,13 +1050,50 @@ def applies_to(point: ChangePoint, project: str | Collection[str]) -> bool:
     return point.project in project
 
 
+def session_start(bundle) -> datetime | None:
+    """When ``bundle``'s session started, as its change points are dated: its
+    main transcript's first priced reply (a transcript point is dated by the
+    first session with the new value, the same way), else its first reply
+    with a time. ``None`` with no main transcript or no time."""
+    top = bundle.top
+    if top is None:
+        return None
+    for turns in (_priced_turns(top), top.turns):
+        start = next((t for t in (_parse_iso(turn.ts) for turn in turns) if t is not None), None)
+        if start is not None:
+            return start
+    return None
+
+
+def changes_setting(point: ChangePoint, key: str) -> bool:
+    """Whether ``point`` changed the main session's setting ``key``
+    (``model``, ``effortLevel``): an apply or undo of it, or a session's
+    transcript showing a new value (``key``), a settings change the
+    snapshots show (``effective.<key>``, or for an older snapshot the
+    settings file it sits in). An agent's setting (``reviewer: model``) is
+    not the main session's."""
+    names = {key, f"effective.{key}", f"user_settings.{key}", f"project_settings.{key}"}
+    return any(label in names for label in point.keys)
+
+
+def last_change(points: list[ChangePoint], key: str, project: str | Collection[str]) -> datetime | None:
+    """When the main session's ``key`` last changed in ``project`` (a key, or
+    every key one project goes by): the newest of ``points`` that changes it
+    (:func:`changes_setting`) and applies there (:func:`applies_to`). ``None``
+    when none does."""
+    return max((p.ts for p in points if changes_setting(p, key) and applies_to(p, project)), default=None)
+
+
 __all__ = [
     "ChangePoint",
     "SUSTAINED_SESSIONS",
     "affects_capture",
     "applies_to",
     "change_points",
+    "changes_setting",
+    "last_change",
     "latest",
     "project_key",
+    "session_start",
     "summary",
 ]

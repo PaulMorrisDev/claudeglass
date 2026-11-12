@@ -2,10 +2,12 @@
 on the report's own window, looked up in tables the report already
 computes -- no new simulation:
 
-- a model for the main session or an agent: ``model_swap_by_agent_type``
-  for the main session, and ``model_swap_agent_file_runs`` for an agent,
-  since its file's ``model`` decides only the runs started without a
-  model of their own (the same tokens repriced);
+- a model for the main session or an agent: ``model_swap_agent_file_runs``,
+  the runs that setting decides (an agent file's model only the runs
+  started without a model of their own; the main session's only the
+  sessions since the model last changed in their project), else
+  ``model_swap_by_agent_type`` for a report from before that table had a
+  row for it;
 - ``autoCompactWindow``: ``compaction_sim_by_window`` (sessions replayed
   with that window; EST-P2 -- not estimated past
   ``CompactionSimThresholds().max_compactions_per_session``, the same
@@ -154,6 +156,7 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
     if row is None:
         return _row(key, label, value, None, "none", f"No {agent} runs in this window.")
     runs = ""
+    since = ""
     if agent != TOP and tables.has("model_swap", "model_swap_agent_file_runs"):
         # An agent file's model decides only the runs started without a
         # model of their own; a workflow script or the spawn sets the rest.
@@ -166,6 +169,21 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
                 "spawn itself named it.",
             )
         runs = " started without a model of their own"
+    elif agent == TOP and tables.has("model_swap", "model_swap_agent_file_runs"):
+        # The main session's model setting decides only the sessions since
+        # the model last changed in their project, outside projects already
+        # on Sonnet or smaller. (A report from before that table had a
+        # main-session row priced every session.)
+        file_row = tables.row("model_swap", "model_swap_agent_file_runs", TOP)
+        if file_row is not None:
+            if _num(row.get("before_change_runs")):
+                since = ", from the sessions since its model last changed"
+            row = file_row
+        elif "lever_runs" in row and not _num(row.get("lever_runs")):
+            return _row(
+                key, label, value, None, "none",
+                "No main session in this window ran under the model setting in force now.",
+            )
     # A report without meta.model_ids falls back to matching column names.
     model_ids = getattr(getattr(tables.model, "meta", None), "model_ids", None) or {}
     column = _model_column(row, value, model_ids)
@@ -182,7 +200,7 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
         "ceiling",
         f"Worked out by repricing the replies of {who}'s runs in this window{runs} at {column[len('cost_'):]}. "
         if runs
-        else f"Worked out by repricing {who}'s replies in this window at {column[len('cost_'):]}. "
+        else f"Worked out by repricing {who}'s replies in this window at {column[len('cost_'):]}{since}. "
         "A different model may need more or fewer replies for the same work, which this doesn't capture.",
     )
 
