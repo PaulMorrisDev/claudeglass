@@ -293,6 +293,18 @@ test('a big paste shows after the cache expired, and the line is empty again whe
   expect((await hint($, world)).tail).toBeUndefined()
 })
 
+test('with coaching off the mod draws no hint, and its present file lists nothing, so neither a new nor a 0.16.0 hook is left without its note', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { enabled: false } }) })
+  const state = rig(on)
+  await started($, world)
+  await world.clock.advance(400 * 1000)
+  await put($, state, 'x'.repeat(60_000))
+  expect((await hint($, world)).tail).toBeUndefined()
+  const present = JSON.parse(String(world.files.get(`/cfg/claudeglass/mod/present/${SESSION}.json`))) as { shows: string[] }
+  expect(present.shows).toEqual([])
+  expect(faults(world)).toEqual([])
+})
+
 test('a drip goes before the cold-cache warning', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
