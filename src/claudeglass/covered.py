@@ -39,15 +39,14 @@ def gone_sentence(covered: int, sessions: int, *, of_file: bool = False) -> str:
     if covered >= sessions:
         return ""
     noun = "session" if sessions == 1 else "sessions"
-    tail = (
-        "were not found on the machine that made this file."
-        if of_file
-        else "were not found, and the dashboard still has those sessions."
-    )
-    return (
-        f"These figures cover {covered:,} of {sessions:,} {noun} in this window. "
-        f"The transcripts of the other {sessions - covered:,} {tail}"
-    )
+    left = sessions - covered
+    if left == 1:
+        rest = "The transcript of the other session was not found"
+        tail = " on the machine that made this file." if of_file else ", and the dashboard still has that session."
+    else:
+        rest = f"The transcripts of the other {left:,} were not found"
+        tail = " on the machine that made this file." if of_file else ", and the dashboard still has those sessions."
+    return f"These figures cover {covered:,} of {sessions:,} {noun} in this window. {rest}{tail}"
 
 
 def stored_sentence(stored: int, sessions: int, *, of_file: bool = False) -> str:
@@ -58,9 +57,11 @@ def stored_sentence(stored: int, sessions: int, *, of_file: bool = False) -> str
         return ""
     noun = "session" if sessions == 1 else "sessions"
     if of_file:
-        verb = "was" if stored == 1 else "were"
-        tail = "on the machine that made this file, because their transcripts were not found there."
-        return f"{stored:,} of {sessions:,} {noun} in this window {verb} read from what the dashboard kept {tail}"
+        verb, found = ("was", "Its transcript was") if stored == 1 else ("were", "Their transcripts were")
+        return (
+            f"{stored:,} of {sessions:,} {noun} in this window {verb} read from what the dashboard kept "
+            f"on the machine that made this file. {found} not found there."
+        )
     verb = "is" if stored == 1 else "are"
     return (
         f"{stored:,} of {sessions:,} {noun} in this window {verb} read from what the dashboard kept, "

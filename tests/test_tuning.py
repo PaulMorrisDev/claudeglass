@@ -64,10 +64,6 @@ SNAKE_CASE = re.compile(r"\b[a-z]+_[a-z0-9_]+\b")
 CAMEL_CASE = re.compile(r"\b[a-z]+[A-Z][A-Za-z]*\b")
 FILLER = re.compile(r"\b(just|simply)\b", re.I)
 MAX_SENTENCE_WORDS = 25
-#: ``covered.stored_sentence(..., of_file=True)`` is worded by decision (it must say whose dashboard and
-#: where the transcripts were not found) and runs to 28 words: the one sentence allowed past the limit.
-FILE_STORED_MARK = "on the machine that made this file, because their transcripts were not found there."
-FILE_STORED_SENTENCE_WORDS = 28
 
 
 @pytest.fixture(autouse=True)
@@ -83,8 +79,7 @@ def _plain(text: str, where: str = "summary") -> None:
     assert not CAMEL_CASE.search(text), f"{where}: camelCase name in {text!r}"
     assert " -- " not in text, f"{where}: dash aside in {text!r}"
     for sentence in re.split(r"(?<=[.?!])\s+", text):
-        limit = FILE_STORED_SENTENCE_WORDS if FILE_STORED_MARK in sentence else MAX_SENTENCE_WORDS
-        assert len(sentence.split()) <= limit, f"{where}: sentence over {limit} words: {sentence!r}"
+        assert len(sentence.split()) <= MAX_SENTENCE_WORDS, f"{where}: sentence over 25 words: {sentence!r}"
 
 
 # -- the sample document and ways to break it ------------------------------------------------
@@ -624,7 +619,7 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     # A summary is read on any machine, so it says whose dashboard and where the transcripts were missing.
     assert lines[1] == (
         "3 of 12 sessions in this window were read from what the dashboard kept "
-        "on the machine that made this file, because their transcripts were not found there."
+        "on the machine that made this file. Their transcripts were not found there."
     )
     assert lines[2] == (
         "1 of 12 sessions in this window was read by an older version and its transcripts are gone, "
@@ -687,9 +682,14 @@ def test_the_coverage_lines_say_it_for_the_machine_that_runs_them_or_for_a_file(
     ]
     assert tuning.coverage_lines(block, of_file=True)[0] == (
         "73 of 82 sessions in this window were read from what the dashboard kept "
-        "on the machine that made this file, because their transcripts were not found there."
+        "on the machine that made this file. Their transcripts were not found there."
     )
     assert tuning.coverage_lines(None) == tuning.coverage_lines({}) == []
+    one = {"sessions": 2, "read": 1, "stored": 1, "older": 0}
+    assert tuning.coverage_lines(one, of_file=True) == [
+        "1 of 2 sessions in this window was read from what the dashboard kept "
+        "on the machine that made this file. Its transcript was not found there."
+    ]
 
 
 def test_the_summary_gives_the_tools_list_saving_by_agent_type_when_the_file_has_one():

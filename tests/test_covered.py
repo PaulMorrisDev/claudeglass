@@ -57,7 +57,11 @@ def test_the_gone_sentence_in_the_singular_the_plural_and_never_when_all_are_cov
     )
     assert covered.gone_sentence(0, 1) == (
         "These figures cover 0 of 1 session in this window. "
-        "The transcripts of the other 1 were not found, and the dashboard still has those sessions."
+        "The transcript of the other session was not found, and the dashboard still has that session."
+    )
+    assert covered.gone_sentence(8, 9) == (
+        "These figures cover 8 of 9 sessions in this window. "
+        "The transcript of the other session was not found, and the dashboard still has that session."
     )
     assert covered.gone_sentence(3, 3) == ""
     assert covered.gone_sentence(4, 3) == ""
@@ -72,7 +76,11 @@ def test_the_gone_sentence_of_a_file_names_the_machine_that_made_it():
     )
     assert covered.gone_sentence(0, 1, of_file=True) == (
         "These figures cover 0 of 1 session in this window. "
-        "The transcripts of the other 1 were not found on the machine that made this file."
+        "The transcript of the other session was not found on the machine that made this file."
+    )
+    assert covered.gone_sentence(8, 9, of_file=True) == (
+        "These figures cover 8 of 9 sessions in this window. "
+        "The transcript of the other session was not found on the machine that made this file."
     )
     assert covered.gone_sentence(3, 3, of_file=True) == ""
     for sentence in (covered.gone_sentence(9, 82, of_file=True), covered.gone_sentence(0, 1, of_file=True)):
@@ -100,11 +108,11 @@ def test_the_stored_sentence_in_the_singular_the_plural_and_never_at_zero():
 def test_the_stored_sentence_of_a_file_names_the_machine_that_made_it():
     assert covered.stored_sentence(73, 82, of_file=True) == (
         "73 of 82 sessions in this window were read from what the dashboard kept "
-        "on the machine that made this file, because their transcripts were not found there."
+        "on the machine that made this file. Their transcripts were not found there."
     )
     assert covered.stored_sentence(1, 3, of_file=True) == (
         "1 of 3 sessions in this window was read from what the dashboard kept "
-        "on the machine that made this file, because their transcripts were not found there."
+        "on the machine that made this file. Its transcript was not found there."
     )
     assert covered.stored_sentence(0, 3, of_file=True) == ""
     # Nothing in it says "here" or speaks of the reader's own dashboard.

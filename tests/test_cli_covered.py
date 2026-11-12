@@ -111,7 +111,7 @@ STORED_2 = (
 #: The same line as ``tuning summary`` prints it, for a file that may have come from another machine.
 STORED_2_FILE = (
     "2 of 3 sessions in this window were read from what the dashboard kept "
-    "on the machine that made this file, because their transcripts were not found there."
+    "on the machine that made this file. Their transcripts were not found there."
 )
 
 
@@ -340,7 +340,7 @@ def test_one_damaged_digest_leaves_out_only_its_session(tmp_path, capsys, blob):
     assert doc["compactions"]["sessions"] == 2
     assert err == (
         "claudeglass tuning export: These figures cover 2 of 3 sessions in this window. "
-        "The transcripts of the other 1 were not found, and the dashboard still has those sessions.\n"
+        "The transcript of the other session was not found, and the dashboard still has that session.\n"
         "claudeglass tuning export: 1 of 3 sessions in this window is read from what the dashboard kept, "
         "because their transcripts were not found.\n"
     )
@@ -351,7 +351,7 @@ def test_one_damaged_digest_leaves_out_only_its_session(tmp_path, capsys, blob):
 
 GONE_0_OF_1 = (
     "These figures cover 0 of 1 session in this window. "
-    "The transcripts of the other 1 were not found, and the dashboard still has those sessions."
+    "The transcript of the other session was not found, and the dashboard still has that session."
 )
 
 
