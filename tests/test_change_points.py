@@ -10,10 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudeglass import change_points, snapshots
+from claudeglass import change_points, model_swap, snapshots
 from claudeglass.model import TranscriptMeta, TranscriptResult, Turn
 from claudeglass.profiles import apply as apply_mod
 from claudeglass.profiles.schema import load_dict
+from claudeglass.snapshots import load_snapshots
 
 
 def _apply(tmp_path: Path, settings: dict):
@@ -846,69 +847,100 @@ def test_without_a_corpus_transcript_points_are_left_out(tmp_path):
     assert change_points.change_points(tmp_path, corpus=None) == []
 
 
-# -- the main model's last change, and when a session started ---------------------
+# -- the run behind a transcript model point, and when a session started ---------
 
 
-@pytest.mark.parametrize(
-    "label, named",
-    [
-        ("model", True),
-        ("effective.model", True),
-        ("user_settings.model", True),
-        ("project_settings.model", True),
-        ("reviewer: model", False),
-        ("agents.reviewer.model", False),
-        ("effective.effortLevel", False),
-    ],
-)
-def test_a_change_to_the_main_model_is_named_in_every_way_a_point_names_it(label, named):
-    point = change_points.ChangePoint(ts=datetime(2026, 9, 22, tzinfo=timezone.utc), source="config", label="x",
-                                      keys=[label])
-    assert change_points.changes_setting(point, "model") is named
-
-
-def test_the_last_change_point_in_a_project_is_the_newest_that_applies_there(tmp_path):
+def test_a_projects_settings_move_is_the_last_change_its_own_snapshots_show(tmp_path):
+    floor = model_swap.at_main_floor
     config_dir = tmp_path / "tl"
-    _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"}, slug="slug:a")
-    _snapshot(config_dir, "20260922T100000Z", {"model": "sonnet"}, {"model": "project_local"}, slug="slug:a")
-    points = change_points.change_points(config_dir)
-    point = change_points.last_change_point(points, "model", "slug:a")
-    assert point.ts == datetime(2026, 9, 22, 10, tzinfo=timezone.utc)
-    assert change_points.last_change_point(points, "model", "slug:b") is None
-    assert change_points.last_change_point(points, "effortLevel", "slug:a") is None
-    # A change made for every project applies in each one, and the newest counts.
-    _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"}, slug="slug:b")
-    _snapshot(config_dir, "20260923T100000Z", {"model": "fable"}, {"model": "user"}, slug="slug:b")
-    points = change_points.change_points(config_dir)
-    expected = datetime(2026, 9, 23, 10, tzinfo=timezone.utc)
-    assert change_points.last_change_point(points, "model", "slug:a").ts == expected
-    assert change_points.last_change_point(points, "model", "slug:zzz").ts == expected
+    for ts, slug, model, layer, user in (
+        ("20260921T100000Z", "slug:a", "opus", "user", "opus"),
+        ("20260921T110000Z", "slug:b", "opus", "user", "opus"),
+        ("20260922T100000Z", "slug:a", "sonnet", "project_local", "opus"),
+        ("20260923T100000Z", "slug:a", "sonnet", "project_local", "sonnet"),
+        ("20260924T100000Z", "slug:b", "sonnet", "user", "sonnet"),
+    ):
+        _snapshot(config_dir, ts, {"model": model}, {"model": layer}, slug=slug, user_settings={"model": user})
+    snaps = load_snapshots(config_dir)
+
+    def at(day):
+        return datetime(2026, 9, day, 10, tzinfo=timezone.utc)
+
+    # Alpha's own file moved it to Sonnet; your user settings' later move to Sonnet is not alpha's.
+    assert change_points.settings_model_move(snaps, ("slug:a",), floor) == (at(22), "sonnet")
+    assert change_points.settings_model_move(snaps, ("slug:b",), floor) == (at(24), "sonnet")
+    # No snapshot of its own: your user settings' model, in every snapshot.
+    assert change_points.settings_model_move(snaps, ("slug:z",), floor) == (at(23), "sonnet")
+    assert change_points.settings_model_move(snaps, (), floor) == (at(23), "sonnet")
+    # A project-less (schema 1) snapshot counts only for a project with none of its own.
+    (config_dir / "snapshots" / "20260925T100000Z.json").write_text(
+        json.dumps({"ts": "20260925T100000Z", "user_settings": {"model": "fable"}}), encoding="utf-8")
+    snaps = load_snapshots(config_dir)
+    assert change_points.settings_model_move(snaps, ("slug:a",), floor) == (at(22), "sonnet")
+    assert change_points.settings_model_move(snaps, ("slug:z",), floor) == (at(25), "fable")
+    # One value throughout is no move.
+    one = tmp_path / "one"
+    for ts in ("20260921T100000Z", "20260922T100000Z"):
+        _snapshot(one, ts, {"model": "opus"}, {"model": "user"}, slug="slug:a", user_settings={"model": "opus"})
+    assert change_points.settings_model_move(load_snapshots(one), ("slug:a",), floor) is None
+    assert change_points.settings_model_move([], ("slug:a",), floor) is None
 
 
-def test_the_value_a_point_moved_the_model_to(tmp_path):
-    config_dir = tmp_path / "tl"
-    _snapshot(config_dir, "20260921T100000Z", {"model": "opus"}, {"model": "user"})
-    _snapshot(config_dir, "20260922T100000Z", {"model": "sonnet"}, {"model": "user"})
-    points = change_points.change_points(config_dir)
-    assert change_points.new_value(points[-1], "model", points) == "sonnet"
+def test_a_projects_transcript_move_is_its_newest_transcript_model_point():
+    floor = model_swap.at_main_floor
 
-    # An apply moves it to its value, and its undo moves it back to the old one.
-    claude_root = tmp_path / ".claude"
-    claude_root.mkdir()
-    (claude_root / "settings.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
-    applied_dir, result = _apply(tmp_path, {"model": "opus"})
-    apply_mod.revert(result.ts, config_dir=applied_dir)
-    points = change_points.change_points(applied_dir)
-    applied = next(p for p in points if p.source == "apply")
-    undone = next(p for p in points if p.source == "revert")
-    assert change_points.new_value(applied, "model", points) == "opus"
-    assert change_points.new_value(undone, "model", points) == "sonnet"
+    def at(day):
+        return datetime(2026, 9, day, tzinfo=timezone.utc)
 
-    # A point that names the model but records no value for it.
-    bare = change_points.ChangePoint(
-        ts=datetime(2026, 9, 22, tzinfo=timezone.utc), source="config", label="x", keys=["user_settings.model"]
-    )
-    assert change_points.new_value(bare, "model", [bare]) is None
+    def point(day, source, project, old=None, **changes):
+        return change_points.ChangePoint(
+            ts=at(day), source=source, label="x", keys=list(changes), project=project,
+            changes=[{"key": k, "agent": None, "old": old, "new": v} for k, v in changes.items()])
+
+    points = [
+        point(1, "transcript", "slug:a", "claude-opus-5", model="claude-sonnet-5"),
+        point(2, "transcript", "slug:a", "claude-sonnet-5", model="claude-opus-5"),
+        point(3, "transcript", "slug:a", effortLevel="high"),
+        point(4, "config", "slug:a", model="haiku"),
+        point(5, "transcript", "slug:b", "claude-opus-5", model="claude-haiku-5-5"),
+        point(6, "transcript", "", "claude-opus-5", model="claude-haiku-5-5"),
+    ]
+    assert change_points.transcript_model_move(points, ("slug:a", "slug:a"), floor) == (at(2), "claude-opus-5")
+    assert change_points.transcript_model_move(points, ("slug:b",), floor) == (at(5), "claude-haiku-5-5")
+    assert change_points.transcript_model_move(points, ("slug:c",), floor) is None
+    assert change_points.transcript_model_move(points, (), floor) is None
+
+
+def test_a_setting_that_changes_on_one_side_of_the_sonnet_line_has_not_moved(tmp_path):
+    def move(name, *values):
+        config_dir = tmp_path / name
+        for day, value in values:
+            effective = {} if value is None else {"model": value}
+            _snapshot(config_dir, f"202609{day}T100000Z", effective, {"model": "user"}, slug="slug:a",
+                      user_settings=effective)
+        return change_points.settings_model_move(load_snapshots(config_dir), ("slug:a",), model_swap.at_main_floor)
+
+    def at(day):
+        return datetime(2026, 9, day, 10, tzinfo=timezone.utc)
+
+    assert move("down", (21, "opus"), (22, "sonnet"), (23, "sonnet[1m]"), (24, "haiku")) == (at(22), "sonnet")
+    assert move("above", (21, "opus"), (22, "fable")) is None
+    assert move("up", (21, "sonnet"), (22, "opus"), (23, "fable")) == (at(22), "opus")
+    assert move("unset_down", (21, None), (22, "sonnet")) == (at(22), "sonnet")
+    assert move("unset_up", (22, "sonnet"), (23, None)) == (at(23), None)
+
+
+def test_a_newer_id_of_the_same_side_is_no_transcript_move():
+    def point(day, old, new):
+        return change_points.ChangePoint(
+            ts=datetime(2026, 9, day, tzinfo=timezone.utc), source="transcript", label="x", keys=["model"],
+            project="slug:a", changes=[{"key": "model", "agent": None, "old": old, "new": new}])
+
+    points = [point(22, "claude-opus-5-5", "claude-sonnet-5"), point(24, "claude-sonnet-5", "claude-sonnet-5-5")]
+    assert change_points.transcript_model_move(points, ("slug:a",), model_swap.at_main_floor) == (
+        datetime(2026, 9, 22, tzinfo=timezone.utc), "claude-sonnet-5")
+    assert change_points.transcript_model_move(
+        [point(22, "claude-opus-5", "claude-opus-5-5")], ("slug:a",), model_swap.at_main_floor) is None
 
 
 def test_the_sessions_behind_a_transcript_model_point_are_its_run(tmp_path):

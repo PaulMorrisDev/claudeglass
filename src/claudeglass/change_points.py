@@ -1065,44 +1065,62 @@ def session_start(bundle) -> datetime | None:
     return None
 
 
-def changes_setting(point: ChangePoint, key: str) -> bool:
-    """Whether ``point`` changed the main session's setting ``key``
-    (``model``, ``effortLevel``): an apply or undo of it, or a session's
-    transcript showing a new value (``key``), a settings change the
-    snapshots show (``effective.<key>``, or for an older snapshot the
-    settings file it sits in). An agent's setting (``reviewer: model``) is
-    not the main session's."""
-    names = {key, f"effective.{key}", f"user_settings.{key}", f"project_settings.{key}"}
-    return any(label in names for label in point.keys)
-
-
-def last_change_point(points: list[ChangePoint], key: str, project: str | Collection[str]) -> ChangePoint | None:
-    """The newest of ``points`` that changes the main session's ``key``
-    (:func:`changes_setting`) and applies in ``project`` (:func:`applies_to`:
-    a key, or every key one project goes by); of two at the same time, the
-    later one in ``points``. ``None`` when none does."""
-    found = None
-    for point in points:
-        if changes_setting(point, key) and applies_to(point, project) and (found is None or point.ts >= found.ts):
-            found = point
-    return found
-
-
 def _main_entry(point: ChangePoint, key: str) -> dict | None:
     return next((c for c in point.changes if c.get("key") == key and not c.get("agent")), None)
 
 
-def new_value(point: ChangePoint, key: str, points: list[ChangePoint]) -> object:
-    """The value ``point`` moved the main session's ``key`` to: what it
-    records (a settings change, an apply, a session's transcript), or for an
-    undo the old value its apply recorded (found in ``points`` by the backup).
-    ``None`` when no value is recorded."""
-    if point.source == "revert":
-        apply = next((p for p in points if p.source == "apply" and p.backup_ts == point.backup_ts), None)
-        entry = _main_entry(apply, key) if apply is not None else None
-        return entry.get("old") if entry is not None else None
-    entry = _main_entry(point, key)
-    return entry.get("new") if entry is not None else None
+def settings_model_move(
+    snapshots: list[snapshots_mod.Snapshot], keys: Collection[str], floor: Callable[[object], bool]
+) -> tuple[datetime, object] | None:
+    """When the main session's ``model`` setting last moved across ``floor``
+    (a test of a model value, ``model_swap.at_main_floor``: Sonnet or
+    smaller) in the project that goes by ``keys`` (every key it carries,
+    ``snapshots.snapshot_project_keys``), and the value it moved to: its
+    own snapshots' effective model, oldest first. A change that stays on
+    one side (``sonnet`` to ``haiku``, ``opus`` to ``fable``) is no move.
+    A project with no snapshot of its own reads your user settings' model in
+    every snapshot instead, the project-less (schema 1) ones included; one
+    with snapshots of its own never reads another project's or a
+    project-less one. An apply or undo shows in the next snapshot, taken
+    when the next session starts. ``None`` when it never moved."""
+    wanted = set(keys)
+    own = [snap for snap in snapshots if str(snap.data.get("project_slug") or "") in wanted]
+    if own:
+        values = [(snap.ts, snapshots_mod.effective_config(snap).get("model")) for snap in own]
+    else:
+        values = [
+            (snap.ts, snap.data["user_settings"].get("model"))
+            for snap in snapshots
+            if isinstance(snap.data.get("user_settings"), dict)
+        ]
+    move, previous, seen = None, None, False
+    for ts, value in values:
+        when = _parse_backup_ts(ts) or _parse_iso(ts)
+        if when is None:
+            continue
+        if seen and floor(value) != floor(previous):
+            move = (when, value)
+        previous, seen = value, True
+    return move
+
+
+def transcript_model_move(
+    points: list[ChangePoint], keys: Collection[str], floor: Callable[[object], bool]
+) -> tuple[datetime, object] | None:
+    """The newest of ``points`` where the sessions' transcripts of the
+    project that goes by ``keys`` showed its main model move across
+    ``floor`` (a transcript point whose old and new model are on different
+    sides), and the model it moved to. A new model on the same side (a newer
+    Sonnet id after an older one) is no move. ``None`` when there is none."""
+    wanted = set(keys)
+    found = None
+    for point in points:
+        entry = _main_entry(point, "model") if point.source == "transcript" and point.project in wanted else None
+        if entry is None or floor(entry.get("old")) == floor(entry.get("new")):
+            continue
+        if found is None or point.ts >= found[0]:
+            found = (point.ts, entry.get("new"))
+    return found
 
 
 def model_runs(points: list[ChangePoint], corpus) -> dict[int, list]:
@@ -1123,7 +1141,8 @@ def model_runs(points: list[ChangePoint], corpus) -> dict[int, list]:
     for index, point in enumerate(points):
         if point.source != "transcript" or "model" not in point.keys:
             continue
-        model = new_value(point, "model", points)
+        entry = _main_entry(point, "model")
+        model = entry.get("new") if entry is not None else None
         runs[index] = [
             bundle for sig, bundle in sessions if sig.key == point.project and sig.start >= point.ts and sig.model == model
         ][:SUSTAINED_SESSIONS]
@@ -1136,12 +1155,11 @@ __all__ = [
     "affects_capture",
     "applies_to",
     "change_points",
-    "changes_setting",
-    "last_change_point",
     "latest",
     "model_runs",
-    "new_value",
     "project_key",
     "session_start",
+    "settings_model_move",
     "summary",
+    "transcript_model_move",
 ]
