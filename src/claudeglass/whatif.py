@@ -5,7 +5,8 @@ computes -- no new simulation:
 - a model for the main session or an agent: ``model_swap_agent_file_runs``,
   the runs that setting decides (an agent file's model only the runs
   started without a model of their own; the main session's only the
-  sessions since the model last changed in their project), else
+  sessions it counts: not those already on Sonnet or smaller, nor those
+  from before their project moved there), else
   ``model_swap_by_agent_type`` for a report from before that table had a
   row for it;
 - ``autoCompactWindow``: ``compaction_sim_by_window`` (sessions replayed
@@ -170,19 +171,23 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
             )
         runs = " started without a model of their own"
     elif agent == TOP and tables.has("model_swap", "model_swap_agent_file_runs"):
-        # The main session's model setting decides only the sessions since
-        # the model last changed in their project, outside projects already
-        # on Sonnet or smaller. (A report from before that table had a
-        # main-session row priced every session.)
+        # The main session's model setting prices only the sessions the
+        # report counts: not those already on Sonnet or smaller, nor those
+        # from before their project moved there. (A report from before that
+        # table had a main-session row priced every session.)
         file_row = tables.row("model_swap", "model_swap_agent_file_runs", TOP)
+        counted, total = _num(row.get("lever_runs")), _num(row.get("spawns"))
         if file_row is not None:
-            if _num(row.get("before_change_runs")):
-                since = ", from the sessions since its model last changed"
+            if counted is not None and total and counted < total:
+                since = f", on {int(counted):,} of its {int(total):,} sessions"
             row = file_row
-        elif "lever_runs" in row and not _num(row.get("lever_runs")):
+        elif _num(row.get("before_change_runs")):
             return _row(
                 key, label, value, None, "none",
-                "No main session in this window ran under the model setting in force now.",
+                "Every main session in this window started before its project moved to Sonnet or smaller."
+                if not _num(row.get("settled_runs"))
+                else "Every main session in this window ran on Sonnet or smaller, or started before its project "
+                "moved there.",
             )
     # A report without meta.model_ids falls back to matching column names.
     model_ids = getattr(getattr(tables.model, "meta", None), "model_ids", None) or {}

@@ -115,26 +115,40 @@ def test_an_agent_model_prices_only_the_runs_its_agent_file_decides():
     assert "workflow script" in none["basis"]
 
 
-def test_the_main_session_model_prices_only_the_sessions_its_setting_decides():
-    """The main session's model setting decides only the sessions since the
-    model last changed in their project, outside projects already on Sonnet."""
-    swap = _table("model_swap_by_agent_type", [
-        {"agent_type": "top-level", "observed_model": "claude-opus-5", "observed_cost": 100.0,
-         "cost_claude-sonnet-5": 60.0, "lever_runs": 2, "before_change_runs": 3},
-    ])
-    decided = _table("model_swap_agent_file_runs", [
-        {"agent_type": "top-level", "runs": 2, "observed_cost": 40.0, "cost_claude-sonnet-5": 25.0},
-    ])
-    model = NS(sections=[NS(key="model_swap", tables=[swap, decided])])
-    [row] = whatif.estimate({"model": "claude-sonnet-5"}, {}, model, UNITS, period=PERIOD)["rows"]
+def test_the_main_session_model_prices_only_the_sessions_it_counts():
+    """The main session's model setting prices the sessions the report counts:
+    not those already on Sonnet or smaller, nor those from before their
+    project moved there."""
+
+    def tables(*, file_row: bool = True, **counts):
+        swap = _table("model_swap_by_agent_type", [
+            {"agent_type": "top-level", "observed_model": "claude-opus-5", "observed_cost": 100.0,
+             "cost_claude-sonnet-5": 60.0, "spawns": 5, **counts},
+        ])
+        decided = _table("model_swap_agent_file_runs", [
+            {"agent_type": "top-level", "runs": 2, "observed_cost": 40.0, "cost_claude-sonnet-5": 25.0},
+        ] if file_row else [])
+        return NS(sections=[NS(key="model_swap", tables=[swap, decided])])
+
+    def price(model):
+        [row] = whatif.estimate({"model": "claude-sonnet-5"}, {}, model, UNITS, period=PERIOD)["rows"]
+        return row
+
+    row = price(tables(lever_runs=2, before_change_runs=3, settled_runs=0))
     assert (row["saving_usd"], row["fidelity"]) == (15.0, "ceiling")
-    assert ", from the sessions since its model last changed" in row["basis"]
-    # No main session ran under the setting in force now: nothing to price.
-    swap.rows[0][swap.columns.index(next(c for c in swap.columns if c.key == "lever_runs"))] = 0
-    model.sections[0].tables[-1] = _table("model_swap_agent_file_runs", [])
-    [none] = whatif.estimate({"model": "claude-sonnet-5"}, {}, model, UNITS, period=PERIOD)["rows"]
-    assert none["saving_usd"] is None and none["fidelity"] == "none"
-    assert none["basis"] == "No main session in this window ran under the model setting in force now."
+    assert "at claude-sonnet-5, on 2 of its 5 sessions. A different model" in row["basis"]
+    # No session counted: nothing to price, and the reason says why.
+    row = price(tables(file_row=False, lever_runs=0, before_change_runs=3, settled_runs=0))
+    assert row["saving_usd"] is None and row["fidelity"] == "none"
+    assert row["basis"] == "Every main session in this window started before its project moved to Sonnet or smaller."
+    row = price(tables(file_row=False, lever_runs=0, before_change_runs=3, settled_runs=2))
+    assert row["basis"] == (
+        "Every main session in this window ran on Sonnet or smaller, or started before its project moved there."
+    )
+    # Every session already on Sonnet or smaller: the whole row is priced.
+    row = price(tables(file_row=False, lever_runs=0, before_change_runs=0, settled_runs=5))
+    assert (row["saving_usd"], row["fidelity"]) == (40.0, "ceiling")
+    assert ", on " not in row["basis"]
 
 
 def _swap_model(columns: dict, model_ids: dict | None = None):
