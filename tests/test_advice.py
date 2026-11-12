@@ -146,8 +146,7 @@ def test_in_a_view_of_several_projects_the_main_card_stays_when_the_setting_alre
     (card,) = main_cards()
     assert card.changes == [] and card.saving_usd == 30.0
     assert (
-        "Your model setting already says Sonnet. These sessions ran on a larger model anyway, chosen with /model, "
-        "the model picker or a project's own settings."
+        "Your model setting already says Sonnet, and these sessions still ran on a larger model."
     ) in card.why
     assert card.action == "Pick Sonnet with /model sonnet or the model picker for routine work, and compare the results."
     # One project's view is unchanged: the card goes.

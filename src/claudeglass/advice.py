@@ -346,10 +346,7 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
     # model, because one project's sessions ran on a larger one anyway.
     set_already = already_set("model", _family_alias(alt), current)
     if set_already:
-        since += (
-            f" Your model setting already says {family}. These sessions ran on a larger model anyway, chosen "
-            "with /model, the model picker or a project's own settings."
-        )
+        since += f" Your model setting already says {family}, and these sessions still ran on a larger model."
     change = SettingChange(
         target="settings",
         key="model",
