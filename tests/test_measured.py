@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -337,3 +338,27 @@ def test_a_store_with_one_older_session_says_1_of_2_on_data_quality(older_store)
     assert (only_new.meta.older_sessions, only_new.meta.sessions) == (0, 1)
     assert "read by an older version" not in render_markdown(only_new)
     assert "read by an older version" not in render_html(only_new)
+
+
+def test_an_agent_run_is_judged_by_its_own_stamp_and_a_message_by_its_main_transcripts(tmp_path):
+    from claudeglass import parse
+    from claudeglass.pricing import load_pricing as load_min
+    from test_habits import _calls_session, _read, _shell
+
+    parse.set_salt(b"h" * 32)
+    pricing = load_min(path=Path(__file__).resolve().parent / "fixtures" / "pricing_min.toml")
+    run = [[_read("a")], [_shell("cat a.txt || cat b.txt", 1)], [_read("b", 2)]]
+    for name, top_stamp, sub_stamp in (("older-agent", PARSER_VERSION, BEFORE_STAMP), ("older-main", BEFORE_STAMP, PARSER_VERSION)):
+        (tmp_path / name).mkdir()
+        corpus = _calls_session(tmp_path / name, run)
+        [bundle] = corpus.sessions
+        bundle.top.parser_version = top_stamp
+        bundle.subs[0].parser_version = sub_stamp
+        result = habits.collect(corpus, pricing)
+        [agent] = result.agents
+        cycles = [c for c in result.cycles if c.calls]
+        assert cycles
+        # The agent's figures follow the agent's digest; the messages' follow the main transcript's.
+        assert (agent.probe_calls is None) == (sub_stamp == BEFORE_STAMP), name
+        assert all((c.probe_calls is None) == (top_stamp == BEFORE_STAMP) for c in cycles), name
+        assert agent.calls == 4 and (agent.probe_calls is None or agent.probe_calls == 3), name
