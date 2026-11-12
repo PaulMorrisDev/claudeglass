@@ -778,7 +778,8 @@ memory and dropped:
 - ``Turn.shell_read_count: int = 0`` and ``shell_read_chars: int = 0`` --
   the commands of the turn's shell calls that read files and the size of
   their results (``shell_reads``: grep, rg, ``sed -n``, cat, head, tail,
-  find, git log/show/diff, Get-Content, Select-String; not a heredoc
+  find, git log/show/diff/grep, ``git ls-files | xargs grep``, Get-Content,
+  Select-String, ``Get-ChildItem -Recurse | Select-String``; not a heredoc
   write, ``sed -i``, ls, wc or git status). A call that was blocked or
   denied is taken back, like ``shell_write_count``.
 - ``Turn.tests_run: str = ""`` -- ``full`` when a shell call ran a whole

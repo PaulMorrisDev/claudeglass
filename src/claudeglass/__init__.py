@@ -486,8 +486,10 @@ __version__ = "0.16.0"
 #: redefines one adds it there.
 #: Bumped to 51: a ``||`` fallback that starts on the next line or in a
 #: subshell is one shell read, and a commit or pull-request message inside
-#: ``"$( ... )"`` is text and not commands (``Turn.shell_read_count``; the
-#: write targets and ``changes_files`` of such a command move with it); a
+#: ``"$( ... )"`` is text and not commands, and ``git grep``,
+#: ``git ls-files | xargs grep`` and ``Get-ChildItem -Recurse |
+#: Select-String`` are reads (``Turn.shell_read_count``; the write targets
+#: and ``changes_files`` of such a command move with the quoting); a
 #: path in any system's temp folder, found by its shape and not only by the
 #: reading process's own temp folder, is temp
 #: (``Turn.shell_code_write_count``, ``Turn.edit_code_count``). A pre-51
