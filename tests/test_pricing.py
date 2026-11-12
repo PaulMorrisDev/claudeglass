@@ -22,6 +22,7 @@ from claudeglass.pricing import (
     ResolvedRates,
     cache_read_savings_usd,
     effective_rates,
+    load_packaged_pricing,
     load_pricing,
     newer_version_id,
     newer_version_of,
@@ -1630,3 +1631,20 @@ def test_the_output_estimate_is_used_by_the_simulation_path_too():
     partial = _turn(output_tokens=7, output_partial=True, output_tokens_est=1_000_000)
     simulated = price_turn(partial, resolved, write_split={"5m": 0}, read_tokens=0)
     assert simulated.output_cost == pytest.approx(10.0)
+
+
+def test_the_packaged_card_loads_without_a_config_or_a_path(tmp_path, monkeypatch):
+    """The packaged rows, whatever card the user keeps in their config folder, and the same object
+    each call (the tuning export's model words come from it)."""
+    claudeglass_dir = tmp_path / "claudeglass"
+    claudeglass_dir.mkdir()
+    (claudeglass_dir / "pricing.toml").write_text(
+        (FIXTURES / "pricing_min.toml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert "claude-widget-9" in load_pricing().models  # the user's card is the one load_pricing reads
+    packaged = load_packaged_pricing()
+    assert "claude-widget-9" not in packaged.models
+    assert {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001"} <= set(packaged.models)
+    assert "packaged default" in packaged.path
+    assert load_packaged_pricing() is packaged
