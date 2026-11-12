@@ -7,6 +7,9 @@ The mod's side of a pair is the plugin's own tests (``plugin/tests/files.test.ts
 off, and a muted kind is not drawn). The hook's side is ``_moved`` reading a present file, written here in
 the shape each copy of the mod writes it.
 
+The rows that name the 0.16.0 package run that release's own hook and ``mod_settings``, taken from the
+``v0.16.0`` tag (they are skipped where git or the tag is not available). The other rows run this build's code.
+
 | Mod | Package | Expected |
 |---|---|---|
 | new | new | the mod lists a surface only while coaching applies, and the hook keeps every hint the mod does not list |
@@ -17,9 +20,14 @@ the shape each copy of the mod writes it.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
+import sys
+import tarfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -109,22 +117,78 @@ def test_muted_carries_the_off_hints_so_an_older_mod_stays_silent_for_them(tmp_p
 
 
 # -- a new mod, a 0.16.0 package ---------------------------------------------------------------------------------
+# The 0.16.0 side is that release's own code: its hook module and its mod_settings, taken from the v0.16.0 tag
+# with `git archive` and run in a child Python of their own, so these rows fail if either side of the pair moves.
+
+REPO = Path(__file__).resolve().parents[1]
+_OLD_RUN = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from datetime import datetime, timezone
+folder, now = Path(sys.argv[2]), float(sys.argv[3])
+what = sys.argv[4]
+if what == "moved":
+    from claudeglass.hooks import capture_hook
+    print(json.dumps(sorted(capture_hook._moved(folder, capture_hook.load_catalogue(), "s1", now))))
+else:
+    from claudeglass import mod_settings
+    data = mod_settings.build(folder, now=datetime.fromtimestamp(now, timezone.utc))
+    print(json.dumps(data["coaching"]))
+"""
 
 
-def test_what_a_new_mod_reads_is_the_same_settings_a_0_16_0_package_writes(tmp_path):
-    # The block's keys a new mod reads (`enabled`, `projects`, `exclude_projects`, `muted`, `once`,
-    # `plan_fresh`, `thresholds`) are the ones 0.16.0 wrote, so a new mod with that package lists the hints
-    # while coaching is on and nothing while it is off: with it off neither side shows a hint, no worse than
-    # 0.16.0 alone.
-    block = mod_settings.build(_config(tmp_path), now=NOW)["coaching"]
-    assert {"enabled", "projects", "exclude_projects", "plan_fresh", "thresholds", "muted", "once"} <= set(block)
+@pytest.fixture(scope="module")
+def v016(tmp_path_factory):
+    """The ``src`` folder of v0.16.0, or a skip when git or the tag is not there."""
+    try:
+        subprocess.run(["git", "-C", str(REPO), "rev-parse", "--verify", "v0.16.0^{commit}"], check=True, capture_output=True)
+        archive = subprocess.run(
+            ["git", "-C", str(REPO), "archive", "--format=tar", "v0.16.0", "src/claudeglass"], check=True, capture_output=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("the v0.16.0 tag, or git, is not available here")
+    folder = tmp_path_factory.mktemp("v016")
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(folder)
+    return folder / "src"
+
+
+def _old(src, folder, what: str):
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", _OLD_RUN, str(src), str(folder), str(NOW.timestamp()), what],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("shows", [[], ["hint"], ["hint", "status"]])
+def test_a_0_16_0_hook_moves_the_whole_set_whatever_a_new_mod_lists(v016, tmp_path, shows):
+    # So with coaching off, where a new mod lists nothing and shows no hint, neither side shows one: no worse
+    # than 0.16.0 alone. With coaching on the new mod shows them and the 0.16.0 hook leaves them to it.
+    folder = _config(tmp_path)
+    _present(folder, shows=shows, active=0)
+    assert _old(v016, folder, "moved") == sorted(THE_WHOLE_SET)
+
+
+def test_0_16_0_writes_every_coaching_key_a_new_mod_reads_and_enabled_follows_coaching_notes(v016, tmp_path):
+    needed = {"enabled", "projects", "exclude_projects", "plan_fresh", "thresholds", "muted", "once"}
+    off = _old(v016, _config(tmp_path / "off"), "settings")
+    on = _old(v016, _config(tmp_path / "on", '[capture]\ncoaching = ["coaching_notes"]\n'), "settings")
+    assert needed <= set(off) and needed <= set(on)
+    assert (off["enabled"], on["enabled"]) == (False, True)
 
 
 # -- an older mod, a 0.16.0 package ------------------------------------------------------------------------------
 
 
-def test_an_older_mods_file_moves_the_set_0_16_0_moved(tmp_path):
-    # Unchanged: the hook given a file with no ``shows`` moves the five hints 0.16.0 moved.
+def test_a_0_16_0_hook_given_an_older_mods_file_moves_the_whole_set_while_it_is_fresh(v016, tmp_path):
+    # Unchanged by this build: a file without ``shows`` moves the five hints, and a stale one moves nothing.
     folder = _config(tmp_path)
     _present(folder)
-    assert _moved(folder) == THE_WHOLE_SET
+    assert _old(v016, folder, "moved") == sorted(THE_WHOLE_SET)
+    _present(folder, seen=NOW.timestamp() - 3600)
+    assert _old(v016, folder, "moved") == []
