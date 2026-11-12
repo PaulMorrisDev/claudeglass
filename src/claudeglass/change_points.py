@@ -127,7 +127,10 @@ def _words(value) -> str:
     if isinstance(value, (list, tuple)):
         # A capture list ([capture] coaching, feedback): its metrics' names.
         names = [
-            capture_catalogue.METRICS_BY_ID[v].title if v in capture_catalogue.METRICS_BY_ID else str(v) for v in value
+            capture_catalogue.METRICS_BY_ID[v].title
+            if isinstance(v, str) and v in capture_catalogue.METRICS_BY_ID
+            else snapshots_mod.list_text([v])
+            for v in value
         ]
         return ", ".join(names) if names else "none"
     if isinstance(value, float) and value.is_integer():

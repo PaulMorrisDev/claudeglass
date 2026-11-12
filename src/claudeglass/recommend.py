@@ -180,6 +180,7 @@ from .snapshots import (
     cut_off_name,
     effective_config,
     effective_provenance,
+    list_text,
     managed_keys,
     split_tool_line,
 )
@@ -1937,12 +1938,12 @@ def current_diet(diet: dict, current) -> dict:
     rare = [name for name in _split_names(diet.get("rare_tools")) if name in sizes and line.offered(name)]
     row = dict(diet)
     kept = [name for name in _split_names(diet.get("keep_tools")) if line.offered(name)]
-    row["keep_tools"] = ", ".join(kept)
+    row["keep_tools"] = list_text(kept)
     if any(_tool_name(name) in line.cut for name in kept):
         # A kept tool the file gives an allowlist the hook cut off can't be written
         # back as the file has it, and its bare name would widen it: no list to give.
         rare = []
-    row["rare_tools"] = ", ".join(rare)
+    row["rare_tools"] = list_text(rare)
     definitions = sum(sizes[name][0] for name in rare)
     deferred = sum(sizes[name][1] for name in rare)
     skills = diet.get("dropped_skills") if SKILLS_TOOL in rare else 0.0
@@ -2031,7 +2032,7 @@ def _tools_list_card(
     scope = "user" if workflow else ("repo" if source == "project" or (has_file and source is None) else "user")
     general = agent_type == "general-purpose"
     pct = int(REMOVABLE_USE_SHARE * 100)
-    line = "tools: " + ", ".join(keep)
+    line = "tools: " + list_text(keep)
     model = diet.get("model")
     check = (
         "Check it with one spawn before and one after on the same model"
@@ -3283,7 +3284,7 @@ def _patch_value(value, missing: str) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(str(v) for v in value) + "]"
+        return "[" + list_text(value) + "]"
     return str(value)
 
 

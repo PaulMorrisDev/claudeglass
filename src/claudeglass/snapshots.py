@@ -819,7 +819,7 @@ def build_effective_config_table(snapshots: list[Snapshot], canonical: Mapping[s
         eff = effective_config(snap)
         prov = effective_provenance(snap)
         for key in sorted(eff):
-            rows.append([project, key, _stringify_config_value(eff[key]), prov.get(key, "")])
+            rows.append([project, key, config_value_text(eff[key]), prov.get(key, "")])
 
     notes: list[str] = []
     if snapshots and not rows:
@@ -975,11 +975,11 @@ def build_env_levers_table(snapshots: list[Snapshot], canonical: Mapping[str, st
         effective = {}
 
     rows: list[list] = [
-        [name, name in names, _stringify_config_value(caps.get(name)) if name in caps else ""]
+        [name, name in names, config_value_text(caps.get(name)) if name in caps else ""]
         for name in ENV_LEVER_NAMES
     ]
     rows.extend(
-        [key, key in effective, _stringify_config_value(effective.get(key)) if key in effective else ""]
+        [key, key in effective, config_value_text(effective.get(key)) if key in effective else ""]
         for key in SETTINGS_LEVER_KEYS
     )
 
@@ -1206,8 +1206,8 @@ def build_config_drift_table(
                 [
                     str(session.get("session_id", "")),
                     key,
-                    _stringify_config_value(snap_value),
-                    _stringify_config_value(observed_value),
+                    config_value_text(snap_value),
+                    config_value_text(observed_value),
                 ]
             )
 
@@ -1484,9 +1484,11 @@ def build_config_diff_table(
         cost = bucket["cost"]
         cc_total = bucket["cc_total"]
         recache_share = (bucket["recache_cc"] / cc_total * 100.0) if cc_total else None
+        value = bucket["value"]
         rows.append(
             [
-                bucket["value"],
+                # A number stays a number; a list or dict reads as text.
+                config_value_text(value) if isinstance(value, (list, tuple, dict)) else value,
                 sessions,
                 bucket["turns"],
                 cost,
@@ -1536,15 +1538,41 @@ def build_config_diff_table(
     )
 
 
-def _stringify_config_value(value: object) -> str:
-    """Render a flattened config value for use as a table row key (fix
-    item 10). A config value can be a bool, number, string, list, dict,
-    or ``None`` (unset) — never guaranteed str/int the way most other
-    tables' row keys are — so this always returns a non-empty string,
-    rather than passing the raw value through.
-    """
+def list_text(values) -> str:
+    """The entries of a list or tuple joined with ``", "``, each as
+    :func:`config_value_text` reads it: ``Bash, Glob, Read``, never a
+    Python list. A list or dict inside one is bracketed, so it stays one
+    entry."""
+    return ", ".join(_entry_text(v) for v in values)
+
+
+def _entry_text(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        return f"[{list_text(value)}]"
+    if isinstance(value, dict):
+        return "{" + _pairs_text(value) + "}"
+    return config_value_text(value)
+
+
+def _pairs_text(value: dict) -> str:
+    return "; ".join(f"{k}: {_entry_text(v)}" for k, v in value.items())
+
+
+def config_value_text(value: object) -> str:
+    """A flattened config value as text for a user or an export (fix item
+    10). A config value can be a bool, number, string, list, dict or
+    ``None`` (unset) — never guaranteed str/int the way most other tables'
+    row keys are — so this always returns a non-empty string, and never
+    raises. A list reads as its entries joined with ``", "`` (``Bash, Glob,
+    Read``, an agent's tools line), a dict as ``key: value`` pairs split by
+    ``"; "``; anything else as ``str()``. Use it wherever a snapshot value
+    reaches text, so there is one way a list reads."""
     if value is None:
         return "(unset)"
+    if isinstance(value, (list, tuple)):
+        return list_text(value) or "(empty list)"
+    if isinstance(value, dict):
+        return _pairs_text(value) or "(none)"
     return str(value)
 
 
@@ -1564,9 +1592,10 @@ def build_config_section(
 
     :func:`build_config_diff_table` itself is unchanged and keeps
     returning the value column verbatim (whatever type the config
-    literally holds) for callers that already depend on that. This
+    literally holds) for callers that already depend on that, apart from
+    a list or dict, which it gives as text (:func:`config_value_text`). This
     function's own table stringifies that first column instead (see
-    :func:`_stringify_config_value`), so every ``Section``'s ``Table``
+    :func:`config_value_text`), so every ``Section``'s ``Table``
     has a first column usable as a row key regardless of the underlying
     config value's type.
 
@@ -1587,7 +1616,7 @@ def build_config_section(
     note and in the effective, layers and groups tables.
     """
     diff_table = build_config_diff_table(sessions_with_metrics, snapshots, key, canonical)
-    rows = [[_stringify_config_value(row[0]), *row[1:]] for row in diff_table.rows]
+    rows = [[config_value_text(row[0]), *row[1:]] for row in diff_table.rows]
     section_table = Table(
         name=diff_table.name,
         title=diff_table.title,
@@ -1606,6 +1635,8 @@ def build_config_section(
 
 
 __all__ = [
+    "config_value_text",
+    "list_text",
     "NAME_CAP",
     "NAME_CUT",
     "NAME_REDACTED",
