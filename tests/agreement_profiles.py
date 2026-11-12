@@ -12,7 +12,7 @@ a card with a standing rule, and (in the API profile) a stored ignore. A
 profile that stops building one of them fails ``test_agreement_profiles``,
 rather than letting a check pass over nothing.
 
-The seven, each a :class:`Spec`:
+The eight, each a :class:`Spec`:
 
 - ``api``: API billing, the desktop app, a status line absent;
 - ``cli_status``: the CLI with a status line (``usage-log.csv``) on a subscription;
@@ -25,6 +25,9 @@ The seven, each a :class:`Spec`:
   the project's own settings move the main model from Opus to Sonnet before
   its fifth session, and its sessions run Sonnet from then; the second stays
   on Opus and has the newest snapshot.
+- ``denied``: the same work, and the reviewer's file withholds ``Edit`` and
+  ``Write`` with ``disallowedTools`` (its spawns called ``Edit`` before the
+  file said so, as a line changed after the spawns would leave it).
 
 No randomness, and every date is fixed.
 """
@@ -91,6 +94,8 @@ class Spec:
     model_back: bool = False
     #: With ``second_project``: the first project's snapshot is the newest.
     a_newest: bool = False
+    #: The reviewer's file has a ``disallowedTools:`` line (``REVIEWER_DENIED``).
+    denies: bool = False
 
 
 SPECS: dict[str, Spec] = {
@@ -101,6 +106,7 @@ SPECS: dict[str, Spec] = {
     "capture_on": Spec("capture_on", capture=True),
     "capture_off": Spec("capture_off"),
     "two_projects": Spec("two_projects", custom_agents=False, workflows=False, second_project=True),
+    "denied": Spec("denied", denies=True),
 }
 
 
@@ -157,6 +163,12 @@ def wire(tools: list[dict]) -> list[dict]:
 #: write them: a comma string and a list.
 REVIEWER_LINE = "Read, Grep, Bash, Edit, Write, WebFetch, NotebookEdit, Skill"
 IMPLEMENTER_LINE = ["Read", "Edit", "Bash", "Grep", "WebFetch", "NotebookEdit", "Skill", "mcp__figma__get_node"]
+
+
+#: The reviewer's ``disallowedTools:`` line in the ``denied`` profile, as the hook stores a
+#: line: a list. ``Edit`` is on its ``tools:`` line and was called in two of five spawns;
+#: ``Write`` is on it and never called.
+REVIEWER_DENIED = ["Edit", "Write"]
 
 
 def _reviewer_plan(k: int) -> list[str]:
@@ -486,9 +498,12 @@ def write_workflow(spec: Spec, root: Path, sid: str, index: int, clock: Clock, f
 def _agent_files(spec: Spec, *, reviewer_line: str = REVIEWER_LINE) -> dict:
     if not spec.custom_agents:
         return {}
+    reviewer = {"model": "sonnet", "effort": "medium", "maxTurns": 40, "description": "str(120)",
+                "source": "project", "tools": reviewer_line}
+    if spec.denies:
+        reviewer["disallowedTools"] = list(REVIEWER_DENIED)
     return {
-        "reviewer": {"model": "sonnet", "effort": "medium", "maxTurns": 40, "description": "str(120)",
-                     "source": "project", "tools": reviewer_line},
+        "reviewer": reviewer,
         "claude-implementer": {"model": "sonnet", "effort": "medium", "maxTurns": 60,
                                "experimental.cacheTtl": "1h", "description": "str(120)", "source": "project",
                                "tools": list(IMPLEMENTER_LINE)},

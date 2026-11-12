@@ -1635,7 +1635,8 @@ def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Reco
 #: (its sub-agents docs), so omitClaudeMd means nothing for them.
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
 
-#: Tools that change files: an agent whose ``tools:`` line names one is a writer.
+#: Tools that change files: an agent whose ``tools:`` line names one, and whose
+#: ``disallowedTools:`` line does not withhold it, is a writer.
 _FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 #: The share of an agent type's task prompt tokens one run must hold for
 #: the spawn-task-prompt card to name it.
@@ -1790,7 +1791,7 @@ def _tool_name(entry: str) -> str:
     return AGENT_TOOLS[0] if base in AGENT_TOOLS else base
 
 
-def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
+def _read_entries(value, *, keep_cut_base: bool = False) -> tuple[list[tuple[str, bool]], bool]:
     """The entries of a stored ``tools`` or ``disallowedTools`` value, each
     with whether the hook cut it inside its parentheses (it is then its base
     name, ``Agent`` for ``Agent(worker-one, ...``), and whether they are the
@@ -1799,7 +1800,10 @@ def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
     masked as a path or URL, is a tool that cannot be read. A string comes
     from a hook that cut the whole line at 64 characters: one that ends in
     ``...`` at that length, or holds the masked-path marker, is not the whole
-    line."""
+    line. With ``keep_cut_base`` (a line that withholds tools) a last entry cut
+    inside its parentheses is kept as its base name, as a list entry is: it
+    still withholds that tool; a ``tools:`` line leaves it out, as it does not
+    list a tool it cannot read whole."""
     if isinstance(value, str) and value != _CURRENT_UNKNOWN:
         if NAME_REDACTED in value:
             return [], False
@@ -1808,7 +1812,9 @@ def _read_entries(value) -> tuple[list[tuple[str, bool]], bool]:
             entries = split_tool_line(body)
             # The last entry may be cut short; one that ended at a comma was not.
             if entries and not body.rstrip().endswith(","):
-                entries.pop()
+                last = entries.pop()
+                if keep_cut_base and "(" in last:
+                    entries.append(last.split("(", 1)[0].strip())
             return [(entry, False) for entry in entries], False
         return [(entry, False) for entry in split_tool_line(value)], True
     if isinstance(value, (list, tuple)):
@@ -1842,6 +1848,22 @@ def _entry_covers(entry: str, name: str) -> bool:
     return base == want
 
 
+def _entry_denies(entry: str, name: str) -> bool:
+    """Whether a ``disallowedTools`` ``entry`` withholds the tool ``name``
+    (``mcp__server__*`` for a whole server). ``mcp__X`` and ``mcp__X__*``
+    withhold server X and each of its tools, ``mcp__*`` every MCP tool, and
+    ``mcp__X__tool`` that one tool only, so the server stays offered. An entry
+    with a specifier (``Bash(git push *)``) still removes the whole tool, so it
+    withholds its base tool (``Task`` counting as ``Agent``)."""
+    base, want = _tool_name(entry), _tool_name(name)
+    if not want.startswith("mcp__"):
+        return base == want
+    if not base.startswith("mcp__"):
+        return False
+    held = base.removesuffix("__*")
+    return want == held or want.startswith(held + "__")
+
+
 @dataclass(frozen=True, slots=True)
 class AgentTools:
     """What an agent file says about its tools, as :func:`read_agent_tools`
@@ -1856,16 +1878,24 @@ class AgentTools:
     #: (``Agent(worker-one, ...``): their allowlist is lost, so a line can't be
     #: written with that entry.
     cut: tuple[str, ...] = ()
-    #: Whether ``deny`` is the whole ``disallowedTools`` line. A cut deny entry
-    #: is left out of it rather than widened to its base name, and a deny line
-    #: the hook cut off or masked is only partly read, so a rule that drops a
-    #: denied tool must not trust it.
+    #: Whether ``deny`` is the whole ``disallowedTools`` line. A deny entry cut
+    #: inside its parentheses is its base name (a specifier does not narrow it),
+    #: but a deny line the hook cut off or masked is only partly read: it still withholds what
+    #: it shows (:meth:`denied`), but a tool it does not show may be withheld.
     deny_whole: bool = True
+
+    def denied(self, name: str) -> bool:
+        """Whether the ``disallowedTools:`` line withholds the tool ``name``
+        (``mcp__server__*`` for a whole server)."""
+        return any(_entry_denies(entry, name) for entry in self.deny)
 
     def offered(self, name: str) -> bool:
         """Whether the tool ``name`` (``mcp__server__*`` for a whole server)
-        is on a known ``tools:`` line, or the line is not known. Only the
-        ``tools:`` line is read so far: ``deny`` is carried, not yet applied."""
+        is on a known ``tools:`` line, or the line is not known, and the
+        ``disallowedTools:`` line does not withhold it. That line is applied
+        first, so a tool on both is removed."""
+        if self.denied(name):
+            return False
         return self.allow is None or any(_entry_covers(entry, name) for entry in self.allow)
 
     def entries_for(self, name: str) -> list[str]:
@@ -1890,14 +1920,15 @@ def read_agent_tools(tools, disallowed=None) -> AgentTools:
     no config snapshot, no ``tools:`` line (the agent gets every tool), an
     empty one, or one the hook cut off (:func:`_read_entries`)."""
     entries, whole = _read_entries(tools)
-    denied, denied_whole = _read_entries(disallowed)
+    denied, denied_whole = _read_entries(disallowed, keep_cut_base=True)
     known = whole and bool(entries)
     return AgentTools(
         allow=tuple(entry for entry, _cut in entries) if known else None,
-        deny=tuple(entry for entry, cut in denied if not cut),
+        # An entry cut inside its parentheses is its base name, which a specifier does not narrow.
+        deny=tuple(entry for entry, _cut in denied),
         cut=tuple(dict.fromkeys(_tool_name(entry) for entry, cut in entries if cut)) if known else (),
         # No line at all denies nothing; the unknown-snapshot marker says nothing.
-        deny_whole=(disallowed is None or denied_whole) and not any(cut for _entry, cut in denied),
+        deny_whole=disallowed is None or denied_whole,
     )
 
 
@@ -1922,18 +1953,19 @@ def _diet_sizes(text) -> dict[str, tuple[float, float, float]]:
     return sizes
 
 
-def current_diet(diet: dict, current) -> dict:
+def current_diet(diet: dict, current, disallowed=None) -> dict:
     """``diet``, an ``agent_startup_diet`` row, for an agent whose
-    ``tools:`` line is ``current``: only the rarely used tools still on a
-    known line are left out, the amounts are worked out again from each
-    one's size, and a tool to keep that the line lacks is dropped (a card
-    never adds one). Nothing is left out when a kept tool's only entry on the
+    ``tools:`` line is ``current`` and ``disallowedTools:`` line is
+    ``disallowed``: only the rarely used tools still offered (on a known
+    line and not withheld) are left out, the amounts are worked out again
+    from each one's size, and a tool to keep that the agent is not offered
+    is dropped (a card never adds one). Nothing is left out when a kept tool's only entry on the
     line was cut inside its parentheses (:attr:`AgentTools.cut`): no line
-    can be written for it. The row as it is when the line is not known
-    (:func:`read_agent_tools`) or the row has no sizes."""
-    line = read_agent_tools(current)
+    can be written for it. The row as it is when the line is not known and
+    nothing is withheld (:func:`read_agent_tools`) or the row has no sizes."""
+    line = read_agent_tools(current, disallowed)
     sizes = _diet_sizes(diet.get("rare_sizes"))
-    if line.allow is None or not sizes:
+    if (line.allow is None and not line.deny) or not sizes:
         return diet
     rare = [name for name in _split_names(diet.get("rare_tools")) if name in sizes and line.offered(name)]
     row = dict(diet)
@@ -1973,7 +2005,7 @@ def current_diet(diet: dict, current) -> dict:
 
 
 def tools_list_offer(
-    agent_type: str, diet: dict, th: RecommendThresholds | None = None, current=None
+    agent_type: str, diet: dict, th: RecommendThresholds | None = None, current=None, disallowed=None
 ) -> tuple[list[str], list[str], float] | None:
     """The tools to keep, the tools to leave off and the tokens that
     leaving them off takes from each start, for one ``agent_startup_diet``
@@ -1982,10 +2014,10 @@ def tools_list_offer(
     give a list (a fork or an unknown type), too few spawns, no tool called
     to put on the line, or less than
     :attr:`RecommendThresholds.spawn_tools_list_tokens` to take off it.
-    ``current`` is the agent's ``tools:`` line when it is known
-    (:func:`current_diet`)."""
+    ``current`` is the agent's ``tools:`` line when it is known and
+    ``disallowed`` its ``disallowedTools:`` line (:func:`current_diet`)."""
     th = th or RecommendThresholds()
-    diet = current_diet(diet, current)
+    diet = current_diet(diet, current, disallowed)
     if agent_type in DIET_EXCLUDED or (agent_type in _NOT_OVERRIDABLE and agent_type != _WORKFLOW_AGENT):
         return None
     measured = diet.get("spawns")
@@ -2015,14 +2047,18 @@ def _tools_list_card(
     carries what leaving them out takes from a start."""
     row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
     current = _agent_current(agent_type, "tools", snapshot)
-    offer = tools_list_offer(agent_type, row, th, current) if row is not None else None
+    denied = _agent_current(agent_type, "disallowedTools", snapshot)
+    offer = tools_list_offer(agent_type, row, th, current, denied) if row is not None else None
     if offer is None:
         return None
-    diet = current_diet(row, current)
+    diet = current_diet(row, current, denied)
     keep, rare, dropped = offer
     # A card never adds a tool: one the diet keeps that a known line lacks.
     on_line = _split_names(diet["keep_tools"])
     not_added = [name for name in _split_names(row["keep_tools"]) if name not in on_line]
+    # Of those, the ones the deny line withholds (whatever the tools line says) and the ones a tools line lacks.
+    withheld = [name for name in not_added if read_agent_tools(current, denied).denied(name)]
+    not_added = [name for name in not_added if name not in withheld]
     measured = diet["spawns"]
     sizes = [(label, diet.get(column)) for column, label in _DIET_PARTS]
 
@@ -2043,6 +2079,12 @@ def _tools_list_card(
         f"{_name_list(rare)}. Claude Code adds StructuredOutput, SubagentHandback and advisor to every subagent "
         "whatever the list says."
     )
+    if withheld:
+        plural = len(withheld) > 1
+        left_out += (
+            f" {_name_list(withheld)} {'are' if plural else 'is'} on its disallowedTools line, so "
+            f"{'they aren' if plural else 'it isn'}'t added."
+        )
     if not_added:
         plural = len(not_added) > 1
         left_out += (
@@ -2193,7 +2235,8 @@ def _rule_spawn_parts(
         # once it is given or a tools line is already in place.
         tools_card = _tools_list_card(report, th, agent_type, snapshot, units)
         current_tools = _agent_current(agent_type, "tools", snapshot)
-        tools_line = read_agent_tools(current_tools)
+        denied_tools = _agent_current(agent_type, "disallowedTools", snapshot)
+        tools_line = read_agent_tools(current_tools, denied_tools)
         known_line = known_tools_line(current_tools)
         if tools_card is not None:
             out.append(tools_card)
@@ -2202,7 +2245,7 @@ def _rule_spawn_parts(
         if tools_card is not None or known_line is not None:
             covered.add(agent_type)
         diet_row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
-        diet_rare = _split_names(current_diet(diet_row, current_tools).get("rare_tools")) if diet_row is not None else []
+        diet_rare = _split_names(current_diet(diet_row, current_tools, denied_tools).get("rare_tools")) if diet_row is not None else []
 
         claude_md_total = part(agent_type, "claude_md")
         # PROF-11/F13: Managed policy CLAUDE.md still loads regardless of
@@ -2231,7 +2274,9 @@ def _rule_spawn_parts(
             # saying it didn't, the card stays but asks for the rules to move first.
             edited = used(agent_type, "edit_spawns")
             edited = edited if isinstance(edited, int) else 0
-            writer = bool(set(known_line) & _FILE_TOOLS) if known_line is not None else edited > 0
+            # A known tools line decides, less the tools the deny line withholds (offered); with no
+            # line, the spawns that edited files do.
+            writer = any(tools_line.offered(name) for name in _FILE_TOOLS) if known_line is not None else edited > 0
             writer_first = writer and rules_unused == 0
             why = f"Each {agent_type} spawn starts with about {claude_md:,.0f} tokens of CLAUDE.md files and memory."
             if writer_first:
@@ -2327,7 +2372,8 @@ def _rule_spawn_parts(
             and listed >= th.spawn_parts_min_spawns
             and skills_used == 0
             and overridable
-            # A known tools line without Skill already leaves the skills list out.
+            # A known tools line without Skill, or Skill on disallowedTools,
+            # already leaves the skills list out.
             and tools_line.offered(SKILLS_TOOL)
         ):
             # Whether the tools list above leaves Skill out, which takes the
@@ -2408,7 +2454,8 @@ def _rule_spawn_parts(
             if server_offered < th.spawn_parts_min_spawns:
                 continue
             if not tools_line.offered(mcp_tool_key(str(values.get("server")))):
-                # A known tools line with no mcp__<server> entry never gets the server.
+                # A known tools line with no mcp__<server> entry never gets the server,
+                # and a server on disallowedTools is already withheld.
                 continue
             if "__" in str(values.get("server")):
                 # disallowedTools names a server as mcp__<server>, and Claude

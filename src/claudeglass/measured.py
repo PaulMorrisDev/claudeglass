@@ -18,10 +18,18 @@ from .model import TranscriptResult
 #: Field (on ``Turn`` or ``TranscriptResult``) -> the ``PARSER_VERSION``
 #: whose meaning it has now: the version that added it or last redefined
 #: it. A bump that adds or redefines a field a figure reads adds it here.
+#: Three fields parser 51 also changed have no row, on purpose:
+#: ``edit_kind`` and ``shell_write_count`` (a write under a system temp
+#: folder that the reading process's own temp folder did not cover), and
+#: ``shell_change_count`` (a write or change that a stray quote in a
+#: ``"$( ... )"`` message hid or invented). They stay ungated because
+#: gating them would drop every older session whose transcript is gone from
+#: the agent-model cards for a difference no real data shows: 0 of 37,438
+#: real write targets moved.
 FIELD_VERSIONS: dict[str, int] = {
-    "shell_read_count": 46,
-    "shell_code_write_count": 50,
-    "edit_code_count": 50,
+    "shell_read_count": 51,
+    "shell_code_write_count": 51,
+    "edit_code_count": 51,
     "coach_tip": 50,
     "coach_tips": 50,
     "coach_disowned": 49,

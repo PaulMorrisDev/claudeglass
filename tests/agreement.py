@@ -7,7 +7,7 @@ headline and the cards under it. A test per defect catches that case. These
 checks catch the next one. Each is a plain function of what the product
 already builds for one project and window (an :class:`Inputs`), and returns
 a list of sentences, one per disagreement; an empty list means the two sides
-agree. ``tests/test_agreement.py`` runs all seven over seven synthetic
+agree. ``tests/test_agreement.py`` runs all seven over eight synthetic
 profiles (``agreement_profiles.py``); a runner outside the repo runs the same
 functions over a real corpus.
 
@@ -24,16 +24,17 @@ The seven (numbers as in the plan's "Agreement checks"):
    least the bar's share of its spawns (and, for workflow agents, every
    writing or shell tool any of them called), unless the agent's own line
    already lacks it.
-2. Where a card's action text names an agents folder, it is the folder of
-   that card's fix (``fixes.fix_file``).
+2. Where the action text of a card whose fix is one exact file names an
+   agents folder, it is the folder of that card's fix (``fixes.fix_file``).
 3. The Overview's headline saving and the habits check's saving are built
    only from the levers and the action and advice cards: an info, fixed or
    ignored card adds nothing.
 4. Each check's figures equal its cards': the Tools check's "rarely called"
    count and tokens are the tools card's for the same agent, and an ignored
    card adds no fix, tip or mention to any check.
-5. The project bundle's counts add up, and every entry in ``files`` is one
-   concrete file.
+5. The project bundle's counts add up, every entry in ``files`` is one
+   concrete file with a one-file fix under it, and the counts do not depend
+   on the order of the cards.
 6. Every hint that generated text names as live is in the derived live list.
 7. A card and a check about the same setting give the same advice, and a card
    and the Changes page state the same current value.
@@ -130,14 +131,21 @@ def _copy_model(model):
     return copy.copy(model)
 
 
-def load_inputs(projects_root, config_dir, project=None, *, days: int | None = None) -> Inputs:
+def load_inputs(
+    projects_root, config_dir, project=None, *, days: int | None = None, claude_root=None
+) -> Inputs:
     """The report and the quick-action context for ``project`` (a folder name
     under ``projects_root``; every project when ``None``), built by the CLI's
     own report path (``cli._cmd_report_like``) and the context the dashboard
     gives the checks (``api._quick_context``): the settings in force and
     every project's agents come from one merged snapshot, the ignored cards
-    from ``ignores``. ``days`` is a window of the last N days; ``None`` is all time."""
+    from ``ignores``. ``days`` is a window of the last N days; ``None`` is all time.
+    ``projects_root`` is the folder the report reads and the CLAUDE.md checks read
+    with it, wherever the config folder is (a copy kept apart from the projects, as
+    in a container, answers as one beside them); ``claude_root`` is Claude's own
+    folder when the config folder's parent is not it."""
     argv = ["check", "--projects-root", str(projects_root), "--config-dir", str(config_dir), "--no-cache", "--quiet"]
+    argv += ["--claude-root", str(claude_root)] if claude_root else []
     argv += ["--days", str(days)] if days else ["--since", "2000-01-01"]
     argv += ["--project", project] if project else ["--all-projects"]
     args = cli._make_parser().parse_args(argv)
@@ -151,6 +159,7 @@ def load_inputs(projects_root, config_dir, project=None, *, days: int | None = N
     if code != 0 or "model" not in box:
         raise RuntimeError(f"the report could not be built (exit {code}): no sessions under the projects folder?")
     model, config_dir = box["model"], Path(config_dir)
+    read_claude_root, read_roots = cli._read_where(args, config_dir)
     snaps = snapshots.load_snapshots(config_dir)
     if project:
         snaps = snapshots.snapshots_for_projects(snaps, box["projects"])
@@ -174,6 +183,8 @@ def load_inputs(projects_root, config_dir, project=None, *, days: int | None = N
         only=cli._report_only(args, box["projects"], config_dir),
         since_ts=box["since"].timestamp() if box["since"] else None,
         until_ts=box["until"].timestamp() if box["until"] else None,
+        claude_root=read_claude_root,
+        projects_roots=tuple(read_roots),
     )
     return Inputs(model=model, ctx=ctx, config_dir=config_dir, projects=box["projects"], all_projects=project is None)
 
@@ -220,7 +231,7 @@ def check_tools_lines(inp: Inputs) -> list[str]:
     """Check 1. For each ``spawn-tools-list`` card: every tool its agent
     called in at least :data:`context_budget.REMOVABLE_USE_SHARE` of the
     spawns it was offered to is on the suggested line, unless the agent's own
-    ``tools:`` line already lacks it; for the workflow card every writing or
+    ``tools:`` line already lacks it or its ``disallowedTools:`` line withholds it; for the workflow card every writing or
     shell tool any workflow agent called is on it too. The tools called are
     the report's own (``agent_startup_diet`` and ``agent_startup_tools``)."""
     problems: list[str] = []
@@ -252,7 +263,8 @@ def check_tools_lines(inp: Inputs) -> list[str]:
                 called.setdefault(tool["tool"], f"called in {used} of {offered} spawns")
             elif workflow and used and tool["tool"] in context_budget._WRITER_TOOLS:
                 called.setdefault(tool["tool"], f"called by a workflow agent in {used} of {offered} spawns")
-        own = recommend.read_agent_tools((inp.agents.get(agent) or {}).get("tools")) if not workflow else None
+        file = inp.agents.get(agent) or {}
+        own = recommend.read_agent_tools(file.get("tools"), file.get("disallowedTools")) if not workflow else None
         for name, why in sorted(called.items()):
             if own is not None and not own.offered(name):
                 continue
@@ -274,17 +286,21 @@ def _folders(text) -> set[str]:
 
 
 def check_agent_folders(inp: Inputs) -> list[str]:
-    """Check 2. Where a card's action text (or its fix's prompt) names an
-    agents folder (``~/.claude/agents/`` or ``.claude/agents/``), it is a
-    folder the card's fix works in (``fixes.fix_file`` for each of its
-    changes). Two cards for one agent also name one folder between them."""
+    """Check 2. Where a card names an agents folder (``~/.claude/agents/`` or
+    ``.claude/agents/``) in its action text or its fix's prompt, it is a folder
+    the card's fix works in (``fixes.fix_file`` for each of its changes). A card
+    that sets a standing rule (kind ``rule`` in ``fixes.fix_group``) may name the
+    agent's own file as a second place, so its text is not held to that; every
+    other card is, one exact file, an "A or B" pair or several files. Two cards
+    for one agent also name one folder between them."""
     problems: list[str] = []
     single: dict[str, dict[str, str]] = {}
     for rec in inp.recs:
         files = {fixes.fix_file(rec, change) for change in (rec.changes or [None])}
         allowed = set().union(*(_folders(f) for f in files if f))
+        standing_rule = any(fixes.fix_group(rec, change)[1] == "rule" for change in (rec.changes or [None]))
         texts = {"action": rec.action, **{f"prompt {i + 1}": fix.get("prompt") for i, fix in enumerate(rec.fixes)}}
-        for where, text in texts.items():
+        for where, text in () if standing_rule else texts.items():
             for folder in sorted(_folders(text) - allowed):
                 problems.append(
                     f"{_who(rec)}: the {where} names {folder} but the fix works in "
@@ -533,8 +549,9 @@ def check_bundle(inp: Inputs) -> list[str]:
     cards it uses are no more than the cards with a prompt to give and, with
     the ones left out for being unconfirmed or managed, no fewer; an empty
     prompt means no cards and a prompt means some; every ``files`` entry is
-    one concrete file that the prompt has a heading for; and no ignored card's
-    prompt is in it."""
+    one concrete file that the prompt has a heading for and has a one-file fix
+    under it; the same cards in the opposite order give the same counts; and no
+    ignored card's prompt is in it."""
     problems: list[str] = []
     recs, skip = inp.recs, set(inp.skip)
     data = fixes.project_prompt(recs, skip)
@@ -571,12 +588,23 @@ def check_bundle(inp: Inputs) -> list[str]:
         header = entry["file"]
         if not _is_one_file(header):
             problems.append(f"the bundle counts {header!r} as one file")
-        elif kinds.get(header, {"file"}) != {"file"}:
-            problems.append(f"the bundle counts {header!r} as one file, the fix groups it as {sorted(kinds[header])}")
+        elif "file" not in kinds.get(header, {"file"}):
+            problems.append(f"the bundle counts {header!r} as a file, no fix under it groups as one: {sorted(kinds[header])}")
         if f"## {header}\n" not in prompt:
             problems.append(f"the bundle lists {header!r} but its prompt has no such heading")
         if entry["fixes"] < 1:
             problems.append(f"the bundle lists {header!r} with {entry['fixes']} fixes")
+    # The counts are per fix: the same cards in the opposite order give the same counts.
+    flipped = fixes.project_prompt(list(reversed(recs)), skip)
+
+    def counts(result):
+        return sorted((f["file"], f["fixes"]) for f in result["files"]), result["several"], result["other"], result["cards"]
+
+    if counts(flipped) != counts(data):
+        problems.append(
+            f"the bundle's counts depend on the order of the cards: {counts(data)[:3]} one way, "
+            f"{counts(flipped)[:3]} the other"
+        )
     open_bodies = {fixes._bundle_body(fix["prompt"])[0] for rec in on_offer for fix in _prompt_fixes(rec)}
     for rec in recs:
         if rec.key in skip:

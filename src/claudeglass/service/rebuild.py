@@ -60,6 +60,7 @@ What else does NOT round-trip, and why:
 from __future__ import annotations
 
 import json
+import zlib
 from collections.abc import Collection
 
 from .. import haiku_tags
@@ -268,4 +269,50 @@ def corpus_from_store(
     return corpus
 
 
-__all__ = ["corpus_from_store"]
+#: What reading a damaged digest can raise: bad compression, bad UTF-8 or
+#: JSON (``ValueError``), or JSON of a shape ``result_from_jsonable`` can't
+#: walk (``TypeError``, ``KeyError``, ``AttributeError``, ``IndexError``).
+_UNREADABLE_DIGEST = (zlib.error, ValueError, TypeError, KeyError, AttributeError, IndexError)
+
+
+def _readable_sessions(store: Store, session_ids: list[str]) -> Corpus:
+    """:func:`corpus_from_store` over ``session_ids``; when a digest among
+    them can't be read, the others one at a time, leaving out the sessions
+    that fail."""
+    try:
+        return corpus_from_store(store, session_ids=session_ids)
+    except _UNREADABLE_DIGEST:
+        pass
+    sessions, total_files, total_bytes = [], 0, 0
+    for session_id in session_ids:
+        try:
+            one = corpus_from_store(store, session_ids=[session_id])
+        except _UNREADABLE_DIGEST:
+            continue
+        sessions += one.sessions
+        total_files += one.total_files
+        total_bytes += one.total_bytes
+    return Corpus(sessions=sessions, total_files=total_files, total_bytes=total_bytes)
+
+
+def add_stored_sessions(corpus: Corpus, store: Store, session_ids: Collection[str]) -> Corpus:
+    """``corpus`` (read from transcripts on disk) with the sessions of
+    ``session_ids`` rebuilt from ``store``'s digests added: the sessions whose
+    transcripts Claude Code's cleanup deleted. A session already in
+    ``corpus`` stays as it was read from disk; an id the store can't build, or
+    whose digest can't be read, is skipped. Sorted as ``load_corpus`` sorts."""
+    have = {bundle.session_id for bundle in corpus.sessions}
+    stored = _readable_sessions(store, [sid for sid in session_ids if sid not in have])
+    if not stored.sessions:
+        return corpus
+    return Corpus(
+        sessions=sorted([*corpus.sessions, *stored.sessions], key=_session_sort_key),
+        total_files=corpus.total_files + stored.total_files,
+        total_bytes=corpus.total_bytes + stored.total_bytes,
+        cache_hits=corpus.cache_hits,
+        cache_misses=corpus.cache_misses,
+        elapsed_s=corpus.elapsed_s,
+    )
+
+
+__all__ = ["add_stored_sessions", "corpus_from_store"]

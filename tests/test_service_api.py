@@ -3833,6 +3833,31 @@ def test_capture_lists_every_metric_with_what_why_and_cost(server):
     assert "uses your tokens" in data["warning"]
 
 
+@pytest.mark.parametrize("enabled_at", ["2026-11-01", "2026-11-01T10:00:00"])
+def test_a_capture_start_with_no_time_zone_is_read_as_utc_by_the_signed_out_count(server, enabled_at):
+    """``config.py`` reads a hand-written ``enabled_at`` with no zone as UTC: the Capture view counts the tag
+    files from it the same way instead of failing."""
+    from claudeglass import capture_catalogue, haiku_tags
+
+    resp, _payload = server.post_json("/api/capture", {"level": "essentials"})
+    assert resp.status == 200
+    path = server.options.config_dir / "config.toml"
+    text = path.read_text(encoding="utf-8")
+    stamp = next(line for line in text.splitlines() if line.startswith("enabled_at"))
+    path.write_text(text.replace(stamp, f'enabled_at = "{enabled_at}"'), encoding="utf-8")
+    folder = server.options.config_dir / capture_catalogue.JUDGE_DIR
+    folder.mkdir()
+    (folder / "2026-11.jsonl").write_text(
+        json.dumps({"ts": "2026-11-05T10:00:00Z", "reply": "msg_1", "agent": "", "err": "no_login"}) + "\n",
+        encoding="utf-8",
+    )
+    resp, body = server.get_json("/api/capture")
+    assert resp.status == 200 and body["ok"] is True
+    measured = body["data"]["measured"]
+    assert measured["report_signed_out"] == 1
+    assert measured["judge_paused_text"] == haiku_tags.SignedOut(agent_runs=1, paused=True).note
+
+
 def test_post_capture_saves_the_level_and_names_the_hooks_it_needs(server):
     resp, payload = server.post_json("/api/capture", {"level": "essentials"})
     assert resp.status == 200
@@ -6608,3 +6633,59 @@ def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_bui
     assert ctx.effective == {"model": "opus"}
     assert ctx.effective_agents == {"reviewer": {"source": "user", "model": "haiku"}}
     assert len(merges) == 1
+
+
+def test_claude_md_reads_the_projects_folder_the_service_is_given_wherever_the_config_folder_is(
+    two_project_server, tmp_path
+):
+    """docs/deploy.md's container: the projects folder is not beside the config folder."""
+    _give_the_projects_folders(two_project_server)
+    moved = tmp_path / "elsewhere" / "projects"
+    moved.parent.mkdir()
+    (two_project_server.options.config_dir.parent / "projects").rename(moved)
+    two_project_server.options.projects_root = moved
+    assert _claude_md_projects(two_project_server) == {"", "alpha-repo", "beta-repo"}
+    assert _claude_md_projects(two_project_server, "?project=proj-alpha") == {"", "alpha-repo"}
+
+def test_skills_route_finds_descriptions_under_the_projects_folder_the_service_is_given(server, tmp_path):
+    """docs/deploy.md's container: the sessions are under the projects folder, and the folder above it is
+    not read as yours."""
+    home = tmp_path / "elsewhere"
+    (home / "skills" / "grill-me").mkdir(parents=True)
+    (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    (home / "projects" / "proj-x").mkdir(parents=True)
+    write_jsonl(home / "projects" / "proj-x" / "s.jsonl", [listing])
+    server.options.projects_root = home / "projects"
+    resp, payload = server.get_json("/api/skills?window=all")
+    assert resp.status == 200, payload
+    row = next(item for item in payload["data"]["skills"] if item["name"] == "grill-me")
+    assert row["source"] == "built-in" and row["description"] == "Interview the user about a plan."
+
+def _move_the_projects_apart(handle, tmp_path):
+    """The projects folder the service is given is not beside its config folder (docs/deploy.md's mount)."""
+    apart = tmp_path / "mount" / "projects"
+    apart.parent.mkdir()
+    (tmp_path / "projects").rename(apart)
+    handle.options.projects_root = apart
+
+
+def test_project_files_route_names_files_from_the_projects_folder_the_service_is_given(project_files_server, tmp_path):
+    _move_the_projects_apart(project_files_server, tmp_path)
+    resp, payload = project_files_server.get_json("/api/project-files")
+    assert resp.status == 200
+    assert payload["data"]["named"] == 1
+    assert payload["data"]["files"][0]["name"] == "docs/context.md"
+
+
+def test_the_quick_actions_name_project_files_from_the_projects_folder_the_service_is_given(
+    project_files_server, tmp_path
+):
+    _move_the_projects_apart(project_files_server, tmp_path)
+    for route in ("/api/quick-actions/project-files", "/api/quick-actions"):
+        resp, payload = project_files_server.get_json(route)
+        assert resp.status == 200, route
+        check = payload["data"] if route.endswith("project-files") else next(
+            item for item in payload["data"]["checks"] if item["id"] == "project-files")
+        assert check["status"] == "act" and check["summary"].startswith("docs/context.md is now about 10k tokens"), route

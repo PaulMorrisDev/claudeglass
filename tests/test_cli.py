@@ -2513,3 +2513,73 @@ def test_cli_reports_read_what_the_mod_showed_without_writing(tmp_path):
     before = (tmp_path / "service.db").read_bytes()
     assert cli._dashboard_mod_events(tmp_path) == expected and expected[0]["outcome"] == "warned"
     assert (tmp_path / "service.db").read_bytes() == before
+
+
+def test_a_project_picked_for_review_or_check_is_found_in_the_projects_root_the_report_read(tmp_path):
+    """A config folder kept apart from the projects (docs/deploy.md's container): the project's own
+    folder is found under ``--projects-root``, and Claude's folder is the one ``--claude-root`` names."""
+    root = tmp_path / "data" / "claude" / "projects"
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    _write_project(root, "proj-a")
+    (root / "proj-a" / "folder.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project)}) + "\n", encoding="utf-8")
+    config = tmp_path / "data" / "claudeglass"
+    base = ["check", "--projects-root", str(root), "--config-dir", str(config), "--project", "proj-a"]
+    args = cli._make_parser().parse_args(base)
+    assert cli._report_only(args, ["proj-a"], config) == (project,)
+    assert cli._read_where(args, config) == (None, [root])
+    given = cli._make_parser().parse_args(base + ["--claude-root", str(tmp_path / "data" / "claude")])
+    assert cli._read_where(given, config) == (tmp_path / "data" / "claude", [root])
+
+def test_check_claude_md_in_the_container_layout_does_not_read_the_mounts_files_as_yours(tmp_path, capsys):
+    """docs/deploy.md's layout: the projects folder is in the mounted Claude home, the config folder is not.
+    Your files are read from --claude-root, else beside the config folder; never beside the projects."""
+    home = tmp_path / "data" / "claude"
+    user = home / "CLAUDE.md"
+    user.parent.mkdir(parents=True)
+    user.write_text("# Mine\n\nBe brief.\n", encoding="utf-8")
+    _write_project(home / "projects", "proj-a")
+    argv = ["check", "claude-md", "--projects-root", str(home / "projects"), "--all-projects",
+            "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "No CLAUDE.md files found." in out and str(user) not in out, out
+    assert cli.main(argv + ["--claude-root", str(home)]) == 0
+    assert str(user) in capsys.readouterr().out
+
+
+def test_review_skills_finds_descriptions_under_the_projects_root_and_your_skills_in_the_claude_folder(
+    tmp_path, capsys
+):
+    home = tmp_path / "data" / "claude"
+    (home / "skills" / "grill-me").mkdir(parents=True)
+    (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    slug = _write_project(home / "projects", "proj-a")
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    with (slug / "session-1.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(listing) + "\n")
+    argv = ["review", "skills", "--projects-root", str(home / "projects"), "--all-projects",
+            "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "Interview the user about a plan." in out and "Built into Claude Code" in out, out
+    assert cli.main(argv + ["--claude-root", str(home)]) == 0
+    assert "Built into Claude Code" not in capsys.readouterr().out
+
+def test_review_claude_md_reads_the_projects_roots_it_was_given(tmp_path, capsys):
+    """The Claude folder is not above the projects root (a mount, or a WSL distro's): the project's own
+    folder and its auto memory are found under --projects-root."""
+    claude = tmp_path / "me" / ".claude"
+    claude.mkdir(parents=True)
+    root = tmp_path / "mount" / "projects"
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("# Demo\n\nUse the demo style.\n", encoding="utf-8")
+    slug = _write_project(root, "proj-a")
+    (slug / "folder.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project)}) + "\n", encoding="utf-8")
+    argv = ["review", "claude-md", "--projects-root", str(root), "--all-projects",
+            "--config-dir", str(tmp_path / "cg"), "--claude-root", str(claude)]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert str(project / "CLAUDE.md") in out, out

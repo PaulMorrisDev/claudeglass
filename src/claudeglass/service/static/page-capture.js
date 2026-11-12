@@ -208,8 +208,9 @@ function renderCaptureData(data, container) {
         var tagged = (config.tagger !== "haiku" && measured.filled_text)
           ? "Claude tagged " + measured.own_coverage_text + " of your messages, and Claude Haiku filled in " + measured.filled_text
           : tagger + " tagged " + measured.coverage_text + " of your messages";
-        lines.push(tagged + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
+        lines.push(tagged + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs" + (measured.report_signed_out_text ? ", and " + measured.report_signed_out_text : "") + "." : "."));
       }
+      if (measured.judge_paused_text) lines.push(measured.judge_paused_text);
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });
       })));

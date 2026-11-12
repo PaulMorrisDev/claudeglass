@@ -56,6 +56,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -413,8 +414,8 @@ def _save_manifest(config_dir: str | Path, manifest: dict[str, str]) -> None:
     path = _manifest_path(config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{_MANIFEST_NAME}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     try:
+        tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         try:
@@ -1109,6 +1110,27 @@ def hook_command(script: Path, extra_args: str = "", python: str | None = None) 
     return command + extra_args if command is not None else None
 
 
+#: How often, and how far apart, a refused replace of a hook file is tried: on Windows a hook call that has the
+#: target open for a moment refuses it with ``PermissionError``, and a few milliseconds later it lands.
+_REPLACE_TRIES = 20
+_REPLACE_PAUSE_S = 0.002
+
+
+def _replace_file(source: Path, target: Path) -> None:
+    """``os.replace(source, target)``, tried again when only a
+    ``PermissionError`` refuses it, up to :data:`_REPLACE_TRIES` times
+    :data:`_REPLACE_PAUSE_S` apart. Any other ``OSError``, or the last
+    refusal, is raised."""
+    for attempt in range(_REPLACE_TRIES):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_TRIES - 1:
+                raise
+            time.sleep(_REPLACE_PAUSE_S)
+
+
 def _install_rank(name: str) -> int:
     """Where a hook file goes in an install: the catalogue, then the
     module that reads it, then the rest, and a capture script (the
@@ -1127,8 +1149,9 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     :func:`check_capture` can tell this tool's own older copy apart from
     one someone else changed. Reads the packaged bytes through
     ``importlib.resources``, so it works from a ``.pyz`` too. When the
-    final rename fails (ROB-P7: a locked file on Windows, say), that one
-    file is skipped -- its previous copy is left running rather than the
+    final rename fails (ROB-P7: a locked file on Windows, say), or the
+    temporary file cannot be created in the first place (a folder that
+    refuses new files), that one file is skipped -- its previous copy is left running rather than the
     whole install failing -- and it keeps its old manifest stamp, so
     :func:`check_capture` still reports it accurately. The catalogue is
     written before the module that reads it, and the module is left out
@@ -1158,9 +1181,9 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
         data = (importlib.resources.files("claudeglass") / "hooks" / name).read_bytes()
         dest = dest_dir / name
         tmp = dest.with_name(f"{name}.{os.getpid()}.tmp")
-        tmp.write_bytes(data)
         try:
-            os.replace(tmp, dest)
+            tmp.write_bytes(data)
+            _replace_file(tmp, dest)
         except OSError:
             try:
                 tmp.unlink()
@@ -1176,6 +1199,43 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     return written
 
 
+#: Said when an install could not put a capture script where Claude Code
+#: runs it from. Settings is left alone: an entry that points at a file
+#: that is not there makes every hook call exit with code 2, which Claude
+#: Code treats as a blocking error.
+HOOK_FILES_INCOMPLETE_TEXT = (
+    "Could not finish copying the capture hook files (another program may be using one), so settings.json "
+    "was left unchanged. Run 'claudeglass capture connect' again."
+)
+
+#: The same, said by setup, which still changes settings.json for the parts it could finish.
+HOOK_FILES_INCOMPLETE_SETUP_TEXT = (
+    "Could not finish copying the capture hook files (another program may be using one), so their entries "
+    "were not added to settings.json. Run 'claudeglass capture connect' to add them."
+)
+
+#: Said when the snapshot hook script could not be copied, by setup and by ``snapshot-config --install-hook``.
+SNAPSHOT_HOOK_FILE_TEXT = "Could not finish copying the snapshot hook file (another program may be using it)"
+
+
+def missing_capture_scripts(config_dir: str | Path, wanted: Iterable[HookSpec]) -> tuple[str, ...]:
+    """The capture scripts ``wanted`` runs that cannot work from
+    ``<config_dir>/hooks``, after an install: the launcher is not there, or
+    the module it loads is not (the catalogue is not needed: the hook falls
+    back to plain wording). A settings entry may be written only for a
+    script that is there with its module."""
+    hooks_dir = Path(config_dir) / "hooks"
+    return tuple(
+        script
+        for script in dict.fromkeys(spec.script for spec in wanted)
+        if not all(
+            (hooks_dir / name).is_file()
+            for name in CAPTURE_FILES.get(script, (script,))
+            if name != capture_catalogue.CATALOGUE_FILE
+        )
+    )
+
+
 def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     """Re-copy each packaged hook file already installed under
     ``<config_dir>/hooks`` (:data:`ALL_HOOK_FILES`) whose on-disk copy is
@@ -1188,8 +1248,9 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     is left alone, except that a capture script that is installed and
     isn't hand-edited gets back any of its own files that are missing: an
     install from before the hook moved into a module has none, and the
-    launcher that replaces its script needs one. Returns the paths
-    actually rewritten."""
+    launcher that replaces its script needs one. A launcher that is gone
+    comes back while its module is there. Returns the paths actually
+    rewritten."""
     dest_dir = Path(config_dir) / "hooks"
     if not dest_dir.is_dir():
         return []
@@ -1206,7 +1267,11 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
         elif state == "outdated":
             stale.append(name)
     for script, names in CAPTURE_FILES.items():
-        if states.get(script) in ("missing", "modified"):
+        if states.get(script) == "modified":
+            continue
+        # A launcher that is gone comes back only while the module it starts is there: with neither, nothing
+        # is installed (or an install was cut short, and 'capture connect' finishes it).
+        if states.get(script) == "missing" and states[capture_catalogue.HOOK_MODULE] == "missing":
             continue
         stale += [name for name in names if states[name] == "missing" and name not in stale]
     if healed and not stale:
@@ -1742,12 +1807,15 @@ __all__ = [
     "HookErrorStat",
     "HookHealth",
     "HookOverhead",
+    "HOOK_FILES_INCOMPLETE_SETUP_TEXT",
+    "HOOK_FILES_INCOMPLETE_TEXT",
     "HookOverheadRow",
     "HookSpec",
     "POLICY_ALL_OFF",
     "POLICY_ALL_OFF_MANAGED",
     "POLICY_MANAGED_ONLY",
     "POLICY_TEXT",
+    "SNAPSHOT_HOOK_FILE_TEXT",
     "backup_path",
     "capture_specs",
     "check",
@@ -1761,6 +1829,7 @@ __all__ = [
     "installed_specs",
     "managed_settings_dir",
     "measure_hook_overhead",
+    "missing_capture_scripts",
     "plan_capture",
     "plan_connect",
     "refresh_hook_files",

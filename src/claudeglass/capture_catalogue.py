@@ -2483,6 +2483,10 @@ DEEP_FEEDBACK_IDS = ("feedback_skill", "feedback_note", "feedback_reminder", "pl
 #: reminder. Any one of them needs the UserPromptSubmit hook
 #: (:func:`hook_specs`).
 FEEDBACK_MESSAGE_IDS = ("feedback_skill", "plan_check", "feedback_reminder")
+#: Those of :data:`FEEDBACK_MESSAGE_IDS` that still work without the hook
+#: entry: the skill only loses the facts line the entry adds. The plan check
+#: and the rating reminder do nothing at all without it.
+FEEDBACK_WORKS_WITHOUT_HOOK = ("feedback_skill",)
 
 #: CAP-5: metric ids retired from :data:`METRICS` (no longer asked, priced,
 #: or shown), kept here only so a ``config.toml`` written before the

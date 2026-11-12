@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
-from . import habits, hook_health
+from . import habits, haiku_tags, hook_health
 from . import ratings as ratings_mod
 from .config import CAPTURE_SAMPLES, CaptureConfig
 from .render.tables import format_cell
@@ -548,9 +548,10 @@ def _worth(rows: list[dict], capture: CaptureConfig, use, units, now: datetime |
     return worth
 
 
-def _measured(use, units) -> dict | None:
+def _measured(use, units, signed_out: haiku_tags.SignedOut | None = None) -> dict | None:
     if use is None:
         return None
+    signed_out = signed_out or haiku_tags.SignedOut()
     return {
         "since": use.since,
         "sessions": use.sessions,
@@ -576,6 +577,12 @@ def _measured(use, units) -> dict | None:
         "tagged_reports": use.tagged_reports,
         "judged": use.judged,
         "report_coverage_pct": use.report_coverage,
+        # Beside the share judged, as ``capture status`` words it: the agent
+        # runs whose call found the claude command signed out, and, while the
+        # judge is paused for it, one sentence on what to do.
+        "report_signed_out": signed_out.agent_runs,
+        "report_signed_out_text": signed_out.runs_text,
+        "judge_paused_text": signed_out.note,
         "scopes": {
             scope: {"note_tokens": s.note_tokens, "tag_tokens": s.tag_tokens, **_money(units, s.cost)}
             for scope, s in sorted(use.scopes.items())
@@ -885,6 +892,7 @@ def view(
     unrated: dict | None = None,
     entrypoints: dict[str, dict] | None = None,
     overhead: dict | None = None,
+    signed_out: haiku_tags.SignedOut | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Everything the Capture tab and the banner show.
@@ -915,7 +923,9 @@ def view(
     ``Store.entrypoint_counts()``, which tells the status-line toggles
     whether any session ran where Claude Code runs a status line.
     ``overhead`` is :func:`build_overhead` over :func:`overhead_window`
-    (``None`` while no ClaudeGlass hook is installed).
+    (``None`` while no ClaudeGlass hook is installed). ``signed_out`` is
+    ``haiku_tags.signed_out`` since capture was turned on: what the tag
+    files show of the judge's login.
     """
     signal_sessions = signal_sessions or {}
     config = config_block(capture, now)
@@ -940,7 +950,7 @@ def view(
         {"id": section, "title": title, "metrics": [r for r in rows if r["section"] == section]}
         for section, title in catalogue.SECTIONS.items()
     ]
-    measured = _measured(use, units)
+    measured = _measured(use, units, signed_out)
     worth = _worth(rows, capture, use, units, now)
     history = (
         {"days": past.days, "sessions": past.sessions, "subagents": past.subagents, "cycles": past.cycles}

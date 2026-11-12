@@ -1213,6 +1213,18 @@ def test_a_feedback_call_that_finds_the_claim_held_leaves_the_state_alone_and_no
     assert not claim.exists()
 
 
+def test_a_feedback_note_whose_stamp_did_not_land_is_not_given(tmp_path, monkeypatch):
+    config_dir = tmp_path / "claudeglass"
+    state = config_dir / cat.COACH_STATE_FILE
+    writes = []
+    with monkeypatch.context() as refusing:
+        refusing.setattr(HOOK, "_write_json", lambda path, data: writes.append(path) is not None and False)
+        assert _fb(tmp_path, _timeline(*WORK), FIX) == ""
+    assert writes == [state] and not state.exists()
+    # Once the write lands again the question is asked: it was skipped, not spent.
+    assert _hint(_fb(tmp_path, _timeline(*WORK), FIX)) == "plan_check"
+
+
 def test_a_plan_approved_by_a_typed_go_ahead_gets_the_plan_check_too(tmp_path):
     rejected = _comes_back("p1", error=True, text="The user doesn't want to proceed with this tool use.")
     records = _timeline(_types("Plan it"), _plans("p1"), rejected, _says("Waiting."), _types("go ahead"), *_edits(), _says("Built."))

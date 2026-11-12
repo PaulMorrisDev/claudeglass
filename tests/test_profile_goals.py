@@ -566,6 +566,14 @@ def test_agents_that_said_they_did_not_use_claude_md_get_it_left_out_ticked():
     assert candidate["evidence"].endswith("3 of the 4 runs that said, said they didn't use it.")
 
 
+def test_one_run_that_said_it_did_not_use_claude_md_is_not_counted_as_runs():
+    [candidate] = [c for c in goals.draft("subagents", _with_agent_reports(0, 1), UNITS)["candidates"]
+                   if c["key"] == "omitClaudeMd"]
+    assert candidate["ticked"]
+    assert candidate["evidence"].endswith(" The one run that said, said it didn't use it.")
+    assert "1 of the 1" not in candidate["evidence"]
+
+
 def test_agents_that_said_they_used_claude_md_keep_it():
     out = goals.draft("subagents", _with_agent_reports(3, 1), UNITS)
     assert not [c for c in out["candidates"] if c["key"] == "omitClaudeMd"]

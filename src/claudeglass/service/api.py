@@ -1798,7 +1798,7 @@ def make_handler(
         }
 
     def _capture_view(config) -> dict:
-        from .. import capture_view
+        from .. import capture_view, haiku_tags
 
         capture = config.capture
         soft = (config.billing, str(config.pricing_path))
@@ -1886,11 +1886,17 @@ def make_handler(
         hooks = hook_health.check_capture(
             hook_health.capture_specs(capture.hook_metrics()), config_dir=options.config_dir
         )
+        signed_out = (
+            haiku_tags.signed_out(options.config_dir, since=discovery._parse_bound(capture.enabled_at))
+            if use is not None and capture.enabled_at
+            else None
+        )
         return capture_view.view(
             capture, past=past, units=units, use=use, hooks=hooks, signal_sessions=signal_sessions,
             started_since=started, feedback_use=feedback_use, skill=skill, brief_skill=brief_skill, ratings=ratings,
             statusline=statusline, weekly_cost=weekly_cost, dependent_value=dependent_value,
             coaching_use=coaching_use, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
+            signed_out=signed_out,
         )
 
     def _capture_conflict(message: str, commands: list[str]) -> tuple[int, dict]:
@@ -2942,7 +2948,10 @@ def make_handler(
         # files, which every project reads), as Skills reads them.
         folders = _project_folders(project)
         review = claude_md_review.build_review(
-            options.config_dir, model.context_files or {}, projects=None if folders is None else list(folders)
+            options.config_dir,
+            model.context_files or {},
+            projects=None if folders is None else list(folders),
+            projects_roots=_projects_roots(),
         )
         return claude_md_review, review, _report_units(model), _period_text(*window, name=query.get("window"))
 
@@ -3000,7 +3009,10 @@ def make_handler(
         data = model.context_files or {}
         folders = _project_folders(project)
         rows, local = claude_md_review.project_file_rows(
-            options.config_dir, data, projects=None if folders is None else list(folders)
+            options.config_dir,
+            data,
+            projects=None if folders is None else list(folders),
+            projects_roots=_projects_roots(),
         )
         flagged = {row["hash"]: row["reasons"] for row in context_files.check_rows(rows)}
         units = _report_units(model)
@@ -3047,15 +3059,21 @@ def make_handler(
                 _report_units(model),
                 _period_text(*window, name=query.get("window")),
                 only=_project_folders(project),
+                projects_roots=_projects_roots(),
             )
         )
 
-    def _project_folders(project):
-        """The folders a ``project`` filter stands for (``skills_review``),
-        or ``None`` with no filter."""
-        from .. import skills_review
+    def _projects_roots():
+        """The folders of project folders the service reads, as the report
+        does: the configured one, then the extra ones."""
+        return discovery.projects_roots([options.projects_root], options.extra_projects_roots)
 
-        return skills_review.project_folders_for(Path(options.config_dir).parent, project) if project else None
+    def _project_folders(project):
+        """The folders a ``project`` filter stands for, found under the
+        projects roots the report read, or ``None`` with no filter."""
+        from .. import claude_md_review
+
+        return claude_md_review.folders_for_slugs(_projects_roots(), project) if project else None
 
     def _current_settings(project=None) -> tuple[dict, dict, bool]:
         """The latest snapshot's effective settings as in force, every project's agent
@@ -3237,6 +3255,7 @@ def make_handler(
             only=_project_folders(project),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
+            projects_roots=tuple(_projects_roots()),
         )
 
     def route_quick_actions(store, query, body):

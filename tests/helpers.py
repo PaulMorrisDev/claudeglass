@@ -596,3 +596,57 @@ def store_with_older_sessions(tmp_path: Path, sessions: dict[str, list[dict]], o
     conn.commit()
     FileWatcher(store, options).run_once()
     return store, options
+
+
+def store_with_gone_sessions(
+    root: Path, projects: dict[str, dict[str, list[dict]]], gone: set[str], *, older: set[str] = frozenset()
+):
+    """A world the CLI reads: ``<root>/projects/<folder>`` holds each
+    folder's sessions (session id -> JSONL lines), ``<root>/claude`` is an
+    empty Claude root, and ``<root>/cg/service.db`` is the store one
+    FileWatcher tick made of them (``--config-dir <root>/cg``, never the real
+    one). Then each id in ``older`` (a subset of ``gone``) has its digest
+    rewritten through :func:`to_older_digest`, each id in ``gone`` has its
+    transcript deleted, and a second tick marks them missing. The store is
+    closed. Returns ``(projects_root, config_dir, claude_root)``."""
+    import os
+    import time
+
+    from claudeglass.service.contracts import ServeOptions
+    from claudeglass.service.store import Store, decode_digest_blob, encode_digest_blob
+    from claudeglass.service.watcher import FileWatcher
+
+    projects_root = root / "projects"
+    config_dir = root / "cg"
+    claude_root = root / "claude"
+    config_dir.mkdir(parents=True)
+    claude_root.mkdir()
+    settled = time.time() - 3600  # past the live-file window, so the watcher reads each file
+    paths: dict[str, Path] = {}
+    for folder_name, sessions in projects.items():
+        folder = projects_root / folder_name
+        folder.mkdir(parents=True)
+        for session_id, lines in sessions.items():
+            path = folder / f"{session_id}.jsonl"
+            write_jsonl(path, lines)
+            os.utime(path, (settled, settled))
+            paths[session_id] = path
+    options = ServeOptions(projects_root=projects_root, config_dir=config_dir)
+    store = Store(config_dir / "service.db", config_dir=config_dir)
+    store.open()
+    FileWatcher(store, options).run_once()
+    conn = store._connection()
+    for session_id in sorted(older):
+        row = conn.execute("SELECT id, digest_blob FROM transcripts WHERE session_id = ?", (session_id,)).fetchone()
+        data = json.loads(decode_digest_blob(row["digest_blob"]))
+        digest = to_older_digest(data, reads_before_46={t["turn_index"]: 2 for t in data["turns"] if t["shell_read_count"] == 1})
+        conn.execute(
+            "UPDATE transcripts SET digest_blob = ?, parser_version = 45 WHERE id = ?",
+            (encode_digest_blob(json.dumps(digest)), row["id"]),
+        )
+    for session_id in sorted(gone):
+        paths[session_id].unlink()
+    conn.commit()
+    FileWatcher(store, options).run_once()
+    store.close()
+    return projects_root, config_dir, claude_root

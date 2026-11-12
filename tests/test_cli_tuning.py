@@ -557,3 +557,15 @@ def test_what_export_writes_summary_reads_and_a_copy_of_it_still_validates(world
     assert _summary(str(world.out)) == 0
     assert capsys.readouterr().out == first
     assert tuning.validate(copy.deepcopy(json.loads(copied.read_text(encoding="utf-8")))) == []
+
+def test_export_gives_the_tuning_build_the_projects_roots_it_read(world, monkeypatch):
+    seen = {}
+    real = tuning.build
+
+    def spy(*args, **kw):
+        seen["projects_roots"] = kw.get("projects_roots")
+        return real(*args, **kw)
+
+    monkeypatch.setattr(tuning, "build", spy)
+    assert _export(world, "--out", str(world.out)) == 0
+    assert seen["projects_roots"] == [world.projects]

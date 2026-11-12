@@ -332,11 +332,12 @@ from .model import (
 #: Tool names whose first ``input.command`` becomes a turn's ``cmd_prefix``.
 _SHELL_TOOL_NAMES = ("Bash", "PowerShell")
 
-#: tool name -> the input key holding the path to check against the
-#: system temp dir for ``edit_kind`` ("scratch" vs "real"). The test is
-#: ``_is_temp_target``, the one a shell write target gets, so a
-#: backslashed, forward-slash, mixed-case or Git Bash form of the temp
-#: dir all match.
+#: tool name -> the input key holding the path to check against the temp
+#: folders for ``edit_kind`` ("scratch" vs "real"). The test is
+#: ``_is_temp_target``, the one a shell write target gets: the reading
+#: process's own temp folder and the system temp shapes
+#: (``_TEMP_SHAPE_RE``), in a backslashed, forward-slash, mixed-case or
+#: Git Bash form.
 _EDIT_TOOL_PATH_KEYS = {
     "Edit": "file_path",
     "Write": "file_path",
@@ -654,9 +655,40 @@ def path_hash(path_value: str, salt: bytes) -> str:
 def _temp_prefixes() -> tuple[str, ...]:
     """The normalised directory prefixes (see :func:`_normalize_path_for_hash`,
     so the lower-case, forward-slash and Git Bash ``/c/`` forms all match)
-    that count as temp for a shell write target or an edit tool's target:
-    the system temp dir, and the ``/tmp/`` Git Bash and Linux use."""
+    that count as temp wherever the transcript is read: the reading
+    process's own temp dir, and the ``/tmp/`` Git Bash and Linux use. The
+    other temp dirs are found by the shape of the path
+    (:data:`_TEMP_SHAPE_RE`), because the dir the process asks for
+    depends on who reads: a service, an export or a second machine has
+    another, and the same transcript would count differently."""
     return (_normalize_path_for_hash(tempfile.gettempdir()).rstrip("/") + "/", "/tmp/")
+
+
+#: Where each system keeps its temp files, by the shape of a normalised
+#: path, anchored at its root: Windows
+#: ``<drive>/users/<user>/appdata/local/temp/`` (any one folder for the
+#: user, so an 8.3 short name such as ``paulm~1`` matches),
+#: ``<drive>/windows/temp/`` and ``<drive>/windows/systemtemp/``, each also
+#: with a long-path prefix (``//?/c:/...``) and as WSL and Cygwin name the
+#: drive (``/mnt/c/...``, ``/cygdrive/c/...``); macOS
+#: ``/var/folders/<xx>/<id>/t/``, with or without ``/private``,
+#: ``/private/tmp/`` and ``/private/var/tmp/``; ``/tmp/`` and ``/var/tmp/``.
+#: A folder only named ``temp`` or ``tmp`` inside a project, or a path that
+#: reaches one of these below a project folder, matches none of them.
+_TEMP_SHAPE_RE = re.compile(
+    r"^(?:(?:(?://\?/)?[a-z]:|/(?:mnt|cygdrive)/[a-z])"
+    r"/(?:users/[^/]+/appdata/local/temp|windows/(?:system)?temp)"
+    r"|(?:/private)?/var/folders/[^/]+/[^/]+/t"
+    r"|/private/(?:var/)?tmp"
+    r"|/var/tmp"
+    r"|/tmp)/"
+)
+
+
+def _is_under_temp(normal: str, prefixes: tuple[str, ...]) -> bool:
+    """Whether a normalised path is in a temp dir: under one of ``prefixes``
+    (:func:`_temp_prefixes`) or of a shape in :data:`_TEMP_SHAPE_RE`."""
+    return normal.startswith(prefixes) or _TEMP_SHAPE_RE.match(normal) is not None
 
 
 #: Folders whose files are reports, plans and notes rather than code, and
@@ -720,7 +752,7 @@ def _is_code_write_target(target: str, prefixes: tuple[str, ...], cwd: str | Non
     ``Turn.shell_code_write_count`` and ``Turn.edit_code_count`` count only
     these."""
     normal = _normalize_path_for_hash(target)
-    if normal.startswith(prefixes):
+    if _is_under_temp(normal, prefixes):
         return False
     name = normal.rpartition("/")[2]
     parts = _folders_below(normal, cwd)
@@ -736,7 +768,7 @@ def _is_temp_target(target: str, prefixes: tuple[str, ...]) -> bool:
     an edit to your work, so ``Turn.shell_write_count`` leaves a shell
     write to one out, and ``Turn.edit_kind`` calls an edit tool's write to
     one "scratch"."""
-    return _normalize_path_for_hash(target).startswith(prefixes)
+    return _is_under_temp(_normalize_path_for_hash(target), prefixes)
 
 
 def detect_provider(model_id: str | None) -> str | None:

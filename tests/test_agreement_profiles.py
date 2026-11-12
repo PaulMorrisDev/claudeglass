@@ -1,4 +1,4 @@
-"""The seven synthetic profiles (``agreement_profiles.py``) each produce the
+"""The eight synthetic profiles (``agreement_profiles.py``) each produce the
 cards the agreement checks read.
 
 A check over a profile with no tools card, no info card with a saving and no
@@ -35,15 +35,16 @@ def _cards(inp, rec_id):
     return [rec for rec in inp.recs if rec.id == rec_id]
 
 
-def test_there_are_seven_profiles_of_the_kinds_the_plan_names():
-    assert NAMES == ["api", "cli_status", "bare", "old_version", "capture_on", "capture_off", "two_projects"]
-    api, cli, bare, old, on, off, two = (ap.SPECS[n] for n in NAMES)
+def test_there_are_eight_profiles_of_the_kinds_the_plan_names():
+    assert NAMES == ["api", "cli_status", "bare", "old_version", "capture_on", "capture_off", "two_projects", "denied"]
+    api, cli, bare, old, on, off, two, denied = (ap.SPECS[n] for n in NAMES)
     assert api.billing == "api" and cli.billing == "subscription"
     assert cli.entrypoint == "cli" and cli.statusline and not api.statusline
     assert not bare.custom_agents and not bare.workflows
     assert old.version == "2.1.300" and not old.request_lines
     assert on.capture and not off.capture
     assert two.second_project and not two.custom_agents
+    assert denied.denies and not any(ap.SPECS[n].denies for n in NAMES if n != "denied")
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -243,3 +244,21 @@ def test_check_7_in_the_all_projects_view_still_reads_a_projects_own_agent_chang
     assert "reviewer" in problem and "'sonnet'" in problem
     monkeypatch.setattr(agreement.change_points, "change_points", lambda *a, **k: [*real(*a, **k), main_point])
     assert agreement.check_same_setting(inp) == []
+
+
+def test_the_denied_profile_has_an_agent_whose_file_withholds_a_tool_its_spawns_called(built):
+    profile, inp = built("denied")
+    assert inp.agents["reviewer"]["disallowedTools"] == ap.REVIEWER_DENIED
+    rows = {row["agent_type"]: row for row in agreement.tables_of(inp.model)["agent_startup_diet"]}
+    # The report still measures Edit as called in two of five spawns and Write as rare.
+    assert "Edit" in rows["reviewer"]["keep_tools"] and "Write" in rows["reviewer"]["rare_tools"]
+    card = [r for r in _cards(inp, "spawn-tools-list") if r.agent_type == "reviewer"][0]
+    assert "Edit" not in card.changes[0].value and "Write" not in card.changes[0].value
+    assert "Write" not in card.action.split("Rarely used")[1]
+    # Edit is on the reviewer's tools line; it is the deny line that keeps it off the suggested one.
+    assert "Edit" in recommend.read_agent_tools(inp.agents["reviewer"]["tools"]).allow
+    assert "Edit is on its disallowedTools line, so it isn't added." in card.action
+    assert "Edit isn't on its tools line" not in card.action
+    for name in NAMES:
+        if name != "denied":
+            assert not any("disallowedTools" in entry for entry in built(name)[1].agents.values()), name

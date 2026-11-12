@@ -902,3 +902,24 @@ def test_the_view_carries_the_overhead_it_is_given_and_none_without():
     block = capture_view.overhead_block(window, hooks_text="x", capture_usd=0.2, coaching_usd=0.0, units=API)
     assert capture_view.view(CaptureConfig(), overhead=block)["overhead"] == block
     assert capture_view.view(CaptureConfig())["overhead"] is None
+
+
+def test_measured_carries_the_signed_out_count_and_the_pause_for_the_judged_line():
+    from claudeglass import haiku_tags
+
+    signed_out = haiku_tags.SignedOut(agent_runs=76, paused=True)
+    measured = capture_view.view(
+        _on(), past=_past(), units=API, use=_use(cycles=8, tagged_cycles=8, reports=76, tagged_reports=0),
+        signed_out=signed_out,
+    )["measured"]
+    assert measured["report_coverage_pct"] == 0.0
+    assert measured["report_signed_out"] == 76
+    assert measured["report_signed_out_text"] == "76 found the claude command signed out"
+    assert measured["judge_paused_text"] == signed_out.note
+    # Judged calls and no pause, or nothing read: nothing to say.
+    for quiet in (haiku_tags.SignedOut(), None):
+        measured = capture_view.view(
+            _on(), past=_past(), units=API, use=_use(cycles=8, tagged_cycles=8, reports=4, tagged_reports=4),
+            signed_out=quiet,
+        )["measured"]
+        assert (measured["report_signed_out"], measured["report_signed_out_text"], measured["judge_paused_text"]) == (0, "", "")
