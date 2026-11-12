@@ -2050,6 +2050,9 @@ def _tools_list_card(
     # A card never adds a tool: one the diet keeps that a known line lacks.
     on_line = _split_names(diet["keep_tools"])
     not_added = [name for name in _split_names(row["keep_tools"]) if name not in on_line]
+    # Of those, the ones the deny line withholds (whatever the tools line says) and the ones a tools line lacks.
+    withheld = [name for name in not_added if read_agent_tools(current, denied).denied(name)]
+    not_added = [name for name in not_added if name not in withheld]
     measured = diet["spawns"]
     sizes = [(label, diet.get(column)) for column, label in _DIET_PARTS]
 
@@ -2070,6 +2073,12 @@ def _tools_list_card(
         f"{_name_list(rare)}. Claude Code adds StructuredOutput, SubagentHandback and advisor to every subagent "
         "whatever the list says."
     )
+    if withheld:
+        plural = len(withheld) > 1
+        left_out += (
+            f" {_name_list(withheld)} {'are' if plural else 'is'} on its disallowedTools line, so "
+            f"{'they aren' if plural else 'it isn'}'t added."
+        )
     if not_added:
         plural = len(not_added) > 1
         left_out += (

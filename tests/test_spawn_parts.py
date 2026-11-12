@@ -1441,3 +1441,23 @@ def test_the_single_mcp_tool_on_a_kept_server_is_suggested_as_that_tool_and_not_
     assert card is not None
     assert "mcp__github__create_issue" in card.changes[0].value and "mcp__github__*" not in card.changes[0].value
     assert "tools: Read, mcp__github__create_issue." in card.action and "mcp__github__*" not in card.action.split("Rarely used")[0]
+
+
+def test_a_tool_the_deny_line_withholds_is_not_said_to_be_missing_from_the_tools_line():
+    # No tools line, and the tools line has the tool: either way it is the deny line that keeps it off.
+    line = ["Read", "Grep", "Bash", "Skill", "WebFetch", "NotebookEdit"]
+    for kw in ({"denied": "Bash"}, {"line": line, "denied": "Bash"}):
+        _recs_denied, card = _tools_card_for(**kw)
+        assert " Bash is on its disallowedTools line, so it isn't added." in card.action, kw
+        assert "tools line" not in card.action.split("Rarely used")[1].replace("disallowedTools line", ""), kw
+    # Two withheld tools, with the neighbour's plural handling.
+    _recs_two, card = _tools_card_for(denied=["Bash", "Grep"])
+    assert "are on its disallowedTools line, so they aren't added." in card.action
+    # A tool really absent from a tools line keeps the tools-line sentence.
+    _recs_lacking, card = _tools_card_for(line=["Read", "Grep", "Skill", "WebFetch", "NotebookEdit"])
+    assert " Bash isn't on its tools line, so it isn't added." in card.action
+    assert "disallowedTools line, so" not in card.action
+    # Both at once: one tool withheld, another absent.
+    _recs_mixed, card = _tools_card_for(line=["Read", "Skill", "WebFetch", "NotebookEdit"], denied="Bash")
+    assert " Bash is on its disallowedTools line, so it isn't added." in card.action
+    assert " Grep isn't on its tools line, so it isn't added." in card.action

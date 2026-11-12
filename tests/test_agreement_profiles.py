@@ -154,6 +154,10 @@ def test_the_denied_profile_has_an_agent_whose_file_withholds_a_tool_its_spawns_
     card = [r for r in _cards(inp, "spawn-tools-list") if r.agent_type == "reviewer"][0]
     assert "Edit" not in card.changes[0].value and "Write" not in card.changes[0].value
     assert "Write" not in card.action.split("Rarely used")[1]
+    # Edit is on the reviewer's tools line; it is the deny line that keeps it off the suggested one.
+    assert "Edit" in recommend.read_agent_tools(inp.agents["reviewer"]["tools"]).allow
+    assert "Edit is on its disallowedTools line, so it isn't added." in card.action
+    assert "Edit isn't on its tools line" not in card.action
     for name in NAMES:
         if name != "denied":
             assert not any("disallowedTools" in entry for entry in built(name)[1].agents.values()), name
