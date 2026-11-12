@@ -266,3 +266,39 @@ def test_the_harness_refuses_a_config_folder_that_is_not_beside_the_projects_fol
     (tmp_path / "data" / "claudeglass").mkdir()
     with pytest.raises(agreement.LayoutError):
         agreement.load_inputs(tmp_path / "copy" / "projects", tmp_path / "data" / "claudeglass", None)
+
+
+def _run_split_and_plan_handoff():
+    from claudeglass.model import Recommendation
+
+    split = Recommendation(id="run-split", key="run-split:reviewer", severity="advice", agent_type="reviewer",
+                           title="Give reviewer smaller tasks", why="Long runs.", action="Split it.", saving_usd=2.0)
+    plan = Recommendation(id="plan-handoff", key="plan-handoff", severity="advice", title="Build from a fresh session",
+                          why="Plans.", action="Clear after a plan.", saving_usd=3.0)
+    fixes.attach_fixes([split, plan])
+    return split, plan
+
+
+def test_check_5_holds_when_run_split_and_plan_handoff_share_a_header_in_either_order(profile):
+    inp = profile("capture_off")[1]
+    split, plan = _run_split_and_plan_handoff()
+    for extra in ([split, plan], [plan, split]):
+        assert agreement.check_bundle(_with_cards(inp.with_recommendations(extra), *inp.recs)) == []
+
+
+def test_check_5_reports_a_bundle_whose_counts_depend_on_the_order_of_the_cards(profile, monkeypatch):
+    inp = profile("capture_off")[1]
+    split, plan = _run_split_and_plan_handoff()
+    both = _with_cards(inp.with_recommendations([]), split, plan)
+    assert agreement.check_bundle(both) == []
+    real = fixes.project_prompt
+
+    def first_kind_wins(recs, skip_keys=frozenset()):
+        data = real(recs, skip_keys)
+        if recs and recs[0].id == "plan-handoff":
+            data = {**data, "several": data["several"] - 1}
+        return data
+
+    monkeypatch.setattr(fixes, "project_prompt", first_kind_wins)
+    problems = agreement.check_bundle(both)
+    assert any("order" in p for p in problems), problems

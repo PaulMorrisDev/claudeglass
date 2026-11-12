@@ -1395,12 +1395,15 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
     variant), information-only cards, unconfirmed changes and managed
     settings; ``left_out`` counts the cards with at least one fix left
     out for each reason (a card can count in both ``cards`` and
-    ``left_out``). ``files`` lists the groups that name one file;
-    ``several`` counts the prompts under a group that spans several files
-    or sets a standing rule, and ``other`` those under a group with no
-    file to edit."""
+    ``left_out``). ``files`` lists the groups that hold a fix of one
+    file, each with how many; ``several`` counts the prompts whose fix spans
+    several files or sets a standing rule, and ``other`` those with no file to
+    edit, whatever header they sit under. The count is per fix, so a one-file
+    fix and a standing rule under one header (``~/.claude/CLAUDE.md``) count
+    the same in either order."""
     groups: dict[str, list[str]] = {}
-    kinds: dict[str, str] = {}
+    #: Each group's prompts' kinds, in step with ``groups``.
+    kinds: dict[str, list[str]] = {}
     left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0}
     cards = 0
     scoped = False
@@ -1433,10 +1436,10 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
                 continue
             body, stripped_scope = _bundle_body(fix["prompt"])
             scoped = scoped or stripped_scope
-            kinds.setdefault(file, kind)
             prompts = groups.setdefault(file, [])
             if body not in prompts:
                 prompts.append(body)
+                kinds.setdefault(file, []).append(kind)
             used = True
         if used:
             cards += 1
@@ -1449,8 +1452,11 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
         if len(alts) > 1:
             target = next((a for a in alts if a in groups), None)
             if target:
-                groups[target].extend(p for p in groups.pop(label) if p not in groups[target])
-    ordered = [f for f in groups if kinds[f] != "none"] + [f for f in groups if kinds[f] == "none"]
+                for body, kind in zip(groups.pop(label), kinds.pop(label)):
+                    if body not in groups[target]:
+                        groups[target].append(body)
+                        kinds[target].append(kind)
+    ordered = [f for f in groups if set(kinds[f]) != {"none"}] + [f for f in groups if set(kinds[f]) == {"none"}]
     if not ordered:
         return {
             "prompt": "",
@@ -1472,9 +1478,9 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
         )
     return {
         "prompt": "\n\n".join(parts),
-        "files": [{"file": f, "fixes": len(groups[f])} for f in ordered if kinds[f] == "file"],
-        "several": sum(len(groups[f]) for f in ordered if kinds[f] in ("several", "rule")),
-        "other": sum(len(groups[f]) for f in ordered if kinds[f] == "none"),
+        "files": [{"file": f, "fixes": kinds[f].count("file")} for f in ordered if "file" in kinds[f]],
+        "several": sum(kind in ("several", "rule") for f in ordered for kind in kinds[f]),
+        "other": sum(kind == "none" for f in ordered for kind in kinds[f]),
         "cards": cards,
         "left_out": left_out,
     }

@@ -758,3 +758,33 @@ def test_a_run_split_card_is_counted_as_a_standing_rule_not_as_a_file_to_edit():
     # A card that edits only CLAUDE.md is still a file.
     plan = _bundle_rec("plan", rec_id="plan-handoff")
     assert fix_group(plan, None) == ("~/.claude/CLAUDE.md", "file")
+
+
+def test_a_one_file_fix_and_a_standing_rule_under_one_header_count_the_same_in_either_order():
+    """plan-handoff edits ~/.claude/CLAUDE.md; run-split sets a rule there and may add a line to
+    the agent's file. The header is a file to edit, the rule is counted apart, whichever comes first."""
+    from claudeglass.fixes import project_prompt
+
+    plan = _bundle_rec("plan", rec_id="plan-handoff")
+    split = _bundle_rec("run-split:reviewer", rec_id="run-split", agent_type="reviewer")
+    pair = _bundle_rec("pair", rec_id="compaction-churn")
+    seen = []
+    for order in ([plan, split, pair], [split, plan, pair], [pair, split, plan]):
+        out = project_prompt(order)
+        assert sorted(out["files"], key=lambda f: f["file"]) == [
+            {"file": "~/.claude/CLAUDE.md", "fixes": 1},
+            {"file": "~/.claude/settings.json or .claude/settings.json", "fixes": 1},
+        ]
+        assert out["several"] == 1 and out["other"] == 0 and out["cards"] == 3
+        seen.append((sorted(f["file"] for f in out["files"]), out["several"], out["other"]))
+    assert seen[0] == seen[1] == seen[2]
+    # The prompt still has one section for the shared header, with both fixes in it.
+    both = project_prompt([split, plan])["prompt"]
+    assert both.count("## ~/.claude/CLAUDE.md") == 1
+
+
+def test_a_rule_alone_under_a_one_path_header_is_not_a_file_to_edit():
+    from claudeglass.fixes import project_prompt
+
+    out = project_prompt([_bundle_rec("run-split:reviewer", rec_id="run-split", agent_type="reviewer")])
+    assert out["files"] == [] and out["several"] == 1

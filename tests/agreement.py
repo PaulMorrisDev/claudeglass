@@ -32,8 +32,9 @@ The seven (numbers as in the plan's "Agreement checks"):
 4. Each check's figures equal its cards': the Tools check's "rarely called"
    count and tokens are the tools card's for the same agent, and an ignored
    card adds no fix, tip or mention to any check.
-5. The project bundle's counts add up, and every entry in ``files`` is one
-   concrete file.
+5. The project bundle's counts add up, every entry in ``files`` is one
+   concrete file with a one-file fix under it, and the counts do not depend
+   on the order of the cards.
 6. Every hint that generated text names as live is in the derived live list.
 7. A card and a check about the same setting give the same advice, and a card
    and the Changes page state the same current value.
@@ -547,8 +548,9 @@ def check_bundle(inp: Inputs) -> list[str]:
     cards it uses are no more than the cards with a prompt to give and, with
     the ones left out for being unconfirmed or managed, no fewer; an empty
     prompt means no cards and a prompt means some; every ``files`` entry is
-    one concrete file that the prompt has a heading for; and no ignored card's
-    prompt is in it."""
+    one concrete file that the prompt has a heading for and has a one-file fix
+    under it; the same cards in the opposite order give the same counts; and no
+    ignored card's prompt is in it."""
     problems: list[str] = []
     recs, skip = inp.recs, set(inp.skip)
     data = fixes.project_prompt(recs, skip)
@@ -585,12 +587,23 @@ def check_bundle(inp: Inputs) -> list[str]:
         header = entry["file"]
         if not _is_one_file(header):
             problems.append(f"the bundle counts {header!r} as one file")
-        elif kinds.get(header, {"file"}) != {"file"}:
-            problems.append(f"the bundle counts {header!r} as one file, the fix groups it as {sorted(kinds[header])}")
+        elif "file" not in kinds.get(header, {"file"}):
+            problems.append(f"the bundle counts {header!r} as a file, no fix under it groups as one: {sorted(kinds[header])}")
         if f"## {header}\n" not in prompt:
             problems.append(f"the bundle lists {header!r} but its prompt has no such heading")
         if entry["fixes"] < 1:
             problems.append(f"the bundle lists {header!r} with {entry['fixes']} fixes")
+    # The counts are per fix: the same cards in the opposite order give the same counts.
+    flipped = fixes.project_prompt(list(reversed(recs)), skip)
+
+    def counts(result):
+        return sorted((f["file"], f["fixes"]) for f in result["files"]), result["several"], result["other"], result["cards"]
+
+    if counts(flipped) != counts(data):
+        problems.append(
+            f"the bundle's counts depend on the order of the cards: {counts(data)[:3]} one way, "
+            f"{counts(flipped)[:3]} the other"
+        )
     open_bodies = {fixes._bundle_body(fix["prompt"])[0] for rec in on_offer for fix in _prompt_fixes(rec)}
     for rec in recs:
         if rec.key in skip:
