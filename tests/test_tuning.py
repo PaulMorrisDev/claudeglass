@@ -2287,3 +2287,27 @@ def test_the_tools_list_saving_leaves_out_what_the_agents_line_no_longer_lists()
     assert tuning._startup_diet_usd(stats, {"reviewer": ["Read", "Grep", "Bash"]}) == {}
     # An unknown line, or another agent's, leaves it as it was.
     assert tuning._startup_diet_usd(stats, {"other": ["Read"]}) == full
+
+
+def test_the_agents_block_prices_the_tools_list_without_the_tools_the_agents_file_withholds(tmp_path):
+    """The block reads each agent file's ``disallowedTools`` line as well as its ``tools`` line:
+    a tool the file withholds is never sent, so a tools list saves nothing on it."""
+    from test_spawn_parts import _diet_acc
+
+    def block(denied):
+        ctx = tuning._Ctx(NS(sessions=[]), Config(tz="UTC"), None, tmp_path, 30, TODAY, None)
+        ctx.habits = habits.Habits()
+        ctx.startup = _diet_stats(_diet_acc("reviewer"))
+        ctx.agent_tools = {}
+        ctx.agent_denied = denied
+        return tuning._agents(ctx)
+
+    open_block = block({})
+    assert open_block["startup_diet_usd"]["custom"] > 0
+    # Skill, NotebookEdit and WebFetch are the three rarely used tools it is offered: all withheld, none to save.
+    assert "startup_diet_usd" not in block({"reviewer": "Skill, NotebookEdit, WebFetch"})
+    # One of them withheld leaves less to save than none.
+    partial = block({"reviewer": "WebFetch"})["startup_diet_usd"]["custom"]
+    assert 0 < partial < open_block["startup_diet_usd"]["custom"]
+    # Another agent's line changes nothing.
+    assert block({"other": "WebFetch"}) == open_block
