@@ -636,7 +636,7 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     assert "Capture cost $4.20 and coaching notes $0.35 at list prices." in lines
     for name in ("Tips:", "Plans:", "Tags:", "Rework:", "Agent answers:", "Hooks:", "Limits:"):
         assert any(line.startswith(name) for line in lines), name
-    assert len(lines) < 50
+    assert len(lines) < 75
 
 
 def test_a_file_without_a_coverage_block_as_every_older_one_is_still_passes_and_says_nothing_of_it():
@@ -645,7 +645,8 @@ def test_a_file_without_a_coverage_block_as_every_older_one_is_still_passes_and_
     assert tuning.validate(doc) == []
     text = tuning.summary_text(doc)
     assert text.splitlines()[1].startswith("Capture:")
-    for words in ("These figures cover", "what the dashboard kept", "older version"):
+    # (The figures block says "an older version read their sessions" of its own summaries: that is not this.)
+    for words in ("These figures cover", "what the dashboard kept", "read by an older version"):
         assert words not in text
 
 

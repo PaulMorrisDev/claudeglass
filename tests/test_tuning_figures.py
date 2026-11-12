@@ -38,6 +38,7 @@ from test_tuning import (
     _mini_world,
     _note,
     _notice,
+    _plain,
     _put,
     _sample,
     _say,
@@ -449,6 +450,7 @@ def test_a_session_an_older_version_read_is_left_out_of_summaries_and_correction
     assert figures["after_summary"] == {"sessions": 0, "unmeasured": 1, "stretches": {}}
     # The same replies are still replies; the older digest did not measure what a lookup is.
     assert figures["reply_cost"]["main"]["under_100k"]["measured_replies"] == 0
+    assert "3 summaries left out of these figures: an older version read their sessions." in tuning.summary_text(doc).splitlines()
     assert measured.FIELD_VERSIONS["estimated"] == 45 and measured.FIELD_VERSIONS["queued_correction"] == 37
 
 
@@ -556,6 +558,8 @@ def test_models_keep_the_dearest_seven_and_fold_the_rest_into_other_over_the_lat
         assert set(entry["weekly_usd"]) <= set(latest)
     # Opus 4.8 ran only before those weeks: named, dear, and with no week.
     assert models["claude-opus-4-8"]["weekly_usd"] == {} and models["claude-opus-4-8"]["cost_usd"] > 0
+    doc = _put(_sample(), "figures", {"models": models})
+    assert "Not used in the file's last 8 weeks: Opus 4.8." in tuning.summary_text(doc).splitlines()
     _valid({"models": models})
 
 
@@ -707,3 +711,65 @@ def test_the_block_gives_the_reference_figures_on_the_fixture(tmp_path):
     _close(bare["summaries"], {k: v for k, v in _MINI_WORLD["summaries"].items() if not k.endswith("_usd") and k != "paid_back"})
     assert bare["models"] == {"claude-opus-4-1": {"replies": 4}, "claude-sonnet-5": {"replies": 5}}
     _valid(bare)
+
+
+# -- the summary lines ----------------------------------------------------------------------------------
+
+_SAMPLE_LINES = [
+    "Cost per reply, main session: $0.10 from 100K to 200K and $0.15 over 200K.",
+    "Cost per reply, direct agents: $0.04 under 100K tokens of context.",
+    "Cost per reply, workflow agents: $0.05 from 100K to 200K.",
+    "One read-only lookup cost $0.09 a reply in the main session and $0.04 in an agent, or $0.04 and $0.03 at Sonnet's rates.",
+    "Context grew by 1,196 tokens a reply on average in the main session, over 460 replies.",
+    "1 session grew by over 10,000 tokens a reply on average.",
+    "Each summary cost about $1.00 and saved $0.10 on every later reply, so it paid back after about 10 replies.",
+    "5 of 6 summaries were followed by that many replies.",
+    "1 summary left out of these figures: an older version read their sessions.",
+    "After a summary, 1 of 4 next messages read as a correction, against 1 of 20 after a stretch as long without one.",
+    "Spend by model: Opus 5.5 $72.25, Opus 5 $9.50 and other models $0.75.",
+    "Not used in the file's last 2 weeks: Opus 5.",
+    "Cold returns by context: 2 under 150K and 4 to 300K.",
+]
+_OPENINGS = (
+    "Cost per reply", "One read-only lookup", "Context grew", "Each summary cost", "After a summary", "Spend by model",
+    "Cold returns by context",
+)  # fmt: skip
+
+
+def _zeros(node):
+    """The fullest block the node allows, every count and amount 0."""
+    if isinstance(node, (tuning.Count, tuning.Num)):
+        return 0
+    if isinstance(node, tuning.Obj):
+        return {key: _zeros(child) for key, child in node.fields.items()}
+    keys = node.keys
+    names = sorted(keys.words) if isinstance(keys, tuning.Closed) else [f"2026-W{i:02d}" for i in range(1, 60)]
+    return {key: _zeros(node.item) for key in names[: node.limit]}
+
+
+def test_the_figures_lines_keep_to_the_copy_rules_and_say_nothing_without_the_block():
+    lines = tuning.summary_text(_sample()).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Cost per reply"))
+    assert lines[start : start + len(_SAMPLE_LINES)] == _SAMPLE_LINES
+    assert start > next(i for i, line in enumerate(lines) if line.startswith("Summaries:"))
+    for line in _SAMPLE_LINES:
+        _plain(line)
+    without = _sample()
+    del without["figures"]
+    text = tuning.summary_text(without)
+    assert not any(opening in text for opening in _OPENINGS)
+    # A block with growth alone says the one growth line.
+    growth = {"by_reply": _sample()["figures"]["growth"]["by_reply"], "by_session": {}, "shrinks": 0}
+    alone = tuning.summary_text(_put(_sample(), "figures", {"growth": growth})).splitlines()
+    assert [line for line in alone if line.startswith(_OPENINGS)] == [_SAMPLE_LINES[4]]
+    # A valid block of zeros, every map full, prints without an error, and only the lines that need no division.
+    zeros = _put(_sample(), "figures", _zeros(tuning._FIGURES))
+    assert tuning.validate(zeros) == []
+    said = [line for line in tuning.summary_text(zeros).splitlines() if line.startswith(_OPENINGS)]
+    assert {line.split(":")[0] for line in said} == {"Spend by model", "Cold returns by context"}
+    # An older file, a block with a part missing: the part's lines are not printed.
+    no_rates = copy.deepcopy(_sample())
+    for part in ("reply_cost", "summaries", "models"):
+        del no_rates["figures"][part]
+    kept = [line for line in tuning.summary_text(no_rates).splitlines() if line.startswith(_OPENINGS)]
+    assert [line.split(" ")[0] for line in kept] == ["Context", "After", "Cold"]

@@ -2335,6 +2335,111 @@ def _figure_returns(ctx: _Ctx) -> dict | None:
     return out or None
 
 
+_CONTEXT_WORDS = {"under_100k": "under 100K tokens of context", "to_200k": "from 100K to 200K", "over_200k": "over 200K"}
+_RETURN_WORDS = {
+    "under_150k": "under 150K", "to_200k": "to 200K", "to_300k": "to 300K", "to_500k": "to 500K", "over_500k": "over 500K",
+}  # fmt: skip
+#: The sessions whose mean rise a reply is over 10,000 tokens.
+_FAST_GROWTH = ("to_20k", "to_50k", "over_50k")
+
+
+def _model_label(word: str) -> str:
+    return "other models" if word == "other" else pricing_mod.model_name(word)
+
+
+def _lookup_mean(reply_cost: dict, places: tuple[str, ...], key: str) -> float | None:
+    """The mean ``key`` amount of the lookups in ``places``, ``None`` with no lookup or a cell without it."""
+    cells = [cell for place in places for cell in (reply_cost.get(place) or {}).values()]
+    lookups = sum(cell["lookups"] for cell in cells)
+    if not lookups or not all(key in cell for cell in cells):
+        return None
+    return sum(cell[key] for cell in cells) / lookups
+
+
+def _figures_lines(block: dict) -> list[str]:
+    lines: list[str] = []
+    reply_cost = block.get("reply_cost") or {}
+    for place in PLACES:
+        row = reply_cost.get(place) or {}
+        parts = [
+            f"{_usd(row[size]['cost_usd'] / row[size]['replies'])} {_CONTEXT_WORDS[size]}"
+            for size in CONTEXT_SIZES
+            if size in row and "cost_usd" in row[size] and row[size]["replies"]
+        ]
+        if parts:
+            lines.append(f"Cost per reply, {cost_centres_mod.CENTRE_LABELS[place].lower()}: {_list(parts)}.")
+    in_agents = ("direct", "workflow")
+    main, agent = _lookup_mean(reply_cost, ("main",), "lookup_usd"), _lookup_mean(reply_cost, in_agents, "lookup_usd")
+    if main and agent:
+        line = f"One read-only lookup cost {_usd(main)} a reply in the main session and {_usd(agent)} in an agent"
+        main_sonnet = _lookup_mean(reply_cost, ("main",), "lookup_sonnet_usd")
+        agent_sonnet = _lookup_mean(reply_cost, in_agents, "lookup_sonnet_usd")
+        both = f", or {_usd(main_sonnet)} and {_usd(agent_sonnet)} at Sonnet's rates" if main_sonnet and agent_sonnet else ""
+        lines.append(f"{line}{both}.")
+    growth = block.get("growth") or {}
+    replies = sum(cell["replies"] for cell in (growth.get("by_reply") or {}).values())
+    if replies:
+        tokens = sum(cell["tokens"] for cell in growth["by_reply"].values())
+        lines.append(
+            f"Context grew by {round(tokens / replies):,} tokens a reply on average in the main session, "
+            f"over {_n(replies, 'reply', 'replies')}."
+        )
+        fast = sum(growth["by_session"].get(word, {}).get("sessions", 0) for word in _FAST_GROWTH)
+        if fast:
+            lines.append(f"{_n(fast, 'session')} grew by over 10,000 tokens a reply on average.")
+    summaries = block.get("summaries") or {}
+    if (
+        summaries.get("summaries")
+        and summaries.get("sized")
+        and summaries.get("read_saving_usd", 0) > 0
+        and "request_usd" in summaries
+        and "write_usd" in summaries
+    ):
+        cost = (summaries["request_usd"] + summaries["write_usd"]) / summaries["summaries"]
+        saved = summaries["read_saving_usd"] / summaries["sized"]
+        lines.append(
+            f"Each summary cost about {_usd(cost)} and saved {_usd(saved)} on every later reply, "
+            f"so it paid back after about {_n(round(cost / saved), 'reply', 'replies')}."
+        )
+        if "paid_back" in summaries:
+            lines.append(
+                f"{summaries['paid_back']:,} of {_n(summaries['summaries'], 'summary', 'summaries')} "
+                "were followed by that many replies."
+            )
+    if summaries.get("unmeasured"):
+        lines.append(
+            f"{_n(summaries['unmeasured'], 'summary', 'summaries')} left out of these figures: "
+            "an older version read their sessions."
+        )
+    after = block.get("after_summary") or {}
+    both_sides = [sides for sides in (after.get("stretches") or {}).values() if "summarised" in sides and "plain" in sides]
+    after_messages = sum(sides["summarised"]["messages"] for sides in both_sides)
+    plain_messages = sum(sides["plain"]["messages"] for sides in both_sides)
+    if after_messages and plain_messages:
+        lines.append(
+            f"After a summary, {sum(sides['summarised']['corrections'] for sides in both_sides):,} of "
+            f"{_n(after_messages, 'next message')} read as a correction, against "
+            f"{sum(sides['plain']['corrections'] for sides in both_sides):,} of {plain_messages:,} "
+            "after a stretch as long without one."
+        )
+    models = block.get("models") or {}
+    if any("cost_usd" in entry for entry in models.values()):
+        ranked = sorted(models.items(), key=lambda kv: (-kv[1].get("cost_usd", 0.0), kv[0]))
+        spend = [f"{_model_label(word)} {_usd(entry.get('cost_usd', 0.0))}" for word, entry in ranked[:5]]
+        lines.append(f"Spend by model: {_list(spend)}.")
+        weeks = {week for entry in models.values() for week in entry.get("weekly_usd", {})}
+        idle = [
+            _model_label(word) for word, entry in ranked if word != "other" and "weekly_usd" in entry and not entry["weekly_usd"]
+        ]
+        if weeks and idle:
+            lines.append(f"Not used in the file's last {_n(len(weeks), 'week')}: {_list(idle)}.")
+    returns = block.get("returns") or {}
+    if returns:
+        parts = [f"{returns[word]['returns']:,} {_RETURN_WORDS[word]}" for word in RETURN_SIZES if word in returns]
+        lines.append(f"Cold returns by context: {_list(parts)}.")
+    return lines
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -2418,6 +2523,7 @@ def summary_text(doc) -> str:
         (_cost_centres_lines, "cost_centres"),
         (_project_files_lines, "project_files"),
         (_compactions_lines, "compactions"),
+        (_figures_lines, "figures"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])
