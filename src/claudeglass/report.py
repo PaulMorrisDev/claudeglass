@@ -1396,38 +1396,55 @@ def _main_model_lever(
     (``model_swap.BEFORE_CHANGE``), else ``None``. A session already on
     Sonnet or smaller is left out by its own model, inside ``model_swap``.
 
-    The move is the newest main-model change point the Changes page lists
-    (``change_points.change_points`` with the corpus: an apply or undo, a
-    change to your user settings or the project's own, a new model its
-    transcripts show) that applies in the session's project. It cuts only
-    when the value it moved the model to is Sonnet or smaller: a newest
-    point to a larger model, a move back included, cuts nothing, and so
-    does a point with no recorded value. A session that started at the
-    point's time counts.
+    The move is the newer of two, for the session's project: the last time
+    its own snapshots' effective model moved across the Sonnet line
+    (``change_points.settings_model_move``; with no snapshot of its own,
+    your user settings' model in every snapshot), and the newest move across
+    it that its sessions' transcripts show (``change_points.transcript_model_move``).
+    A change that stays on one side of the line is no move. Of two at the
+    same time, the settings move. It cuts only when the value it moved the
+    model to is Sonnet or smaller: a newest move to a larger model, a move
+    back included, cuts nothing. A session that started at the move's time
+    counts.
 
     A move that only the transcripts show is passed over when every session
     of the run that made it is headless or has fewer than
-    :data:`MOVE_MIN_REPLIES` priced replies; the newest point left is the
-    one read. A session whose project no change names is judged by the
-    changes made for every project. ``None`` without a config folder, so
-    every main session counts."""
+    :data:`MOVE_MIN_REPLIES` priced replies; the newest one left is read.
+    ``None`` without a config folder, so every main session counts."""
     if config_dir is None:
         return None
     points = change_points_mod.change_points(config_dir, corpus)
     runs = change_points_mod.model_runs(points, corpus)
     points = [p for i, p in enumerate(points) if i not in runs or any(_steered(b) for b in runs[i])]
+    snapshots = snapshots_mod.load_snapshots(config_dir)
+    moves: dict[tuple[str, ...], tuple | None] = {}
     cut: set[str] = set()
     for bundle in corpus.sessions:
         if bundle.top is None:
             continue
         session_id = bundle.top.meta.session_id
-        point = change_points_mod.last_change_point(points, "model", keys_by_session.get(session_id) or ())
-        if point is None or not model_swap.at_main_floor(change_points_mod.new_value(point, "model", points)):
+        keys = tuple(keys_by_session.get(session_id) or ())
+        if keys not in moves:
+            moves[keys] = _newer_move(
+                change_points_mod.settings_model_move(snapshots, keys, model_swap.at_main_floor),
+                change_points_mod.transcript_model_move(points, keys, model_swap.at_main_floor),
+            )
+        move = moves[keys]
+        if move is None or not model_swap.at_main_floor(move[1]):
             continue
         start = change_points_mod.session_start(bundle)
-        if start is None or start < point.ts:
+        if start is None or start < move[0]:
             cut.add(session_id)
     return lambda tr: model_swap.BEFORE_CHANGE if tr.meta.session_id in cut else None
+
+
+def _newer_move(settings: tuple | None, transcript: tuple | None) -> tuple | None:
+    """The newer of a settings move and a transcript move, each a (time,
+    value) or ``None``; of two at the same time, the settings move: it is
+    what was in force, the transcripts only show it."""
+    if settings is None or (transcript is not None and transcript[0] > settings[0]):
+        return transcript
+    return settings
 
 
 # -- build_report -----------------------------------------------------------
