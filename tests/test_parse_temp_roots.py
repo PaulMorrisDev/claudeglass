@@ -70,6 +70,22 @@ def own_temp(monkeypatch):
     # Windows 8.3 short user name
     "C:\\Users\\PAULM~1\\AppData\\Local\\Temp\\x.py",
     "/c/Users/PAULM~1/AppData/Local/Temp/x.py",
+    # Windows 11 keeps a service's temp files in SystemTemp
+    "C:\\Windows\\SystemTemp\\x.py",
+    "/c/Windows/SystemTemp/x.py",
+    # The same folders as WSL and Cygwin name them
+    "/mnt/c/Users/someone/AppData/Local/Temp/x.py",
+    "/mnt/d/Users/PAULM~1/AppData/Local/Temp/sub/x.py",
+    "/cygdrive/c/Users/someone/AppData/Local/Temp/x.py",
+    "/mnt/c/Windows/Temp/x.py",
+    "/cygdrive/c/Windows/Temp/x.py",
+    "/mnt/c/Windows/SystemTemp/x.py",
+    # macOS /var/tmp as the system really names it
+    "/private/var/tmp/x.py",
+    # A Windows long-path prefix in front of a Windows shape
+    "\\\\?\\C:\\Users\\someone\\AppData\\Local\\Temp\\x.py",
+    "\\\\?\\C:\\Windows\\Temp\\x.py",
+    "//?/C:/Users/someone/AppData/Local/Temp/x.py",
 ])
 def test_a_path_in_a_known_temp_shape_is_temp_under_any_reader(target):
     assert _is_temp(target)
@@ -97,6 +113,23 @@ def test_a_path_in_a_known_temp_shape_is_temp_under_any_reader(target):
     "/home/ana/proj/var/tmp/out.py",
     "/home/ana/proj/private/tmp/out.py",
     "/home/ana/proj/var/folders/zz/abc123def456/T/out.py",
+    # The same folders named inside a project are not temp, in every spelling
+    "C:/Dev/proj/Windows/SystemTemp/out.py",
+    "/home/ana/proj/mnt/c/Users/someone/AppData/Local/Temp/out.py",
+    "/home/ana/proj/cygdrive/c/Users/someone/AppData/Local/Temp/out.py",
+    "/home/ana/proj/mnt/c/Windows/Temp/out.py",
+    "/mnt/c/Dev/proj/Users/someone/AppData/Local/Temp/out.py",
+    "/cygdrive/c/Dev/proj/Windows/Temp/out.py",
+    "/home/ana/proj/private/var/tmp/out.py",
+    "C:/Dev/proj/\\\\?\\C:\\Users\\someone\\AppData\\Local\\Temp\\out.py",
+    "C:/Dev/\\\\?\\C:\\Windows\\Temp\\out.py",
+    # A drive that is not one letter, or a folder at the root of a mounted drive, is not temp
+    "/mnt/cc/Users/someone/AppData/Local/Temp/x.py",
+    "/mnt/Users/someone/AppData/Local/Temp/x.py",
+    "/mnt/c/tmp/x.py",
+    "/mnt/c/Temp/x.py",
+    "/cygdrive/c/tmp/x.py",
+    "C:/Windows/System/Temp/x.py",
     # A folder at the root of a drive is not temp
     "C:\\tmp\\x.py",
     "C:\\Temp\\x.py",

@@ -664,17 +664,21 @@ def _temp_prefixes() -> tuple[str, ...]:
 
 
 #: Where each system keeps its temp files, by the shape of a normalised
-#: path: Windows ``<drive>/users/<user>/appdata/local/temp/`` (any one
-#: folder for the user, so an 8.3 short name such as ``paulm~1`` matches)
-#: and ``<drive>/windows/temp/``; macOS ``/var/folders/<xx>/<id>/t/``, with
-#: or without ``/private``, and ``/private/tmp/``; ``/tmp/`` and
-#: ``/var/tmp/``. A folder only named ``temp`` or ``tmp`` inside a project
-#: matches none of them.
+#: path, anchored at its root: Windows
+#: ``<drive>/users/<user>/appdata/local/temp/`` (any one folder for the
+#: user, so an 8.3 short name such as ``paulm~1`` matches),
+#: ``<drive>/windows/temp/`` and ``<drive>/windows/systemtemp/``, each also
+#: with a long-path prefix (``//?/c:/...``) and as WSL and Cygwin name the
+#: drive (``/mnt/c/...``, ``/cygdrive/c/...``); macOS
+#: ``/var/folders/<xx>/<id>/t/``, with or without ``/private``,
+#: ``/private/tmp/`` and ``/private/var/tmp/``; ``/tmp/`` and ``/var/tmp/``.
+#: A folder only named ``temp`` or ``tmp`` inside a project, or a path that
+#: reaches one of these below a project folder, matches none of them.
 _TEMP_SHAPE_RE = re.compile(
-    r"^(?:[a-z]:/users/[^/]+/appdata/local/temp"
-    r"|[a-z]:/windows/temp"
+    r"^(?:(?:(?://\?/)?[a-z]:|/(?:mnt|cygdrive)/[a-z])"
+    r"/(?:users/[^/]+/appdata/local/temp|windows/(?:system)?temp)"
     r"|(?:/private)?/var/folders/[^/]+/[^/]+/t"
-    r"|/private/tmp"
+    r"|/private/(?:var/)?tmp"
     r"|/var/tmp"
     r"|/tmp)/"
 )
