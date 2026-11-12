@@ -2076,7 +2076,8 @@ def _tools_list_card(
         f"{', '.join(why_parts)}."
     )
     if rule_kept:
-        why += f" {_join_names(rule_kept)} stay too because workflow agents called them."
+        one = len(rule_kept) == 1
+        why += f" {_join_names(rule_kept)} {'stays' if one else 'stay'} too because workflow agents called {'it' if one else 'them'}."
     evidence = [_evidence("Spawns with tools recorded", measured, "agent_startup", "agent_startup_diet", agent_type)]
     definitions = diet.get("dropped_definitions")
     if _is_number(definitions):
@@ -2247,10 +2248,13 @@ def _rule_spawn_parts(
                     _evidence("Managed policy CLAUDE.md per spawn (still loads)", claude_md_managed, "agent_startup", "agent_startup_breakdown", agent_type)
                 ]
             if rules_unused:
-                why += (
-                    f" {rules_unused} of the {rules_used + rules_unused} runs that said, said they didn't use "
-                    "your CLAUDE.md."
-                )
+                if rules_used + rules_unused == 1:
+                    why += " The one run that said, said it didn't use your CLAUDE.md."
+                else:
+                    why += (
+                        f" {rules_unused} of the {rules_used + rules_unused} runs that said, said they didn't use "
+                        "your CLAUDE.md."
+                    )
                 rules_evidence.append(
                     _evidence("Runs that said they didn't use CLAUDE.md", rules_unused, "habits", "habits_agents", agent_type)
                 )
