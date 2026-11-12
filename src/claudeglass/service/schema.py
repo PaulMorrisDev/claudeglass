@@ -24,8 +24,9 @@ an older one with no registered step. Most of the store is a derived
 cache over transcripts on disk, never the source of truth, so losing it
 to a rebuild is safe -- the next watcher tick repopulates it. The two
 tables that aren't re-derivable this way, ``session_tags``,
-``session_feedback``, ``session_plan_feedback`` and ``tip_feedback`` (your
-own tags and ratings from the dashboard), are read before a
+``session_feedback``, ``session_plan_feedback``, ``tip_feedback`` and
+``card_marks`` (your own tags and ratings from the dashboard, and what it
+kept of the cards it showed), are read before a
 drop-and-rebuild and written straight back once the tables are recreated
 (ROB-P6, ``Store._export_marks``/``_reimport_marks``), so a rebuild never
 silently erases them either.
@@ -200,12 +201,30 @@ whose ``kind`` is one of ``capture_catalogue.SENSOR_TWEAK_KINDS``. All
 four are NULL on a row that doesn't take them and on one the mod left them
 off (``after`` until it is known). A v10 store gains the columns in place
 (``store.MIGRATIONS[10]``).
+
+Version 12 (what happened to the cards the dashboard showed): a new
+``card_marks`` table holds one row per recommendation card per dashboard
+view (``project`` is the view the dashboard names, the redacted project slug
+or ``*`` for every project; ``folders`` is that view's raw project folder
+names as JSON), written by ``POST /api/recommendations/marks``: the card's
+key, the rule it comes from (``rule_id``), the agent it is about, the setting
+changes it named and its own estimated saving as they were when last marked,
+and when it was first shown, first copied (its own prompt), first copied in
+the project's all-fixes prompt, and, once the view is drawn again, when it
+landed (it left the list and every setting it names moved) and whether the
+settings hold its own values. Times are UTC (``%Y-%m-%dT%H:%M:%SZ``). It stays
+on this machine: no API route returns a row, and the tuning export reads only
+counts and fixed words from it. Nothing can re-derive it, so a
+drop-and-rebuild keeps it like the ratings (``Store._export_marks``), and it
+is left out of ``Store.change_token``: a mark is written each time a list is
+drawn, so a mark that changed the token would rebuild every report each time.
+A v11 store gains the table in place (``store.MIGRATIONS[11]``).
 """
 
 from __future__ import annotations
 
 #: Bump when a table or index below changes shape. See module docstring.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 CREATE_META = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -586,6 +605,29 @@ CREATE INDEX IF NOT EXISTS idx_mod_events_session_ts ON mod_events(session_id, t
 CREATE INDEX IF NOT EXISTS idx_mod_events_event ON mod_events(event, kind);
 """
 
+#: What the dashboard showed of each recommendation card, per view (v12):
+#: when it was first shown and first copied, the rule and changes it held,
+#: and, once the view is drawn again, whether it landed. See the module
+#: docstring's "Version 12". ``folders`` and ``changes`` are JSON.
+CREATE_CARD_MARKS = """
+CREATE TABLE IF NOT EXISTS card_marks (
+    card_key       TEXT NOT NULL,
+    project        TEXT NOT NULL,
+    folders        TEXT NOT NULL DEFAULT '[]',
+    rule_id        TEXT NOT NULL,
+    agent_type     TEXT,
+    changes        TEXT NOT NULL DEFAULT '[]',
+    saving_usd     REAL,
+    first_shown_at TEXT NOT NULL,
+    copied_at      TEXT,
+    bundled_at     TEXT,
+    landed_at      TEXT,
+    landed_exact   INTEGER,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (card_key, project)
+);
+"""
+
 #: Every ``CREATE TABLE``/``CREATE INDEX`` statement, in dependency
 #: order (a table referencing another via ``REFERENCES`` is listed
 #: after it) — ``Store.migrate`` executes these in this order.
@@ -609,6 +651,7 @@ ALL_STATEMENTS: tuple[str, ...] = (
     CREATE_USAGE_LOG,
     CREATE_PREDICTIONS,
     CREATE_MOD_EVENTS,
+    CREATE_CARD_MARKS,
 )
 
 __all__ = [
@@ -632,5 +675,6 @@ __all__ = [
     "CREATE_USAGE_LOG",
     "CREATE_PREDICTIONS",
     "CREATE_MOD_EVENTS",
+    "CREATE_CARD_MARKS",
     "ALL_STATEMENTS",
 ]

@@ -2084,3 +2084,19 @@ def test_run_once_uses_an_explicit_retention_days_for_the_mod_sensor_files(tmp_p
     os.utime(old, (now - 60 * 86400, now - 60 * 86400))
     FileWatcher(store, options).run_once()
     assert not old.exists() and store.read_mod_events() == []
+
+
+def test_a_tick_prunes_card_marks_past_the_signal_retention(tmp_path: Path, store: Store):
+    # The dashboard's card marks are background telemetry like the mod's events:
+    # pruned at the 180-day default whatever retention_days says about sessions.
+    options = _options(tmp_path)
+    now = time.time()
+    card = {"key": "k", "rule_id": "r", "agent_type": None, "changes": [], "saving_usd": None}
+    when = lambda days: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - days * 86400))  # noqa: E731
+    store.mark_cards([{**card, "key": "old"}], mark="shown", project="*", folders=[], now=when(200))
+    store.mark_cards([{**card, "key": "today"}], mark="shown", project="*", folders=[], now=when(0))
+
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.errors == 0
+    assert [r["card_key"] for r in store.card_marks()] == ["today"]
