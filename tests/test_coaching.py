@@ -4665,6 +4665,9 @@ def test_a_claim_that_stays_held_is_given_up_on_after_a_moment(tmp_path, monkeyp
     def slept(seconds):
         sleeps.append(seconds)
         clock[0] += seconds
+        # A wait that never ends would loop here for good: fail it instead.
+        if len(sleeps) > 1000:
+            raise AssertionError("the claim wait never ended")
 
     monkeypatch.setattr(HOOK.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(HOOK.time, "sleep", slept)
