@@ -106,10 +106,26 @@ COMMANDS = [
     ("git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor layout\nFind the cards that overflow\nEOF\n)\"", False, 0),
     ("gh pr create --title t --body \"$(cat <<'EOF'\nRun \"git log -1; git show HEAD\" to check\nEOF\n)\"", False, 0),
     ("git commit -m \"$(cat <<EOF\nHead the list\ntail -n 5 x\nEOF\n)\"", False, 0),
-    ("git commit -m \"$(printf '%s' 'say \"cat a\" here; cat b')\"", False, 0),
-    ("git commit -m \"`cat <<'EOF'\nFind \"cat a\" it\nEOF\n`\"", False, 0),
-    # A message that nests a substitution or a paren
+    # Each form below has a separator inside the quoted text, so only a reader that pairs the quotes of the
+    # substitution itself gets it right
+    ("git commit -m \"`cat <<'EOF'\nFind \"x; cat a\" it\nEOF\n`\"", False, 0),
+    ("git commit -m \"$(printf '%s' 'a 27\" b; cat c')\"; grep -n x y", False, 1),
+    ("git commit -m \"$(printf '%s' 'say \"x; cat a\" here')\"", False, 0),
+    ("for f in a b; do echo \"$f: $(grep -o '\"model\":\"[^\"]*\"' $f | sort)\"; done; grep -n x y", False, 1),
+    ("git commit -m \"$(echo \"$(echo \"a)b\") ; cat d\")\"", False, 0),
+    ("git commit -m \"$(echo \"x $(echo \"a)b\") ; cat d\")\"; grep -n y z", False, 1),
+    ("git commit -m \"$(echo \"`echo \"a)b\"` ; cat d\")\"", False, 0),
+    ("git commit -m \"$(echo $(date) \"x; cat a\")\"; grep -n y z", False, 1),
+    ("git commit -m \"$(echo $(date +%F) 'it''s' \"x; cat a\")\"", False, 0),
+    ("git commit -m \"$(echo \\) 'say \"x; cat a\"')\"", False, 0),
+    # A heredoc body inside the substitution is text
     ("git commit -m \"$(cat <<'EOF'\nMove (a; cat b) and $(grep x y) out\nEOF\n)\"", False, 0),
+    # PowerShell is read as it always was: its "$( ... )" is not part 2's
+    ("git commit -m \"$(cat <<'EOF'\nsay \"x; Get-Content a\" y\nEOF\n)\"", True, 1),
+    ("Write-Output \"$(Write-Output 'a \"x; Get-Content a\" b')\"", True, 1),
+    ("Write-Output \"line $(Get-Content a.txt)\"", True, 0),
+    ("Write-Output \"say `\"x; Get-Content a`\" now\"", True, 0),
+    ("Write-Output \"`$(Get-Content a)\"; Get-Content b", True, 1),
     # A real second read after the commit still counts, so does one inside an unquoted substitution
     ("git commit -m \"$(cat <<'EOF'\nsay \"cat a\"\nEOF\n)\" && cat src/a.py", False, 1),
     ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"; grep -n foo a.py\ncat b.py", False, 2),
