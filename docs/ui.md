@@ -1211,7 +1211,11 @@ the top links to.
 **Answers:** "Which group of settings fits a goal, and what would it
 change?"
 
-**Save my current settings as a profile** comes first. **Create a
+**Save my current settings as a profile** comes first. It keeps your
+settings, each model's own effort level, and your own agents' model, effort,
+most replies and cache lifetime; agents that belong to one project are left
+out, and the line under the button names them ("Left out, because they belong
+to one project: ..."). **Create a
 profile** turns a goal (`/api/profile-goals`) into a table of changes
 with the ones your data supports ticked; each tick asks
 `POST /api/whatif` again. The table's "now" values and each tick's
@@ -1222,7 +1226,9 @@ the one suggested for the window and project picked
 **Show what it changes** opens a
 drawer (`/api/profiles/<id>/diff`, against the settings of the project
 picked, or your newest from any project with none picked) with a Setting / Now / After / Set in
-table, **Estimated effect**, and "Ask Claude to do it", "Or run this
+table (a model's own setting has the model in its name, "Effort level for
+one model (claude-opus-5-5)"; a value the settings snapshot does not keep
+reads "not recorded" under Now), **Estimated effect**, and "Ask Claude to do it", "Or run this
 command" and "Or try it for one session", each with Copy. Then **Best
 setup for each kind of task** (`habits.habits_setups`) and, folded,
 **Edit settings directly**. The page never runs a command and never
