@@ -869,15 +869,19 @@ def test_a_projects_settings_crossings_are_read_from_its_own_snapshots_first(tmp
     # The first snapshot read is no crossing: before it the setting is not known.
     # Alpha's own file moved it to Sonnet; your user settings' later move to Sonnet is not alpha's.
     assert change_points.settings_model_crossings(snaps, ("slug:a",), floor) == ((at(21), False), [(at(22), True)])
-    assert change_points.settings_model_crossings(snaps, ("slug:b",), floor) == ((at(21, 11), False), [(at(24), True)])
+    # Beta follows your user settings: their move, first seen in alpha's snapshot of the 23rd, is beta's.
+    assert change_points.settings_model_crossings(snaps, ("slug:b",), floor) == ((at(21, 11), False), [(at(23), True)])
     # No snapshot of its own: your user settings' model, in every snapshot.
     assert change_points.settings_model_crossings(snaps, ("slug:z",), floor) == ((at(21), False), [(at(23), True)])
     assert change_points.settings_model_crossings(snaps, (), floor) == ((at(21), False), [(at(23), True)])
-    # A project-less (schema 1) snapshot counts only for a project with none of its own.
+    # A project-less (schema 1) snapshot is your user settings: read by a project with none of its own,
+    # and by one that follows them, never by one whose own file sets the model.
     (config_dir / "snapshots" / "20260925T100000Z.json").write_text(
         json.dumps({"ts": "20260925T100000Z", "user_settings": {"model": "fable"}}), encoding="utf-8")
     snaps = load_snapshots(config_dir)
     assert change_points.settings_model_crossings(snaps, ("slug:a",), floor) == ((at(21), False), [(at(22), True)])
+    assert change_points.settings_model_crossings(snaps, ("slug:b",), floor) == (
+        (at(21, 11), False), [(at(23), True), (at(25), False)])
     assert change_points.settings_model_crossings(snaps, ("slug:z",), floor) == (
         (at(21), False), [(at(23), True), (at(25), False)])
     # One value throughout is no crossing; no snapshot is no first one.
@@ -917,7 +921,7 @@ def _model_point(day, old, new, project="slug:a", source="transcript", **more):
         project=project, changes=[{"key": k, "agent": None, "old": old, "new": v} for k, v in changes.items()])
 
 
-def test_a_projects_transcript_crossings_carry_the_start_of_the_session_before():
+def test_a_projects_transcript_crossings_are_its_model_points_across_the_line():
     floor = model_swap.at_main_floor
 
     def at(day):
@@ -926,20 +930,17 @@ def test_a_projects_transcript_crossings_carry_the_start_of_the_session_before()
     effort = change_points.ChangePoint(ts=at(3), source="transcript", label="x", keys=["effortLevel"],
                                        project="slug:a", changes=[{"key": "effortLevel", "agent": None,
                                                                    "old": "low", "new": "high"}])
-    def before(day):
-        return at(day) - timedelta(hours=8)
-
     points = [
-        (before(1), _model_point(1, "claude-opus-5", "claude-sonnet-5")),
-        (before(2), _model_point(2, "claude-sonnet-5", "claude-opus-5")),
-        (before(3), effort),
-        (before(4), _model_point(4, "opus", "haiku", source="config")),
-        (before(5), _model_point(5, "claude-opus-5", "claude-haiku-5-5", project="slug:b")),
-        (before(6), _model_point(6, "claude-opus-5", "claude-haiku-5-5", project="")),
+        _model_point(1, "claude-opus-5", "claude-sonnet-5"),
+        _model_point(2, "claude-sonnet-5", "claude-opus-5"),
+        effort,
+        _model_point(4, "opus", "haiku", source="config"),
+        _model_point(5, "claude-opus-5", "claude-haiku-5-5", project="slug:b"),
+        _model_point(6, "claude-opus-5", "claude-haiku-5-5", project=""),
     ]
     assert change_points.transcript_model_crossings(points, ("slug:a", "slug:a"), floor) == [
-        (before(1), at(1), True), (before(2), at(2), False)]
-    assert change_points.transcript_model_crossings(points, ("slug:b",), floor) == [(before(5), at(5), True)]
+        (at(1), True), (at(2), False)]
+    assert change_points.transcript_model_crossings(points, ("slug:b",), floor) == [(at(5), True)]
     assert change_points.transcript_model_crossings(points, ("slug:c",), floor) == []
     assert change_points.transcript_model_crossings(points, (), floor) == []
 
@@ -948,12 +949,11 @@ def test_a_newer_id_of_the_same_side_is_no_transcript_crossing():
     def at(day):
         return datetime(2026, 9, day, tzinfo=timezone.utc)
 
-    points = [(at(21), _model_point(22, "claude-opus-5-5", "claude-sonnet-5")),
-              (at(23), _model_point(24, "claude-sonnet-5", "claude-sonnet-5-5"))]
-    assert change_points.transcript_model_crossings(points, ("slug:a",), model_swap.at_main_floor) == [
-        (at(21), at(22), True)]
+    points = [_model_point(22, "claude-opus-5-5", "claude-sonnet-5"),
+              _model_point(24, "claude-sonnet-5", "claude-sonnet-5-5")]
+    assert change_points.transcript_model_crossings(points, ("slug:a",), model_swap.at_main_floor) == [(at(22), True)]
     assert change_points.transcript_model_crossings(
-        [(at(21), _model_point(22, "claude-opus-5", "claude-opus-5-5"))], ("slug:a",), model_swap.at_main_floor) == []
+        [_model_point(22, "claude-opus-5", "claude-opus-5-5")], ("slug:a",), model_swap.at_main_floor) == []
 
 
 def test_transcript_points_keep_the_model_a_recorded_change_explains(tmp_path):
@@ -963,26 +963,26 @@ def test_transcript_points_keep_the_model_a_recorded_change_explains(tmp_path):
     _snapshot(tmp_path, "20260912T100000Z", {"model": "sonnet"})
     _snapshot(tmp_path, "20260912T200000Z", {"model": "opus"})
     assert [p.source for p in change_points.change_points(tmp_path, corpus)] == ["config"]
-    [(since, point)] = change_points.transcript_points(corpus)
-    assert (point.source, point.keys, since.date(), point.ts.date()) == (
-        "transcript", ["model"], date(2026, 9, 12), date(2026, 9, 13))
+    [point] = change_points.transcript_points(corpus)
+    assert (point.source, point.keys, point.ts.date()) == ("transcript", ["model"], date(2026, 9, 13))
     assert change_points.transcript_points(None) == []
 
 
-def test_a_point_with_a_model_and_an_effort_change_carries_the_models_own_time_before(tmp_path):
+def test_a_point_with_a_model_and_an_effort_change_keeps_the_earliest_time_before(tmp_path):
     """Effort high on the first 3 Opus sessions and none recorded after, 10
     Sonnet sessions, then Opus with effort max: the last point holds both
-    keys. The main model's card reads the model's own session before; the
-    Changes page keeps the earliest, so an effort edit recorded in that wider
-    gap still explains the effort key, as at 1eec8d8."""
+    keys. The main model's card reads the points alone; the Changes page
+    explains a point by any change recorded since the first of its keys
+    could have changed, so an effort edit in that wider gap still explains
+    the effort key, as at 1eec8d8."""
     sessions = [{"model": NEW, "effort": "high"}] * 3 + [NEW] * 7 + [OLD] * 10 + [{"model": NEW, "effort": "max"}] * 3
     corpus = _history(tmp_path, *sessions)
 
     def day(n):
         return datetime(2026, 9, 10, 9, tzinfo=timezone.utc) + timedelta(days=n)
 
-    assert [(since, p.ts, p.keys) for since, p in change_points.transcript_points(corpus)] == [
-        (day(9), day(10), ["model"]), (day(19), day(20), ["model", "effortLevel"])]
+    assert [(p.ts, p.keys) for p in change_points.transcript_points(corpus)] == [
+        (day(10), ["model"]), (day(20), ["model", "effortLevel"])]
     assert [(since, p.ts) for since, p in change_points._transcript_points(corpus)] == [
         (day(9), day(10)), (day(2), day(20))]
     _snapshot(tmp_path, "20260914T100000Z", {"effortLevel": "high"})
@@ -1019,3 +1019,65 @@ def test_a_session_starts_at_its_first_priced_reply():
     unpriced = SimpleNamespace(top=TranscriptResult(meta=meta, turns=[turn(0, "2026-09-22T09:00:00.000Z")]))
     assert change_points.session_start(unpriced) == datetime(2026, 9, 22, 9, 0, tzinfo=timezone.utc)
     assert change_points.session_start(SimpleNamespace(top=None)) is None
+
+
+# -- R11 v2.3: the project's setting now (H8, H9) ------------------------------
+
+
+def _follows(config_dir, *moves):
+    """Snapshots, each a (ts, slug, your user settings' model, the project's own model or None)."""
+    for ts, slug, user, own in moves:
+        _snapshot(config_dir, ts, {"model": own or user}, {"model": "project_local" if own else "user"}, slug=slug,
+                  user_settings={"model": user})
+
+
+def test_a_project_that_follows_your_user_settings_reads_them_after_its_own_latest_snapshot(tmp_path):
+    """Alpha is snapshotted only when a session starts in it: your user
+    settings moved to Sonnet on the 23rd while you worked in beta."""
+    floor = model_swap.at_main_floor
+
+    def at(day, hour=10):
+        return datetime(2026, 9, day, hour, tzinfo=timezone.utc)
+
+    config_dir = tmp_path / "tl"
+    _follows(config_dir, ("20260920T100000Z", "slug:b", "opus", None), ("20260921T100000Z", "slug:a", "opus", None),
+             ("20260923T100000Z", "slug:b", "sonnet", None), ("20260924T100000Z", "slug:c", "sonnet", "opus"))
+    snaps = load_snapshots(config_dir)
+    # Not known before alpha's first own snapshot; your user settings after it.
+    assert change_points.settings_model_crossings(snaps, ("slug:a",), floor) == ((at(21), False), [(at(23), True)])
+    # Gamma's own file sets opus: your user settings never reach it.
+    assert change_points.settings_model_crossings(snaps, ("slug:c",), floor) == ((at(24), False), [])
+    # Alpha's own file then sets opus: from then on it reads its own snapshots alone.
+    _follows(config_dir, ("20260925T100000Z", "slug:a", "sonnet", "opus"), ("20260926T100000Z", "slug:b", "haiku", None))
+    assert change_points.settings_model_crossings(load_snapshots(config_dir), ("slug:a",), floor) == (
+        (at(21), False), [(at(23), True), (at(25), False)])
+
+
+def test_the_main_model_setting_now_is_read_as_the_lever_reads_it(tmp_path):
+    config_dir = tmp_path / "tl"
+    _follows(config_dir, ("20260921T100000Z", "slug:a", "opus", None), ("20260922T100000Z", "slug:c", "opus", "fable"),
+             ("20260923T100000Z", "slug:b", "sonnet", None))
+    snaps = load_snapshots(config_dir)
+    # A follower: your user settings in the newest snapshot of any project.
+    assert change_points.main_model_now(snaps, ("slug:a",)) == ("sonnet", "user")
+    # No snapshot of its own: the same.
+    assert change_points.main_model_now(snaps, ("slug:z",)) == ("sonnet", "user")
+    # Its own file sets the model: that file's value, and its layer.
+    assert change_points.main_model_now(snaps, ("slug:c",)) == ("fable", "project_local")
+    assert change_points.main_model_now([], ("slug:a",)) is None
+    # Your user settings with no model: none set.
+    _follows(config_dir, ("20260924T100000Z", "slug:b", None, None))
+    assert change_points.main_model_now(load_snapshots(config_dir), ("slug:a",)) == (None, "user")
+
+
+def test_a_project_sets_its_own_model_by_its_latest_own_snapshot(tmp_path):
+    config_dir = tmp_path / "tl"
+    _follows(config_dir, ("20260921T100000Z", "slug:a", "opus", "sonnet"), ("20260922T100000Z", "slug:a", "opus", None),
+             ("20260921T100000Z", "slug:b", "opus", None), ("20260922T100000Z", "slug:b", "opus", "sonnet"))
+    _snapshot(config_dir, "20260923T100000Z", {"model": "opus"}, {"model": "project_shared"}, slug="slug:c",
+              user_settings={"model": "sonnet"})
+    snaps = load_snapshots(config_dir)
+    assert not change_points.sets_own_model(snaps, ("slug:a",))
+    assert change_points.sets_own_model(snaps, ("slug:b",))
+    assert change_points.sets_own_model(snaps, ("slug:c",))
+    assert not change_points.sets_own_model(snaps, ("slug:z",))

@@ -141,10 +141,12 @@ def test_the_main_session_model_prices_only_the_sessions_it_counts():
     row = price(tables(file_row=False, lever_runs=0, before_change_runs=3, settled_runs=0))
     assert row["saving_usd"] is None and row["fidelity"] == "none"
     assert row["basis"] == "Every main session in this window started before its project moved to Sonnet or smaller."
-    row = price(tables(file_row=False, lever_runs=0, before_change_runs=3, settled_runs=2))
-    assert row["basis"] == (
-        "Every main session in this window ran on Sonnet or smaller, or started before its project moved there."
-    )
+    # Any other mix of reasons: nothing is left for a settings change to reach.
+    left = "No main session in this window is left for a settings change to reach."
+    for counts in ({"before_change_runs": 3, "settled_runs": 2}, {"picked_runs": 5}, {"own_model_runs": 5},
+                   {"settled_runs": 2, "picked_runs": 3}, {"before_change_runs": 2, "own_model_runs": 3}):
+        row = price(tables(file_row=False, lever_runs=0, **{"before_change_runs": 0, "settled_runs": 0, **counts}))
+        assert row["saving_usd"] is None and row["basis"] == left, counts
     # Every session already on Sonnet or smaller: the whole row is priced.
     row = price(tables(file_row=False, lever_runs=0, before_change_runs=0, settled_runs=5))
     assert (row["saving_usd"], row["fidelity"]) == (40.0, "ceiling")

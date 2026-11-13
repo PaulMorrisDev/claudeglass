@@ -22,12 +22,19 @@ from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import Diagnostics
 from claudeglass.pricing import load_pricing
-from claudeglass.report import _SECTION_ORDER, _apply_autocompact_pct_override, _cut_time, _main_model_lever, build_report
+from claudeglass.report import (
+    _SECTION_ORDER,
+    _apply_autocompact_pct_override,
+    _cut_time,
+    _main_model_lever,
+    _main_model_setting,
+    build_report,
+)
 from claudeglass.render.csv_out import write_csv_dir
 from claudeglass.render.html import render_html
 from claudeglass.render.json_out import render_json
 from claudeglass.render.markdown import render_markdown
-from claudeglass.snapshots import Snapshot, snapshot_project_key, snapshot_project_keys
+from claudeglass.snapshots import Snapshot, load_snapshots, snapshot_project_key, snapshot_project_keys
 
 from helpers import assert_privacy, turn_line, user_str_line, write_jsonl
 
@@ -1735,12 +1742,12 @@ def _main_sessions(root: Path, folder: str, sessions) -> None:
         write_jsonl(project / f"{folder}-{i:02d}.jsonl", lines)
 
 
-def _r11_lever(root: Path, folders, config_dir):
+def _r11_lever(root: Path, folders, config_dir, *, several: bool = False):
     """The corpus of ``folders`` under ``root``, the keys of each session's
     project, the lever for it, and the main transcripts by folder, in order."""
     corpus = load_corpus([root / "projects" / f for f in folders], since="2000-01-01")
     keys = {b.top.meta.session_id: snapshot_project_keys(b.slug) for b in corpus.sessions if b.top is not None}
-    lever = _main_model_lever(corpus, config_dir, keys)
+    lever = _main_model_lever(corpus, config_dir, keys, several=several)
     by_folder: dict[str, list] = {f: [] for f in folders}
     for bundle in sorted(corpus.sessions, key=lambda b: b.top.meta.session_id):
         by_folder[bundle.slug].append(bundle.top)
@@ -1780,39 +1787,41 @@ def _days(model_id, days, replies=40):
     return [(day, model_id, replies, "claude-desktop") for day in days]
 
 
-def test_a_session_whose_first_reply_is_at_a_move_down_counts(tmp_path):
+def test_a_session_whose_first_reply_is_at_a_move_down_is_a_pick(tmp_path):
+    """The setting says Sonnet now: nothing is priced. The Opus sessions
+    before the move are from before it; one at or after it was picked."""
     _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(6))
     _r11_snapshots(tmp_path / "tl", "C--Dev-alpha", ("20260930T090000Z", "opus", "user"),
                    ("20261004T090000Z", "sonnet", "user"))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], tmp_path / "tl")
     got = [lever(tr) for tr in sessions["C--Dev-alpha"]]
-    assert got == [model_swap.BEFORE_CHANGE] * 3 + [None] * 3
+    assert got == [model_swap.BEFORE_CHANGE] * 3 + [model_swap.PICKED] * 3
 
 
-def test_a_move_back_up_cuts_nothing(tmp_path):
+def test_a_move_back_up_cuts_nothing_and_a_session_started_under_sonnet_is_a_pick(tmp_path):
     _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(6))
     _r11_snapshots(tmp_path / "tl", "C--Dev-alpha", ("20260930T090000Z", "opus", "user"),
                    ("20261004T090000Z", "sonnet", "user"), ("20261005T090000Z", "opus", "user"))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], tmp_path / "tl")
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 6
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 3 + [model_swap.PICKED] + [None] * 2
 
 
 def test_a_project_with_no_snapshot_of_its_own(tmp_path):
     folders = ["C--Dev-alpha", "C--Dev-gamma"]
     for folder in folders:
         _main_sessions(tmp_path, folder, _opus_days(6))
-    # Your settings say Sonnet and nothing moved: gamma's Opus sessions all count.
+    # Your settings say Sonnet and nothing moved: gamma's Opus sessions were picked against them.
     first = tmp_path / "tl1"
     _r11_snapshots(first, "C--Dev-alpha", ("20260930T090000Z", "sonnet", "user"), ("20261004T090000Z", "sonnet", "user"))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, first)
-    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [None] * 6
+    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [model_swap.PICKED] * 6
     stats = model_swap.compute_model_swap(sessions["C--Dev-gamma"], PRICING, main_lever=lever)
-    assert stats.by_key["top-level"].lever.spawns == 6
+    assert (stats.by_key["top-level"].lever.spawns, stats.by_key["top-level"].picked_runs) == (0, 6)
     # Your settings moved down on 4 Oct: it holds for gamma too.
     second = tmp_path / "tl2"
     _r11_snapshots(second, "C--Dev-alpha", ("20260930T090000Z", "opus", "user"), ("20261004T090000Z", "sonnet", "user"))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, second)
-    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [model_swap.BEFORE_CHANGE] * 3 + [None] * 3
+    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [model_swap.BEFORE_CHANGE] * 3 + [model_swap.PICKED] * 3
     # The same move made in alpha's own files holds in alpha alone.
     third = tmp_path / "tl3"
     _r11_snapshots(third, "C--Dev-alpha", ("20260930T090000Z", "opus", "user"),
@@ -1881,7 +1890,7 @@ def test_a_user_settings_move_first_seen_where_a_project_overrides_it_moves_the_
     assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 15
 
 
-def test_a_project_with_snapshots_of_its_own_never_reads_a_project_less_one(tmp_path):
+def test_a_project_that_follows_your_user_settings_reads_a_project_less_snapshot_after_its_own(tmp_path):
     folders = ["C--Dev-alpha", "C--Dev-gamma"]
     for folder in folders:
         _main_sessions(tmp_path, folder, _opus_days(6))
@@ -1890,8 +1899,8 @@ def test_a_project_with_snapshots_of_its_own_never_reads_a_project_less_one(tmp_
     (config_dir / "snapshots" / "20261004T090000Z.json").write_text(
         json.dumps({"ts": "20261004T090000Z", "user_settings": {"model": "sonnet"}}), encoding="utf-8")
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, config_dir)
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 6
-    assert [lever(tr) for tr in sessions["C--Dev-gamma"]] == [model_swap.BEFORE_CHANGE] * 3 + [None] * 3
+    for folder in folders:
+        assert [lever(tr) for tr in sessions[folder]] == [model_swap.BEFORE_CHANGE] * 3 + [model_swap.PICKED] * 3
 
 
 def test_an_apply_counts_once_the_next_snapshot_shows_it(tmp_path):
@@ -1909,15 +1918,15 @@ def test_an_apply_counts_once_the_next_snapshot_shows_it(tmp_path):
     assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 6
     _layers(config_dir, "C--Dev-alpha", ("20261004T090000Z", "sonnet", None))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [None] * 3
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [model_swap.PICKED] * 3
 
 
-def test_a_settings_move_down_keeps_an_earlier_transcript_move_and_comes_before_one_at_its_time(tmp_path):
+def test_a_follower_reads_your_user_settings_move_from_another_projects_snapshot(tmp_path):
     """Alpha's sessions: Opus, a Sonnet run by the picker, then Opus again from
-    7 Oct 09:00. Alpha's own snapshot at that moment shows your user settings
-    on Sonnet (beta's saw the edit first, on 4 Oct). The picker's move to
-    Sonnet still stands, and the Opus run after it was picked against a
-    Sonnet setting: it counts."""
+    7 Oct 09:00. Your user settings moved to Sonnet on 4 Oct, first seen in
+    beta's snapshot; alpha follows them, so its setting moved then. The
+    Opus sessions before are from before the move; the Opus run after it
+    was picked against a Sonnet setting."""
     _main_sessions(tmp_path, "C--Dev-alpha",
                    _opus_days(3) + _days(_R11_SONNET, (3, 4, 5)) + _days(_R11_OPUS, (6, 7, 8)))
     config_dir = tmp_path / "tl"
@@ -1927,7 +1936,8 @@ def test_a_settings_move_down_keeps_an_earlier_transcript_move_and_comes_before_
     moment = datetime(2026, 10, 7, 9, tzinfo=timezone.utc)
     assert any(p.source == "transcript" and p.ts == moment and "model" in p.keys
                for p in change_points.change_points(config_dir, corpus))
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [None] * 6
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == (
+        [model_swap.BEFORE_CHANGE] * 3 + [None] * 3 + [model_swap.PICKED] * 3)
 
 
 def test_a_move_made_by_sessions_of_nine_replies_cuts_nothing_and_of_ten_cuts(tmp_path):
@@ -1960,10 +1970,10 @@ def test_a_setting_that_goes_from_sonnet_to_haiku_cuts_only_from_the_first_move(
     _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", None), ("20261004T090000Z", "opus", "sonnet"),
             ("20261007T090000Z", "opus", "haiku"))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [None]
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [model_swap.PICKED]
 
 
-# -- R11 v2.2: one timeline per project (report._cut_time) ----------------------
+# -- R11 v2.3: the transcripts' walk (report._cut_time) -------------------------
 
 
 def _t(day: float, seconds: int = 0) -> datetime:
@@ -1971,77 +1981,23 @@ def _t(day: float, seconds: int = 0) -> datetime:
 
 
 def _down(day: float) -> tuple:
-    """A transcript move down: the session before it a day earlier."""
-    return (_t(day - 1), _t(day), True)
+    """A transcript crossing down to Sonnet or smaller at ``day``."""
+    return (_t(day), True)
 
 
 def _up(day: float) -> tuple:
-    return (_t(day - 1), _t(day), False)
+    return (_t(day), False)
 
 
-def test_before_the_first_snapshot_the_transcripts_decide():
-    assert _cut_time(None, [], [_down(1)]) == _t(1)
-    assert _cut_time(None, [], [_down(1), _up(5)]) is None
-    assert _cut_time(None, [], [_down(1), _up(5), _down(9)]) == _t(9)
-    # A move up the tracker passed over leaves two moves down: the first stands.
-    assert _cut_time(None, [], [_down(1), _down(9)]) == _t(1)
-
-
-def test_the_first_snapshot_sets_and_undoes_nothing():
-    assert _cut_time((_t(0), True), [], []) is None
-    assert _cut_time((_t(0), False), [], []) is None
-    assert _cut_time((_t(3), True), [], [_down(1)]) == _t(1)
-    assert _cut_time((_t(3), False), [], [_down(1)]) == _t(1)
-    # A second snapshot of the same second is read after the first, as the snapshots were.
-    assert _cut_time((_t(3), False), [(_t(3), True)], [_up(5)]) == _t(3)
-
-
-def test_with_the_setting_above_the_line_the_transcripts_decide():
-    assert _cut_time((_t(-1), False), [], [_down(1)]) == _t(1)
-    assert _cut_time((_t(-1), False), [], [_down(1), _up(5)]) is None
-
-
-def test_with_the_setting_at_or_below_the_line_the_transcripts_move_nothing():
-    assert _cut_time((_t(-1), True), [], [_up(1)]) is None
-    assert _cut_time((_t(-1), True), [], [_up(1), _down(5)]) is None
-    # A move down the setting made stays when the sessions are picked up and back.
-    assert _cut_time((_t(-1), False), [(_t(3), True)], [_up(5), _down(9)]) == _t(3)
-
-
-def test_a_settings_move_down_sets_the_time_and_keeps_an_earlier_one():
-    assert _cut_time((_t(-1), False), [(_t(3), True)], []) == _t(3)
-    assert _cut_time((_t(-1), False), [(_t(3), True)], [_down(1)]) == _t(1)
-
-
-def test_a_settings_move_up_undoes_everything_and_the_transcripts_decide_again():
-    assert _cut_time((_t(-1), True), [(_t(3), False)], []) is None
-    assert _cut_time((_t(-1), False), [(_t(3), True), (_t(5), False)], [_down(1)]) is None
-    assert _cut_time((_t(-1), False), [(_t(3), True), (_t(5), False)], [_down(8)]) == _t(8)
-
-
-def test_of_a_settings_move_and_a_transcript_move_at_the_same_time_the_settings_move_is_read_first():
-    # The setting moves down as the sessions go back up: the earlier move down stands.
-    assert _cut_time((_t(-1), False), [(_t(6), True)], [_down(1), _up(6)]) == _t(1)
-
-
-def test_two_crossings_at_the_same_time_are_read_in_the_order_given():
-    """Two snapshots of the same second are read as they were taken, never
-    by which way they moved."""
-    assert _cut_time((_t(-1), False), [(_t(3), True), (_t(3), False)], []) is None
-    assert _cut_time((_t(-1), False), [(_t(3), False), (_t(3), True)], []) == _t(3)
-
-
-def test_a_first_snapshot_between_a_transcript_moves_two_times_comes_after_it():
-    """The snapshot hook runs as a session starts: the first session on the
-    new model takes the first snapshot seconds before its first reply."""
-    move = [_down(10)]
-    assert _cut_time((_t(10, -3), True), [], move) == _t(10)
-    assert _cut_time((_t(10), True), [], move) == _t(10)
-    # Taken by the last session on the old model, or before it: the move came after.
-    assert _cut_time((_t(9), True), [], move) is None
-    assert _cut_time((_t(5), True), [], move) is None
-    # Taken after both: the move came before.
-    assert _cut_time((_t(12), True), [], move) == _t(10)
+def test_a_standing_move_down_sets_the_time_and_a_move_up_undoes_it():
+    assert _cut_time([]) is None
+    assert _cut_time([_down(1)]) == _t(1)
+    assert _cut_time([_down(1), _up(5)]) is None
+    assert _cut_time([_down(1), _up(5), _down(9)]) == _t(9)
+    # A second move down while one stands keeps the first.
+    assert _cut_time([_down(1), _down(9)]) == _t(1)
+    assert _cut_time([_up(1)]) is None
+    assert _cut_time([_up(1), _down(5)]) == _t(5)
 
 
 def test_a_project_that_moved_to_sonnet_before_the_first_snapshot_is_cut_from_its_move(tmp_path):
@@ -2060,7 +2016,7 @@ def test_a_first_snapshot_taken_by_the_first_sonnet_session_comes_after_the_move
     session instead, the setting already said Sonnet while it ran."""
     for name, ts, expected in (
         ("same", "20261011T085957Z", [model_swap.BEFORE_CHANGE] * 10 + [None] * 5),
-        ("last_opus", "20261010T085957Z", [None] * 15),
+        ("last_opus", "20261010T085957Z", [model_swap.BEFORE_CHANGE] * 9 + [model_swap.PICKED] + [None] * 5),
     ):
         root = tmp_path / name
         _main_sessions(root, "C--Dev-alpha", _opus_days(10) + _days(_R11_SONNET, range(10, 15)))
@@ -2069,21 +2025,24 @@ def test_a_first_snapshot_taken_by_the_first_sonnet_session_comes_after_the_move
         assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == expected, name
 
 
-def test_larger_model_sessions_under_a_known_sonnet_setting_all_count(tmp_path):
+def test_larger_model_sessions_under_a_known_sonnet_setting_are_picks(tmp_path):
     """new_install_still_picking and new_install_picks_then_sonnet_after: the
     first snapshot on day 5 says Sonnet; Opus on days 0 to 9, then Sonnet or
-    nothing. The return to Sonnet came after the setting was known."""
+    nothing. The setting says Sonnet now: nothing is priced. The Opus
+    sessions before the first snapshot are from before the move; those
+    after it were picked against it."""
     for name, later in (("still", []), ("then_sonnet", _days(_R11_SONNET, range(10, 15)))):
         root = tmp_path / name
         _main_sessions(root, "C--Dev-alpha", _opus_days(10) + later)
         _layers(root / "tl", "C--Dev-alpha", ("20261006T080000Z", "sonnet", None))
         _corpus, _keys, lever, sessions = _r11_lever(root, ["C--Dev-alpha"], root / "tl")
-        assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * (10 + len(later)), name
+        assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == (
+            [model_swap.BEFORE_CHANGE] * 5 + [model_swap.PICKED] * 5 + [None] * len(later)), name
         stats = model_swap.compute_model_swap(sessions["C--Dev-alpha"], PRICING, main_lever=lever)
-        assert stats.by_key["top-level"].lever.spawns == 10, name
+        assert stats.by_key["top-level"].lever.spawns == 0, name
 
 
-def test_opus_picked_after_the_setting_moved_down_counts(tmp_path):
+def test_opus_picked_after_the_setting_moved_down_is_a_pick(tmp_path):
     """first_snapshot_opus_then_settings_down: the first snapshot says opus;
     Opus on days 0 to 4; the setting moves to Sonnet on day 5; Opus picked on
     days 6 to 8; Sonnet after."""
@@ -2092,7 +2051,8 @@ def test_opus_picked_after_the_setting_moved_down_counts(tmp_path):
     config_dir = tmp_path / "tl"
     _layers(config_dir, "C--Dev-alpha", ("20261001T080000Z", "opus", None), ("20261006T080000Z", "sonnet", None))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 5 + [None] * 8
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == (
+        [model_swap.BEFORE_CHANGE] * 5 + [model_swap.PICKED] * 3 + [None] * 5)
 
 
 def test_a_setting_removed_and_set_to_sonnet_again_cuts_from_the_latest_move(tmp_path):
@@ -2105,7 +2065,9 @@ def test_a_setting_removed_and_set_to_sonnet_again_cuts_from_the_latest_move(tmp
     _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "sonnet", None), ("20261005T200000Z", None, None),
             ("20261007T200000Z", "sonnet", None))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 7 + [None] * 3
+    # The setting says Sonnet now: the two Opus picks are from before its latest move (the
+    # Sonnet sessions are left out by their own model, in model_swap).
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 2 + [model_swap.BEFORE_CHANGE] * 2 + [None] * 6
 
 
 def test_a_move_to_sonnet_beside_a_setting_edit_on_the_larger_side_still_cuts(tmp_path):
@@ -2137,3 +2099,131 @@ def test_a_move_back_up_that_comes_with_an_effort_change_still_undoes_the_move_d
     [(since, back)] = [(s, p) for s, p in change_points._transcript_points(corpus) if p.ts == _t(20)]
     assert back.keys == ["model", "effortLevel"] and since == _t(2)
     assert [lever(tr) for tr in by_folder["C--Dev-alpha"]] == [None] * 25
+
+
+# -- R11 v2.3: priced only when the change the view offers reaches it (H8, H9) ----
+
+
+def test_a_larger_model_session_inside_an_earlier_sonnet_stretch_is_a_pick(tmp_path):
+    """picks_under_sonnet_then_setting_up: the setting said Sonnet on days 0
+    to 9 and opus from day 10; Opus all along. The sessions after the move
+    up count; those before it were picked against the setting."""
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(15))
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "sonnet", None), ("20261011T080000Z", "opus", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.PICKED] * 10 + [None] * 5
+
+
+def test_a_session_on_a_model_of_unknown_family_is_never_a_pick(tmp_path):
+    _main_sessions(tmp_path, "C--Dev-alpha", _days("my-gateway-model", range(3)) + _days(_R11_OPUS, range(3, 5)))
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "sonnet", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 3 + [model_swap.PICKED] * 2
+    # Nor inside an earlier stretch at or below, with the setting above the line now.
+    _layers(config_dir, "C--Dev-alpha", ("20261010T090000Z", "opus", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 3 + [model_swap.PICKED] * 2
+
+
+def test_in_a_view_of_several_projects_a_project_that_sets_its_own_model_is_left_out(tmp_path):
+    """Beta's own file sets the model; alpha follows your user settings. Only
+    a view of several projects leaves beta out: its own view prices it."""
+    folders = ["C--Dev-alpha", "C--Dev-beta"]
+    for folder in folders:
+        _main_sessions(tmp_path, folder, _opus_days(5))
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", None))
+    _layers(config_dir, "C--Dev-beta", ("20260930T100000Z", "opus", "opus"))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, config_dir, several=True)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 5
+    assert [lever(tr) for tr in sessions["C--Dev-beta"]] == [model_swap.OWN_MODEL] * 5
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-beta"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-beta"]] == [None] * 5
+
+
+def _stale_history(root: Path, *, again: bool = False):
+    """user_down_seen_elsewhere: alpha's 10 Opus sessions, its own snapshots
+    all opus; your user settings to Sonnet on day 10, first seen in beta's
+    snapshot; beta on Sonnet after. ``again``: one more alpha session, on
+    Sonnet, on day 15."""
+    _main_sessions(root, "C--Dev-alpha", _opus_days(10) + (_days(_R11_SONNET, [15]) if again else []))
+    _main_sessions(root, "C--Dev-beta", _days(_R11_SONNET, range(10, 15)))
+    config_dir = root / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", None))
+    _layers(config_dir, "C--Dev-beta", ("20260930T100000Z", "opus", None), ("20261011T080000Z", "sonnet", None))
+    if again:
+        _layers(config_dir, "C--Dev-alpha", ("20261016T085957Z", "sonnet", None))
+    return config_dir
+
+
+def test_your_user_settings_moving_while_you_work_elsewhere_moves_a_follower(tmp_path):
+    config_dir = _stale_history(tmp_path)
+    for folders, several in ((["C--Dev-alpha"], False), (["C--Dev-alpha", "C--Dev-beta"], True)):
+        _corpus, _keys, lever, sessions = _r11_lever(tmp_path, folders, config_dir, several=several)
+        assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 10, folders
+    again = tmp_path / "again"
+    config_dir = _stale_history(again, again=True)
+    _corpus, _keys, lever, sessions = _r11_lever(again, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 10 + [None]
+
+
+def test_a_followers_setting_up_seen_elsewhere_makes_its_later_sessions_count(tmp_path):
+    """stale_snapshot: alpha's only snapshot says Sonnet on day 0; your user
+    settings say opus from day 9, first seen in beta's snapshot; alpha's 8
+    Opus sessions from day 10 have no snapshot of their own. They ran under
+    opus, so the change reaches them: they count."""
+    _main_sessions(tmp_path, "C--Dev-alpha", _days(_R11_OPUS, range(10, 18)))
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20261001T090000Z", "sonnet", None))
+    _layers(config_dir, "C--Dev-beta", ("20261001T100000Z", "sonnet", None), ("20261010T090000Z", "opus", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 8
+    snaps = load_snapshots(config_dir)
+    assert _main_model_setting(snaps, ("C--Dev-alpha",)) == {"value": "opus", "scope": "user"}
+
+
+def test_the_views_main_model_setting_is_the_one_the_lever_reads(tmp_path):
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", None))
+    _layers(config_dir, "C--Dev-beta", ("20260930T100000Z", "opus", "fable"), ("20261011T080000Z", "sonnet", "fable"))
+    snaps = load_snapshots(config_dir)
+    assert _main_model_setting(snaps, ("C--Dev-alpha",)) == {"value": "sonnet", "scope": "user"}
+    assert _main_model_setting(snaps, ("C--Dev-beta",)) == {"value": "fable", "scope": "project-local"}
+    assert _main_model_setting(snaps, ("C--Dev-gamma",)) == {"value": "sonnet", "scope": "user"}
+    # A view of several projects reads the view's own setting (your user settings); none read, none given.
+    assert _main_model_setting(snaps, ("C--Dev-alpha", "C--Dev-beta")) == {}
+    assert _main_model_setting([], ("C--Dev-alpha",)) == {}
+
+
+def test_g3s_guard_never_meets_a_priced_main_session(tmp_path):
+    """Whenever the lever prices a main session in a one-project view, the
+    setting the card, check and goal read for that view is above the Sonnet
+    line or not known: the guard that never raises a setting at Sonnet or
+    smaller is a backstop that these histories never reach."""
+    histories = {}
+    histories["stale"] = _stale_history(tmp_path / "stale")
+    up = tmp_path / "up"
+    _main_sessions(up, "C--Dev-alpha", _days(_R11_OPUS, range(10, 18)))
+    _layers(up / "tl", "C--Dev-alpha", ("20261001T090000Z", "sonnet", None))
+    _layers(up / "tl", "C--Dev-beta", ("20261010T090000Z", "opus", None))
+    histories["up"] = up / "tl"
+    picks = tmp_path / "picks"
+    _main_sessions(picks, "C--Dev-alpha", _opus_days(15))
+    _layers(picks / "tl", "C--Dev-alpha", ("20260930T090000Z", "sonnet", None), ("20261011T080000Z", "opus", None))
+    histories["picks"] = picks / "tl"
+    own = tmp_path / "own"
+    _main_sessions(own, "C--Dev-alpha", _opus_days(5))
+    _layers(own / "tl", "C--Dev-alpha", ("20260930T090000Z", "opus", "sonnet"))
+    histories["own"] = own / "tl"
+    priced = 0
+    for name, config_dir in histories.items():
+        root = config_dir.parent
+        _corpus, _keys, lever, sessions = _r11_lever(root, ["C--Dev-alpha"], config_dir)
+        stats = model_swap.compute_model_swap(sessions["C--Dev-alpha"], PRICING, main_lever=lever)
+        reading = _main_model_setting(load_snapshots(config_dir), ("C--Dev-alpha",))
+        counted = stats.by_key["top-level"].lever.spawns
+        priced += counted
+        assert not (counted and model_swap.at_main_floor(reading["value"])), name
+    assert priced == 8 + 5

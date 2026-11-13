@@ -105,11 +105,13 @@ def test_the_main_model_card_says_which_sessions_it_leaves_out():
     report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {}})
 
-    def main_why(already: int, before: int) -> str:
+    def main_why(already: int, before: int, picked: int = 0, own: int = 0) -> str:
         rec = _tier("top-level")
         for label, count in (
             ("Main sessions already on Sonnet or smaller (not counted)", already),
             ("Main sessions from before their project moved to Sonnet (not counted)", before),
+            ("Main sessions picked against a Sonnet setting (not counted)", picked),
+            ("Main sessions in projects that set their own model (not counted)", own),
         ):
             if count:
                 rec.evidence.append((label, count, "model_swap.model_swap_by_agent_type", "top-level"))
@@ -127,41 +129,89 @@ def test_the_main_model_card_says_which_sessions_it_leaves_out():
         in main_why(7, 3)
     )
     assert "It leaves out" not in main_why(0, 0)
+    # Picks against a Sonnet setting, and projects that set their own model.
+    assert "It leaves out the 1 main session picked against a Sonnet setting." in main_why(0, 0, 1)
+    assert "It leaves out the 4 main sessions picked against a Sonnet setting." in main_why(0, 0, 4)
+    assert "It leaves out the 1 main session in a project that sets its own model." in main_why(0, 0, 0, 1)
+    assert "It leaves out the 6 main sessions in projects that set their own model." in main_why(0, 0, 0, 6)
+    assert (
+        "It leaves out 12 main sessions: 7 already on Sonnet or smaller, 3 from before their project moved there, "
+        "and 2 picked against a Sonnet setting." in main_why(7, 3, 2)
+    )
+    assert (
+        "It leaves out 8 main sessions: 3 from before their project moved to Sonnet or smaller, and 5 in projects "
+        "that set their own model." in main_why(0, 3, 0, 5)
+    )
+    assert (
+        "It leaves out 4 main sessions: 1 already on Sonnet or smaller, 1 from before their project moved there, "
+        "1 picked against a Sonnet setting, and 1 in a project that sets its own model." in main_why(1, 1, 1, 1)
+    )
+    assert "already says" not in main_why(0, 0, 4)
 
 
-def test_in_a_view_of_several_projects_the_main_card_stays_when_the_setting_already_says_its_model():
-    """One setting can't say what every project ran: with several projects
-    the card stays, with no change to make, while its saving counts."""
+def test_a_main_setting_at_sonnet_or_smaller_gets_no_main_card_in_any_view():
+    """G3, now a backstop: the saving reads the same setting, so a priced
+    figure never meets a setting at Sonnet or smaller; if one did, the card
+    would not offer to raise it."""
     report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
-    report.meta.projects = ("C--Dev-a", "C--Dev-b")
 
     def snap(model: str) -> Snapshot:
         data = {"agents": {}, "effective": {"model": model}, "effective_provenance": {"model": "user"}}
         return Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
 
-    def main_cards():
-        return [r for r in advice.finish([_tier("top-level")], report, snap(model), Units()) if r.id == "model-tier-main"]
+    for projects in (("C--Dev-a", "C--Dev-b"), ("C--Dev-a",)):
+        report.meta.projects = projects
+        for model in ("sonnet", "haiku", "claude-haiku-4-5-20251001"):
+            out = advice.finish([_tier("top-level")], report, snap(model), Units())
+            assert not [r for r in out if r.id == "model-tier-main"], (projects, model)
 
-    keep = "Keep routine work on your setting. Pick a larger model only for work that needs it."
-    for model, named in (("sonnet", "Sonnet"), ("haiku", "Haiku"), ("claude-haiku-4-5-20251001", "Haiku")):
-        report.meta.projects = ("C--Dev-a", "C--Dev-b")
-        (card,) = main_cards()
-        # A setting at Sonnet or smaller is already there: nothing raises it.
-        assert card.changes == [] and card.saving_usd == 30.0, model
-        assert (
-            f"Your model setting already says {named}, and the sessions it counts still ran on a larger model."
-        ) in card.why, model
-        assert card.action == keep and "/model" not in card.action, model
-        # One project's view is unchanged: the card goes.
-        report.meta.projects = ("C--Dev-a",)
-        assert main_cards() == [], model
-    # A setting that does not say Sonnet gets the card as before.
+
+def test_in_a_view_of_several_projects_the_main_card_stays_when_the_setting_already_says_opus():
+    """H4 above the Sonnet line: sessions on Fable, the setting on Opus. One
+    setting can't say what every project ran, so with several projects the
+    card stays with no change to make; one project's view drops it."""
+    report = _model_swap_report([["top-level", "claude-fable-5-1", "claude-opus-5-5", 30.0]])
+    data = {"agents": {}, "effective": {"model": "opus"}, "effective_provenance": {"model": "user"}}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+
+    def main_cards():
+        return [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"]
+
     report.meta.projects = ("C--Dev-a", "C--Dev-b")
-    model = "opus"
     (card,) = main_cards()
-    (change,) = card.changes
-    assert (change.current, change.value) == ("opus", "sonnet")
-    assert "already says" not in card.why and "Pick Sonnet" not in card.action
+    assert card.changes == [] and card.saving_usd == 30.0
+    assert "Your model setting already says Opus, and the sessions it counts still ran on a larger model." in card.why
+    assert card.action == "Keep routine work on your setting. Pick a larger model only for work that needs it."
+    report.meta.projects = ("C--Dev-a",)
+    assert main_cards() == []
+
+
+def test_the_main_card_reads_the_setting_the_saving_reads():
+    """In a view of one project the card's current value, and where its
+    change goes, are the lever's reading (ReportMeta.main_model_setting),
+    not the project's last snapshot."""
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
+    report.meta.projects = ("C--Dev-a",)
+    data = {"agents": {}, "effective": {"model": "sonnet"}, "effective_provenance": {"model": "user"}}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+
+    def main_change(reading):
+        report.meta.main_model_setting = reading
+        cards = [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"]
+        return cards[0].changes[0] if cards else None
+
+    change = main_change({"value": "opus", "scope": "user"})
+    assert (change.current, change.value, change.scope) == ("opus", "sonnet", "user")
+    assert change.note == "This changes the model for your main session in every project."
+    change = main_change({"value": "opus", "scope": "project-local"})
+    assert (change.current, change.scope) == ("opus", "project-local")
+    assert change.note == "This changes the model for your main session in this project only."
+    # The reading at Sonnet: no card, whatever the snapshot says.
+    data["effective"]["model"] = "opus"
+    assert main_change({"value": "sonnet", "scope": "user"}) is None
+    # No reading (several projects, or none recorded): the view's own setting.
+    change = main_change({})
+    assert change.current == "opus"
 
 
 def test_the_model_tier_card_names_runs_an_agent_file_does_not_decide():

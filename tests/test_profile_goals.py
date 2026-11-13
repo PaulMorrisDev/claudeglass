@@ -77,6 +77,13 @@ def test_models_goal_never_offers_to_raise_a_main_setting_at_sonnet_or_smaller()
     for now in ("haiku", "claude-haiku-4-5-20251001", "sonnet"):
         assert main_models(now) == [], now
     assert main_models("opus") == ["sonnet"]
+    # The setting the saving reads wins over the view's own (ReportMeta.main_model_setting).
+    model.meta = NS(main_model_setting={"value": "opus", "scope": "user"})
+    assert main_models("sonnet") == ["sonnet"]
+    out = goals.draft("models", model, UNITS, effective={"model": "sonnet"})
+    assert [c["now"] for c in out["candidates"] if c["key"] == "model" and c["agent"] is None] == ["opus"]
+    model.meta = NS(main_model_setting={"value": "sonnet", "scope": "user"})
+    assert main_models("opus") == []
 
 
 def test_models_goal_evidence_names_the_runs_the_agent_file_decides():

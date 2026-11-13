@@ -55,9 +55,14 @@ def test_every_profile_has_the_cards_every_check_reads(built, name):
     assert _cards(inp, "hook-block-resent"), name
     # An info card with a saving: it must add nothing to a total (check 3).
     assert [r for r in recs if r.severity == "info" and (r.saving_usd or 0) > 0], name
-    # A main-session model card that changes a setting (check 7).
+    # A main-session model card that changes a setting (check 7). The api
+    # profile's setting said Sonnet when its first Opus sessions ran: they are
+    # picks, and the three left are too few for a card.
     model = _cards(inp, "model-tier-main")
-    assert model and model[0].changes and model[0].changes[0].key == "model", name
+    if name == "api":
+        assert not model and _main_row(inp)["picked_runs"] == 3, name
+    else:
+        assert model and model[0].changes and model[0].changes[0].key == "model", name
     # A standing-rule card, which the bundle puts under a rule, not a file (check 5).
     rules = [
         r for r in recs if r.severity in agreement.COUNTING
@@ -158,10 +163,11 @@ def _main_row(inp) -> dict:
 
 
 def test_the_two_project_profile_prices_only_the_project_still_on_opus(built):
-    """The first project moved to Sonnet part-way and runs Sonnet from then:
-    its Sonnet sessions are already there, its earlier Opus ones are from
-    before the move down. The all-projects card prices the second project's
-    Opus sessions, as that project's own view does."""
+    """The first project moved to Sonnet part-way, in its own file, and runs
+    Sonnet from then: its Sonnet sessions are already there, and in the
+    all-projects view its earlier Opus ones are in a project that sets its
+    own model. The all-projects card prices the second project's Opus
+    sessions, as that project's own view does."""
     profile, inp = built("two_projects")
     row = _main_row(inp)
     assert row["lever_runs"] == 6
@@ -169,10 +175,10 @@ def test_the_two_project_profile_prices_only_the_project_still_on_opus(built):
     (alone_card,) = _cards(alone, "model-tier-main")
     (card,) = _cards(inp, "model-tier-main")
     assert card.saving_usd == pytest.approx(alone_card.saving_usd, rel=1e-9)
-    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 3, 7)
+    assert (row["spawns"], row["before_change_runs"], row["settled_runs"], row["own_model_runs"]) == (16, 0, 7, 3)
     assert card.changes[0].current == "opus"
     assert (
-        "It leaves out 10 main sessions: 7 already on Sonnet or smaller, and 3 from before their project moved there."
+        "It leaves out 10 main sessions: 7 already on Sonnet or smaller, and 3 in projects that set their own model."
         in card.why
     )
     assert agreement.check_same_setting(inp) == []
@@ -186,17 +192,21 @@ def _on_opus(bundle) -> bool:
     return models.most_common(1)[0][0] == ap.OPUS
 
 
-def test_a_project_that_moved_its_model_and_back_counts_every_session_on_opus(tmp_path):
+def test_a_project_that_moved_its_model_and_back_counts_the_opus_sessions_from_its_move_on(tmp_path):
     spec = ap.Spec("and_back", custom_agents=False, workflows=False, second_project=True, model_back=True)
     profile = ap.build(spec, tmp_path / "p")
     inp = agreement.load_inputs(profile.projects_root, profile.config_dir, None)
     row = _main_row(inp)
-    assert row["lever_runs"] == 10
-    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 0, 6)
+    # The transcripts alone decide once the setting is above the line (H8):
+    # the first project's run of Sonnet stands, as its return to Opus is two
+    # sessions, so its two Opus sessions before it are from before the move.
+    assert row["lever_runs"] == 8
+    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 2, 6)
     folders = [profile.projects_root / ap.SLUG, profile.projects_root / ap.SLUG_B]
     loaded = corpus.load_corpus(folders, since="2000-01-01")
-    counted = [b.top for b in loaded.sessions if b.top is not None and _on_opus(b)]
-    assert len(counted) == 10
+    first_two = sorted((b for b in loaded.sessions if b.slug == ap.SLUG), key=change_points.session_start)[:2]
+    counted = [b.top for b in loaded.sessions if b.top is not None and _on_opus(b) and b not in first_two]
+    assert len(counted) == 8
     expected = model_swap.compute_model_swap(counted, load_pricing()).by_key["top-level"].tier_verdict.saving_usd
     assert row["saving_usd"] == pytest.approx(expected, rel=1e-9)
     (card,) = _cards(inp, "model-tier-main")
@@ -205,7 +215,7 @@ def test_a_project_that_moved_its_model_and_back_counts_every_session_on_opus(tm
     # The first project alone: four Opus sessions (about 184 replies) are under the bar.
     first = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG)
     first_row = _main_row(first)
-    assert (first_row["lever_runs"], first_row["before_change_runs"]) == (4, 0)
+    assert (first_row["lever_runs"], first_row["before_change_runs"]) == (2, 2)
     assert not _cards(first, "model-tier-main")
 
 

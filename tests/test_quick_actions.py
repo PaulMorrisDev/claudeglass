@@ -460,28 +460,96 @@ def test_models_check_offers_no_opusplan_beside_no_main_session_counted(tmp_path
     assert "Main session on opusplan" in check((20, 5, 15, 0))["summary"]
 
 
+def _with_reasons(model, main, other=(10, 10, 0, 0, 0, 0)):
+    """``_full_model`` with the swap table's session counts: ``spawns``,
+    ``lever_runs``, ``before_change_runs``, ``settled_runs``,
+    ``picked_runs`` and ``own_model_runs``, for the main row (0) and the
+    other row (1)."""
+    swap = model.sections[0].tables[0]
+    swap.columns += [NS(key=k) for k in ("spawns", "lever_runs", "before_change_runs", "settled_runs", "picked_runs",
+                                         "own_model_runs")]
+    swap.rows[0] += list(main)
+    swap.rows[1] += list(other)
+    return model
+
+
 def test_models_check_says_what_ran_when_the_setting_already_has_the_cheaper_model(tmp_path):
-    def run(main, now="sonnet"):
+    """Above the Sonnet line only (Fable sessions, the setting on Opus). A
+    setting at Sonnet or smaller never meets a priced session (the saving
+    reads the same setting), so nothing says "already says" of it."""
+    def run(main, now, best="claude-opus-4-7"):
         model = _full_model()
         swap = model.sections[0].tables[0]
+        swap.rows[0][-4], swap.rows[0][-3] = "claude-fable-5-1", best
         swap.rows[1][-3], swap.rows[1][-2] = None, 0
         _with_session_counts(model, main, (10, 10, 0, 0))
         return qa.run("models", _ctx(tmp_path, model=model, effective={"model": now}))
 
-    def summary(main, now="sonnet"):
-        return run(main, now)["summary"]
+    assert run((29, 24, 0, 5), "opus")["summary"] == (
+        "Your model setting already says opus. 24 main sessions in this window still ran on a larger model."
+    )
+    assert run((2, 1, 0, 1), "opus")["summary"] == (
+        "Your model setting already says opus. 1 main session in this window still ran on a larger model."
+    )
+    for now in ("sonnet", "haiku"):
+        result = run((29, 24, 0, 5), now, best="claude-sonnet-4-5")
+        assert "already says" not in result["summary"], now
+        assert all("Main session" not in fix["title"] for fix in result["fixes"]), now
 
-    assert summary((29, 24, 0, 5)) == (
-        "Your model setting already says sonnet. 24 main sessions in this window still ran on a larger model."
+
+def test_models_check_says_the_picks_and_the_projects_with_their_own_model(tmp_path):
+    def run(main, **ctx):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+        if not main[1]:
+            swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+        _with_reasons(model, main)
+        return qa.run("models", _ctx(tmp_path, model=model, **ctx))
+
+    picks = "{} in this window ran on a larger model though their project's setting said Sonnet or smaller when they started."
+    # Nothing left to price: the check is ok and says what ran.
+    result = run((10, 0, 0, 0, 10, 0))
+    assert (result["status"], result["summary"]) == ("ok", picks.format("10 main sessions"))
+    assert run((1, 0, 0, 0, 1, 0))["summary"] == (
+        "1 main session in this window ran on a larger model though its project's setting said Sonnet or smaller "
+        "when it started."
     )
-    assert summary((2, 1, 0, 1)) == (
-        "Your model setting already says sonnet. 1 main session in this window still ran on a larger model."
+    assert run((5, 0, 0, 0, 0, 5))["summary"] == (
+        "5 main sessions ran in projects that set their own model. Pick one of those projects to see them."
     )
-    # A setting below the suggested model is already there too, and is named as it is set.
-    assert summary((29, 24, 0, 5), "haiku") == (
-        "Your model setting already says haiku. 24 main sessions in this window still ran on a larger model."
+    assert run((1, 0, 0, 0, 0, 1))["summary"] == (
+        "1 main session ran in a project that sets its own model. Pick that project to see it."
     )
-    assert all("Main session" not in fix["title"] for fix in run((29, 24, 0, 5), "haiku")["fixes"])
+    # Some left to price: the change is offered for those, and the picks are still said.
+    result = run((12, 2, 0, 0, 10, 0))
+    assert result["status"] == "act" and result["summary"].endswith(picks.format("10 main sessions"))
+    assert [fix["title"] for fix in result["fixes"] if "Main session" in fix["title"]]
+    assert "already says" not in result["summary"]
+
+
+def test_models_check_tip_gives_every_reason_and_counts_only_a_priced_saving(tmp_path):
+    def tip(main, saving=40.0):
+        model = _full_model()
+        model.sections[0].tables[0].rows[0][-2] = saving
+        result = qa.run("models", _ctx(tmp_path, model=_with_reasons(model, main), effective_agents={"Explore": {}}))
+        return [t for t in result["tips"] if "main session" in t["title"].lower()]
+
+    (one,) = tip((20, 4, 3, 5, 6, 2))
+    assert one == {"title": "Some main sessions aren't counted", "text": (
+        "5 main sessions already ran on Sonnet or smaller. 3 main sessions started before their project moved to "
+        "Sonnet or smaller. 6 main sessions ran on a larger model under a Sonnet setting. 2 main sessions ran in "
+        "projects that set their own model. The saving counts the other 4.")}
+    (one,) = tip((3, 0, 0, 0, 1, 1))
+    assert one == {"title": "No main session is counted", "text": (
+        "1 main session ran on a larger model under a Sonnet setting. 1 main session ran in a project that sets its "
+        "own model. Nothing is left to price.")}
+    # Sessions counted but no saving (their model has no price to compare): no count of them.
+    (one,) = tip((13, 3, 0, 5, 5, 0), saving=0.0)
+    assert one["text"] == (
+        "5 main sessions already ran on Sonnet or smaller. 5 main sessions ran on a larger model under a Sonnet "
+        "setting.")
+    assert tip((10, 10, 0, 0, 0, 0)) == []
 
 
 def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
@@ -2814,3 +2882,22 @@ def test_the_effort_check_counts_its_changes_when_no_row_is_over_the_bar(tmp_pat
     model.recommendations = [_effort_card(), other]
     summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
     assert summary.startswith("2 effort changes would think less." + prefix), summary
+
+
+def test_models_check_reads_the_main_setting_the_saving_reads(tmp_path):
+    """In a view of one project the main fix's current value, and where it
+    goes, are the lever's reading (ReportMeta.main_model_setting), not the
+    view's snapshot."""
+    def main_fixes(reading, now):
+        model = _full_model()
+        model.meta = NS(main_model_setting=reading)
+        result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": now}))
+        return [fix for fix in result["fixes"] if fix["title"].startswith("Main session")]
+
+    (fix,) = main_fixes({"value": "opus", "scope": "project-local"}, "sonnet")
+    assert fix["command"].startswith("claudeglass apply --set model=sonnet --scope project-local")
+    assert ["Now and after", "Now: opus. After: sonnet."] in fix["explainer"]
+    (fix,) = main_fixes({"value": "opus", "scope": "user"}, "sonnet")
+    assert "--scope project-local" not in fix["command"]
+    assert main_fixes({"value": "sonnet", "scope": "user"}, "opus") == []
+    assert main_fixes({}, "sonnet") == []

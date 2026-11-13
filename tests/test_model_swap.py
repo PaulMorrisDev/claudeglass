@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace as NS
 
 from claudeglass import helptext, model, model_swap
 from claudeglass.model import (
@@ -387,15 +388,22 @@ def test_with_every_main_session_left_out_there_is_no_saving_and_no_card():
 
     cut = lambda tr: model_swap.BEFORE_CHANGE  # noqa: E731
     cut_opus = lambda tr: model_swap.BEFORE_CHANGE if OPUS in tr.turns[0].model else None  # noqa: E731
+    results_of: list = []
     cases = (
         (sessions(OPUS, OPUS), cut, "before_change",
          "every main session started before its project moved to Sonnet or smaller"),
         (sessions(SONNET, SONNET), None, "main_floor",
          "Sonnet is the smallest model suggested for your main session"),
-        (sessions(SONNET, OPUS), cut_opus, "before_change",
-         "every main session ran on Sonnet or smaller, or started before its project moved there"),
+        (sessions(SONNET, OPUS), cut_opus, "left_out", "no main session is left that a settings change would reach"),
+        (sessions(OPUS, OPUS), lambda tr: model_swap.PICKED, "picked",
+         "every main session was picked on a larger model against a Sonnet setting"),
+        (sessions(OPUS, OPUS), lambda tr: model_swap.OWN_MODEL, "own_model",
+         "every main session ran in a project that sets its own model"),
+        (sessions(OPUS, OPUS), lambda tr: model_swap.PICKED if tr is results_of[0] else model_swap.OWN_MODEL,
+         "left_out", "no main session is left that a settings change would reach"),
     )
     for results, lever, state, label in cases:
+        results_of[:] = results
         stats = model_swap.compute_model_swap(results, PRICING, main_lever=lever)
         verdict = stats.by_key["top-level"].tier_verdict
         assert verdict.state == state and verdict.alt_model is None and verdict.saving_usd == 0.0
@@ -817,3 +825,38 @@ def test_a_main_session_with_no_priced_reply_is_on_no_row():
 
 def test_the_file_runs_tables_main_session_row_reads_main_session():
     assert helptext.TABLE_COPY["model_swap_agent_file_runs"].value_labels == {"top-level": "Main session"}
+
+
+def test_picks_and_own_model_sessions_count_on_the_row_and_are_said_on_the_card():
+    picked, own, counted = (_run(OPUS, "", kind="top-level") for _ in range(3))
+    reasons = {id(picked): model_swap.PICKED, id(own): model_swap.OWN_MODEL}
+    stats = model_swap.compute_model_swap([picked, own, counted], PRICING, main_lever=lambda tr: reasons.get(id(tr)))
+    alone = model_swap.compute_model_swap([counted], PRICING).by_key["top-level"]
+    row = stats.by_key["top-level"]
+    assert (row.spawns, row.lever.spawns, row.picked_runs, row.own_model_runs) == (3, 1, 1, 1)
+    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
+    section = model_swap.build_section(stats)
+    cells = _row_cells(section, "top-level")
+    assert (cells["picked_runs"], cells["own_model_runs"]) == (1, 1)
+    report, (rec,) = _main_rule(section)
+    for label in ("Main sessions picked against a Sonnet setting (not counted)",
+                  "Main sessions in projects that set their own model (not counted)"):
+        assert (label, 1, "model_swap.model_swap_by_agent_type", "top-level") in rec.evidence
+    _assert_evidence_resolves(report, rec)
+
+
+def test_above_main_floor_is_a_known_larger_model():
+    for model in ("opus", "claude-opus-5-5", "fable", "claude-fable-5-1"):
+        assert model_swap.above_main_floor(model), model
+    for model in ("sonnet", "claude-sonnet-5", "haiku", "my-gateway-model", "", None, ["opus"], 5):
+        assert not model_swap.above_main_floor(model), model
+
+
+def test_main_setting_is_the_views_reading_or_none():
+    report = NS(meta=NS(main_model_setting={"value": "opus", "scope": "project-local"}))
+    assert model_swap.main_setting(report) == ("opus", "project-local")
+    assert model_swap.main_setting(NS(meta=NS(main_model_setting={}))) is None
+    assert model_swap.main_setting(NS(meta=NS())) is None
+    assert model_swap.main_setting(None) is None
+    assert [model_swap.layer_scope(layer) for layer in ("user", "project_local", "project_shared", "managed", None)] == [
+        "user", "project-local", "repo", "managed", "user"]
