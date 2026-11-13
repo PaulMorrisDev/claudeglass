@@ -1256,6 +1256,9 @@ def profile_change_where(key: str, scope: str) -> str:
     return settings_path
 
 
+#: A model's own setting, in the words of "wins over this model's own ...".
+_MODEL_OWN_WORDS = {"effortLevel": "level", "autoCompactWindow": "window"}
+
 #: The project file a ``snapshots.SETTINGS_LAYER_NAMES`` layer is, for the
 #: "sets it too and wins" sentence. ``managed`` is not here: the diff
 #: already says "Locked by your organisation's policy" for it.
@@ -1290,9 +1293,9 @@ def profile_overridden_by(
        ``project_picked``: with none, the snapshot is whichever project's
        took it, and the sentence would name a project the reader did not
        choose.
-    1b. ``settings.modelSettings.<id>.effortLevel`` while such a project file
-       sets the flat ``effortLevel``: a higher file's flat value beats a lower
-       file's per-model entry (N6).
+    1b. ``settings.modelSettings.<id>.effortLevel`` (or ``.autoCompactWindow``)
+       while such a project file sets the flat key of the same name: a higher
+       file's flat value beats a lower file's per-model entry (N6, R2-4).
     2. ``settings.autoCompactWindow``, or a model's own window, while
        ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` is among ``env_names``.
     2b. ``settings.model`` while ``ANTHROPIC_MODEL`` is among ``env_names``.
@@ -1327,16 +1330,19 @@ def profile_overridden_by(
         and precedence[layer] < precedence[target]
     ):
         return f"This project's {_OVERRIDING_PROJECT_FILE[layer]} sets it too and wins."
-    flat_layer = provenance.get("effortLevel")
+    flat_layer = provenance.get(own_key) if own_key in _MODEL_OWN_WORDS else None
     if (
-        own_key == "effortLevel"
+        flat_layer is not None
         and project_picked
         and target in precedence
         and flat_layer in _OVERRIDING_PROJECT_FILE
         and precedence[flat_layer] < precedence[target]
     ):
-        # N6: a higher file's flat effortLevel beats a lower file's per-model entry.
-        return f"This project's {_OVERRIDING_PROJECT_FILE[flat_layer]} sets effortLevel, which wins over this model's own level."
+        # N6: a higher file's flat value beats a lower file's per-model entry.
+        return (
+            f"This project's {_OVERRIDING_PROJECT_FILE[flat_layer]} sets {own_key}, "
+            f"which wins over this model's own {_MODEL_OWN_WORDS[own_key]}."
+        )
     # A model's own entry wins over the flat key only in the target's file or
     # a higher one (R2-2); with a target that is no known layer, as before.
     own_layer = provenance.get("modelSettings") or "user"

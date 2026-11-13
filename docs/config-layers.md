@@ -137,8 +137,10 @@ or the generic marker:
   project's <file> sets effortLevel, which wins over this model's own
   level." The apply preview lists such a row as overridden. A per-model
   `autoCompactWindow` row says `CLAUDE_CODE_AUTO_COMPACT_WINDOW` wins, as
-  the flat key's row does; whether a higher file's flat window beats a
-  lower file's per-model one is not in the docs, so no row claims it. A flat
+  the flat key's row does. The same rule holds for the window: a flat
+  `autoCompactWindow` in a higher file beats a model's own window in a lower
+  one, and the row ("This project's <file> sets autoCompactWindow, which
+  wins over this model's own window.") and the apply preview say so. A flat
   row is called overridden by a model's own entry only when that entry is in
   the target file or a higher one.
 

@@ -1498,3 +1498,21 @@ def test_the_apply_preview_says_a_project_files_flat_effort_beats_a_models_own_l
     same_file = apply_mod.plan_apply(profile, scope="repo", project_path=project, config_dir=claude_root / "claudeglass",
                                      claude_root=claude_root, snapshot=snap)
     assert same_file.overridden == ()
+
+
+def test_the_apply_preview_says_a_project_files_flat_window_beats_a_models_own_window(tmp_path):
+    # R2-4: within a file a model's own window wins; across files the higher file's flat window does.
+    claude_root = tmp_path / ".claude"
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    snap = _snapshot(effective={"autoCompactWindow": 400000}, effective_provenance={"autoCompactWindow": "project_shared"})
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass",
+                                claude_root=claude_root, snapshot=snap)
+    assert plan.overridden == (
+        "modelSettings.claude-opus-5-5.autoCompactWindow: autoCompactWindow is set by this project's shared settings "
+        "(.claude/settings.json), which takes precedence",
+    )
+    same_file = apply_mod.plan_apply(profile, scope="repo", project_path=project, config_dir=claude_root / "claudeglass",
+                                     claude_root=claude_root, snapshot=snap)
+    assert same_file.overridden == ()

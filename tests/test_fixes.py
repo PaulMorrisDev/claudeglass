@@ -1373,3 +1373,19 @@ def test_a_flat_row_is_still_called_overridden_by_a_models_own_entry_in_the_targ
         assert profile_overridden_by(key, "user", {"modelSettings": "user"}, [], False, models, True) == sentence, key
         assert profile_overridden_by(key, "repo", {"modelSettings": "project_local"}, [], False, models, True) == sentence, key
         assert profile_overridden_by(key, "repo", {"modelSettings": "project_shared"}, [], False, models, True) == sentence, key
+
+
+# -- R2-4: a model's own window row says when a project file's flat window wins ----------------------------
+
+
+def test_a_models_own_window_row_says_a_project_files_flat_window_wins():
+    from claudeglass.fixes import profile_overridden_by
+
+    key = "settings.modelSettings.claude-opus-5-5.autoCompactWindow"
+    provenance = {"autoCompactWindow": "project_shared"}
+    assert profile_overridden_by(key, "user", provenance, [], False, None, True) == (
+        "This project's .claude/settings.json sets autoCompactWindow, which wins over this model's own window."
+    )
+    # Applied to that file, the model's own entry wins within it; with no project picked no file is named.
+    assert profile_overridden_by(key, "repo", provenance, [], False, None, True) is None
+    assert profile_overridden_by(key, "user", provenance, [], False, None, False) is None

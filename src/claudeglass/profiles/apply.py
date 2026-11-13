@@ -824,19 +824,21 @@ def plan_apply(
                 continue
             if precedence[layer] < target_rank:
                 overridden.append(f"{key}: already set by {_LAYER_LABEL.get(layer, layer)}, which takes precedence")
-        # N6: a model's own effort level loses to a higher file's flat effortLevel.
-        flat_layer = provenance.get("effortLevel")
+        # N6, R2-4: a model's own effort level or window loses to a higher file's flat key.
         models = settings_changes.get("modelSettings")
-        if (
-            isinstance(models, dict)
-            and flat_layer in precedence
-            and flat_layer != target_layer
-            and precedence[flat_layer] < target_rank
-        ):
+        for own_key in ("effortLevel", "autoCompactWindow"):
+            flat_layer = provenance.get(own_key)
+            if not (
+                isinstance(models, dict)
+                and flat_layer in precedence
+                and flat_layer != target_layer
+                and precedence[flat_layer] < target_rank
+            ):
+                continue
             for model_id in sorted(models):
-                if isinstance(models[model_id], dict) and "effortLevel" in models[model_id]:
+                if isinstance(models[model_id], dict) and own_key in models[model_id]:
                     overridden.append(
-                        f"modelSettings.{model_id}.effortLevel: effortLevel is set by "
+                        f"modelSettings.{model_id}.{own_key}: {own_key} is set by "
                         f"{_LAYER_LABEL.get(flat_layer, flat_layer)}, which takes precedence"
                     )
         env_provenance = snapshot.data.get("effective_env_provenance") if snapshot is not None else None
