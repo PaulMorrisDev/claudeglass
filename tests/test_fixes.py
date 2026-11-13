@@ -1027,3 +1027,27 @@ def test_a_per_model_change_gets_the_command_apply_takes():
     words = shlex.split(command)
     profile, error = cli._one_off_profile([words[words.index("--set") + 1]], None)
     assert error is None and profile is not None
+
+
+def test_a_managed_setting_asks_claude_only_to_draft_a_note_to_the_administrator():
+    from claudeglass import fixes
+    from claudeglass.model import Recommendation, SettingChange
+
+    rec = Recommendation(
+        id="model-tier-main",
+        severity="advice",
+        category="settings",
+        title="Your main session could run on Sonnet",
+        action="a",
+        scope="managed",
+        why="Your main session ran on Opus 5.5.",
+    )
+    change = SettingChange(target="settings", key="model", value="sonnet", current="opus", scope="managed")
+    rec.changes = [change]
+    assert fixes.prompt_for(rec, change) == (
+        "My organisation's managed settings lock model, so I can't change it myself. Draft a short request to my "
+        "administrator to set model to sonnet, saying why: Your main session ran on Opus 5.5. Keep it under 120 "
+        "words and don't change any files."
+    )
+    assert fixes.command_for(change, "managed") is None
+    assert fixes.build_fixes(rec)[0]["command"] is None
