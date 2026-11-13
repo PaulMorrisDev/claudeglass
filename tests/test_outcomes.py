@@ -255,6 +255,51 @@ def test_fewer_than_five_spawns_a_side_is_too_little_data_never_a_number(stub_ca
     )
 
 
+def test_a_start_context_basis_under_the_floor_is_not_measured(stub_carry):
+    world = _spawn_world(_same([60_000] * 6), _same([58_000] * 6))
+    reading = _read(_point("agents.gp.tools"), "gp", "tools", outcomes.Prediction(None, 2_000), world)
+    # A 2,000-token drop matches a 2,000-token basis, but 2,000 of a 60,000-token start is lost in the noise.
+    assert outcomes.START_FLOOR == 0.45
+    assert reading.verdict == "not_measured"
+    assert reading.note == "the basis is too small a share of the start to tell from noise"
+    assert reading.measured_usd is None and reading.predicted_usd is None
+
+
+def test_a_basis_at_the_floor_is_read_and_one_token_under_is_not(stub_carry):
+    world = _spawn_world(_same([60_000] * 6), _same([33_000] * 6))
+    at = _read(_point("agents.gp.tools"), "gp", "tools", outcomes.Prediction(None, 27_000), world)
+    assert at.verdict == "half_or_more"
+    under = _read(_point("agents.gp.tools"), "gp", "tools", outcomes.Prediction(None, 26_999), world)
+    assert under.verdict == "not_measured"
+
+
+def test_the_floor_is_the_before_median_on_the_held_family(stub_carry):
+    before = _same([60_000] * 6) + _same([200_000] * 7, "haiku-4-5")
+    world = _spawn_world(before, _same([30_000] * 6))
+    reading = _read(_point("agents.gp.tools"), "gp", "tools", outcomes.Prediction(None, 30_000), world)
+    # Half of the held family's 60,000 start; against every spawn's median it would be 15% and floored.
+    assert reading.verdict == "half_or_more" and reading.before_units == 6
+
+
+def test_an_every_project_fix_leaves_out_only_the_projects_under_the_floor(stub_carry):
+    world = _merged(
+        _spawn_world(_same([60_000] * 6), _same([20_000] * 6), project="proj-a"),
+        _spawn_world(_same([200_000] * 6), _same([190_000] * 6), project="proj-b"),
+    )
+    reading = _read(_point("agents.gp.tools"), "gp", "tools", outcomes.Prediction(None, 30_000), world)
+    assert reading.projects == 1
+    assert (reading.before_units, reading.after_units) == (6, 6)
+    assert reading.measured_usd == pytest.approx(6 * 160.0)
+    assert reading.predicted_usd == pytest.approx(6 * 120.0)
+    assert reading.verdict == "half_or_more"
+
+
+def test_a_side_too_thin_to_read_is_too_little_data_not_under_the_floor(stub_carry):
+    world = _spawn_world(_same([60_000] * 6), _same([58_000] * 4))
+    reading = _read(_point("agents.gp.tools"), "gp", "tools", outcomes.Prediction(None, 2_000), world)
+    assert reading.verdict == "too_little_data"
+
+
 def test_a_model_change_at_the_same_point_leaves_no_family_to_compare(stub_carry):
     world = _spawn_world(_same([60_000] * 6, "haiku-4-5"), _same([20_000] * 6, "sonnet-5"))
     reading = _read(
@@ -270,18 +315,18 @@ def test_another_change_to_what_every_start_carries_cuts_the_before_side(stub_ca
     world = _spawn_world(_same([90_000] * 6 + [60_000] * 6), _same([20_000] * 8), gap=0.5)
     plugins = _point("enabled_plugins", ts=T - timedelta(days=6.25))
     tools = _point("agents.gp.tools")
-    uncut = _read(tools, "gp", "tools", outcomes.Prediction(None, 30_000), world, points=[tools])
+    uncut = _read(tools, "gp", "tools", outcomes.Prediction(None, 40_000), world, points=[tools])
     assert uncut.before_units == 12
-    cut = _read(tools, "gp", "tools", outcomes.Prediction(None, 30_000), world, points=[tools, plugins])
+    cut = _read(tools, "gp", "tools", outcomes.Prediction(None, 40_000), world, points=[tools, plugins])
     # Only the spawns after the plugins change are read, so only the 60,000 starts.
     assert cut.before_units == 6
     assert cut.measured_usd == pytest.approx(8 * 160.0)
     # A change to another of this agent's settings cuts it the same way.
     model = _point("agents.gp.model", ts=T - timedelta(days=6.25))
-    assert _read(tools, "gp", "tools", outcomes.Prediction(None, 30_000), world, points=[tools, model]).before_units == 6
+    assert _read(tools, "gp", "tools", outcomes.Prediction(None, 40_000), world, points=[tools, model]).before_units == 6
     # A change after this one cuts the after side.
     later = _point("agents.gp.skills", ts=T + timedelta(days=2.2))
-    after = _read(tools, "gp", "tools", outcomes.Prediction(None, 30_000), world, points=[tools, later])
+    after = _read(tools, "gp", "tools", outcomes.Prediction(None, 40_000), world, points=[tools, later])
     assert after.verdict == "too_little_data" and after.measured_usd is None
 
 
@@ -381,14 +426,22 @@ def test_a_main_session_start_context_fix_is_predicted_by_the_same_carry_on_its_
         return _approximate(10.0, 6 * 160.0)
 
     monkeypatch.setattr(counterfactual, "without_change", fake)
-    reading = _read(_point("effective.enabledPlugins"), None, "enabledPlugins", outcomes.Prediction(None, 20_000), world)
-    # The measured carry is for a 40,000-token drop on 6 sessions; the card named 20,000 tokens.
+    reading = _read(_point("effective.enabledPlugins"), None, "enabledPlugins", outcomes.Prediction(None, 30_000), world)
+    # The measured carry is for a 40,000-token drop on 6 sessions; the card named 30,000 tokens.
     assert seen["sides"] == (6, 6)
     assert reading.method == "start_context"
     assert reading.measured_usd == pytest.approx(6 * 160.0)
-    assert reading.predicted_usd == pytest.approx(6 * 80.0)
+    assert reading.predicted_usd == pytest.approx(6 * 120.0)
     assert reading.verdict == "half_or_more"
     assert (reading.before_units, reading.after_units) == (6, 6)
+
+
+def test_a_main_session_start_context_basis_under_the_floor_is_not_measured(stub_carry, monkeypatch):
+    monkeypatch.setattr(counterfactual, "without_change", lambda *a: pytest.fail("under the floor"))
+    world = _main_world([60_000] * 6, [58_000] * 6)
+    reading = _read(_point("effective.enabledPlugins"), None, "enabledPlugins", outcomes.Prediction(None, 2_000), world)
+    assert reading.verdict == "not_measured"
+    assert reading.note == "the basis is too small a share of the start to tell from noise"
 
 
 def test_a_main_session_start_context_fix_without_enough_sessions_on_a_family_is_too_little_data(monkeypatch):

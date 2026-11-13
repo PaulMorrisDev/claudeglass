@@ -335,6 +335,8 @@ class AgentStart:
     #: Median start context per spawn before, less after: positive when the
     #: change took context off the start.
     drop_tokens: float
+    #: Median start context per spawn before, on the same family.
+    before_tokens: float
     #: (session id, index into its ``spawns``) of each spawn after the change
     #: on that family. The index is also the spawn's index in the bundle's ``subs``.
     after_spawns: list[tuple[str, int]]
@@ -355,8 +357,11 @@ def agent_start_reading(agent: str, before_facts, after_facts) -> AgentStart | N
     held_after = [(sid, i, t) for sid, i, t in after if t.model == family]
     if len(held_before) < MIN_SPAWNS or len(held_after) < MIN_SPAWNS:
         return None
-    drop = median(t.startup_tokens for t in held_before) - median(t.startup_tokens for _sid, _i, t in held_after)
-    return AgentStart(agent, family, len(held_before), len(held_after), drop, [(sid, i) for sid, i, _t in held_after])
+    before_tokens = median(t.startup_tokens for t in held_before)
+    drop = before_tokens - median(t.startup_tokens for _sid, _i, t in held_after)
+    return AgentStart(
+        agent, family, len(held_before), len(held_after), drop, before_tokens, [(sid, i) for sid, i, _t in held_after]
+    )
 
 
 def carry_on(reading: AgentStart, tokens: float, bundles: dict, pricing: Pricing) -> float:

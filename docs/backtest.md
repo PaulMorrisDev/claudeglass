@@ -118,7 +118,7 @@ setting.
   is measured on the context at the start of each agent run, on the one model
   family both sides share, carried over every reply of the runs after the
   change. The estimate is the tokens it said it takes out of each start,
-  carried the same way.
+  carried the same way. A start-context fix is measured only when its estimate takes out at least 45% of the start: where nothing changed, starts moved by up to 22% on their own.
 - **Any other setting** has no honest measure (cost per session moves with the
   kind of work by more than an estimate's size), so the row stays unjudged
   ("Not judged yet.") and expires like one that never matched. Waiting does not

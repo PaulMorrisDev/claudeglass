@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from statistics import median
 
 from . import backtest, change_points, counterfactual, impact, quality
 from .calibration import FALLBACK
@@ -68,6 +69,12 @@ START_SENSITIVE = (
     "effective.skillOverrides", "effective.enabledMcpjsonServers", "effective.disabledMcpjsonServers",
     "claude_md_chars",
 )
+#: The least share of the before median start a start-context basis may be. Where nothing
+#: changed, the median start of an agent's spawns moved by up to 21.6% between two
+#: fortnights on the frozen data, so a smaller basis cannot be told from that.
+START_FLOOR = 0.45
+#: Why a start-context reading under :data:`START_FLOOR` is not a verdict.
+NOTE_BASIS_TOO_SMALL = "the basis is too small a share of the start to tell from noise"
 VERDICTS = ("half_or_more", "under_half", "too_little_data", "not_measured")
 GUARD_STATES = ("holds", "worse", "unclear", "too_little_data")
 METHODS = ("exact", "start_context", "none")
@@ -388,11 +395,14 @@ def _measure(
         return reading
 
     measured = predicted = 0.0
-    before_n = after_n = counted = 0
+    before_n = after_n = counted = floored = 0
     if method == "start_context" and agent is not None:
         for before, after in sides:
             start = counterfactual.agent_start_reading(agent, before, after)
             if start is None:
+                continue
+            if basis / start.before_tokens < START_FLOOR:
+                floored += 1
                 continue
             measured += counterfactual.carry_on(start, start.drop_tokens, bundles, pricing)
             predicted += counterfactual.carry_on(start, basis, bundles, pricing)
@@ -406,6 +416,11 @@ def _measure(
             held_before = sum(1 for s in before if s.main.model == family and s.main.startup_tokens)
             held_after = sum(1 for s in after if s.main.model == family and s.main.startup_tokens)
             if family is None or held_before < MIN_UNITS or held_after < MIN_UNITS:
+                continue
+            # The floor is against the median start on both paths, though this measure reads the mean.
+            before_median = median(s.main.startup_tokens for s in before if s.main.model == family and s.main.startup_tokens)
+            if basis / before_median < START_FLOOR:
+                floored += 1
                 continue
             result = counterfactual.without_change(point, before, after, bundles, pricing)
             row = next(
@@ -444,6 +459,10 @@ def _measure(
                 before_n, after_n, counted = _units(before, agent, bundles), _units(after, agent, bundles), 1
 
     reading.before_units, reading.after_units, reading.projects = before_n, after_n, counted
+    if counted == 0 and floored:
+        # Every pair that could be read had a basis too small a share of its start: not a verdict.
+        reading.note = NOTE_BASIS_TOO_SMALL
+        return reading
     if counted == 0:
         reading.verdict = "too_little_data"
         reading.short_export = method == "start_context" and point.ts - LOOKBACK < corpus_start

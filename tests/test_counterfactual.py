@@ -381,6 +381,14 @@ def test_an_agents_start_reading_is_the_drop_in_median_start_tokens_on_one_famil
     assert reading.after_spawns == [(f"a{n}", 0) for n in range(6)]
 
 
+def test_an_agent_start_reading_keeps_the_before_median_of_its_family():
+    before_spec = _same_family([50_000, 60_000, 61_000, 62_000, 70_000]) + _same_family([200_000] * 6, "haiku-4-5")
+    before, after, _bundles = _spawn_world({"gp": (before_spec, _same_family([20_000] * 6))})
+    reading = counterfactual.agent_start_reading("gp", before, after)
+    assert reading.family == "sonnet-5"
+    assert reading.before_tokens == 61_000
+
+
 def test_an_agents_start_reading_holds_the_family_with_most_spawns_on_both_sides():
     haiku = [("haiku-4-5", 50_000)] * 5
     before, after, _bundles = _spawn_world(
