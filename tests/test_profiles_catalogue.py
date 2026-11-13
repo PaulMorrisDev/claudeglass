@@ -74,28 +74,24 @@ def test_every_catalogue_profile_round_trips_through_dump_and_load(profile_id):
     assert reloaded == original
 
 
-#: The four profiles that used to name the owner's own agents
-#: (``claude-implementer``, ``verification-runner``).
-_OWNER_AGENT_PROFILES = ("implementation-heavy", "overseer-fanout", "workflow-ultracode", "overnight-batch")
-
-
-@pytest.mark.parametrize("profile_id", _OWNER_AGENT_PROFILES)
+@pytest.mark.parametrize("profile_id", EXPECTED_IDS)
 def test_no_catalogue_profile_names_an_agent(profile_id):
-    """A shipped profile cannot know the user's agent names, so it names a
+    """A shipped profile cannot know the user's agent names (and a built-in
+    agent such as Explore has no file ``apply`` could patch), so it names a
     role (``[roles.writer]``) and never an agent file."""
     profile = get(profile_id)
     assert profile.agents == {}
-    for name in ("claude-implementer", "verification-runner"):
+    for name in ("claude-implementer", "verification-runner", "Explore"):
         assert name not in profile.notes
-    has_role = profile_id != "overnight-batch"
+    has_role = profile_id in ("implementation-heavy", "overseer-fanout", "workflow-ultracode")
     assert list(profile.roles) == (["writer"] if has_role else [])
 
 
-@pytest.mark.parametrize("profile_id", _OWNER_AGENT_PROFILES)
+@pytest.mark.parametrize("profile_id", EXPECTED_IDS)
 def test_no_catalogue_agent_line_is_outranked_or_a_default(profile_id):
     """``subagentPromptCacheTtl`` outranks every agent file's cache lifetime,
-    so a role line for it changes nothing while the profile sets the
-    setting; ``omitClaudeMd = false`` is Claude Code's default."""
+    so an agent or role line for it changes nothing while the profile sets
+    the setting; ``omitClaudeMd = false`` is Claude Code's default."""
     profile = get(profile_id)
     for fields in (*profile.agents.values(), *profile.roles.values()):
         if "subagentPromptCacheTtl" in profile.settings:

@@ -10,12 +10,9 @@ generally, phases.phases_summary's "discovery" row showing a large \
 cost_share_pct (recommend.py's discovery-share rule fires past its \
 threshold there) -- data, web or database exploration racks up many \
 short, low-stakes read/search turns rather than deep reasoning. \
-effortLevel and the Explore agent's own effort are both lowered to \
-"low" since exploration turns rarely need high-effort reasoning; \
-subagentPromptCacheTtl (and the same TTL pinned in Explore's own \
-frontmatter, per recommend.py's ttl-switch per-agent-type verdict \
-lever "experimental.cacheTtl in <agent>.md") is kept at 5m because \
-exploration bursts run in short back-to-back turns, not the long \
+effortLevel is lowered to "low" since exploration turns rarely need \
+high-effort reasoning; subagentPromptCacheTtl is kept at 5m for every \
+subagent because exploration bursts run in short back-to-back turns, not the long \
 verification gaps that make a 1h TTL pay off. autoCompactWindow is \
 tightened (100000, below the settings allowlist's 1,000,000 ceiling) so \
 a long discovery crawl compacts sooner, per recommend.py's \
@@ -28,7 +25,3 @@ sessions' tendency to accumulate large read-only context.
 effortLevel = "low"
 subagentPromptCacheTtl = "5m"
 autoCompactWindow = 100000
-
-[agents.Explore]
-effort = "low"
-"experimental.cacheTtl" = "5m"

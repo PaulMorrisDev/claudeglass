@@ -394,7 +394,7 @@ real report table/column rather than an invented number.
 | id | `for` | archetype | key settings | justification (report table/column) |
 |---|---|---|---|---|
 | `interactive-chat` | chat, quick-question, pairing, docs | `chat-only` | `effortLevel=medium`, `promptCacheTtl=5m` | `ttl.ttl_by_agent_type`'s top-level `gap_p50_s`/`gap_p90_s`/`recommendation`/`lever` row (chat-only turn gaps rarely clear the 1h TTL break-even); `scorecard.dimensions` (no `cache_efficiency`/`context_hygiene`/`agent_efficiency` evidence to justify a higher tier). |
-| `discovery-scrape` | data-exploration, web-research, database-exploration | `single-model` | `effortLevel=low`, `subagentPromptCacheTtl=5m`, `autoCompactWindow=100000`; `agents.Explore.effort=low`, `agents.Explore."experimental.cacheTtl"=5m` | `classify.classify_purpose`'s `local-llm-pipeline` signature and `phases.phases_summary`'s "discovery" row `cost_share_pct`; `recache.recache_huge_context.share_pct` / `scorecard.dimensions`' context-hygiene p90 proxy for the tightened `autoCompactWindow`. |
+| `discovery-scrape` | data-exploration, web-research, database-exploration | `single-model` | `effortLevel=low`, `subagentPromptCacheTtl=5m`, `autoCompactWindow=100000` | `classify.classify_purpose`'s `local-llm-pipeline` signature and `phases.phases_summary`'s "discovery" row `cost_share_pct`; `recache.recache_huge_context.share_pct` / `scorecard.dimensions`' context-hygiene p90 proxy for the tightened `autoCompactWindow`. |
 | `planning-requirements` | planning, requirements, architecture | `single-model` | `effortLevel=high`, `promptCacheTtl=1h` | `agents.topology_effort_tokens`'s `thinking_share` column (the deliberate opposite case to the effort-mismatch rule: a planning session's high thinking-token share is doing real work); `sessions.sessions_by_purpose`'s "planning" row for the longer per-turn gap justifying 1h. |
 | `implementation-heavy` | implementation, refactor, test-triage, review | `plan-high-implement-low` | `effortLevel=medium`, `subagentPromptCacheTtl=5m`; `roles.writer.model=sonnet`, `.effort=medium`, `.maxTurns=60` | `agents.topology_spawn_write`'s `mean_first_call` column and `agent_startup.agent_startup_breakdown`'s `removable_tools` column (recommend.py's spawn-cost rule thresholds); `ttl.ttl_by_agent_type`'s per-agent-type lever text for the 5m `subagentPromptCacheTtl`, which Claude Code reads before any agent file's `experimental.cacheTtl`. |
 | `overseer-fanout` | fanout, multi-agent-coordination | `overseer-fanout` | `effortLevel=high`, `subagentPromptCacheTtl=5m`; `roles.writer.effort=medium`, `.maxTurns=60` | `agents.topology_report_proxy`'s `mean_proxy` column (agent-report-size rule); `agents.topology_spawn_write`'s `mean_first_call` column (spawn-cost rule) for the top/writer effort split. |
@@ -402,10 +402,10 @@ real report table/column rather than an invented number.
 | `plan-then-build` | plan-then-build | `single-model` | `promptCacheTtl=1h`; no model change | `habits.habits_by_shape`'s `plan_build` row (`share` column: main sessions that approve a plan with `ExitPlanMode`, then edit files in the same session); `plan_handoff.plan_handoff_summary`'s `tokens_carried_median`/`saving_usd` for the `/clear`-after-the-plan habit its notes describe. Not `implementation-heavy`, whose archetype hands the build to a cheaper model or agent. |
 | `workflow-ultracode` | workflow-run, scripted-multi-phase, ops | `workflow-heavy` | `subagentPromptCacheTtl=5m`; `roles.writer.maxTurns=40` | `workflows.workflows_summary`'s "Total workflow runs" row and `workflows.workflows_detail`'s per-run `agent_count`/`phases` columns; `ttl.ttl_by_agent_type`'s per-agent-type lever (short-gap scripted phases). |
 
-No shipped profile except `discovery-scrape` (which sets the built-in
-`Explore` agent) names an agent: the three that change the agent that
-writes code use `[roles.writer]`, so they fit whatever the user calls
-that agent. The earlier per-agent cache lifetime lines are gone because
+No shipped profile names an agent: the three that change the agent
+that writes code use `[roles.writer]`, so they fit whatever the user
+calls that agent, and a built-in agent such as `Explore` has no file for
+`apply` to patch. The earlier per-agent cache lifetime lines are gone because
 `subagentPromptCacheTtl`, set to the same value in the same profile,
 outranks every agent file's `experimental.cacheTtl`
 (`docs/concepts.md`), and `omitClaudeMd = false` is Claude Code's

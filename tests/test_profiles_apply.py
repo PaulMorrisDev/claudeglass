@@ -401,6 +401,24 @@ def test_plan_apply_blocks_missing_agent_file(tmp_path):
     assert not (project / ".claude" / "agents" / "ghost.md").exists()
 
 
+def test_apply_of_discovery_scrape_without_an_explore_file_writes_the_settings(tmp_path):
+    """Explore is built into Claude Code, so nearly no user has an
+    Explore.md: a shipped profile must not name it, or the whole apply
+    (settings included) is refused."""
+    from claudeglass.profiles import catalogue
+
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"researcher": _agent_text("researcher", "Read")})
+    plan = apply_mod.plan_apply(
+        catalogue.get("discovery-scrape"), scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    apply_mod.execute(plan, config_dir=config_dir)
+    written = json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))
+    assert written == {"effortLevel": "low", "subagentPromptCacheTtl": "5m", "autoCompactWindow": 100000}
+    assert sorted(p.name for p in agents_dir.iterdir()) == ["researcher.md"]
+
+
 def test_force_creates_missing_agent_file_from_scratch(tmp_path):
     home = tmp_path / "home"
     claude_root = home / ".claude"
