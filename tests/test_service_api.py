@@ -6925,6 +6925,33 @@ def test_a_project_views_landing_reads_only_that_projects_snapshots(tmp_path, mo
         handle.store.close()
 
 
+def test_an_every_project_card_does_not_land_on_another_projects_settings(tmp_path, monkeypatch):
+    from claudeglass import snapshots as snapshots_mod
+
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        own = snapshots_mod.snapshot_project_key("proj-b")
+        other = snapshots_mod.snapshot_project_key("elsewhere")
+        # elsewhere has held sonnet all along, proj-b opus (the newest when the card was
+        # first shown). Nobody changes a setting; elsewhere just starts another session.
+        _snapshot_at(handle, "2026-09-10T12:00:00Z", {"model": "sonnet"}, slug=other)
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus"}, slug=own)
+        handle.store.mark_cards([_gone_card()], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        _snapshot_at(handle, "2026-09-21T12:00:00Z", {"model": "sonnet"}, slug=other)
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        [row] = handle.store.card_marks()
+        assert (row["landed_at"], row["landed_exact"]) == (None, None)
+        # The fix made where the card was first shown does land it, whatever elsewhere holds.
+        _snapshot_at(handle, "2026-09-22T12:00:00Z", {"model": "sonnet"}, slug=own)
+        _snapshot_at(handle, "2026-09-23T12:00:00Z", {"model": "opus"}, slug=other)
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        [row] = handle.store.card_marks()
+        assert (row["landed_at"], row["landed_exact"]) == ("2026-09-22T12:00:00Z", 1)
+    finally:
+        handle.close()
+        handle.store.close()
+
+
 def test_a_card_mark_writes_nothing_but_the_store(tmp_path, monkeypatch):
     # A finished report writes the mod's settings file on its own thread; that is
     # the report's doing, not the mark's, and would race with the comparison.

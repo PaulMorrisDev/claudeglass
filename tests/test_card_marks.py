@@ -134,6 +134,27 @@ def test_an_agent_recorded_only_in_another_project_is_read_through_the_merge():
     assert got == (_day(4), True)
 
 
+def test_a_setting_is_read_in_the_project_the_card_was_first_shown_in():
+    # Project b holds sonnet all along, project a opus (the newest snapshot when the card
+    # was first shown). Nobody changes anything; b starts another session.
+    snaps = [
+        _snap(0, slug="proj-b", effective={"model": "sonnet"}),
+        _snap(1, slug="proj-a", effective={"model": "opus"}),
+        _snap(3, slug="proj-b", effective={"model": "sonnet"}),
+    ]
+    assert _land([_model("sonnet")], snaps, _day(1) + timedelta(hours=1)) is None
+
+
+def test_a_fix_made_in_that_project_lands_although_another_project_still_holds_the_old_value():
+    snaps = [
+        _snap(0, slug="proj-b", effective={"model": "opus"}),
+        _snap(1, slug="proj-a", effective={"model": "opus"}),
+        _snap(2, slug="proj-a", effective={"model": "sonnet"}),
+        _snap(3, slug="proj-b", effective={"model": "opus"}),
+    ]
+    assert _land([_model("sonnet")], snaps, _day(1) + timedelta(hours=1)) == (_day(2), True)
+
+
 def test_a_shared_cache_gives_the_same_answer():
     snaps = [_snap(0, effective={"model": "opus"}), _snap(3, effective={"model": "sonnet"})]
     shown = _day(0) + timedelta(hours=1)

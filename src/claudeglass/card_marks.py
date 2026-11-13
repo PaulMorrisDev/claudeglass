@@ -15,7 +15,9 @@ A card is **shown** when its title is drawn on a page you have open, and
    (:func:`snapshots.same_value` on the flattened key) as the value in force
    when the card was first shown (the merged snapshot of those taken at or
    before that time; unset when there was none), from some snapshot after it
-   through the newest one, unbroken.
+   through the newest one, unbroken. A setting (not an agent's field) is read
+   in the project whose snapshot was in force when the card was first shown,
+   so another project's session, on a value it has always held, moves nothing.
 
 :func:`landing` answers the second half. It is not
 :func:`fixes.already_set` over every change, the test ``advice`` uses to drop
@@ -83,14 +85,23 @@ def landing(
         if when is not None and when <= first_shown:
             start = i
     then = merged(start) if start is not None else None
-    before = [value_in(then, c) if then is not None else None for c in changes]
+    own = _own_project(snaps, start, canonical, cache) if start is not None else None
+
+    def read(i: int, change: dict):
+        """The value ``change`` names at snapshot ``i``: an agent's field from
+        the merge, a setting from the project the card was first shown in."""
+        snap = merged(i)
+        if change["target"] != "agent" and own is not None and own[i] is not None:
+            snap = own[i]
+        return value_in(snap, change)
+
+    before = [read(start, c) if start is not None else None for c in changes]
     run = None
     for i in range((start + 1) if start is not None else 0, len(snaps)):
         if stamps[i] is None:
             continue
-        snap = merged(i)
-        moved = snap is not None and all(
-            not snapshots_mod.same_value(flat_key(c), old, value_in(snap, c)) for c, old in zip(changes, before)
+        moved = merged(i) is not None and all(
+            not snapshots_mod.same_value(flat_key(c), old, read(i, c)) for c, old in zip(changes, before)
         )
         if not moved:
             run = None
@@ -98,9 +109,28 @@ def landing(
             run = stamps[i]
     if run is None:
         return None
-    newest = merged(len(snaps) - 1)
-    exact = all(already_set(c["key"], c["value"], value_in(newest, c)) for c in changes)
+    last = len(snaps) - 1
+    exact = all(already_set(c["key"], c["value"], read(last, c)) for c in changes)
     return run, exact
+
+
+def _own_project(snaps: list, i: int, canonical: dict, cache: dict) -> list:
+    """For each snapshot index, the newest snapshot at or before it that holds
+    settings and belongs to the project whose snapshot was in force at ``i``:
+    where a card shown in the every-project view reads a setting, so that
+    another project's session, on a value it has always held, does not move
+    it."""
+    base = next((s for s in reversed(snaps[: i + 1]) if isinstance(s.data.get("effective"), dict)), snaps[i])
+    label = snapshots_mod._canonical_label(base, canonical)
+    key = ("own", label)
+    if key not in cache:
+        newest, found = None, []
+        for snap in snaps:
+            if isinstance(snap.data.get("effective"), dict) and snapshots_mod._canonical_label(snap, canonical) == label:
+                newest = snap
+            found.append(newest)
+        cache[key] = found
+    return cache[key]
 
 
 def card_row(rec) -> dict:
