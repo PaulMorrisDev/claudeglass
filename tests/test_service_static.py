@@ -2945,7 +2945,7 @@ def test_an_estimate_is_logged_when_a_change_is_saved_or_its_command_copied() ->
     assert goal.index('toast("Profile saved.")') < goal.index("log: true")
     estimate = _function_source(source, "renderProfileEstimate")
     assert "if (logged || !request) return;" in estimate and "log: true" in estimate
-    assert "renderProfileDiff(data, box, logEstimate)" in _function_source(source, "renderProfileDetail")
+    assert "renderProfileDiff(data, box, estimator.log)" in _function_source(source, "renderProfileDetail")
     assert "{ onCopy: onCopy }" in _function_source(source, "renderProfileDiff")
     copy = _function_source(source, "codeBlockWithCopy")
     assert "if (ok && onCopy) onCopy();" in copy
@@ -4592,3 +4592,23 @@ def test_start_from_carries_the_role_and_fills_only_the_profiles_own_agents() ->
     assert (
         '". It goes to each of your agents named like implementer, fixer or builder that can edit files."' in editor
     )
+
+
+def test_the_estimate_is_drawn_from_the_changes_the_chosen_target_makes() -> None:
+    """F2: the estimate is built from the drawer's own diff rows, so it prices what the chosen target
+    changes (not a key your policy locks or one already set) and is redrawn with each diff."""
+    source = _app_js()
+    detail = re.sub(r"\s+", " ", _function_source(source, "renderProfileDetail"))
+    assert "estimator.show(data);" in detail
+    assert "renderProfileDiff(data, box, estimator.log);" in detail
+    estimate = _function_source(source, "renderProfileEstimate")
+    assert "p.agents" not in estimate and "p.settings" not in estimate
+    assert "profileChangeFromDiff(diff)" in estimate
+    assert "if (mine !== ticket) return;" in estimate
+    assert "if (logged || !request) return;" in estimate and "log: true" in estimate
+    assert (
+        'container.insertBefore(el("h3", { text: "Estimated effect" }), container.firstChild);' in estimate
+    )
+    change = re.sub(r"\s+", " ", _function_source(source, "profileChangeFromDiff"))
+    assert "if (row.managed || diffRowSame(row)) return;" in change
+    assert "change.settings.modelSettings[row.model]" in change

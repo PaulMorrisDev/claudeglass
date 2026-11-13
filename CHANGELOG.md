@@ -125,6 +125,11 @@ Capture and dashboard:
   target. Before, it named one agent, and `apply` refused the copy or
   dropped the change. Make such a copy again to get this.
   `GET /api/profiles/<id>` adds `own_agents`.
+- **The estimate beside a profile prices only what the chosen target
+  changes.** It is redrawn when you pick another target, and leaves out
+  settings your policy locks and values already set. Before, it priced
+  the agent that writes code where no agent file changes, and copying the
+  prompt logged that estimate. Its "Estimated effect" heading shows again.
 
 Cards and checks:
 

@@ -101,7 +101,10 @@ observed model (the model-swap table's own per-agent-type column) is
 Opus 5.5 or a Fable model: thinking can't be turned down on those
 models, so the lever has nothing to show for itself there (V26).
 
-Any other key says "not estimated" rather than guessing. Changes
+Any other key says "not estimated" rather than guessing. In a
+profile's drawer the estimate prices only what the chosen target
+changes: the rows of its diff, leaving out a key your policy locks or
+one already set to the value. Picking another target redraws it. Changes
 overlap, so a total of several rows is rough. Each profile's detail
 shows the same estimate.
 

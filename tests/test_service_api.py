@@ -8151,3 +8151,19 @@ def test_a_copy_made_with_start_from_applies_like_the_shipped_profile(server, tm
             (a.kind, a.path, a.new_bytes) for a in plans[1].actions if a.kind != "active_profile"
         ]
         assert plans[0].blocked == plans[1].blocked == ()
+
+
+def test_a_role_at_a_target_with_no_writer_gives_the_estimate_nothing_to_price(server):
+    """The diff at the user target lists no row for a project writer, so the estimate the page builds
+    from those rows asks /api/whatif about no agent (and logs none)."""
+    _seed_agents(server, {"builder": ("project", "Read, Edit")})
+    diff = server.get_json("/api/profiles/implementation-heavy/diff?scope=user")[1]["data"]
+    assert diff["agents"] == []
+    diff = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local&project=proj-a")[1]["data"]
+    assert {(r["agent"], r["setting"]) for r in diff["agents"]} == {
+        ("builder", "model"),
+        ("builder", "effort"),
+        ("builder", "maxTurns"),
+    }
+    # and the card route says what the profile itself holds, for the editor
+    assert server.get_json("/api/profiles/implementation-heavy")[1]["data"]["own_agents"] == {}
