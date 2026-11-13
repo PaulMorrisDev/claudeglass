@@ -398,5 +398,40 @@
         "rebuilt": 4
       }
     }
+  },
+  "outcomes": {
+    "landed": 9,
+    "short_export": 1,
+    "controls": {"judged": 6, "worse": 1},
+    "cards": [
+      {
+        "rule": "spawn-tools-list",
+        "agent": "custom",
+        "landed": 5,
+        "measured": 3,
+        "half_or_more": 2,
+        "too_little_data": 2,
+        "guard_holds": 3,
+        "guard_worse": 1,
+        "predicted_usd": 14.5,
+        "saved_usd": 9.25,
+        "lost_usd": 1.5
+      }
+    ],
+    "levers": [
+      {
+        "lever": "model",
+        "agent": "none",
+        "landed": 4,
+        "measured": 1,
+        "half_or_more": 1,
+        "too_little_data": 3,
+        "guard_holds": 1,
+        "guard_worse": 0,
+        "predicted_usd": 6.0,
+        "saved_usd": 4.75,
+        "lost_usd": 0.0
+      }
+    ]
   }
 }

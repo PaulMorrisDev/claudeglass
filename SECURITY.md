@@ -937,8 +937,9 @@ file and nothing else. Export also reads `<config-dir>/service.db`, read-only:
 your dashboard ratings and tip-card answers, as `report` does, the digests
 of the window's sessions whose transcripts were not found, which it
 counts like the rest, and what the dashboard kept of the recommendation
-cards it showed (its `card_marks` table); only counts and fixed words reach
-the file. Neither makes a network call. Export writes only
+cards it showed (its `card_marks` table) and the estimates it logged for
+profile changes (its `predictions` table); only counts, amounts and fixed words reach
+the file. The figure a saving was priced on does not. Neither makes a network call. Export writes only
 to the terminal or the single file `--out` names. The properties below are the
 ones the code enforces, not promises about intent:
 

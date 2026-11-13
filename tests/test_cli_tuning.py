@@ -624,6 +624,38 @@ def test_export_passes_the_dashboards_card_marks_and_the_exports_projects(world,
     assert json.loads(world.out.read_text(encoding="utf-8"))["cards"] == {"shown": 0, "rows": []}
 
 
+def test_export_passes_card_marks_and_predictions_to_the_outcomes_block(world, monkeypatch):
+    seen = []
+    real = tuning.build
+
+    def spy(*args, **kw):
+        seen.append(kw.get("outcomes"))
+        return real(*args, **kw)
+
+    rows, predictions = [], [{"id": "p1", "source": "whatif"}]
+    monkeypatch.setattr(cli, "_dashboard_card_marks", lambda config_dir: rows)
+    monkeypatch.setattr(cli, "_dashboard_predictions", lambda config_dir: predictions)
+    monkeypatch.setattr(tuning, "build", spy)
+    assert _export(world, "--out", str(world.out)) == 0
+    assert _export(world, "--project", "other-project", "--days", "365", "--out", str(world.out)) == 0
+    every, one = seen
+    assert every.card_rows is rows and every.predictions is predictions and every.every_project is True
+    assert every.folders == frozenset({"acme-secret-project", "other-project"})
+    assert one.card_rows is rows and one.predictions is predictions and one.every_project is False
+    assert one.folders == frozenset({"other-project"})
+    # A prediction that matches no change point is nothing landed.
+    assert json.loads(world.out.read_text(encoding="utf-8"))["outcomes"]["landed"] == 0
+
+
+def test_export_without_a_dashboard_store_has_no_outcomes_block(world, capsys):
+    assert not (world.config_dir / "service.db").exists()
+    assert _export(world, "--out", str(world.out)) == 0
+    capsys.readouterr()
+    doc = json.loads(world.out.read_text(encoding="utf-8"))
+    assert "outcomes" not in doc
+    assert "Fixes that landed" not in tuning.summary_text(doc)
+
+
 def test_export_without_a_dashboard_store_has_no_cards_block(world, capsys):
     assert not (world.config_dir / "service.db").exists()
     assert _export(world, "--out", str(world.out)) == 0
