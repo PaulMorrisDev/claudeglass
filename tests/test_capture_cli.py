@@ -625,6 +625,33 @@ def test_on_yes_connects_everything_and_a_second_run_changes_nothing(tmp_path):
     assert "already Essentials" in out and "already runs the capture hooks" in out
 
 
+def test_capture_on_takes_after(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "on", "--yes", "--after", "light")
+    assert rc == 0
+    assert load_config(config_dir=config_dir).capture.after == "light"
+    assert 'after = "light"' in (config_dir / "config.toml").read_text(encoding="utf-8")
+    # Saying stop writes it back, and a word that is neither is refused by the parser.
+    rc, out = _capture(config_dir, "on", "--yes", "--after", "stop")
+    assert load_config(config_dir=config_dir).capture.after == "stop"
+    with pytest.raises(SystemExit):
+        cli._make_parser().parse_args(["capture", "on", "--after", "never", "--config-dir", str(config_dir)])
+    # Without the flag the choice is left as it was.
+    _capture(config_dir, "on", "--yes", "--after", "light")
+    _capture(config_dir, "on", "--yes", "--sample", "50")
+    assert load_config(config_dir=config_dir).capture.after == "light"
+
+
+def test_status_says_a_light_sample_goes_on_after_the_end(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "essentials"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    assert "Metrics capture: Light sample (since 2020-01-01, 20% of sessions)" in out
+    assert "A light sample goes on" in out and "capture's notes, tags and signals have stopped" not in out
+
+
 def test_levels_up_and_down_sync_the_entries(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "on", "--yes")

@@ -785,6 +785,13 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         default=None,
         help="capture this share of sessions, in percent (each session is in or out for its whole length)",
     )
+    sub.add_argument(
+        "--after",
+        choices=capture_catalogue.AFTER_CHOICES,
+        default=None,
+        help="what happens when it ends: stop (the default), or keep a light sample: the kind, difficulty and size "
+        "of the work, and task changes, in 1 session in 5",
+    )
     sub.add_argument("--yes", action="store_true", help="make the changes without asking (they are still printed)")
     sub.add_argument(
         "--dry-run",
@@ -4438,7 +4445,13 @@ def _capture_status(
     stdout.write(f"Metrics capture: {capture_view.describe(capture)}\n")
     ids = capture.active_metrics()
     if capture.is_on:
-        if capture.expired():
+        if capture.light():
+            stdout.write(
+                "Its end time has passed, so full capture has stopped. A light sample goes on: Claude tags the kind, "
+                "difficulty and size of the work, and task changes, in 1 session in 5. "
+                "'claudeglass capture off' stops it; 'claudeglass capture on' starts full capture again.\n"
+            )
+        elif capture.expired():
             stdout.write(
                 "Its end time has passed, so capture's notes, tags and signals have stopped; coaching notes and the "
                 "feedback facts line, if you have them on, still run. 'claudeglass capture on' starts capture again.\n"
@@ -4646,6 +4659,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             changes["until"] = until
         if args.sample is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
             changes["sample"] = args.sample
+        if args.after is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
+            changes["after"] = args.after
     except ValueError as exc:
         stdout.write(f"{exc}\n")
         return 2
@@ -4698,8 +4713,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     if preview != current:
         if current.is_on and current.expired(now) and preview.is_on and not preview.expired(now):
             stdout.write("Its end time had passed, so this starts capture again for a new span.\n")
-        if capture_view.describe(current) != capture_view.describe(preview):
-            stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
+        if capture_view.describe(current, now) != capture_view.describe(preview, now):
+            stdout.write(f"Metrics capture: {capture_view.describe(current, now)} -> {capture_view.describe(preview, now)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":
             stdout.write(
                 "Deep also turns on the /cg-feedback survey with its facts line, the plan check, and Claude's "
@@ -4758,7 +4773,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             # the dashboard's route does, so the mod hears of it within its settings reload.
             mod_settings_mod.refresh_coaching(config_dir)
     elif action != "connect":
-        stdout.write(f"Metrics capture is already {capture_view.describe(current)}.\n")
+        stdout.write(f"Metrics capture is already {capture_view.describe(current, now)}.\n")
 
     skill_on = "feedback_skill" in preview.feedback
     brief_on = "brief_templates" in preview.coaching

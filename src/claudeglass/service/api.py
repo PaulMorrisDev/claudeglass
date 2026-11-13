@@ -1952,9 +1952,9 @@ def make_handler(
         if not isinstance(body, dict) or not body:
             return None, (
                 "request body must be a JSON object with one or more of: level, metrics, sample, until, feedback, "
-                "coaching, tagger"
+                "coaching, tagger, after"
             )
-        allowed = ("level", "metrics", "sample", "until", "feedback", "coaching", "tagger")
+        allowed = ("level", "metrics", "sample", "until", "feedback", "coaching", "tagger", "after")
         unknown = sorted(set(body) - set(allowed))
         if unknown:
             return None, f"unknown key {', '.join(unknown)}; allowed: {', '.join(allowed)}"
@@ -2002,6 +2002,10 @@ def make_handler(
             if body["tagger"] not in capture_catalogue.TAGGERS:
                 return None, f"'tagger' must be one of: {', '.join(capture_catalogue.TAGGERS)}"
             changes["tagger"] = body["tagger"]
+        if "after" in body:
+            if body["after"] not in capture_catalogue.AFTER_CHOICES:
+                return None, f"'after' must be one of: {', '.join(capture_catalogue.AFTER_CHOICES)}"
+            changes["after"] = body["after"]
         return changes, None
 
     def route_capture_post(store, query, body):
