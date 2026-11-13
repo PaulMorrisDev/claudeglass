@@ -2757,14 +2757,28 @@ def _capture_checks(ctx: _Ctx) -> dict | None:
         block["breaks"] = {"cycles": len(breaks), "reused": sum(answer.reused for answer in breaks)}
         if by_prior:
             block["breaks"]["prior"] = by_prior
+    levels = catalogue.TAG_VOCAB["level"]
     parts = {
-        "check": capture_checks_mod.redone_by_check(h.cycles),
-        "level": capture_checks_mod.pieces_by_level(h.work_pieces),
-        "level_effort": capture_checks_mod.level_by_effort(h.work_pieces, ctx.cycles_by_id),
-        "level_family": capture_checks_mod.level_by_family(h.work_pieces, ctx.cycles_by_id),
+        "check": _in_order(capture_checks_mod.redone_by_check(h.cycles), catalogue.TAG_VOCAB["check"]),
+        "level": _in_order(capture_checks_mod.pieces_by_level(h.work_pieces), levels),
+        "level_effort": _in_order(
+            capture_checks_mod.level_by_effort(h.work_pieces, ctx.cycles_by_id),
+            levels,
+            lambda row: _in_order(row, capture_checks_mod.EFFORTS),
+        ),
+        "level_family": _in_order(
+            capture_checks_mod.level_by_family(h.work_pieces, ctx.cycles_by_id),
+            levels,
+            lambda row: _in_order(row, capture_checks_mod.FAMILIES),
+        ),
     }
     block.update({name: part for name, part in parts.items() if part})
     return block or None
+
+
+def _in_order(found: dict, words: tuple[str, ...], inner: Callable[[dict], dict] = lambda row: row) -> dict:
+    """``found`` in the order of ``words``, each row put through ``inner``, so a file reads the same way twice."""
+    return {word: inner(found[word]) for word in words if word in found}
 
 
 def _break_answers(ctx: _Ctx) -> list:

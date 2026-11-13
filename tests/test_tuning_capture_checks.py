@@ -233,6 +233,11 @@ def test_the_reference_figures(monkeypatch):
         "normal": {"opus": {"pieces": 4, "reworked": 0}},
         "hard": {"opus": {"pieces": 13, "reworked": 6}, "fable": {"pieces": 1, "reworked": 0}},
     }
+    # Every map is written in the order of its closed list, so two files of one machine read alike.
+    assert list(block["check"]) == ["targeted", "full", "run", "manual", "none"]
+    assert list(block["level"]) == ["easy", "normal", "hard"] == list(block["level_family"])
+    assert list(block["level_effort"]["easy"]) == ["medium", "xhigh"]
+    assert list(block["level_family"]["easy"]) == ["sonnet", "opus"]
     assert block["lost"] == {
         "cycles": 70, "evidence": 35, "yes": {"answers": 0, "evidence": 0}, "no": {"answers": 0, "evidence": 0},
     }  # fmt: skip
