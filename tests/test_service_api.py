@@ -6806,33 +6806,16 @@ def test_the_silent_line_leaves_out_sessions_the_mod_ran_in_on_a_surface_that_dr
         handle.store.close()
 
 
-def test_the_silent_line_reads_only_the_mod_events_near_the_window(tmp_path, monkeypatch):
-    """The window is the replay's days; an event from before the day ahead of it is not read."""
-    from claudeglass import capture as capture_mod
-
+def test_a_session_the_mod_joined_long_before_the_window_is_still_a_mod_session(tmp_path, monkeypatch):
+    """The mod's ``present`` event for a session still in use can be older than the replay's days: it is read
+    whatever its age, so the session's moments in the window are the mod's to show and make no silent line."""
     handle, _settings = _silent_line_server(tmp_path, monkeypatch, {"now": _hooks_ok})
-    asked = []
-    real = Store.read_mod_events
-
-    def read(self, **kwargs):
-        rows = real(self, **kwargs)
-        asked.append((kwargs, [row["session_id"] for row in rows]))
-        return rows
-
-    monkeypatch.setattr(Store, "read_mod_events", read)
     try:
-        now = datetime.now(timezone.utc).replace(microsecond=0)
-
-        def present(at):
-            return {"ts": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "present", "surface": "desktop"}
-
-        assert handle.store.replace_mod_events("session-old", [present(now - timedelta(days=capture_mod.HISTORY_DAYS + 5))]) == 1
-        assert handle.store.replace_mod_events("session-new", [present(now - timedelta(hours=3))]) == 1
-        _silent_note(handle)
-        reads = [rows for kwargs, rows in asked if kwargs.get("since")]
-        assert reads and all(rows == ["session-new"] for rows in reads)
-        since = datetime.strptime(asked[-1][0]["since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        assert abs((now - since) - timedelta(days=capture_mod.HISTORY_DAYS + 1)) < timedelta(minutes=5)
+        joined = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=20)
+        for session in ("session-a", "session-b"):
+            event = {"ts": joined.strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "present", "surface": "terminal"}
+            assert handle.store.replace_mod_events(session, [event]) == 1
+        assert _silent_note(handle) is None
     finally:
         handle.close()
         handle.store.close()
