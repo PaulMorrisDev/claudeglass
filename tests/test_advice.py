@@ -6,6 +6,8 @@ from __future__ import annotations
 import itertools
 import re
 
+import pytest
+
 from claudeglass import advice, fixes, known_savers
 from claudeglass.model import (
     Column,
@@ -15,6 +17,7 @@ from claudeglass.model import (
     ReportMeta,
     ReportModel,
     Section,
+    SettingChange,
     Table,
 )
 from claudeglass.snapshots import Snapshot
@@ -1127,3 +1130,54 @@ def test_plan_rounds_without_numbers_says_it_without_counts():
     (card,) = advice.finish([rec], _model_swap_report([]), None, Units())
     assert card.why.startswith("You often send a plan back before you approve it")
     assert fixes.CRITIQUE_PLAN_LINE in card.action
+
+
+def test_a_plugin_agent_is_left_out_of_the_model_card():
+    plugin = "pr-review-toolkit:code-reviewer"
+    report = _model_swap_report(
+        [
+            [plugin, "claude-opus-5-5", "claude-sonnet-5-5", 30.0],
+            ["implementer", "claude-opus-5-5", "claude-sonnet-5-5", 20.0],
+        ]
+    )
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {"implementer": {"source": "user"}}})
+    out = advice.finish([_tier(plugin, scope="repo"), _tier("implementer", scope="repo")], report, snap, Units())
+    fixes.attach_fixes(out)
+    (card,) = [r for r in out if r.id == "model-tier"]
+    assert [(c.agent, c.value) for c in card.changes] == [("implementer", "sonnet")]
+    assert card.why.endswith(" pr-review-toolkit:code-reviewer is left out: its plugin sets its model.")
+    assert ":" not in str(fixes.project_prompt(out)["files"])
+
+
+def _plugin_file_change(rec_id: str, agent: str):
+    key, value = {
+        "spawn-tools-list": ("tools", ["Read"]),
+        "spawn-claude-md": ("omitClaudeMd", True),
+        "spawn-unused-skills": ("disallowedTools", ["Skill"]),
+        "spawn-unused-mcp": ("disallowedTools", ["mcp__a"]),
+    }.get(rec_id, (None, None))
+    if key is None:
+        return []
+    return [SettingChange(target="agent", key=key, agent=agent, value=value)]
+
+
+@pytest.mark.parametrize("rec_id", sorted(fixes.PLUGIN_AGENT_FILE_CARDS))
+def test_a_card_that_edits_a_plugin_agents_file_is_information_only(rec_id):
+    agent = "pr-review-toolkit:code-reviewer"
+    rec = Recommendation(
+        id=rec_id,
+        severity="advice",
+        category="settings",
+        title="t",
+        agent_type=agent,
+        changes=_plugin_file_change(rec_id, agent),
+    )
+    (rec,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    fixes.attach_fixes([rec])
+    assert rec.severity == "info"
+    assert rec.changes == []
+    assert rec.fixes == []
+    assert rec.action == (
+        "pr-review-toolkit:code-reviewer comes from the pr-review-toolkit plugin. Its file belongs to the "
+        "plugin, and the plugin's next update would replace any edit to it."
+    )

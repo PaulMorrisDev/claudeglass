@@ -178,6 +178,10 @@ Cards and checks:
   from their own card, so pasting the prompt no longer makes them lasting.
   The note beside the button says so, and the prompt says when a file it
   edits is read in every project.
+- **A plugin's agent no longer gets a fix for a file that cannot exist.**
+  Its file belongs to the plugin, so a card that would edit it is shown
+  for information only, the model card leaves it out, and no prompt names
+  a path under ~/.claude/agents for it.
 
 Coaching:
 

@@ -1542,3 +1542,11 @@ def test_a_tool_the_deny_line_withholds_is_not_said_to_be_missing_from_the_tools
     _recs_mixed, card = _tools_card_for(line=["Read", "Skill", "WebFetch", "NotebookEdit"], denied="Bash")
     assert " Bash is on its disallowedTools line, so it isn't added." in card.action
     assert " Grep isn't on its tools line, so it isn't added." in card.action
+
+
+def test_a_plugin_agents_tools_card_is_information_only():
+    acc = _diet_acc("pr-review-toolkit:code-reviewer", spawns=20, uses={"Read": 20, "Grep": 20})
+    recs = _recs(_report(acc), snapshot=_snapshot({}), units=Units())
+    rec = _tools_rec(recs, "pr-review-toolkit:code-reviewer")
+    assert rec.severity == "info" and rec.changes == [] and rec.fixes == []
+    assert fixes.project_prompt([rec])["left_out"]["info"] == 1

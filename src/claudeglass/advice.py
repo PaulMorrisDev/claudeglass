@@ -50,7 +50,7 @@ from datetime import date
 from typing import Callable
 
 from . import cost_centres, known_savers, model_gate, model_swap, whatif
-from .fixes import CRITIQUE_PLAN_LINE, already_set
+from .fixes import CRITIQUE_PLAN_LINE, PLUGIN_AGENT_FILE_CARDS, already_set, plugin_of
 from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
@@ -261,10 +261,15 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
     # it gets a card of its own, ranked after every other advice card
     # (finish's sort); subagents share the merged card.
     left_out: dict[bool, list[tuple[str, str]]] = {True: [], False: []}
+    #: A plugin's agents: their model is set in the plugin's own file.
+    plugins: dict[bool, list[str]] = {True: [], False: []}
     rows = []
     for rec in tier:
         agent = rec.agent_type or "top-level"
         if agent in NOT_OVERRIDABLE:
+            continue
+        if plugin_of(agent):
+            plugins[agent == "top-level"].append(agent)
             continue
         alt = ctx.cell("model_swap", "model_swap_by_agent_type", agent, "best_cheaper_alternative_model")
         saving = ctx.cell("model_swap", "model_swap_by_agent_type", agent, "saving_usd")
@@ -310,7 +315,15 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
     agent_rows = [r for r in rows if r[1] != "top-level"]
     out = list(rest)
     if agent_rows:
-        out.append(_agent_tier_card(agent_rows, left_out[False], tier, ctx))
+        card = _agent_tier_card(agent_rows, left_out[False], tier, ctx)
+        if plugins[False]:
+            names = plugins[False]
+            one = len(names) == 1
+            card.why += (
+                f" {_listed(names)} {'is' if one else 'are'} left out: {'its' if one else 'their'} plugin sets "
+                f"{'its' if one else 'their'} model."
+            )
+        out.append(card)
     if main_rows:
         out.append(_main_tier_card(main_rows[0], left_out[True], ctx))
     return out
@@ -1538,6 +1551,28 @@ _SEVERITY_ORDER = {"action": 0, "advice": 1, "info": 2}
 _LAST_IN_GROUP = frozenset({"model-tier-main"})
 
 
+def _plugin_agent_info(rec: Recommendation) -> None:
+    """A card whose only fix edits a plugin agent's own file is information
+    only: that file is the plugin's, and its next update replaces any edit.
+    A card for how the main session uses the agent keeps its fix, with no
+    agent file named (run-split's ``plugin-agent`` prompt)."""
+    plugin = plugin_of(rec.agent_type)
+    if plugin is None:
+        return
+    if rec.id == "run-split" and not rec.variant:
+        rec.variant = "plugin-agent"
+        return
+    if rec.id not in PLUGIN_AGENT_FILE_CARDS:
+        return
+    rec.severity = "info"
+    rec.changes = []
+    rec.lever = None
+    rec.action = (
+        f"{rec.agent_type} comes from the {plugin} plugin. Its file belongs to the plugin, and the plugin's "
+        "next update would replace any edit to it."
+    )
+
+
 def finish(
     recs: list[Recommendation], report: ReportModel, snapshot: Snapshot | None, units: Units | None
 ) -> list[Recommendation]:
@@ -1552,6 +1587,7 @@ def finish(
         explain = _EXPLAIN.get(rec.id)
         if explain is not None:
             explain(rec, ctx)
+        _plugin_agent_info(rec)
         if rec.scope == "managed" and rec.changes and "administrator" not in rec.action:
             rec.action += " Your organisation's managed settings set this, so only your administrator can change it."
     recs = _drop_applied(recs)

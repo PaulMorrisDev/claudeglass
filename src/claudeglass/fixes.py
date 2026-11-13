@@ -475,6 +475,15 @@ _WORKFLOW_PROMPTS = {
         "session. Show me the diff before saving. Claude Code will ask my permission before editing files under "
         ".claude."
     ),
+    # A plugin's agent: its file is the plugin's, so no line in it is proposed.
+    "run-split:plugin-agent": (
+        "My {agent} runs get long, and every later reply reads again all the run has read. Please add a short "
+        "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
+        "is large, give it one part per run, and start a fresh {agent} for the next part with a short note of "
+        "what's done, what's left and the files involved, rather than one long run. "
+        "Show me the diff before saving. Claude Code will ask my permission before editing files under "
+        ".claude."
+    ),
     "run-split": (
         "My {agent} runs get long, and every later reply reads again all the run has read. Please add a short "
         "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
@@ -959,6 +968,30 @@ def _model_family(model_id: str) -> str:
     return model_id
 
 
+def plugin_of(agent_type: object) -> str | None:
+    """The plugin an agent type comes from, or ``None``. Claude Code names a
+    plugin's agents ``<plugin>:<name>``, and no other agent name may hold a
+    colon (sub-agents docs)."""
+    if isinstance(agent_type, str) and ":" in agent_type:
+        return agent_type.split(":", 1)[0] or None
+    return None
+
+
+#: Cards whose only fix edits the agent's own file. A plugin's agent has no
+#: file of the user's own, so for one of these the card is information only.
+PLUGIN_AGENT_FILE_CARDS = frozenset(
+    {
+        "spawn-tools-list",
+        "spawn-claude-md",
+        "spawn-unused-skills",
+        "spawn-unused-mcp",
+        "spawn-cost",
+        "agent-report-size",
+        "ttl-switch",
+    }
+)
+
+
 def already_set(key: str, value, now) -> bool:
     """Whether ``now`` already is ``value``, so offering the change would
     do nothing. A model id matches its family's alias ("claude-sonnet-5"
@@ -1368,6 +1401,8 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     block rather than printing an empty one. When ``rec.why`` is set, the
     explainer's first row is "Why it's suggested": ``rec.why``.
     """
+    if rec.id in PLUGIN_AGENT_FILE_CARDS and plugin_of(rec.agent_type):
+        return []
     if rec.changes:
         return [build_fix(rec, change) for change in rec.changes]
     variant_id = f"{rec.id}:{rec.variant}" if rec.variant else rec.id
@@ -1474,7 +1509,8 @@ def fix_group(rec: Recommendation, change: SettingChange | None) -> tuple[str | 
     if _NOTE_OVERRIDES.get(rec.id) == "scope":
         return "CLAUDE.md (Claude asks which)", "rule"
     label = _FIX_FILE.get(variant_id, _FIX_FILE.get(rec.id))
-    if label is None:
+    if label is None or ("{agent}" in label and plugin_of(rec.agent_type)):
+        # A plugin agent's file is the plugin's: no header names it.
         return "Other", "none"
     return label.format(agent=rec.agent_type or "this agent"), _FIX_KIND.get(variant_id, _FIX_KIND.get(rec.id, "file"))
 
@@ -1633,6 +1669,7 @@ def attach_fixes(recommendations: list[Recommendation]) -> None:
 __all__ = [
     "AGENT_FILE_ELSEWHERE",
     "LEVER_LABELS",
+    "PLUGIN_AGENT_FILE_CARDS",
     "PROFILE_SCOPE_WHERE",
     "PROMPT_RESTART",
     "PROMPT_SCOPE",
@@ -1648,6 +1685,7 @@ __all__ = [
     "fix_file",
     "fix_group",
     "fix_note",
+    "plugin_of",
     "profile_change_where",
     "profile_overridden_by",
     "profile_prompt",

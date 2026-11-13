@@ -2573,6 +2573,8 @@ The dashboard never changes your Claude Code settings. Each change comes
 with the prompt and, for a plain setting, the command. The command's
 `--dry-run` shows the diff first, and a real run prints how to undo it.
 
+A plugin's agent (`plugin:agent`) has no file of yours, so a card that would edit its file is information only, and the model card leaves it out.
+
 Rules implemented today, in the order they run. From `recommend.py`'s
 own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `notification-invalidation`, `batch-instructions`, `subagent-volume`,

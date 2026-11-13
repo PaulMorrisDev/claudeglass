@@ -1077,3 +1077,42 @@ def test_the_bundle_says_a_file_under_home_claude_reaches_every_project():
     )
     repo = _bundle_rec("r", [SettingChange(key="autoCompactWindow", value=200000, scope="repo")], rec_id="compaction-window")
     assert fixes.project_prompt([repo])["prompt"].split("\n\n")[0] == fixes._BUNDLE_OPEN
+
+
+def test_a_plugin_agent_is_named_by_its_plugin():
+    from claudeglass import fixes as fixes_mod
+
+    assert fixes_mod.plugin_of("pr-review-toolkit:code-reviewer") == "pr-review-toolkit"
+    assert fixes_mod.plugin_of("my-plugin:review:security") == "my-plugin"
+    assert fixes_mod.plugin_of("implementer") is None
+    assert fixes_mod.plugin_of(None) is None
+    assert fixes_mod.plugin_of(":x") is None
+
+
+def test_a_plugin_agents_volume_card_names_no_agent_file():
+    from claudeglass import fixes as fixes_mod
+
+    rec = _bundle_rec("v", rec_id="subagent-volume", agent_type="p:a")
+    assert fixes_mod.fix_group(rec, None) == ("Other", "none")
+
+
+def test_a_plugin_agents_run_split_prompt_names_no_agent_file():
+    from claudeglass import advice
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Diagnostics, PricingMeta, Recommendation, ReportMeta, ReportModel
+    from claudeglass.units import Units
+
+    report = ReportModel(
+        meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)), sections=[], diagnostics=Diagnostics(lines=1000)
+    )
+
+    def prompt(agent):
+        rec = Recommendation(
+            id="run-split", severity="advice", category="settings", title="t", why="Long runs.", agent_type=agent
+        )
+        (rec,) = advice.finish([rec], report, None, Units())
+        fixes_mod.attach_fixes([rec])
+        return rec.fixes[0]["prompt"]
+
+    assert "agents/" not in prompt("p:a")
+    assert ".claude/agents/implementer.md" in prompt("implementer")
