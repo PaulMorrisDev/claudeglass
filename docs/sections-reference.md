@@ -2643,7 +2643,9 @@ cites the cell it used:
   (`quick_actions._main_effort_already_set`). While the variable is set and
   no main-session effort card is open, the check offers no setting for the
   main session and says the variable decides
-  (`quick_actions._main_effort_left_to_env`).
+  (`quick_actions._main_effort_left_to_env`). Under a managed effort level
+  above medium and no effort card it says your administrator sets it
+  (`quick_actions._main_effort_left_to_managed`).
 - `spawn-claude-md` is held back when at least as many of an agent type's
   runs said they used CLAUDE.md as said they didn't (a tie holds it back),
   and cites the ones that didn't. With no runs that said, it still fires.

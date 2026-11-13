@@ -3352,3 +3352,63 @@ def test_the_compaction_checks_fix_says_a_models_own_window_wins_as_the_card_doe
 
     fix = _window_fix(tmp_path, {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}, {"modelSettings": "user"})
     assert f"claude-opus-5-5 has its own auto-compact window, which wins for it. {_OWN_WINDOW_STEP}" in fix["prompt"]
+
+
+# -- R4-1: the effort check while managed settings decide the main session's effort ----------------
+
+_LEFT_TO_MANAGED = (
+    "The main session spends {share} of its output thinking, but your organisation's managed settings set its "
+    "effort, so only your administrator can change it."
+)
+_MANAGED_HIGH = dict(effective={"effortLevel": "high"}, effective_provenance={"effortLevel": "managed"})
+
+
+def test_the_effort_check_says_your_administrator_sets_it_under_a_managed_level_and_no_card(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    assert not [r for r in model.recommendations if r.id == "effort-mismatch"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, **_MANAGED_HIGH))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == _LEFT_TO_MANAGED.format(share="40%")
+    assert "No agent spends more than" not in result["summary"]
+
+
+def test_the_effort_check_keeps_another_agents_fix_and_adds_the_managed_sentence(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    _with_reviewer_over_the_bar(model)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective_agents={"reviewer": {}}, **_MANAGED_HIGH))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["reviewer: effort medium"]
+    assert [f for f in result["fixes"] if f.get("agent") is None] == []
+    assert result["summary"].endswith(" " + _LEFT_TO_MANAGED.format(share="40%"))
+
+
+def test_an_open_managed_effort_card_keeps_its_fix_and_the_check_adds_no_managed_sentence(tmp_path):
+    """Guard (passes before and after): the card already carries the administrator request as its fix."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(changes=[
+        SettingChange(target="settings", key="effortLevel", value="medium", current="high", scope="managed")
+    ])]
+    result = qa.run("effort", _ctx(tmp_path, model=model, **_MANAGED_HIGH))
+    assert [f for f in result["fixes"] if f.get("card") == "effort-mismatch"]
+    assert "managed settings set its effort" not in result["summary"]
+
+
+def test_the_variables_sentence_shows_not_the_managed_one_while_the_variable_is_set_too(tmp_path):
+    """Guard (passes before and after): the two sentences never both show."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True, **_MANAGED_HIGH))
+    assert result["summary"] == _LEFT_TO_ENV.format(share="40%")
+
+
+def test_a_managed_medium_is_already_set_and_the_check_adds_no_managed_sentence(tmp_path):
+    """Guard (passes before and after): a managed level that is already low or medium says so as it does today."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "medium"},
+                                   effective_provenance={"effortLevel": "managed"}))
+    assert qa._EFFORT_ALREADY_SET.format(level="medium", model="claude-opus-5-5") in result["summary"]
+    assert "managed settings set its effort" not in result["summary"]

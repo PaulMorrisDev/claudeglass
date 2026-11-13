@@ -721,10 +721,15 @@ def _effort(ctx: Context) -> dict:
     )
     already = _main_effort_already_set(ctx)
     left_to_env = _main_effort_left_to_env(ctx)
+    left_to_managed = _main_effort_left_to_managed(ctx)
     if not fixes:
         return _result(
             "ok",
-            " ".join(text for text in (_IGNORED_ONLY if draft["removed"] else "", already, left_to_env) if text)
+            " ".join(
+                text
+                for text in (_IGNORED_ONLY if draft["removed"] else "", already, left_to_env, left_to_managed)
+                if text
+            )
             or f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
             table=table,
         )
@@ -739,7 +744,8 @@ def _effort(ctx: Context) -> dict:
         + " Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
         "check {{page:changes}} after a few sessions."
         + (f" {already}" if already else "")
-        + (f" {left_to_env}" if left_to_env else ""),
+        + (f" {left_to_env}" if left_to_env else "")
+        + (f" {left_to_managed}" if left_to_managed else ""),
         table=table,
         fixes=fixes,
     )
@@ -755,6 +761,14 @@ _EFFORT_ALREADY_SET = (
 def _several_projects(ctx: Context) -> bool:
     """Whether the report covers more than one project (``snapshots.view_spans_projects``)."""
     return view_spans_projects(ctx.model)
+
+
+def _main_observed_model(tables) -> str | None:
+    """The model the main session ran on (the model_swap table's top-level row)."""
+    return next(
+        (r.get("observed_model") for r in tables.rows("model_swap", "model_swap_by_agent_type") if r.get("agent_type") == goals.TOP),
+        None,
+    )
 
 
 def _main_effort_already_set(ctx: Context) -> str:
@@ -773,10 +787,7 @@ def _main_effort_already_set(ctx: Context) -> str:
     recs = getattr(ctx.model, "recommendations", ()) or ()
     if any(rec.id == "effort-mismatch" and rec.variant == "env" for rec in recs):
         return ""
-    observed = next(
-        (r.get("observed_model") for r in tables.rows("model_swap", "model_swap_by_agent_type") if r.get("agent_type") == goals.TOP),
-        None,
-    )
+    observed = _main_observed_model(tables)
     level = goals.main_effort_in_force(ctx.effective, ctx.effective_provenance, observed)
     if level not in goals.EFFORT_DONE:
         return ""
@@ -808,6 +819,39 @@ def _main_effort_left_to_env(ctx: Context) -> str:
     if any(rec.id == "effort-mismatch" and not getattr(rec, "agent_type", None) for rec in recs):
         return ""
     return _MAIN_EFFORT_LEFT_TO_ENV.format(share=_pct(main.get("thinking_share")))
+
+
+#: What the effort check says when the main session thinks a lot and your
+#: organisation's managed settings, not a setting of yours, decide its effort.
+_MAIN_EFFORT_LEFT_TO_MANAGED = (
+    "The main session spends {share} of its output thinking, but your organisation's managed settings set its "
+    "effort, so only your administrator can change it."
+)
+
+
+def _main_effort_left_to_managed(ctx: Context) -> str:
+    """:data:`_MAIN_EFFORT_LEFT_TO_MANAGED` when the main session spent at
+    least ``goals.THINKING_PCT`` of its output thinking and a managed file
+    sets its effort above medium (``goals.main_effort_reading``), else
+    ``""``. Also ``""`` while CLAUDE_CODE_EFFORT_LEVEL is set (its own
+    sentence covers that) and when a main-session effort card is there: an
+    open one carries the administrator request as its fix, and an ignored
+    one means the person said no."""
+    if ctx.effort_level_env_set:
+        return ""
+    tables = whatif._Tables(ctx.model)
+    main = tables.row("agents", "topology_effort_by_agent_type", goals.TOP)
+    if main is None or (whatif._num(main.get("thinking_share")) or 0.0) < goals.THINKING_PCT:
+        return ""
+    level, layer, _decided_by = goals.main_effort_reading(
+        ctx.effective, ctx.effective_provenance, _main_observed_model(tables)
+    )
+    if level is None or level in goals.EFFORT_DONE or layer != "managed":
+        return ""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "effort-mismatch" and not getattr(rec, "agent_type", None) for rec in recs):
+        return ""
+    return _MAIN_EFFORT_LEFT_TO_MANAGED.format(share=_pct(main.get("thinking_share")))
 
 
 #: The replay keeps every real summary, so it can only test smaller windows.
