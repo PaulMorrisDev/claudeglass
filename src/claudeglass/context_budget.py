@@ -1663,7 +1663,7 @@ def _build_baseline_table(
             "Agents from plugins are part of the agent roster but not counted here; Claude Code's "
             "Custom agents category includes them. "
             "Memory files (est) adds the auto memory (MEMORY.md) the first calls carried to the "
-            "CLAUDE.md files and rules that load at the start. "
+            "CLAUDE.md files and project rules that load at the start. "
             "Rules with a paths: list and CLAUDE.md files in subfolders are left out. "
             "\"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
             "about them. It adds what keeping them cost, from the same per-server prices as the tool search "

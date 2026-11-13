@@ -5734,7 +5734,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "skills_listing_est": ("Skills list (est.)", "The list of skills Claude Code sent, estimated from its length."),
             "memory_files_est": (
                 "CLAUDE.md and rules (est.)",
-                "Your CLAUDE.md files and the rules that load at the start, estimated from file size, and the "
+                "Your CLAUDE.md files and project rules that load at the start, estimated from file size, and the "
                 "auto memory (MEMORY.md) the first replies carried. Rules with a paths: list and CLAUDE.md files "
                 "in subfolders load only when needed, so they are left out. A snapshot from before this version "
                 "counts every rule until a new session starts. Blank without a settings snapshot.",
@@ -5766,7 +5766,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "controllable_est": (
                 "What you can change (est.)",
-                "The skills list, the CLAUDE.md files and rules that load at the start, and the MCP tools of servers you can turn off, together. "
+                "The skills list, the CLAUDE.md files and project rules that load at the start, and the MCP tools of servers you can turn off, together. "
                 "The part of the first call a setting can shrink. Servers built into the desktop app are left out.",
             ),
             "system_prompt_est": (
