@@ -4096,6 +4096,34 @@ def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one()
     assert "if (overhead.capture && overhead.coaching)" in line
 
 
+def test_capture_page_offers_when_it_ends() -> None:
+    """The choice of what happens at the end sits under the end's select, shows only when an end is set, and
+    posts ``after`` (``capture on --after`` is the same choice)."""
+    controls = _function_source(_static_text("page-capture.js"), "renderCaptureControls")
+    assert 'var afterId = "capture-after";' in controls
+    assert 'el("label", { for: afterId, text: "When it ends" })' in controls
+    assert 'text: "Stop capturing"' in controls and 'text: "Keep a light sample"' in controls
+    assert 'value: "stop"' in controls and 'value: "light"' in controls
+    assert "if (config.until) {" in controls
+    assert "postCapture({ after: value }, container," in controls
+    assert '"Saved: capture stops at the end."' in controls
+    assert '"Saved: a light sample goes on after the end."' in controls
+    assert (
+        "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in 5."
+        in controls
+    )
+    assert (
+        "At the end, capture stops or keeps its light sample, and the banner says so. Your level stays set, "
+        "so picking a new end starts it again." in controls
+    )
+    assert (
+        "When you switch capture on, it ends by itself after \" + config.timebox_days + \" days. Once it's on, "
+        "you can pick another end here, or none, and whether a light sample goes on after it." in controls
+    )
+    # The old wording is gone.
+    assert "At the end, capture stops by itself" not in controls
+
+
 def test_capture_overhead_line_is_worded_as_capture_status_words_it() -> None:
     """``capture status`` prints ``capture_view.overhead_text``; the page
     composes the same sentences from the same fields."""

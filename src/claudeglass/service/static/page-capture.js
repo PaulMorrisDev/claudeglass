@@ -379,7 +379,7 @@ function renderCaptureControls(data, container) {
   var config = data.config || {};
   var block = captureBlock(container, "How much and for how long");
   if (!config.on) {
-    block.appendChild(el("p", { class: "notes", text: "When you switch capture on, it ends by itself after " + config.timebox_days + " days. Once it's on, you can pick another end here, or none." }));
+    block.appendChild(el("p", { class: "notes", text: "When you switch capture on, it ends by itself after " + config.timebox_days + " days. Once it's on, you can pick another end here, or none, and whether a light sample goes on after it." }));
     return;
   }
   var form = el("div", { class: "capture-controls" });
@@ -443,7 +443,23 @@ function renderCaptureControls(data, container) {
   form.appendChild(el("label", { for: endId, text: "Capture ends" }));
   form.appendChild(end);
   form.appendChild(el("p", { class: "notes", text: "A choice saves as soon as you pick it. The days count from when you pick, not from when capture started." }));
-  form.appendChild(el("p", { class: "notes", text: "At the end, capture stops by itself and the banner says so. Your level stays set, so picking a new end starts it again." }));
+  form.appendChild(el("p", { class: "notes", text: "At the end, capture stops or keeps its light sample, and the banner says so. Your level stays set, so picking a new end starts it again." }));
+
+  // What happens at the end only matters when there is an end.
+  if (config.until) {
+    var afterId = "capture-after";
+    var after = el("select", { id: afterId });
+    after.appendChild(el("option", { value: "stop", text: "Stop capturing" }));
+    after.appendChild(el("option", { value: "light", text: "Keep a light sample" }));
+    after.value = config.after === "light" ? "light" : "stop";
+    after.addEventListener("change", function () {
+      var value = after.value;
+      postCapture({ after: value }, container, value === "light" ? "Saved: a light sample goes on after the end." : "Saved: capture stops at the end.");
+    });
+    form.appendChild(el("label", { for: afterId, text: "When it ends" }));
+    form.appendChild(after);
+    form.appendChild(el("p", { class: "notes", text: "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in 5." }));
+  }
   block.appendChild(form);
 }
 
