@@ -14,7 +14,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture, capture_catalogue as cat, capture_view, hint_occasions, hook_health, measured
+from claudeglass import capture, capture_catalogue as cat, capture_view, hint_occasions, hook_health, jsonl, measured
 from claudeglass import prompt_shape, prompting, ratings
 from claudeglass.config import CaptureConfig, Config
 from claudeglass.corpus import load_corpus
@@ -128,6 +128,39 @@ def test_the_parser_flags_background_waiting_as_the_hook_reads_it(tmp_path):
             seen[expected] += 1
     # Both answers came up, so the comparison is not vacuous.
     assert seen[True] >= 3 and seen[False] >= 8
+
+
+@pytest.mark.parametrize("fillers", [3, 38, 40, 41, 42, 43, 46, 60])
+def test_a_background_launch_the_hook_can_no_longer_see_stops_counting(tmp_path, fillers):
+    """The hook reads the last 4 MB of a transcript: a launch that never got a notification (a dev server) lies
+    beyond it once enough was written since, and the typed line after that finds nothing waiting. The parser
+    counts bytes as it reads them, so it agrees with the hook's own reading of the same file, line for line."""
+    coaching = capture_hook.load_catalogue()["coaching"]
+    padding = [_reply(3 + i * 0.5, say="y" * 100_000) for i in range(fillers)]
+    lines = [*_started(LAUNCH_SHELL), *padding, _said("how is it going?", 3 + fillers * 0.5 + 1), _reply(3 + fillers * 0.5 + 2)]
+    result = _parse(tmp_path, lines)
+    through_the_question = lines[:-1]
+    path = tmp_path / "hook-view.jsonl"
+    write_jsonl(path, through_the_question)
+    seen_by_hook = capture_hook._background_pending(capture_hook._tail(str(path), capture_hook._COACH_PROMPT_TAIL_BYTES), coaching)
+    assert result.turns[-1].background_waiting is seen_by_hook
+    assert seen_by_hook is (fillers < 41.5)
+    typed = [e for e in result.events if e.kind.name == "HUMAN_TEXT"]
+    assert typed[-1].detail.get("waiting") is (True if seen_by_hook else None)
+
+
+def test_the_line_reader_counts_the_files_bytes_as_the_hook_would_seek_them(tmp_path):
+    path = tmp_path / "s.jsonl"
+    path.write_bytes(
+        b'{"type": "user", "text": "caf\xc3\xa9 \xe2\x82\xac"}\r\n\r\n   \n{not json}\n'
+        + b'{"a": 1}\n' + b"x" * 40 + b'\n{"b": 2}'
+    )
+    stats = jsonl.LineStats()
+    starts = []
+    for _no, _line in jsonl.iter_lines(path, stats=stats):
+        starts.append((stats.line_start, stats.bytes_read))
+    assert stats.bytes_read == path.stat().st_size
+    assert starts[0][0] == 0 and [b - a for a, b in starts] == [len(b'{"type": "user", "text": "caf\xc3\xa9 \xe2\x82\xac"}\r\n'), 9, 8]
 
 
 def test_a_typed_line_with_background_work_out_keeps_a_flag_and_no_words(tmp_path):

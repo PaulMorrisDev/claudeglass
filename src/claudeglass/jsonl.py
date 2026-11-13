@@ -36,12 +36,21 @@ class LineStats:
     Callers fold these into ``model.Diagnostics``: ``lines``,
     ``unparsable_lines``, ``truncated_final_line``, ``oversized_lines``
     (a WP1 addition to ``Diagnostics`` — see model.py's module docstring).
+
+    ``bytes_read`` is how far into the file the lines handled so far reach
+    and ``line_start`` where the latest one began: each line's text in UTF-8
+    plus the white space around it (one byte a character), blank, oversized
+    and unparsable lines included. It is the file's size to the byte for
+    ASCII white space and valid UTF-8, which is all the parser uses it for
+    (how far back the capture hook's 4 MB tail reaches).
     """
 
     lines: int = 0
     unparsable_lines: int = 0
     truncated_final_line: bool = False
     oversized_lines: int = 0
+    bytes_read: int = 0
+    line_start: int = 0
 
 
 def _windows_long_path(path: Path) -> str:
@@ -109,9 +118,13 @@ def _process_line(
     line_no: int, raw: str, stats: LineStats, *, is_last: bool
 ) -> tuple[int, dict] | None:
     text = raw.strip()
+    stats.line_start = stats.bytes_read
     if not text:
+        stats.bytes_read += len(raw)
         return None
-    if len(text.encode("utf-8")) > MAX_LINE_BYTES:
+    size = len(text.encode("utf-8"))
+    stats.bytes_read += size + len(raw) - len(text)
+    if size > MAX_LINE_BYTES:
         stats.oversized_lines += 1
         return None
     try:

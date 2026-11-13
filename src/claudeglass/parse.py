@@ -2441,22 +2441,41 @@ _TASK_NOTIFICATION_CALL_RE = re.compile(TASK_NOTIFICATION_CALL_PATTERN)
 class _BackgroundWatch:
     """Which background work is still out, in memory only: the calls whose
     tool result said the work went to the background, with no task
-    notification for the call since. ``capture_hook._background_pending``
-    line by line, with the hook's own helpers; a message you typed while
-    ``pending`` is not empty has ``Turn.background_waiting``."""
+    notification for the call since, each with where in the file its result
+    line began. ``capture_hook._background_pending`` line by line, with the
+    hook's own helpers; a message you typed while :meth:`waiting` has
+    ``Turn.background_waiting``.
 
-    pending: set[str] = field(default_factory=set)
+    The hook reads only the last ``capture_hook._COACH_PROMPT_TAIL_BYTES`` of
+    the file, so a launch that never got a notification (a dev server) stops
+    being seen once more than that lies between its line and the end of the
+    message: :meth:`waiting` drops it then. The distance is the file's bytes
+    as ``jsonl.LineStats`` counts them (exact for ASCII white space and valid
+    UTF-8), copied and replayed lines the parser skips included, as the hook
+    reads them too."""
 
-    def see(self, d: dict) -> None:
-        """One line of the transcript, in order. A subagent's own line is
-        not the session's work. A notification ends the wait for the calls
-        it names, or every wait when it names none."""
+    pending: dict[str, int] = field(default_factory=dict)
+
+    def waiting(self, end: int) -> bool:
+        """Whether a launch is still within the hook's tail of a message
+        whose line ends ``end`` bytes into the file. A launch beyond it never
+        comes back, so it is forgotten."""
+        floor = end - capture_hook._COACH_PROMPT_TAIL_BYTES
+        if self.pending and any(start < floor for start in self.pending.values()):
+            self.pending = {call: start for call, start in self.pending.items() if start >= floor}
+        return bool(self.pending)
+
+    def see(self, d: dict, start: int = 0) -> None:
+        """One line of the transcript, in order, which began ``start`` bytes
+        into the file. A subagent's own line is not the session's work. A
+        notification ends the wait for the calls it names, or every wait when
+        it names none."""
         if d.get("isSidechain"):
             return
         text = capture_hook._notification_text(d, TASK_NOTIFICATION_PREFIX)
         if text is not None:
             called = set(_TASK_NOTIFICATION_CALL_RE.findall(text))
-            self.pending = self.pending - called if called else set()
+            self.pending = {call: at for call, at in self.pending.items() if call not in called} if called else {}
             return
         if d.get("type") != "user":
             return
@@ -2466,7 +2485,7 @@ class _BackgroundWatch:
                 and block.get("type") == "tool_result"
                 and _BACKGROUND_LAUNCH_RE.search(capture_hook._result_head(block, BACKGROUND_SCAN_CHARS))
             ):
-                self.pending.add(str(block.get("tool_use_id") or ""))
+                self.pending[str(block.get("tool_use_id") or "")] = start
 
 
 def _denial_before(events: list[Event]) -> str | None:
@@ -3348,7 +3367,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         line_type = d.get("type")
         # Coaching-occasions addition: a typed line never changes what is
         # pending, so every line is seen before it is classified.
-        background.see(d)
+        background.see(d, line_stats.line_start)
 
         line_ts = d.get("timestamp")
         plan_watch.at =line_ts if isinstance(line_ts, str) else ""
@@ -3555,7 +3574,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                 event.detail["after"] = after
         elif event.kind in (EventKind.HUMAN_TEXT, EventKind.QUEUE_OPERATION) and event.detail.get("go"):
             plan_watch.approve()
-        if event.kind == EventKind.HUMAN_TEXT and background.pending:
+        if event.kind == EventKind.HUMAN_TEXT and background.waiting(line_stats.bytes_read):
             # Coaching-occasions addition (see model.py's module docstring):
             # a flag only, never the result text it was worked out from.
             event.detail["waiting"] = True
