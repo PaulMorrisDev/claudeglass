@@ -574,6 +574,56 @@ def test_capture_past_its_end_adds_nothing(tmp_path):
     assert _note(future, _start())
 
 
+ENDED = '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\n'
+BIG_READ = {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Read",
+            "tool_response": {"type": "text", "file": {"content": "x" * (cat.BIG_OUTPUT_TOKENS * 4)}}}
+
+
+def test_past_the_end_stop_asks_nothing(tmp_path):
+    # Today's behaviour, whether the key says stop or is missing (a config.toml from before it).
+    for name, body in {"missing": ENDED, "stop": ENDED + 'after = "stop"\n'}.items():
+        config_dir = _config(tmp_path / name, body)
+        for payload in (_start(), _start(source="compact"), _subagent(), BIG_READ,
+                        {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "prompt": "go on"}):
+            assert _note(config_dir, payload) == "", (name, payload["hook_event_name"])
+        assert HOOK._capture_for(_start(), {"capture": {"level": "deep", "until": "2020-01-01T00:00:00+00:00"}},
+                                 datetime.now(timezone.utc)) is None
+
+
+def test_past_the_end_a_light_sample_asks_four_keys_in_one_session_in_five(tmp_path):
+    assert (HOOK.LIGHT_METRICS, HOOK.LIGHT_SAMPLE) == (cat.LIGHT_METRICS, cat.LIGHT_SAMPLE) == (
+        ("task", "level", "size", "shift"), 20
+    )
+    light = _config(tmp_path / "light", ENDED + 'after = "light"\nfeedback = ["feedback_skill", "feedback_note", "plan_check"]\n')
+    expected = cat.note_text(cat.with_requirements(cat.LIGHT_METRICS), "main")
+    inside, outside = _session_id(20, inside=True), _session_id(20, inside=False)
+    note = _note(light, _start(inside))
+    assert note == expected
+    assert note.splitlines()[0] == "cg-cap v1 task,level,shift,size"
+    for key in ("task:", "level:", "size:", "shift:"):
+        assert any(line.startswith(key) for line in note.splitlines()), key
+    for key in ("brief:", "missing:", "plan:", "skill:", "prior:", "check:", "lost:"):
+        assert not any(line.startswith(key) for line in note.splitlines()), key
+    assert _note(light, _start(inside, source="compact")) == expected
+    assert _note(light, _start(outside)) == ""
+    # About one session in five is in, whatever the level it ran at.
+    inside_count = sum(HOOK.sampled_in(f"session-{n}", HOOK.LIGHT_SAMPLE) for n in range(1000))
+    assert 150 <= inside_count <= 250
+    # The sample the user chose still bounds it, and so do their projects; agents and large results get no note.
+    low = _config(tmp_path / "low", ENDED + 'after = "light"\nsample = 10\n')
+    between = next(f"session-{n}" for n in range(1000) if 10 <= int(hashlib.sha256(f"session-{n}".encode()).hexdigest()[:8], 16) % 100 < 20)
+    assert _note(low, _start(between)) == ""
+    skipped = _config(tmp_path / "skipped", ENDED + 'after = "light"\nprojects = ["!app"]\n')
+    assert _note(skipped, _start(inside)) == ""
+    assert _note(light, {**_subagent(inside)}) == "" and _note(light, {**BIG_READ, "session_id": inside}) == ""
+    # Capture off stays off whatever it was told to keep.
+    off = _config(tmp_path / "off", '[capture]\nlevel = "off"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n')
+    assert _note(off, _start(inside)) == ""
+    # A running capture is not a light sample.
+    running = _config(tmp_path / "running", '[capture]\nlevel = "deep"\nuntil = "2999-01-01"\nafter = "light"\n')
+    assert _note(running, _start(inside)) == cat.note_text(cat.level_metrics("deep"), "main")
+
+
 def test_a_large_tool_result_gets_a_one_line_note_at_deep(tmp_path):
     deep = _config(tmp_path / "deep", '[capture]\nlevel = "deep"\n')
     threshold = cat.BIG_OUTPUT_TOKENS * 4

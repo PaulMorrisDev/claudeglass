@@ -646,18 +646,39 @@ def log_payload_keys(config_dir: Path, payload: dict, scope: str) -> None:
     _write_json(path, seen)
 
 
+#: What a light sample keeps after the time-box (``[capture] after =
+#: "light"``): these metrics, in at most this percent of sessions
+#: (``capture_catalogue.LIGHT_METRICS``/``LIGHT_SAMPLE``, held to them by a
+#: test: the hook can't import the package).
+LIGHT_METRICS = ("task", "level", "size", "shift")
+LIGHT_SAMPLE = 20
+
+
 def _capture_for(payload: dict, config: dict, now: datetime) -> dict | None:
     """The ``[capture]`` table when capture applies to this hook call:
     on, not past its end, this session sampled in, and the project not
-    left out. ``None`` otherwise."""
+    left out. Past its end that is the light sample, when ``after`` says to
+    keep one: the table with only :data:`LIGHT_METRICS` on, in no more than
+    :data:`LIGHT_SAMPLE` percent of sessions and with no feedback item.
+    ``None`` otherwise."""
     capture = config.get("capture")
     if not isinstance(capture, dict) or capture.get("level", "off") == "off":
         return None
     until = capture.get("until") or ""
     if until:
         stop = _parse_time(until)
-        if stop is None or now >= stop:
+        if stop is None:
             return None
+        if now >= stop:
+            if capture.get("after") != "light":
+                return None
+            capture = {
+                **capture,
+                "level": "custom",
+                "metrics": list(LIGHT_METRICS),
+                "sample": min(int(capture.get("sample", 100)), LIGHT_SAMPLE),
+                "feedback": [],
+            }
     if not sampled_in(str(payload.get("session_id") or ""), int(capture.get("sample", 100))):
         return None
     cwd = project_dir(payload)
