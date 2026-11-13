@@ -3613,6 +3613,67 @@ def test_an_inferred_card_gets_no_date():
     assert "newest tag" not in item.evidence
 
 
+def _questions(days) -> list[CycleFact]:
+    """Messages that changed nothing, each tagged the way a Deep session tags them (no check)."""
+    tag = CaptureTag(task="chat", brief="clear", level="easy", size="xs", prior="none")
+    return [_cycle(day, tag=tag, changed=False) for day in days]
+
+
+def test_checks_are_not_old_while_every_message_that_could_be_asked_for_one_was_tagged():
+    # Five checked changes on 10-31, then a week of questions: a question is never asked for check.
+    days = [f"2026-11-0{n}" for n in range(1, 9)]
+    h = Habits(tz="UTC", cycles=[*(_cycle("2026-10-31", tag=CaptureTag(check="full")) for _ in range(5)),
+                                 *_questions(days)])
+    item = _by_key(habits.playbook(h))["targeted_checks"]
+    assert "newest tag" not in item.evidence
+    # A change on 11-08 that came back with no check is a message that should have had one.
+    h.cycles.append(_cycle("2026-11-08"))
+    item = _by_key(habits.playbook(h))["targeted_checks"]
+    assert item.evidence.endswith(TAG_AGE_LINE.format("2026-10-31"))
+
+
+def test_a_check_word_on_a_message_that_changed_nothing_is_not_the_newest_check_tag():
+    # Checked changes on 10-20, then a check=none on an unchanged message on 11-01 (old data has many).
+    h = Habits(tz="UTC", cycles=[
+        *(_cycle("2026-10-20", tag=CaptureTag(check="full")) for _ in range(5)),
+        _cycle("2026-11-01", tag=CaptureTag(check="none"), changed=False),
+        _cycle("2026-11-08"),
+    ])
+    item = _by_key(habits.playbook(h))["targeted_checks"]
+    assert item.evidence.endswith(TAG_AGE_LINE.format("2026-10-20"))
+    assert habits._newest_tag(h, item).date().isoformat() == "2026-10-20"
+
+
+def test_tool_output_is_not_old_while_no_large_result_came_after_its_newest_answer():
+    big = [("Read", habits.BIG_OUTPUT_TOKENS, 2.0)]
+    answered = [_cycle("2026-10-23", tag=CaptureTag(out="unneeded"), big_outputs=big) for _ in range(3)]
+    tagged = [_cycle(f"2026-11-0{n}", tag=CaptureTag(task="chat", level="easy")) for n in range(1, 9)]
+    h = Habits(tz="UTC", cycles=[*answered, *tagged])
+    assert "newest tag" not in _by_key(habits.playbook(h))["quiet_output"].evidence
+    # A large result on 11-08 that came back with no answer is one that should have had it.
+    h.cycles.append(_cycle("2026-11-08", big_outputs=big))
+    assert _by_key(habits.playbook(h))["quiet_output"].evidence.endswith(TAG_AGE_LINE.format("2026-10-23"))
+    # A large result from a shell command is not one the note asks about.
+    shell = Habits(tz="UTC", cycles=[*answered, *tagged, _cycle("2026-11-08", big_outputs=[("Bash", 9_000, 2.0)])])
+    assert "newest tag" not in _by_key(habits.playbook(shell))["quiet_output"].evidence
+
+
+def test_agent_verdicts_are_old_only_when_an_agent_run_since_has_none():
+    def day(d: str) -> datetime:
+        return datetime.fromisoformat(d).replace(tzinfo=timezone.utc)
+
+    def card(*runs) -> str:
+        agents = [*(_agent(ts=day("2026-10-23"), retry="brief") for _ in range(2)), *(_agent(ts=day(d)) for d in runs)]
+        cycles = [_cycle(f"2026-11-0{n}", tag=CaptureTag(task="chat")) for n in range(1, 9)]
+        return _by_key(habits.playbook(Habits(tz="UTC", cycles=cycles, agents=agents)))["better_briefs"].evidence
+
+    # Tagged every day, the last verdict on 10-23 and no agent run since: nothing was asked and left unanswered.
+    assert "newest tag" not in card()
+    # A run a day later with no verdict is within the week; ten days later it is a run that went unjudged.
+    assert "newest tag" not in card("2026-10-24")
+    assert card("2026-11-02").endswith(TAG_AGE_LINE.format("2026-10-23"))
+
+
 def _briefs_notes(h: Habits) -> list[str]:
     return _table(habits.section_from(h), "habits_briefs").notes
 

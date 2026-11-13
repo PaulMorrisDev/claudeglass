@@ -2989,28 +2989,53 @@ _BUILDERS = (
 def _newest_tag(h: Habits, item: Item) -> datetime | None:
     """When the newest tag behind ``item`` was written: the newest message
     whose tag holds a word for a key the card reads (:data:`ITEM_TAG_KEYS`),
-    or for ``better_briefs`` the newest agent run with a verdict. ``None``
-    when there is none, or the card reads no tags."""
+    or for ``better_briefs`` the newest agent run with a verdict. ``check``
+    counts only on a message that changed something, the only kind asked for
+    it (an older digest holds the word on others, rewritten to ``none``).
+    ``None`` when there is none, or the card reads no tags."""
     if item.key == "better_briefs":
         fields = [_AGENT_FACT_FIELDS.get(key, key) for key in AGENT_TAG_KEYS]
         return max((a.ts for a in h.agents if a.ts is not None and any(getattr(a, f) for f in fields)), default=None)
     keys = ITEM_TAG_KEYS.get(item.key, ())
     return max(
-        (c.ts for c in h.cycles if c.ts is not None and c.tag is not None and any(getattr(c.tag, k, None) for k in keys)),
+        (
+            c.ts for c in h.cycles
+            if c.ts is not None and c.tag is not None and (c.changed or "check" not in keys)
+            and any(getattr(c.tag, k, None) for k in keys)
+        ),
+        default=None,
+    )
+
+
+def _newest_asked(h: Habits, item: Item) -> datetime | None:
+    """The newest moment the card's key was asked for: a message that
+    changed something for ``check``, one with a large Read or web result
+    for ``out``, an agent run for ``better_briefs``, any message for the
+    rest. A tag is as old as that moment says, not as the newest message of
+    any kind: a question changes nothing and gets no ``check``."""
+    if item.key == "better_briefs":
+        return max((a.ts for a in h.agents if a.ts is not None), default=None)
+    keys = ITEM_TAG_KEYS.get(item.key, ())
+    return max(
+        (
+            c.ts for c in h.cycles
+            if c.ts is not None and (c.changed or "check" not in keys)
+            and ("out" not in keys or any(tool in catalogue.BIG_OUTPUT_TOOLS for tool, *_ in c.big_outputs))
+        ),
         default=None,
     )
 
 
 def _tag_age_line(h: Habits, item: Item) -> str:
     """For a card that rests on Claude's tags (``reported`` among its
-    sources): the date of its newest tag, once your newest message is
-    :data:`TAG_AGE_DAYS` days or more after it, as capture ends by itself.
-    ``""`` otherwise."""
+    sources): the date of its newest tag, once the newest message that would
+    have been asked for it (:func:`_newest_asked`) is :data:`TAG_AGE_DAYS`
+    days or more after it, as capture ends by itself. ``""`` otherwise,
+    including while capture asks and gets answers."""
     if "reported" not in item.sources:
         return ""
-    newest = _newest_tag(h, item)
-    latest = max((c.ts for c in h.cycles if c.ts is not None), default=None)
-    if newest is None or latest is None or latest - newest < timedelta(days=TAG_AGE_DAYS):
+    newest, asked = _newest_tag(h, item), _newest_asked(h, item)
+    if newest is None or asked is None or asked - newest < timedelta(days=TAG_AGE_DAYS):
         return ""
     return f"Claude's newest tag behind this is from {local_day(newest, h.tz)}. None of your messages since then has one."
 
