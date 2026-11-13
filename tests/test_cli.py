@@ -2395,6 +2395,12 @@ def test_set_builds_a_per_model_entry(tmp_path, capsys):
                      str(config_dir), "--claude-root", str(claude_root), "--dry-run"]) == 2
 
 
+def test_set_with_a_dot_in_the_model_id_reaches_the_schemas_message_about_the_id():
+    # the key is the last part, so a cloud-provider style id with a dot is read whole
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-4.5.effortLevel=low"], None)
+    assert err == "settings.modelSettings: model id 'claude-opus-4.5' must be letters, digits, '-', '_' or brackets"
+
+
 def test_cmd_apply_set_env_writes_the_settings_env_block(tmp_path, capsys):
     # COV-07/COV-11: apply --set env.NAME=value writes into the target
     # settings file's own "env" object, exactly like any other --set key
