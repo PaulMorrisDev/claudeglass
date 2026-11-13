@@ -197,7 +197,9 @@ Cards and checks:
   sets modelSettings.<model>.<key> for each.
 - **A main session on Mythos gets the main model card.** Mythos ranks with
   Fable, at whose prices the rate card lists it, so the card offers Opus and
-  the Models table no longer says the family is not recognised.
+  the Models table no longer says the family is not recognised. The capture
+  hook also counts a brief run again on Mythos after a smaller model as a
+  retry for the model.
 - **The project's one prompt for every open fix leaves out model changes.**
   The main session's model and an agent's model are for you to try first
   from their own card, so pasting the prompt no longer makes them lasting.

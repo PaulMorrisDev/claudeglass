@@ -721,6 +721,17 @@ def test_a_rerun_of_a_brief_on_a_higher_tier_is_a_retry_for_the_model_even_far_b
         assert record["agent"].split().count("retry=model") == 1 and "retry=brief" not in record["agent"]
 
 
+def test_a_rerun_on_mythos_after_sonnet_is_a_retry_for_the_model_and_after_fable_is_not():
+    """Mythos is priced as Fable, so the hook ranks it as Fable (workstyle._SAME_TIER_AS)."""
+    tiers = tuple(CATALOGUE["judge"]["agent"]["model_tiers"])
+    assert HOOK._model_tier("claude-mythos-5-2", tiers) == HOOK._model_tier("claude-fable-5-2", tiers) == 3
+    earlier_sonnet = [{"brief": "do x", "model": "claude-sonnet-5-5"}]
+    assert HOOK._derived_retry("do x", "claude-mythos-5-2", earlier_sonnet, tiers) is True
+    # The same tier is not a step up.
+    earlier_fable = [{"brief": "do x", "model": "claude-fable-5-2"}]
+    assert HOOK._derived_retry("do x", "claude-mythos-5-2", earlier_fable, tiers) is False
+
+
 @pytest.mark.parametrize("first, again, same_brief", [
     ("claude-sonnet-5", "claude-sonnet-5", True),   # the same tier again is not a step up
     ("claude-opus-4-7", "claude-sonnet-5", True),   # a lower tier is not either

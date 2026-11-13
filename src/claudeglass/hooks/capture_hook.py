@@ -4294,7 +4294,8 @@ def _session_records(path: str) -> list[dict]:
 def _model_tier(model: str, tiers) -> int:
     """The rank of ``model``'s family in ``tiers``, smallest first; -1 when
     it names none (``workstyle.model_tier``)."""
-    lowered = str(model).lower()
+    # Mythos is priced as Fable, so it ranks as Fable (workstyle._SAME_TIER_AS).
+    lowered = str(model).lower().replace("mythos", "fable")
     for rank, family in enumerate(tiers):
         if family in lowered:
             return rank
