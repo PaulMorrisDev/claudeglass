@@ -652,6 +652,27 @@ def test_status_says_a_light_sample_goes_on_after_the_end(tmp_path):
     assert "A light sample goes on" in out and "capture's notes, tags and signals have stopped" not in out
 
 
+def test_status_during_a_light_sample_lists_only_its_keys_and_their_size(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    assert "essentials: task, level, shift, size\n" in out
+    for left_out in ("brief", "prior", "check", "big_output", "session_end", "deep:", "free:"):
+        assert left_out not in out, left_out
+    # The size is the note and the tag of those four keys: no tool note and no agent judge.
+    assert "tokens of note when a session starts" in out and "tokens of tag at the end of each reply" in out
+    assert "large or web tool result" not in out and "subagent run" not in out
+    assert "hasn't judged an agent run" not in out
+    # Full capture, still running, lists everything it asks for.
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "deep"\nuntil = "2099-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, full = _capture(config_dir, "status")
+    assert "large or web tool result" in full and "big_output" in full
+
+
 def test_levels_up_and_down_sync_the_entries(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "on", "--yes")

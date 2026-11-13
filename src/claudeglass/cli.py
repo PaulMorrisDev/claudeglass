@@ -4365,6 +4365,14 @@ _HAIKU_ERRORS = {
 }
 
 
+def _running_metrics(capture: CaptureConfig) -> tuple[str, ...]:
+    """The metrics the hook asks for now: the level's, or only the light
+    sample's four keys once the end has passed and a light sample runs."""
+    if capture.light():
+        return capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
+    return capture.active_metrics()
+
+
 def _haiku_lines(
     capture: CaptureConfig, config_dir: Path, agent_replies: Callable[[], frozenset[str]] | None = None
 ) -> list[str]:
@@ -4394,7 +4402,7 @@ def _haiku_lines(
                 "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
                 "change, once the hook's Stop entry is in settings.json."
             )
-    elif capture.is_on and capture_catalogue.tagged_keys(capture.active_metrics()):
+    elif capture.is_on and capture_catalogue.tagged_keys(_running_metrics(capture)):
         done = haiku_tags.summary(
             config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER, agent_reply_ids=agent_ids
         )
@@ -4402,7 +4410,7 @@ def _haiku_lines(
             lines += _haiku_done_lines(done, "filled in", "missing tag", "No tag")
         else:
             lines.append("Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one.")
-    if capture.is_on and capture_catalogue.agent_metric_ids(capture.active_metrics()):
+    if capture.is_on and capture_catalogue.agent_metric_ids(_running_metrics(capture)):
         done = haiku_tags.summary(config_dir, since=since, kind="agent", agent_reply_ids=agent_ids)
         if done.calls:
             lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
@@ -4443,7 +4451,7 @@ def _capture_status(
     capture: CaptureConfig, *, config_dir: Path, claude_root: Path, stdout, args=None, config: Config | None = None
 ) -> int:
     stdout.write(f"Metrics capture: {capture_view.describe(capture)}\n")
-    ids = capture.active_metrics()
+    ids = _running_metrics(capture)
     if capture.is_on:
         if capture.light():
             stdout.write(
