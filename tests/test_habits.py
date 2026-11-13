@@ -2303,6 +2303,17 @@ def test_targeted_checks_prices_unchecked_redone_work_from_self_reports():
     assert item.sources == ("reported",)
 
 
+def test_targeted_checks_counts_only_messages_that_changed_something():
+    h = Habits(cycles=[
+        *(_cycle(tag=CaptureTag(check="full")) for _ in range(5)),
+        *(_cycle(tag=CaptureTag(check="manual"), changed=False) for _ in range(6)),
+    ])
+    # Five changed cycles ran the full suite; the six that changed nothing had nothing to check.
+    item = habits._item_targeted_checks(h)
+    assert item is not None
+    assert item.n == 5
+
+
 def test_targeted_checks_counts_a_test_command_as_derived_evidence_without_a_tag():
     h = Habits(cycles=[
         *(_cycle(tag=CaptureTag(check="none"), redone=True, redo_cost=2.0) for _ in range(3)),

@@ -2725,7 +2725,9 @@ def _item_targeted_checks(h: Habits) -> Item | None:
     # set ``classify_purpose`` uses) is evidence a message was checked
     # even without a ``[cg: check=...]`` tag, and stronger evidence than
     # one that contradicts it (said "none" but ran a test anyway).
-    reported_checked = [c for c in h.cycles if c.tag is not None and c.tag.check]
+    # A message that changed nothing was not asked for the word (and ``settle`` blanks it), so it is not
+    # counted: old data and new count alike.
+    reported_checked = [c for c in h.cycles if c.tag is not None and c.tag.check and c.changed]
     inferred_checked = [c for c in h.cycles if c.checked_by_tool]
     checked = list({id(c): c for c in (*reported_checked, *inferred_checked)}.values())
     if len(checked) < MIN_GROUP:
