@@ -146,7 +146,9 @@ Capture and dashboard:
   plugin's agent. Agent names in copied prompts are in quotes. A saved
   profile that breaks the rule is listed in Setup › Profiles with why
   and which file to fix or delete, and its card goes once the file is
-  deleted.
+  deleted. The snapshot hook now keeps agent names up to 128 characters,
+  so a writer with a name of 65 to 128 characters is no longer called
+  unusable.
 - **An id, model id or card key with a line break at its end is
   refused.** A profile id like that gave an error 500 on Windows.
 - **During a light sample, capture keeps the hook entry the plan check and

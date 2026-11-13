@@ -712,7 +712,7 @@ def _load_agents(agents_dir: Path, source: str) -> dict:
         parsed = parse_frontmatter(text)
         if not parsed:
             continue
-        name = _clip_name(parsed.get("name") or md_path.stem)
+        name = _clip_name(parsed.get("name") or md_path.stem, _MAX_AGENT_NAME_CHARS)
         entry = redact_agent_frontmatter(parsed)
         entry["source"] = source
         result[name] = entry
@@ -856,13 +856,20 @@ _NAME_LOOKS_LIKE_PATH_OR_URL_RE = re.compile(
 )
 
 
-def _clip_name(value: object) -> str:
+#: An agent's name is kept up to the longest name ClaudeGlass takes in
+#: (``profiles.schema.AGENT_NAME_MAX``), so the dashboard reads the same
+#: name ``apply`` finds in the agent's file. A longer one is cut like any
+#: other name, and the cut name fails that rule as the whole name does.
+_MAX_AGENT_NAME_CHARS = 128
+
+
+def _clip_name(value: object, cap: int = _MAX_NAME_CHARS) -> str:
     text = str(value)
     if _NAME_LOOKS_LIKE_PATH_OR_URL_RE.search(text):
         return f"<redacted path/url, str({len(text)})>"
-    if len(text) <= _MAX_NAME_CHARS:
+    if len(text) <= cap:
         return text
-    return text[: _MAX_NAME_CHARS - 3] + "..."
+    return text[: cap - 3] + "..."
 
 
 # -- schema 2: settings layers ------------------------------------------------
