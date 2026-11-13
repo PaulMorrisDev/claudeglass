@@ -1420,6 +1420,28 @@ def test_profile_diff_without_a_recorded_snapshot_lists_no_role_rows_and_does_no
         store.close()
 
 
+def test_a_snapshot_with_no_agents_map_is_treated_like_no_snapshot(server):
+    """A snapshot that records config but no ``agents`` list tells the
+    dashboard nothing of the user's agents, so the drawer must not claim
+    that none of them is a writer."""
+    server.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts="2026-10-05T12:00:00Z",
+        schema_version=2,
+        digest_json=json.dumps({"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "user"}}),
+    )
+    for scope in ("user", "repo"):
+        data = server.get_json(f"/api/profiles/implementation-heavy/diff?scope={scope}")[1]["data"]
+        assert data["agents"] == []
+        notes = [n for n in data["notes"] if "agent that writes code" in n]
+        assert notes == [
+            _WRITER_NOTE_HEAD + "Your agents have not been recorded yet, so no agent file is listed here."
+        ]
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    assert data["agents"] == {} and data["setting_count"] == 2
+
+
 def test_a_profile_with_no_roles_shows_no_agent_that_writes_code_note(server):
     _seed_agents(server, {"researcher": ("user", "Read")})
     for profile_id in ("interactive-chat", "overnight-batch", "discovery-scrape"):
