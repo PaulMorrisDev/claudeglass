@@ -3212,6 +3212,42 @@ def test_profile_route_returns_resolved_agents_and_counts(server):
     assert data["roles"] == {}
 
 
+def test_the_every_project_snapshot_is_built_once_per_store_change_and_project(server, monkeypatch):
+    """Reading and merging every stored snapshot takes tens of milliseconds
+    on a long-lived store, and the Setup page asks for it three times per
+    draw. It is kept per store change token and project filter, as the
+    routes around it keep their own parts."""
+    from claudeglass import snapshots as snapshots_mod
+
+    _seed_agents(server, _WORK_AGENTS)
+    real = snapshots_mod.with_every_project_agents
+    calls = []
+
+    def counting(snaps, canonical=None):
+        calls.append(len(snaps))
+        return real(snaps, canonical)
+
+    monkeypatch.setattr(snapshots_mod, "with_every_project_agents", counting)
+    for profile_id in ("implementation-heavy", "overseer-fanout", "workflow-ultracode", "implementation-heavy"):
+        data = server.get_json(f"/api/profiles/{profile_id}")[1]["data"]
+        assert sorted(data["agents"]) == ["implementer"]
+    assert len(calls) == 1
+    # the drawer's diff of the same project filter shares it; another project filter is its own
+    server.get_json("/api/profiles/implementation-heavy/diff")
+    assert len(calls) == 1
+    server.get_json("/api/profiles/implementation-heavy/diff?project=proj-a")
+    server.get_json("/api/profiles/implementation-heavy/diff?project=proj-a")
+    assert len(calls) == 2
+    # a snapshot lands: the next read builds again and sees it
+    _seed_agents(server, {"fixer": ("user", "Read, Edit")}, ts="2026-10-02T12:00:00Z")
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    assert sorted(data["agents"]) == ["fixer"]
+    assert len(calls) == 3
+    # a profile with no roles reads no snapshot at all
+    server.get_json("/api/profiles/interactive-chat")
+    assert len(calls) == 3
+
+
 def test_profile_route_without_a_recorded_snapshot_lists_no_role_keys(server):
     # the fixture's one snapshot records no agents
     data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]

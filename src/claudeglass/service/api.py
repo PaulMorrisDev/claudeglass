@@ -1200,18 +1200,37 @@ def make_handler(
                 return snapshot
         return snaps[-1] if snaps else None
 
+    #: project filter -> the snapshot built for it, all for one store
+    #: change token (see _config_snapshot_with_every_project_agents).
+    snapshot_parts: dict = {"token": None, "built": {}}
+
     def _config_snapshot_with_every_project_agents(project=None) -> Snapshot | None:
         """:func:`_latest_config_snapshot` with its agents widened to
         every project's latest snapshot (see
         ``snapshots.with_every_project_agents``), for the "now" value of
         an agent recorded in another project. With a ``project`` filter
         (its raw slugs), only that project's snapshots count, as the
-        report's own advice reads them (``report._settings_snapshots``)."""
+        report's own advice reads them (``report._settings_snapshots``).
+
+        Reading and merging every stored snapshot takes tens of
+        milliseconds on a long-lived store and the Setup page asks three
+        times per draw, so the one built is kept per store change token
+        and project filter, like the report (see _get_report_model): a
+        changed store builds it again. Callers only read it."""
+        token = store.change_token()
+        with report_lock:
+            if snapshot_parts["token"] == token and project in snapshot_parts["built"]:
+                return snapshot_parts["built"][project]
         snaps = _snapshots_from_store()
         if project:
             snaps = snapshots_mod.snapshots_for_projects(snaps, project)
         canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
-        return snapshots_mod.with_every_project_agents(snaps, canonical)
+        built = snapshots_mod.with_every_project_agents(snaps, canonical)
+        with report_lock:
+            if snapshot_parts["token"] != token:
+                snapshot_parts["token"], snapshot_parts["built"] = token, {}
+            snapshot_parts["built"][project] = built
+        return built
 
     def _build_report_model(
         window_days: int | None,
