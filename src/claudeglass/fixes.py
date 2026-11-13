@@ -1299,12 +1299,14 @@ def profile_overridden_by(
     3. ``settings.effortLevel`` while ``effort_env_set``
        (``CLAUDE_CODE_EFFORT_LEVEL``).
     4. ``settings.effortLevel`` while ``model_settings`` (the effective
-       ``modelSettings``) gives models an effort level of their own.
+       ``modelSettings``) gives models an effort level of their own, in the
+       target's file or a higher one (``provenance["modelSettings"]``): a
+       flat value in the target file beats an entry in a lower file.
     4b. ``settings.effortLevel`` at the user target, with none of the
        above: Opus 5.5 and later ignore it in user settings
        (:data:`USER_EFFORT_IGNORED`).
     5. ``settings.autoCompactWindow`` while ``model_settings`` gives models
-       an auto-compact window of their own.
+       an auto-compact window of their own, placed as in rule 4.
 
     Pure: the caller reads the snapshot."""
     from .profiles.apply import _SCOPE_LAYER
@@ -1335,6 +1337,10 @@ def profile_overridden_by(
     ):
         # N6: a higher file's flat effortLevel beats a lower file's per-model entry.
         return f"This project's {_OVERRIDING_PROJECT_FILE[flat_layer]} sets effortLevel, which wins over this model's own level."
+    # A model's own entry wins over the flat key only in the target's file or
+    # a higher one (R2-2); with a target that is no known layer, as before.
+    own_layer = provenance.get("modelSettings") or "user"
+    own_wins = target not in precedence or own_layer not in precedence or precedence[own_layer] <= precedence[target]
     if key == "model" and snapshots_mod.MODEL_ENV in env_names:
         return f"{snapshots_mod.MODEL_ENV} is set and wins over this setting."
     if (key == "autoCompactWindow" or own_key == "autoCompactWindow") and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
@@ -1348,7 +1354,7 @@ def profile_overridden_by(
         ids = sorted(
             str(model)
             for model, entry in (model_settings or {}).items()
-            if isinstance(entry, dict) and entry.get("effortLevel")
+            if own_wins and isinstance(entry, dict) and entry.get("effortLevel")
         )
         if len(ids) == 1:
             return f"{ids[0]} has its own effort level, which wins for it."
@@ -1360,7 +1366,7 @@ def profile_overridden_by(
         ids = sorted(
             str(model)
             for model, entry in (model_settings or {}).items()
-            if isinstance(entry, dict) and entry.get("autoCompactWindow") is not None
+            if own_wins and isinstance(entry, dict) and entry.get("autoCompactWindow") is not None
         )
         if len(ids) == 1:
             return f"{ids[0]} has its own auto-compact window, which wins for it."

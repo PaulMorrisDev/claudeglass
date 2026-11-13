@@ -138,7 +138,9 @@ or the generic marker:
   level." The apply preview lists such a row as overridden. A per-model
   `autoCompactWindow` row says `CLAUDE_CODE_AUTO_COMPACT_WINDOW` wins, as
   the flat key's row does; whether a higher file's flat window beats a
-  lower file's per-model one is not in the docs, so no row claims it.
+  lower file's per-model one is not in the docs, so no row claims it. A flat
+  row is called overridden by a model's own entry only when that entry is in
+  the target file or a higher one.
 
 `effective`/`effective_provenance` merge exactly this same key set
 (`SETTINGS_SUMMARY_KEYS`) across the four layers — a value there has

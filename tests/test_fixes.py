@@ -1345,3 +1345,31 @@ def test_a_models_own_window_row_says_the_window_variable_wins():
     assert profile_overridden_by(key, "user", {}, ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], False, None, True) == (
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
     )
+
+
+# -- R2-2: a flat row loses to a model's own entry only when that entry is in the target file or a higher one --
+
+
+def test_a_flat_row_is_not_called_overridden_by_a_models_own_entry_in_a_lower_file():
+    from claudeglass.fixes import profile_overridden_by
+
+    models = {"claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300000}}
+    provenance = {"effortLevel": "project_shared", "autoCompactWindow": "project_shared", "modelSettings": "user"}
+    for key in ("settings.effortLevel", "settings.autoCompactWindow"):
+        assert profile_overridden_by(key, "repo", provenance, [], False, models, False) is None, key
+        assert profile_overridden_by(key, "repo", provenance, [], False, models, True) is None, key
+
+
+def test_a_flat_row_is_still_called_overridden_by_a_models_own_entry_in_the_target_file_or_above():
+    """Guard (passes before and after)."""
+    from claudeglass.fixes import profile_overridden_by
+
+    models = {"claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300000}}
+    words = {
+        "settings.effortLevel": "claude-opus-5-5 has its own effort level, which wins for it.",
+        "settings.autoCompactWindow": "claude-opus-5-5 has its own auto-compact window, which wins for it.",
+    }
+    for key, sentence in words.items():
+        assert profile_overridden_by(key, "user", {"modelSettings": "user"}, [], False, models, True) == sentence, key
+        assert profile_overridden_by(key, "repo", {"modelSettings": "project_local"}, [], False, models, True) == sentence, key
+        assert profile_overridden_by(key, "repo", {"modelSettings": "project_shared"}, [], False, models, True) == sentence, key

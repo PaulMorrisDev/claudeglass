@@ -275,7 +275,8 @@ Cards and checks:
   and later ignore it there.** The diff row and the prompt suggest /effort
   on each model, or a project target, where it applies to every model.
   A model's own effortLevel row says when a project file's flat level wins
-  over it, and the apply preview lists it as overridden.
+  over it, and the apply preview lists it as overridden. A flat row is no
+  longer called overridden by a model's own entry in a lower file.
 
 Coaching:
 
