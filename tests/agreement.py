@@ -329,6 +329,7 @@ _OVERVIEW_FUNCTIONS = (
     ("page-overview.js", "usdOf"),
     ("page-overview.js", "combinedSaving"),
     ("page-overview.js", "agentModelItems"),
+    ("page-overview.js", "ignoredSavings"),
     ("page-overview.js", "availableSaving"),
 )
 
@@ -371,11 +372,15 @@ def overview_saving(inp: Inputs, recs: list, skip) -> float:
         row["ignored"] = rec.key in skip
         rows.append(row)
     preamble = _declaration("page-overview.js", "LEVER_RULES") + _declaration("page-overview.js", "AGENT_MODEL_RULES")
+    preamble += _declaration("page-overview.js", "LEVER_CARD")
     preamble += _declaration("page-actions.js", "RULE_AREA") + _declaration("ui.js", "SEVERITY_ORDER")
     preamble += 'var MAIN_AGENT = "top-level";\nvar WORKFLOW_AGENT = "workflow-subagent";\n'
     names = {"model_swap_by_agent_type"}
     tables = {t["name"]: t for t in (to_jsonable(t) for s in inp.model.sections for t in s.tables) if t["name"] in names}
-    expression = f"availableSaving([], groupRecommendations({json.dumps(rows)}), {json.dumps(tables)})"
+    expression = (
+        f"availableSaving([], groupRecommendations({json.dumps(rows)}), {json.dumps(tables)}, "
+        f"groupRecommendations({json.dumps(rows)}, {{ignored: true}}))"
+    )
     return float(run_node(list(_OVERVIEW_FUNCTIONS), expression, preamble=preamble))
 
 

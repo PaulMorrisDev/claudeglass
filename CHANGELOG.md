@@ -187,6 +187,10 @@ Cards and checks:
   asks for /effort medium, which Claude Code saves per model. While
   CLAUDE_CODE_EFFORT_LEVEL is set, it says the variable wins. The
   auto-compact cards name a model whose own window wins.
+- **The Overview's headline saving leaves out cards you ignored.** An
+  ignored model card takes out its main session or agent row, and an
+  ignored auto-compact, tool-output or wasted-replies card takes out its
+  lever.
 
 Coaching:
 

@@ -220,6 +220,14 @@ var AGENT_MODEL_RULES = {
   "agent-decide-apply": true,
 };
 
+// The card each of the other levers is the finding of. Ignoring that
+// card takes its lever out of the headline (ignoredSavings).
+var LEVER_CARD = {
+  compaction_sim: "compaction-window",
+  carry: "tool-output-carry",
+  waste: "wasted-turns",
+};
+
 // The main session's agent type, as model_swap_by_agent_type and a
 // recommendation's agent_type name it.
 var MAIN_AGENT = "top-level";
@@ -254,6 +262,28 @@ function agentModelItems(group, agents) {
   return items;
 }
 
+// What the cards you ignored take out of the headline: the model lever's
+// row for the main session (model-tier-main) and for each agent type a
+// model-tier card changes, and the lever a card is the finding of
+// (LEVER_CARD). ``groups`` are groupRecommendations(recs, { ignored: true }).
+function ignoredSavings(groups) {
+  var skip = { levers: {}, agents: {} };
+  groups.forEach(function (group) {
+    if (group.id === "model-tier-main") skip.agents[MAIN_AGENT] = true;
+    if (group.id === "model-tier") {
+      group.members.forEach(function (rec) {
+        (rec.changes || []).forEach(function (change) {
+          skip.agents[change.agent] = true;
+        });
+      });
+    }
+    Object.keys(LEVER_CARD).forEach(function (key) {
+      if (LEVER_CARD[key] === group.id) skip.levers[key] = true;
+    });
+  });
+  return skip;
+}
+
 // What doing every way to save would come to: the four Savings levers,
 // and any priced action no lever counts (lower effort, say), counted once
 // as Actions lists it. They overlap, so they aren't added up. Each is a
@@ -262,15 +292,19 @@ function agentModelItems(group, agents) {
 // two multiply. A saving for one agent type comes from that type's spend
 // (the model lever per type; the summary lever from the main session);
 // any other from all of it. Each lever is a ceiling, so the whole is too,
-// and never more than the spend.
-function availableSaving(levers, groups, tables) {
+// and never more than the spend. What a card you ignored is the finding of
+// is left out (ignoredSavings).
+function availableSaving(levers, groups, tables, ignored) {
   var agents = tableObjects((tables || {}).model_swap_by_agent_type);
+  var skip = ignoredSavings(ignored || []);
   var items = [];
   levers.forEach(function (lever) {
-    if (!(lever.usd > 0)) return;
+    if (!(lever.usd > 0) || skip.levers[lever.key]) return;
     if (lever.key === "model_swap" && agents.length) {
       agents.forEach(function (row) {
-        if (usdOf(row.saving_usd)) items.push({ usd: usdOf(row.saving_usd), agent: row.agent_type });
+        if (usdOf(row.saving_usd) && !skip.agents[row.agent_type]) {
+          items.push({ usd: usdOf(row.saving_usd), agent: row.agent_type });
+        }
       });
     } else {
       items.push({ usd: lever.usd, agent: lever.key === "compaction_sim" ? MAIN_AGENT : null });
@@ -943,7 +977,7 @@ export function renderOverview(panel) {
       phrase: phrase,
     };
     facts.previousCost = facts.previousSummary ? facts.previousSummary.total_cost || 0 : null;
-    facts.saving = availableSaving(levers, groups, reportTables);
+    facts.saving = availableSaving(levers, groups, reportTables, groupRecommendations(recs, { ignored: true }));
     var tiles = renderTiles(tilesHost, facts, meta, dailyRows);
     addSpendTrend(tiles.spend, dailyRows);
     countTiles(tiles.counts);

@@ -526,7 +526,8 @@ that order, each as a heading with a one-line answer beside it.
    of it), taken from what the others leave (`combinedSaving`). A cheaper
    model prices the fewer tokens earlier summaries leave, so the two
    multiply. An action a Savings lever already counts (`LEVER_RULES`) is
-   left out. An inherited agent-model action's saving joins only while
+   left out. A card you ignored takes out its model row or the lever it is
+   the finding of (`LEVER_CARD`). An inherited agent-model action's saving joins only while
    its card is Worth considering, and only where the model lever has no
    saving for that agent type (`agentModelItems`): a workflow agent's,
    which has no lever, is a share of all the spend. The other two
@@ -820,8 +821,8 @@ detail scrolls) and the one picked.
   actions" and the checks' links (`groupRecommendations` leaves them out
   unless asked), and **Start from my recommendations**. The models and habits checks
   no longer lead with an ignored card. The Overview's
-  available saving comes from the report's tables, so it still counts
-  them.
+  available saving leaves out what an ignored card is the finding of: its
+  model row, or its lever (`ignoredSavings`).
 - **Copy prompt** (with a project picked): one button above the inbox
   copies every to-do card's prompt for that project in one go, under a
   header line per file (`/api/recommendations/prompt`). It leaves out
