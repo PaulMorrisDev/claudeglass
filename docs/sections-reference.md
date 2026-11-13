@@ -564,6 +564,10 @@ redundant read in `topology_redundant_reads`), is still more
 than 5% of observed cost (`1 - switch_pct`) and more than $1.00
 (`switch_usd`). The action says the figure is modelled, not observed.
 See [`docs/compaction-sim.md`](compaction-sim.md#the-report-section).
+Its change goes to the file that sets the window, never a project's in a view of several projects, and it says a
+model's own window wins only when that window is in the same file or a
+higher one. The Overview compaction check's fix goes to the same file
+with the same note; under a managed window it asks your administrator.
 Once the sweep has priced the main sessions, `compaction-churn` is
 dropped and `long-context-share` keeps only its workflow advice, whether
 or not `compaction-window` fires: the replay is the one answer on the
@@ -2622,7 +2626,9 @@ cites the cell it used:
   "N of M (P%)" and the pooled percent. The card offers no settings change
   in user settings or while `CLAUDE_CODE_EFFORT_LEVEL` is set: Opus 5.5 and
   later ignore a user `effortLevel`, so it asks for `/effort medium`. In a
-  project, local or managed file it changes `effortLevel` there. Outside the
+  project, local or managed file it changes `effortLevel` there, or the
+  model's own entry when that file decides by it (the file
+  `goals.main_effort_reading` names, config-layers.md's view rule). Outside the
   variable's case the card closes once the settings already give the main
   session's model `low` or `medium` (`goals.main_effort_reading`): its own
   `modelSettings` entry, matched by canonical id, unless a flat `effortLevel`

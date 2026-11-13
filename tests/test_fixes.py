@@ -1391,3 +1391,20 @@ def test_a_models_own_window_row_says_a_project_files_flat_window_wins():
     # Applied to that file, the model's own entry wins within it; with no project picked no file is named.
     assert profile_overridden_by(key, "repo", provenance, [], False, None, True) is None
     assert profile_overridden_by(key, "user", provenance, [], False, None, False) is None
+
+
+# -- R3-VIEW-RULE: a project file's own entry for the model wins over a lower file's -------------
+
+
+def test_a_project_files_own_entry_for_the_model_wins_over_your_user_files():
+    from claudeglass.fixes import profile_overridden_by
+
+    key = "settings.modelSettings.claude-opus-5-5.effortLevel"
+    own = {"claude-opus-5-5": {"effortLevel": "high"}}
+    assert profile_overridden_by(key, "user", {"modelSettings": "project_shared"}, [], False, own, True) == (
+        "This project's .claude/settings.json sets it too and wins."
+    )
+    assert profile_overridden_by(key, "repo", {"modelSettings": "project_shared"}, [], False, own, True) is None
+    # A block with no entry for this model says nothing of it.
+    other = {"claude-sonnet-5": {"effortLevel": "high"}}
+    assert profile_overridden_by(key, "user", {"modelSettings": "project_shared"}, [], False, other, True) is None

@@ -50,7 +50,7 @@ from datetime import date
 from typing import Callable
 
 from . import cost_centres, known_savers, model_gate, model_swap, whatif
-from .fixes import CRITIQUE_PLAN_LINE, PLUGIN_AGENT_FILE_CARDS, already_set, plugin_of, profile_overridden_by
+from .fixes import CRITIQUE_PLAN_LINE, OWN_WINDOW_STEP, PLUGIN_AGENT_FILE_CARDS, already_set, plugin_of, profile_overridden_by, window_change_note
 from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
@@ -648,7 +648,7 @@ def _advice_scope(rec_scope: str) -> str:
 
 
 #: Said after the sentence naming a model whose own window wins.
-_OWN_WINDOW_STEP = "To change a model's own window, run /autocompact with the new size in a session on that model."
+_OWN_WINDOW_STEP = OWN_WINDOW_STEP
 
 
 def _window_change(rec: Recommendation, ctx: _Context, *, value: int | None = None, suggested: str) -> SettingChange:
@@ -656,31 +656,28 @@ def _window_change(rec: Recommendation, ctx: _Context, *, value: int | None = No
     CLAUDE_CODE_AUTO_COMPACT_WINDOW is set it overrides autoCompactWindow,
     so the change goes to the variable, in a settings file's env block
     (whose value replaces the shell's). A model's own window, saved with
-    /autocompact, wins over the setting for that model, so the change's
-    note names it."""
+    /autocompact, wins over the setting for that model when it is in the
+    change's own file or a higher one, so the change's note names it
+    (``fixes.window_change_note``, as the compaction check's fix says)."""
     now = ctx.window_now()
     if not auto_compact_window_env_set(ctx.snapshot):
-        own = (
-            profile_overridden_by(
-                "settings.autoCompactWindow",
-                "user",
-                {},
-                (),
-                False,
-                effective_config(ctx.snapshot).get("modelSettings"),
-                False,
-            )
-            if ctx.snapshot is not None
-            else None
-        )
+        scope = _advice_scope(rec.scope)
+        if scope in ("repo", "project-local") and _several_projects(ctx):
+            # The view rule: a scope worked out from one project's file is not
+            # where a change for several projects goes.
+            scope = "user"
         return SettingChange(
             target="settings",
             key="autoCompactWindow",
             value=value,
             current=now,
             suggested=suggested,
-            scope=_advice_scope(rec.scope),
-            note=f"{own} {_OWN_WINDOW_STEP}" if own else "",
+            scope=scope,
+            note=window_change_note(
+                scope, effective_provenance(ctx.snapshot), effective_config(ctx.snapshot).get("modelSettings")
+            )
+            if ctx.snapshot is not None
+            else "",
         )
     from .recommend import _env_lever_scope
 
@@ -880,7 +877,9 @@ def _effort_lever(rec: Recommendation, ctx: _Context, note: str) -> None:
     effortLevel, and /effort saves a level per model instead (the
     settings-reference and model-config docs). A project, local or managed
     file's effortLevel applies to every model, so only there is it the
-    change."""
+    change; when such a file decides the main model's level by its own
+    entry for the model, the change is to that entry (the view rule: the
+    file that decides, ``goals.main_effort_reading``)."""
     scope = _advice_scope(rec.scope)
     if effort_level_env_set(ctx.snapshot):
         rec.variant = "env"
@@ -893,21 +892,38 @@ def _effort_lever(rec: Recommendation, ctx: _Context, note: str) -> None:
     from .profiles import goals
 
     snapshot = ctx.snapshot
-    level = goals.main_effort_in_force(
-        effective_config_in_force(snapshot) if snapshot is not None else {},
-        effective_provenance(snapshot) if snapshot is not None else {},
-        ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model"),
-    )
+    effective = effective_config_in_force(snapshot) if snapshot is not None else {}
+    observed = ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model")
+    provenance = effective_provenance(snapshot) if snapshot is not None else {}
+    level, layer, decided_by = goals.main_effort_reading(effective, provenance, observed)
     if level in goals.EFFORT_DONE:
         # N2: the main session's model already gets medium or lower, from
         # whichever file decides it (/effort's own save among them).
         rec.variant = "applied"
         rec.changes = []
         return
+    decider = layer or provenance.get("effortLevel")
+    if scope != "managed" and (decider is not None or _several_projects(ctx)):
+        # The file that decides the main model's level (its own entry or the
+        # flat level), else the flat key's file, both as the view reads them;
+        # in a view of several projects never one project's file. A snapshot
+        # that records no layer leaves the rule's own scope.
+        scope = model_swap.layer_scope(decider) if decider in ("project_shared", "project_local", "managed") else "user"
+        rec.scope = scope
     if scope in ("repo", "project-local", "managed"):
         rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
+        entry = goals.main_effort_entry(effective, observed) if decided_by == "modelSettings" else None
         rec.changes = [
             SettingChange(
+                target="settings",
+                key="modelSettings",
+                value={entry: {"effortLevel": "medium"}},
+                current={entry: {"effortLevel": level}},
+                note=note,
+                scope=scope,
+            )
+            if entry
+            else SettingChange(
                 target="settings",
                 key="effortLevel",
                 value="medium",

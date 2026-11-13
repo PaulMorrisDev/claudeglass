@@ -531,6 +531,22 @@ def main_effort_in_force(effective: dict, provenance: dict, observed: str | None
     return main_effort_reading(effective, provenance, observed)[0]
 
 
+def main_effort_entry(effective: dict, observed: str | None) -> str | None:
+    """The ``modelSettings`` key a change to the main session's own effort
+    level on ``observed`` goes under: the entry it has, as written (when the
+    profile schema accepts the key), else its canonical id; ``None`` for a
+    model with no canonical id."""
+    model_id = _canonical_model(_main_model_id(observed))
+    if not model_id:
+        return None
+    entries = effective.get("modelSettings")
+    for key, entry in (entries.items() if isinstance(entries, dict) else ()):
+        if (isinstance(entry, dict) and entry.get("effortLevel") and _MODEL_ID_RE.match(str(key))
+                and _same_model(str(key), model_id)):
+            return str(key)
+    return model_id
+
+
 def _project_effort_note(layer: str | None) -> str:
     """N6: when a project file's flat effortLevel is what decides now, a
     sentence saying it wins over a model's own level in a lower file."""

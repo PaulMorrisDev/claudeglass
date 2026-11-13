@@ -174,12 +174,18 @@ or the generic marker:
   project's <file> sets effortLevel, which wins over this model's own
   level." The apply preview lists such a row as overridden. A per-model
   `autoCompactWindow` row says `CLAUDE_CODE_AUTO_COMPACT_WINDOW` wins, as
-  the flat key's row does. The same rule holds for the window: a flat
+  the flat key's row does. The same rule holds for the window (read in
+  Claude Code 2.1.317's source, the per-model window work): a flat
   `autoCompactWindow` in a higher file beats a model's own window in a lower
   one, and the row ("This project's <file> sets autoCompactWindow, which
   wins over this model's own window.") and the apply preview say so. A flat
   row is called overridden by a model's own entry only when that entry is in
-  the target file or a higher one.
+  the target file or a higher one. A model's own row at a lower target says
+  "This project's <file> sets it too and wins." when that project file's
+  `modelSettings` block has the model's own entry. The window card's change
+  and the compaction check's fix carry the same note
+  (`fixes.window_change_note`, read for the change's own file), and both
+  go to the file that sets the window (see "Which file a view reads").
 
 `effective`/`effective_provenance` merge exactly this same key set
 (`SETTINGS_SUMMARY_KEYS`) across the four layers — a value there has

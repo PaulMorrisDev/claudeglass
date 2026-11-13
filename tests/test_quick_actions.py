@@ -3344,3 +3344,11 @@ def test_the_effort_checks_fix_goes_to_a_project_files_own_entry_for_the_model(t
     assert fix["command"] == (
         "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope repo --project-dir . --dry-run"
     )
+
+
+def test_the_compaction_checks_fix_says_a_models_own_window_wins_as_the_card_does(tmp_path):
+    """Within one file a model's own window beats the flat one: the card's note, on the check's fix."""
+    from claudeglass.advice import _OWN_WINDOW_STEP
+
+    fix = _window_fix(tmp_path, {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}, {"modelSettings": "user"})
+    assert f"claude-opus-5-5 has its own auto-compact window, which wins for it. {_OWN_WINDOW_STEP}" in fix["prompt"]

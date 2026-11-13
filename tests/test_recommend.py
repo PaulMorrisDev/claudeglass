@@ -3512,3 +3512,17 @@ def test_in_one_project_the_project_files_flat_level_still_decides_the_effort_ca
     assert _effort_card({"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": layer}}, ["alpha"]) is None
     card = _effort_card({"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": layer}}, ["alpha"])
     assert [(c.key, c.value, c.scope) for c in card.changes] == [("effortLevel", "medium", scope)]
+
+
+def test_a_project_files_own_entry_for_the_model_gets_the_effort_cards_change():
+    """The project file's own entry for the model beats an entry in your user file, so /effort, which
+    saves to your user file, would change nothing: the change goes to that entry in that file."""
+    data = {"effective": {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+            "effective_provenance": {"modelSettings": "project_shared"}}
+    card = _effort_card(data, ["alpha"])
+    assert [(c.key, c.value, c.scope) for c in card.changes] == [
+        ("modelSettings", {"claude-opus-5-5": {"effortLevel": "medium"}}, "repo")
+    ]
+    # In a view of several projects that file is one project's: the user path, as for the flat level.
+    card = _effort_card(data, ["alpha", "beta"])
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])

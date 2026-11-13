@@ -22,7 +22,7 @@ from typing import Callable
 
 from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
-from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note, plugin_of
+from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note, plugin_of, window_change_note
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
@@ -232,6 +232,10 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
         current=candidate["now"],
         new_agent_file=bool(agent) and agent in _BUILTIN_AGENT_TYPES and agent not in ctx.effective_agents,
         scope=scope,
+        # What wins over a flat window, as the window card's change says it.
+        note=window_change_note(scope, ctx.effective_provenance, (ctx.effective or {}).get("modelSettings"))
+        if not agent and candidate["key"] == "autoCompactWindow"
+        else "",
     )
     effect = estimate.get("effect_text") or ""
     rec = Recommendation(

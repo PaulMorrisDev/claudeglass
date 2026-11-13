@@ -1259,6 +1259,19 @@ def profile_change_where(key: str, scope: str) -> str:
 #: A model's own setting, in the words of "wins over this model's own ...".
 _MODEL_OWN_WORDS = {"effortLevel": "level", "autoCompactWindow": "window"}
 
+#: Said after the sentence naming a model whose own window wins.
+OWN_WINDOW_STEP = "To change a model's own window, run /autocompact with the new size in a session on that model."
+
+
+def window_change_note(scope: str, provenance: dict, model_settings: dict | None) -> str:
+    """The note on a change to the flat ``autoCompactWindow`` at ``scope``,
+    for the window card and the compaction check alike: the models whose own
+    window, in that file or a higher one, wins over it
+    (:func:`profile_overridden_by` rule 5 with the real target and
+    ``provenance``), and how to change one; ``""`` when none does."""
+    own = profile_overridden_by("settings.autoCompactWindow", scope or "user", provenance, (), False, model_settings, False)
+    return f"{own} {OWN_WINDOW_STEP}" if own else ""
+
 #: The project file a ``snapshots.SETTINGS_LAYER_NAMES`` layer is, for the
 #: "sets it too and wins" sentence. ``managed`` is not here: the diff
 #: already says "Locked by your organisation's policy" for it.
@@ -1289,7 +1302,8 @@ def profile_overridden_by(
 
     1. A settings key that a project file ranking above ``scope``'s file
        (``snapshots.SETTINGS_LAYER_NAMES``, ``apply._SCOPE_LAYER``) sets
-       too, per ``provenance`` (``{key: layer}``). Said only when a
+       too, per ``provenance`` (``{key: layer}``); for a model's own row,
+       a project file whose ``modelSettings`` block has that model's entry. Said only when a
        ``project_picked``: with none, the snapshot is whichever project's
        took it, and the sentence would name a project the reader did not
        choose.
@@ -1323,6 +1337,11 @@ def profile_overridden_by(
     layer = provenance.get(key)
     model_parts = key.split(".")
     own_key = model_parts[2] if len(model_parts) == 3 and model_parts[0] == "modelSettings" else None
+    entry = (model_settings or {}).get(model_parts[1]) if own_key is not None else None
+    if isinstance(entry, dict) and own_key in entry:
+        # A model's own entry: modelSettings is one file's block, so the entry
+        # is that file's, and a higher file's entry for the model wins (R3).
+        layer = provenance.get("modelSettings")
     if (
         project_picked
         and target in precedence

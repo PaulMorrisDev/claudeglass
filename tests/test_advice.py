@@ -1366,3 +1366,44 @@ def test_your_own_user_entry_still_closes_the_card_in_a_view_of_several_projects
         "effective_provenance": {"effortLevel": "user", "modelSettings": "user"},
     }
     assert _effort_on_projects("claude-opus-5-5", data, ["alpha", "beta"]) == []
+
+
+# -- R3-VIEW-RULE: what wins is read for the change's own file and the real provenance --------------
+
+
+def _window_card(scope, effective, provenance, projects=("alpha",)):
+    rec = _compaction("compaction-window", scope=scope, title="Set autoCompactWindow to at least 200,000",
+                      evidence=[("Candidate 200,000: modelled saving after rediscovery correction", 12.0, "x", "200,000")])
+    report = _model_swap_report([["top-level", "claude-opus-5-5", None, None]])
+    report.meta.projects = tuple(projects)
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": effective, "effective_provenance": provenance})
+    [card] = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "compaction-window"]
+    return card
+
+
+def test_the_window_cards_change_to_a_project_file_says_nothing_of_a_lower_files_own_window():
+    """R3-2, the reviewer's input: the project file's flat window beats your user file's own window for
+    the model, so the card's change works and no note sends you to /autocompact."""
+    effective = {"autoCompactWindow": 300000, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}
+    card = _window_card("repo", effective, {"autoCompactWindow": "project_shared", "modelSettings": "user"})
+    [change] = card.changes
+    assert (change.key, change.scope, change.note) == ("autoCompactWindow", "repo", "")
+
+
+def test_a_models_own_window_in_the_same_file_still_gets_the_note():
+    """Guard: within one file a model's own window beats the flat one."""
+    effective = {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}
+    card = _window_card("user", effective, {"modelSettings": "user"})
+    assert card.changes[0].note == (
+        "claude-opus-5-5 has its own auto-compact window, which wins for it. " + advice._OWN_WINDOW_STEP
+    )
+
+
+def test_a_card_at_the_project_files_scope_does_not_close_in_a_view_of_several_projects():
+    """R3-1 through advice.finish with the scope recommend gives the card (the reviewer's p15b input)."""
+    data = {"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_shared"}}
+    report = _model_swap_report([["top-level", "claude-opus-5-5", None, None]])
+    report.meta.projects = ("alpha", "beta")
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    [card] = [r for r in advice.finish([_reported_effort_rec(scope="repo")], report, snap, Units()) if r.id == "effort-mismatch"]
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])
