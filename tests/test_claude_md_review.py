@@ -717,6 +717,13 @@ def test_a_project_file_gets_five_prompts_to_copy_and_edits_nothing():
         ]
 
 
+def test_the_prompts_that_name_an_agent_definition_name_both_places_and_subfolders():
+    where = "(~/.claude/agents/<name>.md or .claude/agents/<name>.md, or a folder inside them)"
+    fixes = {fix["title"]: fix for fix in cmr.project_file_fixes(_file_row(), UNITS)}
+    for title in ("Split it by who needs it", "Put the essential lines in the agent definition and drop the read"):
+        assert where in fixes[title]["prompt"], title
+
+
 def test_the_explainer_says_who_reads_the_file_and_what_cutting_it_saves():
     [fix, *_rest] = cmr.project_file_fixes(_file_row(), UNITS)
     sections = dict(fix["explainer"])

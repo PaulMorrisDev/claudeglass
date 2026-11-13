@@ -1491,7 +1491,8 @@ def project_file_fixes(row: dict, units: Units) -> list[dict]:
                     opening,
                     "Work out which parts each of those agents uses. Keep a short shared part in the file, and "
                     f"move what only some of them need into separate files beside it (for example {stem}-<topic>{ext}). "
-                    "Then change each agent's definition (.claude/agents/<name>.md) so it reads only the files it needs.",
+                    "Then change each agent's definition (~/.claude/agents/<name>.md or .claude/agents/<name>.md, or a folder "
+                    "inside them) so it reads only the files it needs.",
                     _PROMPT_TAIL,
                 ]
             ),
@@ -1556,7 +1557,8 @@ def project_file_fixes(row: dict, units: Units) -> list[dict]:
                     [
                         opening,
                         f"For each of these agents ({who}), find the few lines it really uses and copy them into "
-                        "its definition (.claude/agents/<name>.md). Then remove the instruction to read the file "
+                        "its definition (~/.claude/agents/<name>.md or .claude/agents/<name>.md, or a folder inside them). "
+                        "Then remove the instruction to read the file "
                         "from that definition. Keep the file for people.",
                         _PROMPT_TAIL,
                     ]
