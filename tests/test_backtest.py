@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from claudeglass import backtest, impact
+from claudeglass import backtest, counterfactual, impact
 from claudeglass.change_points import ChangePoint
 from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing, price_turn
@@ -353,6 +354,56 @@ def test_a_model_prediction_is_judged_on_the_same_sessions_repriced(tmp_path):
     expected = sum(price_turn(t, opus).total - price_turn(t, sonnet).total for t in after_turns)
     assert row["measured_usd"] == pytest.approx(expected, abs=1e-6)
     assert row["measured_pct"] < 0
+
+
+def _agent_spawns(start_tokens: list[int], first_day: float, prefix: str):
+    """One session a spawn of ``gp``, each with a stand-in transcript the carry reads."""
+    facts, bundles = [], {}
+    for n, tokens in enumerate(start_tokens):
+        spawn = impact._Transcript(cost=1.0, turns=4, startup_tokens=tokens, model="sonnet-5")
+        facts.append(
+            impact.SessionFacts(
+                start=CHANGE + timedelta(days=first_day + n * 0.1),
+                main=impact._Transcript(cost=2.0, turns=5),
+                session_id=f"{prefix}{n}",
+                spawns=[("gp", spawn)],
+            )
+        )
+        bundles[f"{prefix}{n}"] = SimpleNamespace(subs=[SimpleNamespace(turns=[SimpleNamespace(turn_index=i) for i in range(5)])])
+    return facts, bundles
+
+
+def test_an_agent_tools_prediction_is_judged_on_start_context(monkeypatch):
+    """The tools line is priced on the drop in what each spawn starts with,
+    not on the cost per reply of the sessions before, which a different
+    amount of work moves more than the line does."""
+
+    class StubCarry:
+        def __init__(self, sub, pricing):
+            pass
+
+        def cost(self, chars, start, end):
+            return chars / 1000
+
+    monkeypatch.setattr(counterfactual, "_Carry", StubCarry)
+    prediction = _prediction(ts="2026-09-19T12:00:00Z", measure_key="tools", agent="gp", predicted_usd=900.0)
+    point = ChangePoint(CHANGE, "config", "x", keys=["agents.gp.tools"])
+    before, _ = _agent_spawns([60_000] * 6, -3, "b")
+    after, bundles = _agent_spawns([20_000] * 6, 0.1, "a")
+
+    row = backtest._exact_saving(prediction, point, before, after, bundles, load_pricing())
+    assert (row.key, row.agent, row.fidelity) == ("tools", "gp", "approximate")
+    # 6 spawns, each carrying 40,000 tokens at 4 characters, at the stub's 1/1000.
+    assert row.without_usd - row.paid_usd == pytest.approx(960.0)
+    judged = backtest._judge_row(prediction, before, after, UNITS, row)
+    assert judged.measured_usd == pytest.approx(960.0)
+    assert judged.verdict == "as_estimated"
+
+    # Four spawns after are too few to read: no exact figure, so the rate path as before.
+    assert backtest._exact_saving(prediction, point, before, after[:4], bundles, load_pricing()) is None
+    # A prediction on another of its settings does not take the tools line's figure.
+    skills = _prediction(ts="2026-09-19T12:00:00Z", measure_key="skills", agent="gp", predicted_usd=900.0)
+    assert backtest._exact_saving(skills, point, before, after, bundles, load_pricing()) is None
 
 
 def test_judge_predictions_leaves_an_unmatched_prediction_alone(tmp_path):
