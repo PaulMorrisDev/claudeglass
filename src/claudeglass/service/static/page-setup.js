@@ -158,7 +158,8 @@ function renderBaseline(data, container) {
 // ======================================================================
 //
 // v0.3: GET /api/profiles now returns {"profiles": [...each tagged
-// source: "catalogue"|"user"...], "suggested_profile_id"} (docs/api.md)
+// source: "catalogue"|"user"...]} (docs/api.md); the suggestion is its own
+// route, GET /api/profile-suggestion, so the list never waits for a report
 // rather than a bare list of indexed (user-only) profiles, and GET
 // /api/profiles/<id>/diff is a real computation (profiles/diff.py)
 // rather than a 501 stub -- see that route's own docstring in api.py.
@@ -174,6 +175,17 @@ function loadProfileSchema() {
     });
   }
   return profileSchemaPromise;
+}
+
+// Key -> plain label from /api/profile-schema's levers. modelSettings is one
+// settings key here (its entries are per model), whatever the schema calls it.
+function profileLeverLabels(schema) {
+  var labels = {};
+  ((schema && schema.settings) || []).concat((schema && schema.agents) || []).forEach(function (lever) {
+    labels[lever.key] = lever.label;
+  });
+  if (!labels.modelSettings || labels.modelSettings === "modelSettings") labels.modelSettings = "Per-model settings";
+  return labels;
 }
 
 var PROFILE_SCOPE_LABELS = {
@@ -212,15 +224,29 @@ export function renderProfiles(panel) {
   panel.appendChild(editorDetails);
 
   var editorShown = false;
+  // What GET /api/profile-suggestion answered, or null (not answered yet, failed, or none).
+  var suggestion = null;
 
   function refreshList() {
     loadInto(listContainer, "/api/profiles", function (data, container) {
       renderProfilesList(data, container);
+      applySuggestion(container, suggestion);
       // Built once, so a save's status line stays on screen.
       if (!editorShown) {
         editorShown = true;
         renderProfileEditor(formContainer, (data && data.profiles) || [], refreshList);
       }
+    });
+  }
+
+  // The suggestion is worked out from the report for the picked window and project, which can take a
+  // while, so the list draws first and this adds the chip and the line when it answers. If it fails or
+  // has none, nothing is added. A new window or project draws this view again, which asks again.
+  function loadSuggestion() {
+    fetchJson(withWindow("/api/profile-suggestion")).then(function (result) {
+      var body = result.body;
+      suggestion = body && body.ok === true ? body.data : null;
+      applySuggestion(listContainer, suggestion);
     });
   }
 
@@ -250,9 +276,11 @@ export function renderProfiles(panel) {
         return;
       }
       var skipped = body.data.skipped_managed || [];
+      var projectAgents = body.data.skipped_project_agents || [];
       saveCurrentStatus.textContent =
         'Saved as "' + (body.data.name || body.data.id) + '".' +
-        (skipped.length ? " Left out, because your organisation's policy sets them: " + skipped.join(", ") + "." : "");
+        (skipped.length ? " Left out, because your organisation's policy sets them: " + skipped.join(", ") + "." : "") +
+        (projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "");
       toast("Your current settings are saved as a profile.");
       refreshList();
     });
@@ -266,21 +294,19 @@ export function renderProfiles(panel) {
 
   renderProfileCreator(creatorContainer, refreshList);
   refreshList();
+  loadSuggestion();
 }
 
 function renderProfilesList(data, container) {
   var profiles = (data && data.profiles) || [];
-  var suggestedId = data && data.suggested_profile_id;
   if (!profiles.length) {
     container.appendChild(emptyState("No profiles yet.", null, "Save your current settings above, or create one from a goal."));
     return;
   }
   var cards = el("div", { class: "profile-cards" });
   profiles.forEach(function (profile) {
-    var isSuggested = Boolean(suggestedId) && profile.id === suggestedId;
-    var card = el("article", { class: "profile-card" + (isSuggested ? " profile-card-suggested" : "") });
+    var card = el("article", { class: "profile-card", "data-profile-id": profile.id });
     var head = el("div", { class: "profile-card-head" }, [el("h3", { text: profile.name || profile.id })]);
-    if (isSuggested) head.appendChild(chip("Suggested for you", { tone: "accent", icon: "check" }));
     card.appendChild(head);
 
     var meta = [profile.source === "catalogue" ? "Built in" : "Yours"];
@@ -296,10 +322,7 @@ function renderProfilesList(data, container) {
       var body = results[0].body;
       if (!body || body.ok !== true) return;
       var p = body.data;
-      var labels = {};
-      ((results[1] && results[1].settings) || []).concat((results[1] && results[1].agents) || []).forEach(function (lever) {
-        labels[lever.key] = lever.label;
-      });
+      var labels = profileLeverLabels(results[1]);
       var names = Object.keys(p.settings || {}).map(function (key) {
         return labels[key] || key;
       });
@@ -333,8 +356,29 @@ function renderProfilesList(data, container) {
     cards.appendChild(card);
   });
   container.appendChild(cards);
-  if (suggestedId) {
-    container.appendChild(el("p", { class: "notes", text: "Suggested for you: the profile your latest baseline matches best." }));
+}
+
+// Marks the suggested profile's card and says why under the cards, replacing any earlier mark.
+// ``suggestion`` is GET /api/profile-suggestion's answer; with none, or a profile the list
+// doesn't have, the list is left as it is.
+function applySuggestion(container, suggestion) {
+  Array.prototype.forEach.call(container.querySelectorAll(".profile-suggested-chip, .profile-suggestion-note"), function (node) {
+    node.remove();
+  });
+  Array.prototype.forEach.call(container.querySelectorAll(".profile-card-suggested"), function (card) {
+    card.classList.remove("profile-card-suggested");
+  });
+  var suggestedId = suggestion && suggestion.suggested_profile_id;
+  if (!suggestedId) return;
+  var cards = Array.prototype.slice.call(container.querySelectorAll(".profile-card"));
+  var card = cards.filter(function (candidate) {
+    return candidate.getAttribute("data-profile-id") === suggestedId;
+  })[0];
+  if (!card) return;
+  card.classList.add("profile-card-suggested");
+  card.querySelector(".profile-card-head").appendChild(chip("Suggested for you", { tone: "accent", icon: "check", class: "profile-suggested-chip" }));
+  if (suggestion.suggested_reason) {
+    container.appendChild(el("p", { class: "notes profile-suggestion-note", text: "Suggested for you: " + suggestion.suggested_reason }));
   }
 }
 
@@ -342,10 +386,22 @@ function _diffRowValue(value) {
   if (value === null || value === undefined) return "not set";
   if (Array.isArray(value)) return value.length ? value.join(", ") : "(empty list)";
   if (typeof value === "boolean") return value ? "on" : "off";
+  if (typeof value === "object") {
+    // A table of names (modelSettings: model -> its own settings).
+    return Object.keys(value)
+      .map(function (key) {
+        var inner = value[key];
+        return inner !== null && typeof inner === "object" && !Array.isArray(inner)
+          ? key + " (" + _diffRowValue(inner) + ")"
+          : key + ": " + _diffRowValue(inner);
+      })
+      .join(", ");
+  }
   return String(value);
 }
 
 function diffRowSame(row) {
+  if (row.recorded === false) return false;
   return JSON.stringify(row.current_value) === JSON.stringify(row.proposed_value);
 }
 
@@ -368,6 +424,7 @@ function renderDiffRowsTable(rows) {
         render: function (row) {
           var label = row.label || row.setting || row.key;
           if (row.agent) label += " (" + row.agent + " agent)";
+          if (row.model) label += " (" + row.model + ")";
           var cell = el("span", null, [el("span", { text: label })]);
           if (row.description) cell.appendChild(el("span", { class: "cell-hint", text: row.description }));
           return cell;
@@ -377,6 +434,8 @@ function renderDiffRowsTable(rows) {
         key: "current_value",
         label: "Now",
         render: function (row) {
+          // A per-model value the snapshot does not keep: unset would be a guess.
+          if (row.recorded === false) return "not recorded";
           return _diffRowValue(row.current_value);
         },
       },
@@ -393,7 +452,8 @@ function renderDiffRowsTable(rows) {
         render: function (row) {
           if (row.managed) return "Locked by your organisation's policy; not changed";
           if (diffRowSame(row)) return "Already set; no change";
-          return row.where || row.target_file || "-";
+          var where = row.where || row.target_file || "-";
+          return row.overridden_by ? where + ". " + row.overridden_by : where;
         },
       },
     ],
@@ -420,7 +480,7 @@ function renderProfileDetail(profile, container) {
   function load() {
     loadInto(
       body,
-      "/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value),
+      withWindow("/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value)),
       function (data, box) {
         renderProfileDiff(data, box, logEstimate);
       }
@@ -555,14 +615,30 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
   form.appendChild(el("div", { class: "lever-field" }, [el("label", { for: "profile-form-name", text: "Display name" }), nameInput]));
 
   form.appendChild(el("h3", { text: "Settings for every session" }));
-  var settingFields = schema.settings.map(function (lever) {
-    return leverInput(lever, "profile-setting-");
-  });
+  // modelSettings is a table of tables, not a value to type: the form leaves it out and
+  // carries a "Start from" profile's through, so a copy keeps it.
+  var carriedModelSettings = null;
+  var settingFields = schema.settings
+    .filter(function (lever) {
+      return lever.kind !== "map[str,model]";
+    })
+    .map(function (lever) {
+      return leverInput(lever, "profile-setting-");
+    });
   var settingsGrid = el("div", { class: "lever-grid" });
   settingFields.forEach(function (f) {
     settingsGrid.appendChild(f.node);
   });
   form.appendChild(settingsGrid);
+  // What the form carries through, one read-only line; "Edit as JSON instead" changes it.
+  var carriedLine = el("p", { class: "notes", id: "profile-form-model-settings", hidden: true });
+  form.appendChild(carriedLine);
+  function showCarriedModelSettings() {
+    carriedLine.textContent = carriedModelSettings
+      ? profileLeverLabels(schema).modelSettings + ": " + _diffRowValue(carriedModelSettings)
+      : "";
+    carriedLine.hidden = !carriedModelSettings;
+  }
 
   form.appendChild(el("h3", { text: "Settings for one agent" }));
   form.appendChild(el("p", { class: "notes", text: "Written to that agent's file. Use the agent's name as it appears under Agents & context." }));
@@ -636,6 +712,7 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       var v = leverValue(f);
       if (v !== undefined) doc.settings[f.lever.key] = v;
     });
+    if (carriedModelSettings) doc.settings.modelSettings = carriedModelSettings;
     agentBlocks.forEach(function (block) {
       var agentName = block.name.value.trim();
       if (!agentName) return;
@@ -657,11 +734,15 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       agentsWrap.removeChild(block.node);
     });
     agentBlocks.length = 0;
+    carriedModelSettings = null;
+    showCarriedModelSettings();
     if (!startSelect.value) return;
     fetchJson("/api/profiles/" + encodeURIComponent(startSelect.value)).then(function (result) {
       var body = result.body;
       if (!body || body.ok !== true) return;
       var p = body.data;
+      carriedModelSettings = p.settings.modelSettings || null;
+      showCarriedModelSettings();
       settingFields.forEach(function (f) {
         setLeverValue(f, p.settings[f.lever.key]);
       });
@@ -989,10 +1070,7 @@ function renderProfileEstimate(profile, container) {
     var body = results[0].body;
     if (!body || body.ok !== true) return;
     var p = body.data;
-    var labels = {};
-    ((results[1] && results[1].settings) || []).concat((results[1] && results[1].agents) || []).forEach(function (lever) {
-      labels[lever.key] = lever.label;
-    });
+    var labels = profileLeverLabels(results[1]);
     // F11: `tasks` is the profile's `for` words normalised to the task
     // vocabulary (a catalogue word like "implementation" isn't one, and
     // /api/whatif rejects it); several scale by their combined share.

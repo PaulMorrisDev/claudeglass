@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from claudeglass.fixes import SETTING_TEXT
 from claudeglass.profiles import goals
 from claudeglass.units import Units
 
@@ -378,17 +379,74 @@ def test_an_env_set_effort_level_warns_the_candidate_wont_apply():
     assert (by_key["effortLevel"]["value"], by_key["effortLevel"]["ticked"]) == ("medium", True)
 
 
-def test_a_models_own_effort_override_warns_the_candidate_wont_apply():
+def test_tasks_goal_offers_the_per_model_effort_when_the_model_has_its_own():
+    # PF1 part 3: the flat effortLevel would lose to the model's own entry, so the draft offers that
+    # entry instead of a candidate that "won't apply"; ticked by the same rule as the flat one.
     out = goals.draft(
         "tasks", _with_setups(*_SETUPS), UNITS,
         effective={
             "model": "opus", "effortLevel": "high",
-            "modelSettings": {"claude-sonnet-5": {"effortLevel": "low"}},
+            "modelSettings": {
+                "claude-sonnet-5": {"effortLevel": "low"},
+                "claude-opus-5-5": {"effortLevel": "xhigh"},
+            },
         },
     )
     by_key = {c["key"]: c for c in out["candidates"]}
-    assert "Won't apply to sonnet: it already has its own effort level set; use --effort instead." \
+    assert "effortLevel" not in by_key
+    assert "Won't apply" not in " ".join(c["evidence"] for c in out["candidates"])
+    candidate = by_key["modelSettings"]
+    # the model's key as written in the settings file, and only the model the cheaper setup ran on
+    assert candidate["value"] == {"claude-sonnet-5": {"effortLevel": "medium"}}
+    assert candidate["now"] == {"claude-sonnet-5": {"effortLevel": "low"}}
+    assert candidate["ticked"] is True and candidate["agent"] is None
+    assert candidate["label"] == "Per-model settings"
+    # it carries the flat effort level's trade-off, as the candidate it replaces did
+    assert candidate["tradeoff"] == SETTING_TEXT["effortLevel"][1] != ""
+    assert candidate["evidence"].startswith("For bug fix work, sonnet at medium effort cost")
+    # it is not simulated, and it reaches the profile under its model
+    assert candidate["estimate"]["fidelity"] == "none"
+    assert out["profile"]["settings"]["modelSettings"] == {"claude-sonnet-5": {"effortLevel": "medium"}}
+    assert "effortLevel" not in out["profile"]["settings"]
+    # with too few messages behind the cheaper setup it is offered but not ticked, as the flat one is
+    few = (_SETUPS[0], _SETUPS[1], ("bugfix", "all", "sonnet", "medium", 8, 0.5, 83.0, 1, "cheaper", 75.0))
+    out = goals.draft(
+        "tasks", _with_setups(*few), UNITS,
+        effective={"modelSettings": {"claude-sonnet-5": {"effortLevel": "low"}}},
+    )
+    assert [c["ticked"] for c in out["candidates"] if c["key"] == "modelSettings"] == [False]
+    # a model whose own effort already is the cheaper one has nothing to offer
+    out = goals.draft(
+        "tasks", _with_setups(*_SETUPS), UNITS,
+        effective={"modelSettings": {"claude-sonnet-5": {"effortLevel": "medium"}}},
+    )
+    assert not [c for c in out["candidates"] if c["key"] in ("modelSettings", "effortLevel")]
+    # the environment variable beats every model's entry: that note stays, on the flat key
+    out = goals.draft(
+        "tasks", _with_setups(*_SETUPS), UNITS, effort_level_env_set=True,
+        effective={"modelSettings": {"claude-sonnet-5": {"effortLevel": "low"}}},
+    )
+    by_key = {c["key"]: c for c in out["candidates"]}
+    assert "modelSettings" not in by_key
+    assert "Won't apply to sonnet: CLAUDE_CODE_EFFORT_LEVEL is set for this session; use --effort instead." \
         in by_key["effortLevel"]["evidence"]
+
+
+def test_as_profile_merges_model_settings_candidates_per_model():
+    candidates = [
+        {"key": "modelSettings", "agent": None, "value": {"a": {"effortLevel": "low"}}},
+        {"key": "modelSettings", "agent": None, "value": {"a": {"autoCompactWindow": 300000}, "b": {"effortLevel": "high"}}},
+        {"key": "effortLevel", "agent": None, "value": "medium"},
+        {"key": "effort", "agent": "reviewer", "value": "low"},
+    ]
+    settings, agents = goals._as_profile(candidates)
+    assert settings == {
+        "modelSettings": {"a": {"effortLevel": "low", "autoCompactWindow": 300000}, "b": {"effortLevel": "high"}},
+        "effortLevel": "medium",
+    }
+    assert agents == {"reviewer": {"effort": "low"}}
+    # the candidates themselves are left as they were
+    assert candidates[0]["value"] == {"a": {"effortLevel": "low"}}
 
 
 def test_an_effort_level_candidate_carries_no_warning_when_neither_applies():

@@ -438,8 +438,8 @@ all-projects report, `loadProjects()`).
 - The menu's note says what follows the pick: your changes, settings and
   CLAUDE.md files, as well as the window's figures. The latest baseline,
   whether your estimates came true, and the hook and statusline checks
-  always cover every project, and Profiles uses your newest settings
-  from any project. In the page:
+  always cover every project. Profiles follows the project you pick.
+  In the page:
   - Your changes lists the changes that apply in the project (those for
     every project and its own), each judged on that project's sessions.
   - Setup › Settings shows only that project's settings and changes,
@@ -1211,16 +1211,29 @@ the top links to.
 **Answers:** "Which group of settings fits a goal, and what would it
 change?"
 
-**Save my current settings as a profile** comes first. **Create a
+**Save my current settings as a profile** comes first. It keeps your
+settings, each model's own effort level, and your own agents' model, effort,
+most replies and cache lifetime; agents that belong to one project are left
+out, and the line under the button names them ("Left out, because they belong
+to one project: ..."). **Create a
 profile** turns a goal (`/api/profile-goals`) into a table of changes
 with the ones your data supports ticked; each tick asks
 `POST /api/whatif` again. The table's "now" values and each tick's
 estimate use the window and project picked. **Your profiles and the
 built-in ones** marks
-the one the latest baseline suggests. **Show what it changes** opens a
-drawer (`/api/profiles/<id>/diff`, against your newest settings from any
-project, whichever is picked) with a Setting / Now / After / Set in
-table, **Estimated effect**, and "Ask Claude to do it", "Or run this
+the one suggested for the window and project picked
+(`/api/profile-suggestion`, which fills in once the report is ready).
+**Show what it changes** opens a
+drawer (`/api/profiles/<id>/diff`, against the settings of the project
+picked, or your newest from any project with none picked) with a Setting / Now / After / Set in
+table (a model's own setting has the model in its name, "Effort level for
+one model (claude-opus-5-5)"; a value the settings snapshot does not keep
+reads "not recorded" under Now (as does a user agent hidden behind a project agent of
+the same name, which is never "Already set"); "Set in" names the file and, when something
+wins over the change, says so in the same cell: a project file that sets it
+too (only with a project picked), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or
+`CLAUDE_CODE_EFFORT_LEVEL` being set, or a model with an effort level of its
+own), **Estimated effect**, and "Ask Claude to do it", "Or run this
 command" and "Or try it for one session", each with Copy. Then **Best
 setup for each kind of task** (`habits.habits_setups`) and, folded,
 **Edit settings directly**. The page never runs a command and never

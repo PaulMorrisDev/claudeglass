@@ -131,6 +131,7 @@ from ..config import (
 from ..pricing import PricingError, cache_read_savings_usd, load_pricing
 from ..profiles import catalogue as profile_catalogue
 from ..profiles import diff as profile_diff_mod
+from ..profiles import roles as profile_roles
 from ..profiles import schema as profile_schema
 from ..render.html import render_html
 from ..render.json_out import render_json, to_jsonable
@@ -1204,18 +1205,37 @@ def make_handler(
                 return snapshot
         return snaps[-1] if snaps else None
 
+    #: project filter -> the snapshot built for it, all for one store
+    #: change token (see _config_snapshot_with_every_project_agents).
+    snapshot_parts: dict = {"token": None, "built": {}}
+
     def _config_snapshot_with_every_project_agents(project=None) -> Snapshot | None:
         """:func:`_latest_config_snapshot` with its agents widened to
         every project's latest snapshot (see
         ``snapshots.with_every_project_agents``), for the "now" value of
         an agent recorded in another project. With a ``project`` filter
         (its raw slugs), only that project's snapshots count, as the
-        report's own advice reads them (``report._settings_snapshots``)."""
+        report's own advice reads them (``report._settings_snapshots``).
+
+        Reading and merging every stored snapshot takes tens of
+        milliseconds on a long-lived store and the Setup page asks three
+        times per draw, so the one built is kept per store change token
+        and project filter, like the report (see _get_report_model): a
+        changed store builds it again. Callers only read it."""
+        token = store.change_token()
+        with report_lock:
+            if snapshot_parts["token"] == token and project in snapshot_parts["built"]:
+                return snapshot_parts["built"][project]
         snaps = _snapshots_from_store()
         if project:
             snaps = snapshots_mod.snapshots_for_projects(snaps, project)
         canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
-        return snapshots_mod.with_every_project_agents(snaps, canonical)
+        built = snapshots_mod.with_every_project_agents(snaps, canonical)
+        with report_lock:
+            if snapshot_parts["token"] != token:
+                snapshot_parts["token"], snapshot_parts["built"] = token, {}
+            snapshot_parts["built"][project] = built
+        return built
 
     def _build_report_model(
         window_days: int | None,
@@ -2325,16 +2345,6 @@ def make_handler(
             for row in store.profiles()
         ]
 
-        suggested_profile_id = None
-        latest_baseline = _latest_baseline_row(store)
-        if latest_baseline is not None:
-            try:
-                record = json.loads(latest_baseline["digest_json"])
-            except (TypeError, ValueError, json.JSONDecodeError):
-                record = {}
-            if isinstance(record, dict):
-                suggested_profile_id = record.get("suggested_profile")
-
         # The profile `apply <profile>` last marked active: ignored
         # recommendations are kept per profile.
         active_id = ignores.active_profile(options.config_dir)
@@ -2345,11 +2355,26 @@ def make_handler(
         return _ok(
             {
                 "profiles": catalogue_entries + user_entries,
-                "suggested_profile_id": suggested_profile_id,
                 "active_profile_id": None if active_id == ignores.NO_PROFILE else active_id,
                 "active_profile_name": active_name,
             }
         )
+
+    def route_profile_suggestion(store, query, body):
+        # PF1: the suggestion is worked out live from the report for the
+        # picked window and project, not read from the record `init` stored
+        # once. It is a route of its own because the report can take a while
+        # to build and the profile list must not wait for it. Nothing is
+        # suggested for a view with too few sessions.
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        suggestion = baseline_mod.suggest_for_model(_get_report_model(*window, project))
+        suggested_profile_id, suggested_reason = suggestion if suggestion is not None else (None, None)
+        return _ok({"suggested_profile_id": suggested_profile_id, "suggested_reason": suggested_reason})
 
     def route_baseline(store, query, body):
         # v0.3: pair the latest capture with the onboarding capture
@@ -2569,6 +2594,113 @@ def make_handler(
         except (OSError, profile_schema.ProfileError, ValueError):
             return None
 
+    def _recorded_agents(snapshot):
+        """The snapshot's ``agents`` map (name -> entry), or ``None`` when
+        there is no snapshot or it records no agents list: the dashboard
+        then knows nothing of the user's agents."""
+        raw = snapshot.data.get("agents") if snapshot is not None else None
+        if not isinstance(raw, dict):
+            return None
+        return {name: entry for name, entry in raw.items() if isinstance(entry, dict)}
+
+    def _agents_from(agents: dict, *sources: str) -> dict:
+        return {name: entry for name, entry in agents.items() if entry.get("source") in sources}
+
+    def _user_agents(agents: dict) -> dict:
+        """The user's own agent files in the recorded map. The hook merges
+        the map with a project agent winning, so a user agent that a
+        project's agent of the same name shadows is recorded only as the
+        project entry (``shadowed_by_project``). ``apply`` at user scope
+        reads the disk and changes that user file, so it counts here too,
+        its tools unknown (the entry's are the project's)."""
+        found = _agents_from(agents, "user")
+        for name, entry in agents.items():
+            if entry.get("shadowed_by_project") and name not in found:
+                found[name] = {"source": "user"}
+        return found
+
+    def _other_scope_note(names: tuple[str, ...], scope: str) -> str:
+        """The sentence added to the no-writer note when the other target
+        file has a writer. The quoted target names are the picker's own
+        labels (``PROFILE_SCOPE_LABELS`` in page-setup.js)."""
+        one = len(names) == 1
+        listed = profile_roles.join_names(names)
+        if scope == "user":
+            if one:
+                return f'Your project agent {listed} writes code. To change it, pick a "This project" target above.'
+            return f'Your project agents {listed} write code. To change them, pick a "This project" target above.'
+        if one:
+            return (
+                f"Your agent {listed} in ~/.claude/agents writes code. "
+                'To change it, pick "Your user settings, every project" above.'
+            )
+        return (
+            f"Your agents {listed} in ~/.claude/agents write code. "
+            'To change them, pick "Your user settings, every project" above.'
+        )
+
+    def _resolve_roles(profile, snapshot, scope: str | None, project=None):
+        """``(profile, notes, writers)``: ``profile`` with its roles folded
+        into the user's own agents, the notes to show, and the agents the
+        writer role went to. ``scope`` is the target file's scope, or
+        ``None`` for the scope-free view (the card, the estimate, "Start
+        from"), which reads user and project agents together and says
+        nothing. ``project`` is the picked project (its raw slugs) or
+        ``None``: a project target with none picked cannot say which
+        project's agents the command will see, so the role's keys are left
+        out and a note asks for one."""
+        if not profile.roles:
+            return profile, (), ()
+        if scope in ("project-local", "repo") and not project:
+            return (
+                profile_roles.resolve(profile, {}).profile,
+                (
+                    "This profile also changes the agent that writes code. "
+                    "Pick one project to see which of its agents changes.",
+                ),
+                (),
+            )
+        recorded = _recorded_agents(snapshot)
+        if recorded is None:
+            # Nothing is known of the user's agents, so no role key is
+            # listed and no "none of your agents" claim is made.
+            folded = profile_roles.resolve(profile, {}).profile
+            if scope is None:
+                return folded, (), ()
+            return (
+                folded,
+                (
+                    "This profile also changes the agent that writes code. "
+                    "Your agents have not been recorded yet, so no agent file is listed here.",
+                ),
+                (),
+            )
+        if scope is None:
+            both = {**_agents_from(recorded, "project"), **_user_agents(recorded)}
+            resolved = profile_roles.resolve(profile, both)
+            return resolved.profile, (), resolved.matched.get("writer", ())
+        here = _user_agents(recorded) if scope == "user" else _agents_from(recorded, "project")
+        resolved = profile_roles.resolve(profile, here)
+        found = resolved.matched.get("writer")
+        if found is None:
+            return resolved.profile, (), ()
+        if len(found) > 1:
+            return resolved.profile, (profile_roles.several_writers_note(found),), found
+        if found:
+            return resolved.profile, (), found
+        folder = "~/.claude/agents" if scope == "user" else ".claude/agents"
+        whose = "your agents" if scope == "user" else "this project's agents"
+        note = (
+            "This profile also changes the agent that writes code. "
+            f"None of {whose} in {folder} is named like implementer, fixer or builder and can edit files, "
+            "so no agent file changes."
+        )
+        there = _agents_from(recorded, "project") if scope == "user" else _user_agents(recorded)
+        elsewhere = profile_roles.writers(there)
+        if elsewhere:
+            note += " " + _other_scope_note(elsewhere, scope)
+        return resolved.profile, (note,), ()
+
     def route_profile_diff(store, query, body):
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
@@ -2579,12 +2711,26 @@ def make_handler(
         if scope not in _VALID_PROFILE_SCOPES:
             return _bad_request(f"'scope' must be one of {_VALID_PROFILE_SCOPES}")
 
+        # PF1: the drawer follows the project picker, so "now", the agents
+        # and what wins over a change are the picked project's own.
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+
         notes: list[str] = []
-        snapshot = _config_snapshot_with_every_project_agents()
+        snapshot = _config_snapshot_with_every_project_agents(project)
+        env_names: set[str] = set()
+        effort_env_set = False
         if snapshot is not None:
             effective = snapshots_mod.effective_config(snapshot)
             provenance = snapshots_mod.effective_provenance(snapshot)
             managed_keys = set(snapshots_mod.managed_keys(snapshot))
+            for field in ("env_names", "effective_env_names"):
+                names = snapshot.data.get(field)
+                if isinstance(names, list):
+                    env_names.update(str(n) for n in names)
+            content_layers = snapshot.data.get("content_layers")
+            effort_env_set = bool(isinstance(content_layers, dict) and content_layers.get("effort_level_env_set"))
             # Deviation (mirrors profiles/apply.py's own, documented
             # deviation note): snapshots.py has no effective_agents()
             # accessor, so the schema-2 field is read straight off the
@@ -2595,8 +2741,17 @@ def make_handler(
             effective, provenance, managed_keys, effective_agents = {}, {}, set(), {}
             notes.append("no config snapshot recorded yet; diff computed against an empty effective config")
 
+        written = profile
+        profile, role_notes, role_writers = _resolve_roles(written, snapshot, scope, project)
+
+        # At user scope apply changes the user file of a user agent that a project
+        # agent of the same name hides; the snapshot holds only the project's values.
+        shadowed = frozenset()
+        if snapshot is not None and scope == "user":
+            recorded_agents = _recorded_agents(snapshot) or {}
+            shadowed = frozenset(n for n, e in recorded_agents.items() if e.get("shadowed_by_project"))
         profile_diff = profile_diff_mod.diff_against_effective(
-            profile, effective, effective_agents, provenance, managed_keys
+            profile, effective, effective_agents, provenance, managed_keys, shadowed
         )
         diff_text = profile_diff_mod.render_unified_diff(profile_diff, scope=scope)
         # project_path is deliberately never accepted from the client here
@@ -2609,25 +2764,46 @@ def make_handler(
         apply_cmd, launch_cmd = profile_diff_mod.apply_command(profile.id, scope).split("\n", 1)
         if scope != "user":
             notes.append("Run the command in the project's own folder: --project-dir . means the folder you run it from.")
+        notes.extend(role_notes)
 
-        from ..fixes import LEVER_LABELS, SETTING_TEXT, profile_change_where, profile_prompt
+        from ..fixes import LEVER_LABELS, SETTING_TEXT, profile_change_where, profile_overridden_by, profile_prompt
 
         def _row(row) -> dict:
             parts = row.key.split(".")
             # agents.<agent>.<key>; the key itself may be dotted (experimental.cacheTtl).
             name = ".".join(parts[2:]) if row.key.startswith("agents.") else ".".join(parts[1:])
+            agent = parts[1] if row.key.startswith("agents.") else None
+            # settings.modelSettings.<model id>.<key> (a model id has no dot): the
+            # setting is modelSettings.<key> and the id is the row's own ``model``.
+            model = None
+            if row.key.startswith("settings.modelSettings.") and len(parts) == 4:
+                model = parts[2]
+                name = f"modelSettings.{parts[3]}"
+            # The role a row came from: the agent got this key from the
+            # profile's writer role, not from an [agents.<name>] table.
+            from_role = (
+                agent in role_writers
+                and name in written.roles.get("writer", {})
+                and name not in written.agents.get(agent, {})
+            )
             return {
                 "key": row.key,
                 "setting": name,
-                "agent": parts[1] if row.key.startswith("agents.") else None,
+                "agent": agent,
+                "model": model,
+                "role": "writer" if from_role else None,
                 "label": LEVER_LABELS.get(name, name),
                 "description": SETTING_TEXT.get(name, ("", "", ""))[0],
                 "where": profile_change_where(row.key, scope),
+                "overridden_by": profile_overridden_by(
+                    row.key, scope, provenance, env_names, effort_env_set, effective.get("modelSettings"), project is not None
+                ),
                 "current_value": row.current_value,
                 "current_provenance": row.current_provenance,
                 "proposed_value": row.proposed_value,
                 "target_file": row.target_file,
                 "managed": row.managed,
+                "recorded": row.recorded,
             }
 
         settings_rows = [_row(r) for r in profile_diff.rows if r.key.startswith("settings.")]
@@ -2687,7 +2863,12 @@ def make_handler(
         profile = _load_profile_by_id(profile_id)
         if profile is None:
             return _not_found(f"unknown profile: {profile_id!r}")
-        setting_count = len(profile.settings) + sum(len(v) for v in profile.agents.values()) + len(profile.env)
+        # PF1: the card, the estimate and "Start from" read the agents the
+        # writer role goes to among the user's own (user and project).
+        resolved, _notes, _writers = _resolve_roles(
+            profile, _config_snapshot_with_every_project_agents() if profile.roles else None, None
+        )
+        setting_count = len(resolved.settings) + sum(len(v) for v in resolved.agents.values()) + len(resolved.env)
         return _ok(
             {
                 "id": profile.id,
@@ -2698,7 +2879,8 @@ def make_handler(
                 "tasks": list(profile_catalogue.tasks_for(profile)),
                 "notes": profile.notes,
                 "settings": dict(profile.settings),
-                "agents": {name: dict(keys) for name, keys in profile.agents.items()},
+                "agents": {name: dict(keys) for name, keys in resolved.agents.items()},
+                "roles": {name: dict(keys) for name, keys in profile.roles.items()},
                 "env": dict(profile.env),
                 "setting_count": setting_count,
             }
@@ -2726,8 +2908,12 @@ def make_handler(
     def route_profiles_from_current(store, query, body):
         """Save the latest snapshot's effective config as a user
         profile: allowlisted keys only, managed keys left out and listed
-        so the UI can say so. Writes only this tool's own profile store,
-        never Claude Code's config."""
+        so the UI can say so. Only the user's own agents are kept: ``apply``
+        patches an agent's file in the user's folder at its default scope,
+        so a project agent in the profile would get the whole profile
+        refused. The project ones left out come back as
+        ``skipped_project_agents``. Writes only this tool's own profile
+        store, never Claude Code's config."""
         body = body if isinstance(body, dict) else {}
         snapshot = _latest_config_snapshot()
         if snapshot is None or not isinstance(snapshot.data.get("effective"), dict):
@@ -2745,17 +2931,40 @@ def make_handler(
             key: effective[key]
             for key in profile_schema.SETTINGS_ALLOWLIST
             if key in effective and key not in managed and effective[key] is not None
-            and _valid({"settings": {key: effective[key]}})
+            and key != "modelSettings" and _valid({"settings": {key: effective[key]}})
         }
+        # Each model's entry is checked alone, so one the schema refuses (no
+        # effort level recorded, an id with a dot) drops only itself.
+        models = effective.get("modelSettings")
+        if "modelSettings" not in managed and isinstance(models, dict):
+            kept_models = {
+                str(model_id): {
+                    sub_key: entry[sub_key]
+                    for sub_key in profile_schema.MODEL_SETTINGS_ALLOWLIST
+                    if entry.get(sub_key) is not None
+                    and _valid({"settings": {"modelSettings": {str(model_id): {sub_key: entry[sub_key]}}}})
+                }
+                for model_id, entry in models.items()
+                if isinstance(entry, dict)
+            }
+            kept_models = {model_id: kept for model_id, kept in kept_models.items() if kept}
+            if kept_models:
+                settings["modelSettings"] = kept_models
         agents: dict = {}
+        skipped_project_agents: list[str] = []
         for name, fields in effective_agents.items():
             if not isinstance(fields, dict):
                 continue
-            kept = {
-                key: fields[key]
-                for key in profile_schema.AGENT_ALLOWLIST
-                if fields.get(key) is not None and _valid({"agents": {str(name): {key: fields[key]}}})
-            }
+            if fields.get("source") != "user":
+                if fields.get("source") == "project":
+                    skipped_project_agents.append(str(name))
+                continue
+            # effective_agents names a few fields its own way (max_turns).
+            kept = {}
+            for key in profile_schema.AGENT_ALLOWLIST:
+                value = fields.get(profile_diff_mod._EFFECTIVE_AGENT_FIELD.get(key, key))
+                if value is not None and _valid({"agents": {str(name): {key: value}}}):
+                    kept[key] = value
             if kept:
                 agents[str(name)] = kept
         doc = {
@@ -2768,6 +2977,7 @@ def make_handler(
         status, payload = _save_user_profile(store, doc, replace=query.get("replace") == "1")
         if status == 201:
             payload["data"]["skipped_managed"] = sorted(k for k in profile_schema.SETTINGS_ALLOWLIST if k in managed)
+            payload["data"]["skipped_project_agents"] = sorted(skipped_project_agents)
         return status, payload
 
     def route_profiles_post(store, query, body):
@@ -3867,6 +4077,7 @@ def make_handler(
         "/api/recache": route_recache,
         "/api/compactions": route_compactions,
         "/api/profiles": route_profiles,
+        "/api/profile-suggestion": route_profile_suggestion,
         "/api/baseline": route_baseline,
         "/api/daily-usage": route_daily_usage,
         "/api/ttl": route_ttl,

@@ -1116,10 +1116,126 @@ def test_profiles_listing_includes_the_catalogue(server):
     assert_privacy(body)
 
 
-def test_profiles_listing_reports_the_baseline_suggested_profile(server):
+def test_profiles_list_needs_no_report_and_carries_no_suggestion(server, monkeypatch):
+    """The list draws at once: it is the profiles alone, so no report is built to answer it
+    (the suggestion has a route of its own)."""
+    calls = _spy_corpus_reads(monkeypatch)
     resp, body = server.get_json("/api/profiles")
     assert resp.status == 200
-    assert body["data"]["suggested_profile_id"] == "implementation-heavy"
+    assert {p["id"] for p in body["data"]["profiles"]} >= set(profile_catalogue.CATALOGUE_IDS)
+    assert "suggested_profile_id" not in body["data"] and "suggested_reason" not in body["data"]
+    assert {"active_profile_id", "active_profile_name"} <= set(body["data"])
+    assert calls == []
+    # With the window and project named it is still just the list.
+    assert server.get_json("/api/profiles?window=all&project=not-a-project")[0].status == 200
+    assert calls == []
+    # The suggestion is the route that builds one.
+    assert server.get_json("/api/profile-suggestion")[0].status == 200
+    assert _report_builds(calls)
+
+
+def test_profiles_suggestion_route_suggests_for_the_window_and_project_not_the_stored_baseline(
+    two_project_server, monkeypatch
+):
+    handle = two_project_server
+    # A stored record that says one profile; the stub below says another for
+    # whatever report model the route reads, and counts that model's sessions.
+    handle.store.record_baseline(
+        project_slug="proj-alpha",
+        project_root_path=r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-alpha",
+        window_start="2026-09-11T00:00:00Z",
+        window_end="2026-09-18T00:00:00Z",
+        archetype="plan-high-implement-low",
+        digest_json=json.dumps({"sessions": 1, "suggested_profile": "implementation-heavy"}),
+    )
+    seen: list[int] = []
+
+    def fake_suggest(model):
+        count = sum(service_api.baseline_mod._mode_mix(model).values())
+        seen.append(count)
+        return "workflow-ultracode", f"{count} sessions read."
+
+    monkeypatch.setattr(service_api.baseline_mod, "suggest_for_model", fake_suggest)
+
+    resp, body = handle.get_json("/api/profile-suggestion")
+    assert resp.status == 200
+    assert body["data"]["suggested_profile_id"] == "workflow-ultracode"  # not the stored "implementation-heavy"
+    assert body["data"]["suggested_reason"] == "2 sessions read."
+    # The picked project's own report is the one read.
+    resp, body = handle.get_json("/api/profile-suggestion?project=proj-alpha")
+    assert resp.status == 200
+    assert body["data"]["suggested_reason"] == "1 sessions read."
+    resp, body = handle.get_json("/api/profile-suggestion?project=proj-beta&window=all")
+    assert body["data"]["suggested_reason"] == "1 sessions read."
+    assert seen == [2, 1, 1]
+    # An unknown project or window is the usual 400, not a silent fall-back.
+    assert handle.get_json("/api/profile-suggestion?project=not-a-project")[0].status == 400
+    assert handle.get_json("/api/profile-suggestion?window=bogus")[0].status == 400
+
+
+def test_a_user_profile_with_the_id_suggestion_is_served_like_any_profile(server):
+    """The suggestion route used to sit at /api/profiles/suggestion, where a
+    user profile with that id would be read."""
+    (server.options.config_dir / "profiles").mkdir(exist_ok=True)
+    (server.options.config_dir / "profiles" / "suggestion.toml").write_text(
+        'id = "suggestion"\nname = "Mine"\n[settings]\neffortLevel = "low"\n', encoding="utf-8"
+    )
+    resp, body = server.get_json("/api/profiles/suggestion")
+    assert resp.status == 200
+    assert body["data"]["id"] == "suggestion" and body["data"]["settings"] == {"effortLevel": "low"}
+    resp, body = server.get_json("/api/profiles/suggestion/diff")
+    assert resp.status == 200 and body["data"]["profile_id"] == "suggestion"
+    # the suggestion is its own route
+    resp, body = server.get_json("/api/profile-suggestion")
+    assert resp.status == 200 and "suggested_profile_id" in body["data"]
+
+
+def test_profiles_suggestion_route_gives_the_live_suggestion_only_from_the_floor_of_sessions(server, monkeypatch):
+    # The stored record ("implementation-heavy") is not what comes back; the
+    # one-session view is under the floor, so nothing is suggested at all.
+    resp, body = server.get_json("/api/profile-suggestion")
+    assert resp.status == 200
+    assert body["data"]["suggested_profile_id"] is None
+    assert body["data"]["suggested_reason"] is None
+    # With the floor lowered the same view speaks, in a plain sentence.
+    monkeypatch.setattr(service_api.baseline_mod, "SUGGEST_MIN_SESSIONS", 1)
+    resp, body = server.get_json("/api/profile-suggestion")
+    assert body["data"]["suggested_profile_id"] in profile_catalogue.CATALOGUE_IDS
+    assert body["data"]["suggested_profile_id"] != "implementation-heavy"
+    assert body["data"]["suggested_reason"].endswith(".")
+    assert "this window" in body["data"]["suggested_reason"]
+    assert_privacy(body)
+
+
+def test_profiles_suggestion_route_shows_none_for_a_window_without_sessions(tmp_path, monkeypatch):
+    empty = corpus_mod.Corpus(sessions=[], total_files=0, total_bytes=0, cache_hits=0, cache_misses=0, elapsed_s=0.0)
+    _install_fake_rebuild(monkeypatch, empty)
+    store = Store(tmp_path / "empty.db")
+    store.open()
+    # An old stored record is not shown in its place.
+    store.record_baseline(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        window_start="2026-09-11T00:00:00Z",
+        window_end="2026-09-18T00:00:00Z",
+        archetype="plan-high-implement-low",
+        digest_json=json.dumps({"sessions": 1, "suggested_profile": "overseer-fanout"}),
+    )
+    config_dir = tmp_path / "empty-config"
+    config_dir.mkdir()
+    options = ServeOptions(projects_root=tmp_path / "projects", config_dir=config_dir)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), service_api.make_handler(store, options))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    handle = _ServerHandle(httpd, thread, corpus=empty, store=store, options=options)
+    try:
+        resp, body = handle.get_json("/api/profile-suggestion")
+        assert resp.status == 200
+        assert body["data"]["suggested_profile_id"] is None
+        assert body["data"]["suggested_reason"] is None
+    finally:
+        handle.close()
+        store.close()
 
 
 def test_baseline_returns_the_latest_capture_and_capture_status(server):
@@ -1226,6 +1342,169 @@ def test_profile_diff_rows_say_where_each_change_lands_and_come_with_a_prompt(se
     assert "settings profile" in data["prompt"] and "show me the diff" in data["prompt"]
 
 
+def _seed_settings_snapshot(handle, slug, ts, *, effort, layer, agents=(), env_names=(), effort_env_set=False,
+                            model_settings=None, extra=None) -> None:
+    """One config snapshot of ``slug``: its effective effort level and the layer that set it, its agents
+    (name -> tools, or name -> (source, tools)), the env var names it saw and what else is in force."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    def _agent(value):
+        return value if isinstance(value, tuple) else ("user", value)
+
+    effective = {"effortLevel": effort, **(extra or {})}
+    if model_settings:
+        effective["modelSettings"] = model_settings
+    handle.store.upsert_snapshot(
+        project_slug=slug,
+        project_root_path=rf"C:\Users\definitely-not-a-real-person\.claude\projects\{slug}",
+        ts=ts,
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "project_slug": snapshot_project_key(slug),
+                "effective": effective,
+                "effective_provenance": {key: (layer if key == "effortLevel" else "user") for key in effective},
+                "managed_keys": [],
+                "env_names": list(env_names),
+                "content_layers": {"effort_level_env_set": effort_env_set},
+                "agents": {
+                    name: {"name": name, "source": _agent(v)[0], "tools": _agent(v)[1]} for name, v in dict(agents).items()
+                },
+                "effective_agents": {
+                    name: {"source": _agent(v)[0], "model": None, "effort": None, "max_turns": None}
+                    for name, v in dict(agents).items()
+                },
+            }
+        ),
+    )
+
+
+def test_profile_diff_reads_the_picked_projects_snapshot(two_project_server):
+    handle = two_project_server
+    # proj-beta is older and has no project file setting the effort level; proj-alpha is the newest
+    # snapshot, sets it in .claude/settings.json and has an agent that writes code.
+    _seed_settings_snapshot(handle, "proj-beta", "2026-10-01T12:00:00Z", effort="low", layer="user",
+                            agents={"researcher": "Read, Grep", "builder": ("project", "Read, Edit")})
+    _seed_settings_snapshot(handle, "proj-alpha", "2026-10-02T12:00:00Z", effort="high", layer="project_shared",
+                            agents={"implementer": "Read, Edit"})
+
+    def effort_row(query):
+        data = handle.get_json(f"/api/profiles/implementation-heavy/diff{query}")[1]["data"]
+        return data, next(r for r in data["settings"] if r["setting"] == "effortLevel")
+
+    # No project picked: the newest snapshot of any project. It names no project file: which project's
+    # file it would be is not something the reader chose.
+    data, row = effort_row("")
+    assert (row["current_value"], row["overridden_by"]) == ("high", None)
+    assert [r["agent"] for r in data["agents"]] == ["implementer"] * 3
+    # What the agent notes say follows the pick too: with none picked a project target lists no agent
+    # (which project's agents the command will see is not known); with alpha picked, alpha's own do.
+    data, _ = effort_row("?scope=project-local")
+    assert data["agents"] == []
+    assert [n for n in data["notes"] if "agent that writes code" in n] == [_PICK_ONE_NOTE]
+    data, _ = effort_row("?project=proj-alpha&scope=project-local")
+    assert data["agents"] == []
+    assert [n for n in data["notes"] if "agent that writes code" in n] == [
+        "This profile also changes the agent that writes code. None of this project's agents in .claude/agents "
+        "is named like implementer, fixer or builder and can edit files, so no agent file changes. "
+        'Your agent implementer in ~/.claude/agents writes code. '
+        'To change it, pick "Your user settings, every project" above.'
+    ]
+    # Project alpha picked: its own snapshot, so its project file and its agents.
+    data, row = effort_row("?project=proj-alpha")
+    assert (row["current_value"], row["overridden_by"]) == (
+        "high",
+        "This project's .claude/settings.json sets it too and wins.",
+    )
+    assert [r["agent"] for r in data["agents"]] == ["implementer"] * 3
+    # The target file's own layer is the project file: nothing above it.
+    data, row = effort_row("?project=proj-alpha&scope=repo")
+    assert row["overridden_by"] is None
+    # Project beta picked: its snapshot alone, so its value, no override and its (lack of a) writer.
+    data, row = effort_row("?project=proj-beta")
+    assert (row["current_value"], row["overridden_by"]) == ("low", None)
+    assert data["agents"] == []
+    assert any("None of your agents in ~/.claude/agents" in note for note in data["notes"])
+    # Rows that are not settings carry the key with no value.
+    assert all("overridden_by" in r and r["overridden_by"] is None for r in data["agents"] + data["env"])
+    # An unknown project is the usual 400.
+    assert handle.get_json("/api/profiles/implementation-heavy/diff?project=not-a-project")[0].status == 400
+
+
+def test_profile_diff_rows_say_what_wins_over_them_whatever_the_pick(two_project_server):
+    handle = two_project_server
+    _seed_settings_snapshot(
+        handle, "proj-alpha", "2026-10-02T12:00:00Z", effort="high", layer="user", effort_env_set=True,
+        model_settings={"claude-opus-5-5": {"effortLevel": "high"}},
+        env_names=["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], extra={"autoCompactWindow": 500000},
+    )
+
+    def row(profile, setting, query=""):
+        data = handle.get_json(f"/api/profiles/{profile}/diff{query}")[1]["data"]
+        return next(r for r in data["settings"] if r["setting"] == setting)
+
+    for query in ("", "?project=proj-alpha"):
+        assert row("implementation-heavy", "effortLevel", query)["overridden_by"] == (
+            "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+        )
+        assert row("overnight-batch", "autoCompactWindow", query)["overridden_by"] == (
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
+        )
+        assert row("overnight-batch", "cleanupPeriodDays", query)["overridden_by"] is None
+    # Without the effort env var, the model's own effort level is what wins.
+    _seed_settings_snapshot(
+        handle, "proj-alpha", "2026-10-03T12:00:00Z", effort="high", layer="user",
+        model_settings={"claude-opus-5-5": {"effortLevel": "high"}},
+    )
+    assert row("implementation-heavy", "effortLevel")["overridden_by"] == (
+        "claude-opus-5-5 has its own effort level, which wins for it."
+    )
+
+
+def test_profile_diff_gives_a_per_model_row_its_setting_model_and_whether_it_was_recorded(two_project_server):
+    handle = two_project_server
+    _seed_settings_snapshot(
+        handle, "proj-alpha", "2026-10-02T12:00:00Z", effort="high", layer="user",
+        model_settings={"claude-opus-5-5": {"effortLevel": "high"}},
+    )
+    (handle.options.config_dir / "profiles").mkdir(exist_ok=True)
+    (handle.options.config_dir / "profiles" / "per-model.toml").write_text(
+        'id = "per-model"\n[settings]\neffortLevel = "medium"\n'
+        'modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWindow" = 300000 } }\n',
+        encoding="utf-8",
+    )
+    resp, body = handle.get_json("/api/profiles/per-model/diff")
+    assert resp.status == 200
+    data = body["data"]
+    rows = {r["key"]: r for r in data["settings"]}
+    effort = rows["settings.modelSettings.claude-opus-5-5.effortLevel"]
+    assert (effort["setting"], effort["model"], effort["recorded"]) == ("modelSettings.effortLevel", "claude-opus-5-5", True)
+    assert (effort["current_value"], effort["proposed_value"]) == ("high", "medium")
+    assert effort["label"] == "Effort level for one model"
+    assert effort["description"].startswith("How hard Claude thinks, for this model only.")
+    assert effort["where"] == "~/.claude/settings.json"
+    window = rows["settings.modelSettings.claude-opus-5-5.autoCompactWindow"]
+    assert (window["setting"], window["model"], window["recorded"]) == (
+        "modelSettings.autoCompactWindow", "claude-opus-5-5", False,
+    )
+    assert window["current_value"] is None and window["proposed_value"] == 300000
+    # every other row has no model and was recorded
+    flat = rows["settings.effortLevel"]
+    assert flat["model"] is None and flat["recorded"] is True and flat["setting"] == "effortLevel"
+    # the prompt and the unified diff name the model
+    assert (
+        '- In ~/.claude/settings.json, set effortLevel for the model claude-opus-5-5 (under "modelSettings") '
+        'to "medium" (now: high).'
+    ) in data["prompt"]
+    assert "+modelSettings.claude-opus-5-5.autoCompactWindow: 300000" in data["diff"]
+    assert_privacy(body)
+    # the schema route gives the key a label and text, so the editor and the card summary can name it
+    lever = next(
+        lever for lever in handle.get_json("/api/profile-schema")[1]["data"]["settings"] if lever["key"] == "modelSettings"
+    )
+    assert lever["label"] == "Per-model settings" and lever["description"]
+
+
 def test_profile_diff_notes_missing_snapshot_when_store_has_none(tmp_path, monkeypatch):
     corpus = _build_corpus(tmp_path)
     _install_fake_rebuild(monkeypatch, corpus)
@@ -1247,6 +1526,360 @@ def test_profile_diff_notes_missing_snapshot_when_store_has_none(tmp_path, monke
     finally:
         handle.close()
         store.close()
+
+
+def _seed_agents(handle, agents: dict, *, ts: str = "2026-10-01T12:00:00Z", slug: str = "proj-a") -> None:
+    """One config snapshot that records ``agents`` (name -> (source, tools))."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    handle.store.upsert_snapshot(
+        project_slug=slug,
+        project_root_path=_FAKE_ROOT,
+        ts=ts,
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "project_slug": snapshot_project_key(slug),
+                "effective": {"effortLevel": "high"},
+                "effective_provenance": {"effortLevel": "user"},
+                "managed_keys": [],
+                "agents": {
+                    name: {"name": name, "source": source, "tools": tools, "description": "str(1)"}
+                    for name, (source, tools) in agents.items()
+                },
+                "effective_agents": {
+                    name: {"source": source, "model": None, "effort": None, "max_turns": None}
+                    for name, (source, _tools) in agents.items()
+                },
+            }
+        ),
+    )
+
+
+_WORK_AGENTS = {
+    "implementer": ("user", "Read, Grep, Glob, Edit, Write, Bash"),
+    "researcher": ("user", "Read, Grep, Glob"),
+    "reviewer": ("user", "Read, Grep, Glob"),
+}
+
+_WRITER_NOTE_HEAD = "This profile also changes the agent that writes code. "
+
+
+def test_profile_diff_names_the_users_writer(server):
+    _seed_agents(server, _WORK_AGENTS)
+    resp, body = server.get_json("/api/profiles/implementation-heavy/diff")
+    assert resp.status == 200
+    data = body["data"]
+    assert [(r["agent"], r["setting"], r["role"]) for r in data["agents"]] == [
+        ("implementer", "model", "writer"),
+        ("implementer", "effort", "writer"),
+        ("implementer", "maxTurns", "writer"),
+    ]
+    assert {r["where"] for r in data["agents"]} == {"~/.claude/agents/implementer.md"}
+    assert all(r["role"] is None for r in data["settings"])
+    assert data["notes"] == []
+    assert "claude-implementer" not in json.dumps(body)
+    assert "~/.claude/agents/implementer.md" in data["prompt"]
+    assert "implementer.md" in data["diff"]
+
+
+def test_profile_diff_notes_when_no_agent_writes_code_and_where_one_is(server):
+    no_writer_user = (
+        _WRITER_NOTE_HEAD
+        + "None of your agents in ~/.claude/agents is named like implementer, fixer or builder and can edit files, "
+        "so no agent file changes."
+    )
+    no_writer_project = (
+        _WRITER_NOTE_HEAD
+        + "None of this project's agents in .claude/agents is named like implementer, fixer or builder and can edit "
+        "files, so no agent file changes."
+    )
+    _seed_agents(
+        server,
+        {
+            "researcher": ("user", "Read, Grep"),
+            "reviewer": ("user", "Read, Grep"),
+            "builder": ("project", "Read, Edit"),
+        },
+    )
+    # user scope: no user writer, one project writer
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert data["agents"] == []
+    assert data["notes"] == [
+        no_writer_user + ' Your project agent builder writes code. To change it, pick a "This project" target above.'
+    ]
+    assert "claude-implementer" not in data["prompt"]
+    # project scope: the one project writer is the writer, so no note
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local&project=proj-a")[1]["data"]
+    assert [r["agent"] for r in data["agents"]] == ["builder"] * 3
+    assert all(r["where"] == ".claude/agents/builder.md" for r in data["agents"])
+    assert not any("agent that writes code" in n for n in data["notes"])
+
+    # a user writer, no project writer
+    _seed_agents(server, {"implementer": ("user", "Read, Edit"), "reviewer": ("user", "Read")}, ts="2026-10-02T12:00:00Z")
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]
+    assert data["agents"] == []
+    assert [n for n in data["notes"] if "agent that writes code" in n] == [
+        no_writer_project
+        + ' Your agent implementer in ~/.claude/agents writes code. To change it, pick "Your user settings, every project" above.'
+    ]
+
+    # several writers elsewhere
+    _seed_agents(
+        server,
+        {"implementer": ("user", "Read, Edit"), "tester": ("user", "Read, Edit"), "fixer": ("user", "Edit")},
+        ts="2026-10-03T12:00:00Z",
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local&project=proj-a")[1]["data"]
+    assert [n for n in data["notes"] if "agent that writes code" in n] == [
+        no_writer_project
+        + ' Your agents fixer, implementer and tester in ~/.claude/agents write code. '
+        'To change them, pick "Your user settings, every project" above.'
+    ]
+    # nothing is a writer anywhere: only the base note, at each scope
+    _seed_agents(server, {"reviewer": ("user", "Read")}, ts="2026-10-04T12:00:00Z")
+    notes = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]["notes"]
+    assert notes == [no_writer_user]
+    notes = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]["notes"]
+    assert [n for n in notes if "agent that writes code" in n] == [no_writer_project]
+
+
+_PICK_ONE_NOTE = (
+    "This profile also changes the agent that writes code. Pick one project to see which of its agents changes."
+)
+
+
+def test_a_project_target_with_no_project_picked_lists_no_agent_rows(server):
+    """The command runs in one project, which the dashboard cannot know with
+    none picked, and the union of every project's agents lists files that are
+    not there (project B's builder, when the command runs in project A)."""
+    _seed_agents(server, {"builder": ("project", "Read, Edit")}, ts="2026-10-01T12:00:00Z", slug="proj-b")
+    _seed_agents(server, {"reviewer": ("user", "Read")}, ts="2026-10-02T12:00:00Z", slug="proj-a")
+    for scope in ("project-local", "repo"):
+        data = server.get_json(f"/api/profiles/implementation-heavy/diff?scope={scope}")[1]["data"]
+        assert data["agents"] == []
+        assert [n for n in data["notes"] if "agent that writes code" in n] == [_PICK_ONE_NOTE]
+        assert "builder" not in data["prompt"] and "agents/" not in data["prompt"]
+    # with a project picked, that project's own agents are read
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local&project=proj-a")[1]["data"]
+    assert data["agents"] == []
+    assert not any(n == _PICK_ONE_NOTE for n in data["notes"])
+    assert any("None of this project's agents in .claude/agents" in n for n in data["notes"])
+    _seed_agents(
+        server, {"builder": ("project", "Read, Edit"), "reviewer": ("user", "Read")}, ts="2026-10-03T12:00:00Z", slug="proj-a"
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]
+    assert [(r["agent"], r["where"]) for r in data["agents"]] == [("builder", ".claude/agents/builder.md")] * 3
+    assert not any("agent that writes code" in n for n in data["notes"])
+    # the user target needs no project
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert not any(n == _PICK_ONE_NOTE for n in data["notes"])
+
+
+def test_a_user_writer_hidden_behind_a_project_agent_of_the_same_name_is_still_a_user_writer(server):
+    """The hook merges the agents map with the project agent winning, so a
+    user ``implementer`` that a project's ``implementer`` shadows is recorded
+    only as the project entry (``shadowed_by_project``). ``apply`` at user
+    scope reads the disk and changes ``~/.claude/agents/implementer.md``, so
+    the drawer must count it as a user agent too, its tools unknown."""
+    server.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts="2026-10-01T12:00:00Z",
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "effective": {"effortLevel": "high"},
+                "effective_provenance": {"effortLevel": "user"},
+                "managed_keys": [],
+                "agents": {
+                    "implementer": {
+                        "name": "implementer",
+                        "source": "project",
+                        "tools": ["Read"],
+                        "shadowed_by_project": True,
+                    },
+                    "reviewer": {"name": "reviewer", "source": "user", "tools": ["Read"]},
+                },
+                "effective_agents": {},
+            }
+        ),
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert [(r["agent"], r["where"]) for r in data["agents"]] == [("implementer", "~/.claude/agents/implementer.md")] * 3
+    assert not any("agent that writes code" in n for n in data["notes"])
+    # at a project target the entry is the project's own agent, and its own
+    # tools line (Read only) says it cannot edit
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]
+    assert data["agents"] == []
+
+
+def test_a_shadowed_user_agents_rows_are_not_recorded_and_never_read_as_already_set(server):
+    """The snapshot records a user agent that a project agent of the same name shadows only as the
+    project entry. At user scope apply changes the user file, whose own values are not recorded: the
+    project agent's values must not stand in for them, or a row whose proposed value equals the
+    project's would read "Already set" and drop out of the prompt while apply still writes the file."""
+    server.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts="2026-10-01T12:00:00Z",
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "effective": {"effortLevel": "high"},
+                "effective_provenance": {"effortLevel": "user"},
+                "managed_keys": [],
+                "agents": {
+                    "implementer": {
+                        "name": "implementer", "source": "project", "tools": ["Read", "Edit"],
+                        "shadowed_by_project": True,
+                    },
+                    "reviewer": {"name": "reviewer", "source": "user", "tools": ["Read"]},
+                },
+                # the project agent's own values; they equal what implementation-heavy proposes
+                "effective_agents": {
+                    "implementer": {"source": "project", "model": "sonnet", "effort": "medium", "max_turns": 60},
+                    "reviewer": {"source": "user", "model": "opus", "effort": None, "max_turns": None},
+                },
+            }
+        ),
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    rows = {r["setting"]: r for r in data["agents"] if r["agent"] == "implementer"}
+    assert set(rows) == {"model", "effort", "maxTurns"}
+    assert all(r["recorded"] is False and r["current_value"] is None for r in rows.values())
+    assert all(r["where"] == "~/.claude/agents/implementer.md" for r in rows.values())
+    # so the prompt keeps every line, and says the value is not recorded
+    assert data["prompt"].count("implementer.md") == 3
+    assert '- In ~/.claude/agents/implementer.md, set model in the frontmatter to "sonnet" (now: not recorded).' in data["prompt"]
+    assert "-model: not recorded\n+model: sonnet" in data["diff"]
+
+
+def test_profile_diff_says_when_several_agents_write_code(server):
+    _seed_agents(
+        server,
+        {"tester": ("user", "Read, Edit"), "implementer": ("user", "Read, Edit"), "researcher": ("user", "Read")},
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert sorted({r["agent"] for r in data["agents"]}) == ["implementer", "tester"]
+    assert len(data["agents"]) == 6
+    assert data["notes"] == [
+        "implementer and tester are both named like an agent that writes code, so each gets these changes."
+    ]
+    _seed_agents(
+        server,
+        {"tester": ("user", "Read, Edit"), "implementer": ("user", "Read, Edit"), "fixer": ("user", "Edit")},
+        ts="2026-10-02T12:00:00Z",
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert data["notes"] == [
+        "fixer, implementer and tester are all named like an agent that writes code, so each gets these changes."
+    ]
+
+
+def test_profile_diff_without_a_recorded_snapshot_lists_no_role_rows_and_does_not_guess(tmp_path, monkeypatch):
+    note = _WRITER_NOTE_HEAD + "Your agents have not been recorded yet, so no agent file is listed here."
+    corpus = _build_corpus(tmp_path)
+    _install_fake_rebuild(monkeypatch, corpus)
+    store = Store(tmp_path / "no-snapshot.db")
+    store.open()
+    config_dir = tmp_path / "no-snapshot-config"
+    config_dir.mkdir()
+    options = ServeOptions(projects_root=tmp_path / "projects", config_dir=config_dir)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), service_api.make_handler(store, options))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    handle = _ServerHandle(httpd, thread, corpus=corpus, store=store, options=options)
+    try:
+        data = handle.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+        assert data["agents"] == []
+        assert note in data["notes"]
+        assert not any("None of" in n for n in data["notes"])
+        assert "claude-implementer" not in data["prompt"]
+        # a project target with no project picked asks for one first
+        data = handle.get_json("/api/profiles/implementation-heavy/diff?scope=project-local")[1]["data"]
+        assert data["agents"] == []
+        assert [n for n in data["notes"] if "agent that writes code" in n] == [_PICK_ONE_NOTE]
+        # a snapshot that records no agents list says the same
+        _seed_agents(handle, {})
+        store.upsert_snapshot(
+            project_slug="proj-a",
+            project_root_path=_FAKE_ROOT,
+            ts="2026-10-05T12:00:00Z",
+            schema_version=2,
+            digest_json=json.dumps({"effective": {"effortLevel": "high"}}),
+        )
+        data = handle.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+        assert note in data["notes"] and not any("None of" in n for n in data["notes"])
+    finally:
+        handle.close()
+        store.close()
+
+
+def test_a_snapshot_with_no_agents_map_is_treated_like_no_snapshot(server):
+    """A snapshot that records config but no ``agents`` list tells the
+    dashboard nothing of the user's agents, so the drawer must not claim
+    that none of them is a writer."""
+    server.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts="2026-10-05T12:00:00Z",
+        schema_version=2,
+        digest_json=json.dumps({"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "user"}}),
+    )
+    for scope in ("user", "repo"):
+        data = server.get_json(f"/api/profiles/implementation-heavy/diff?scope={scope}&project=proj-a")[1]["data"]
+        assert data["agents"] == []
+        notes = [n for n in data["notes"] if "agent that writes code" in n]
+        assert notes == [
+            _WRITER_NOTE_HEAD + "Your agents have not been recorded yet, so no agent file is listed here."
+        ]
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    assert data["agents"] == {} and data["setting_count"] == 2
+
+
+def test_a_profile_with_no_roles_shows_no_agent_that_writes_code_note(server):
+    _seed_agents(server, {"researcher": ("user", "Read")})
+    for profile_id in ("interactive-chat", "overnight-batch", "discovery-scrape"):
+        data = server.get_json(f"/api/profiles/{profile_id}/diff")[1]["data"]
+        assert not any("agent that writes code" in n for n in data["notes"]), profile_id
+
+
+def test_the_note_names_the_pickers_own_target_labels(server):
+    """The notes quote the target file picker's labels; this fails if the
+    sentence and ``PROFILE_SCOPE_LABELS`` in the page's script part ways."""
+    import re
+
+    source = (Path(service_api.__file__).parent / "static" / "page-setup.js").read_text(encoding="utf-8")
+    block = re.search(r"var PROFILE_SCOPE_LABELS = \{(.*?)\};", source, re.S).group(1)
+    labels = dict(re.findall(r'"?([\w-]+)"?: "([^"]+)"', block))
+    assert set(labels) == {"user", "project-local", "repo"}
+
+    _seed_agents(server, {"researcher": ("user", "Read"), "builder": ("project", "Edit")})
+    user_note = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]["notes"][0]
+    quoted = re.search(r'pick a "([^"]+)" target above', user_note).group(1)
+    assert quoted == "This project"
+    assert labels["project-local"].startswith(quoted) and labels["repo"].startswith(quoted)
+
+    _seed_agents(server, {"implementer": ("user", "Edit")}, ts="2026-10-02T12:00:00Z")
+    project_notes = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]["notes"]
+    project_note = next(n for n in project_notes if "agent that writes code" in n)
+    quoted = re.search(r'pick "([^"]+)" above', project_note).group(1)
+    assert quoted == labels["user"]
+
+
+def test_profile_diff_explicit_agent_values_win_over_the_role(server):
+    _seed_agents(server, _WORK_AGENTS)
+    profile_text = (
+        'id = "my-writer"\n[settings]\neffortLevel = "low"\n'
+        '[agents.implementer]\nmodel = "haiku"\n[roles.writer]\nmodel = "sonnet"\neffort = "low"\n'
+    )
+    (server.options.config_dir / "profiles").mkdir(exist_ok=True)
+    (server.options.config_dir / "profiles" / "my-writer.toml").write_text(profile_text, encoding="utf-8")
+    data = server.get_json("/api/profiles/my-writer/diff")[1]["data"]
+    rows = {r["setting"]: r for r in data["agents"]}
+    assert rows["model"]["proposed_value"] == "haiku" and rows["model"]["role"] is None
+    assert rows["effort"]["proposed_value"] == "low" and rows["effort"]["role"] == "writer"
 
 
 def test_profile_diff_unknown_id_is_not_found(server):
@@ -2656,6 +3289,74 @@ def test_profile_route_returns_a_catalogue_profile_and_404s_unknown(server):
     assert resp.status == 404
 
 
+def test_profile_route_returns_resolved_agents_and_counts(server):
+    expected = {"model": "sonnet", "effort": "medium", "maxTurns": 60}
+    _seed_agents(
+        server,
+        {**_WORK_AGENTS, "builder": ("project", "Read, Edit"), "plugin-writer": ("plugin", "Edit")},
+    )
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    # user and project agents together; a plugin agent is never a writer
+    assert data["agents"] == {"builder": expected, "implementer": expected}
+    assert data["roles"] == {"writer": expected}
+    assert data["settings"] == {"effortLevel": "medium", "subagentPromptCacheTtl": "5m"}
+    assert data["setting_count"] == 2 + 3 + 3
+
+    # a user with no writer: the role keys are not listed and not counted
+    _seed_agents(server, {"researcher": ("user", "Read"), "reviewer": ("user", "Read")}, ts="2026-10-02T12:00:00Z")
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    assert data["agents"] == {}
+    assert data["roles"] == {"writer": expected}
+    assert data["setting_count"] == 2
+
+    # a profile with no roles is returned as written
+    data = server.get_json("/api/profiles/interactive-chat")[1]["data"]
+    assert data["roles"] == {}
+
+
+def test_the_every_project_snapshot_is_built_once_per_store_change_and_project(server, monkeypatch):
+    """Reading and merging every stored snapshot takes tens of milliseconds
+    on a long-lived store, and the Setup page asks for it three times per
+    draw. It is kept per store change token and project filter, as the
+    routes around it keep their own parts."""
+    from claudeglass import snapshots as snapshots_mod
+
+    _seed_agents(server, _WORK_AGENTS)
+    real = snapshots_mod.with_every_project_agents
+    calls = []
+
+    def counting(snaps, canonical=None):
+        calls.append(len(snaps))
+        return real(snaps, canonical)
+
+    monkeypatch.setattr(snapshots_mod, "with_every_project_agents", counting)
+    for profile_id in ("implementation-heavy", "overseer-fanout", "workflow-ultracode", "implementation-heavy"):
+        data = server.get_json(f"/api/profiles/{profile_id}")[1]["data"]
+        assert sorted(data["agents"]) == ["implementer"]
+    assert len(calls) == 1
+    # the drawer's diff of the same project filter shares it; another project filter is its own
+    server.get_json("/api/profiles/implementation-heavy/diff")
+    assert len(calls) == 1
+    server.get_json("/api/profiles/implementation-heavy/diff?project=proj-a")
+    server.get_json("/api/profiles/implementation-heavy/diff?project=proj-a")
+    assert len(calls) == 2
+    # a snapshot lands: the next read builds again and sees it
+    _seed_agents(server, {"fixer": ("user", "Read, Edit")}, ts="2026-10-02T12:00:00Z")
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    assert sorted(data["agents"]) == ["fixer"]
+    assert len(calls) == 3
+    # a profile with no roles reads no snapshot at all
+    server.get_json("/api/profiles/interactive-chat")
+    assert len(calls) == 3
+
+
+def test_profile_route_without_a_recorded_snapshot_lists_no_role_keys(server):
+    # the fixture's one snapshot records no agents
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    assert data["agents"] == {}
+    assert data["setting_count"] == 2
+
+
 def test_session_explain_gives_template_sentences(server):
     resp, raw = server.request("GET", f"/api/session/{server.session_id}/explain")
     assert resp.status == 200
@@ -2700,7 +3401,7 @@ def test_profiles_from_current_saves_allowlisted_non_managed_keys(server):
             {
                 "effective": {"effortLevel": "high", "model": "opus", "permissions": {"allow": []}},
                 "managed_keys": ["model"],
-                "effective_agents": {"reviewer": {"effort": "low", "color": "blue"}},
+                "effective_agents": {"reviewer": {"source": "user", "effort": "low", "color": "blue"}},
             }
         ),
     )
@@ -2723,6 +3424,115 @@ def test_profiles_from_current_saves_allowlisted_non_managed_keys(server):
     # A second save without replace=1 is a conflict, not an overwrite.
     resp, _payload = server.post_json("/api/profiles/from-current", {})
     assert resp.status == 409
+
+
+def _seed_current_snapshot(handle, *, effective=None, effective_agents=None, managed=(), ts="2026-09-19T12:00:00Z"):
+    handle.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts=ts,
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "effective": effective if effective is not None else {"effortLevel": "high"},
+                "managed_keys": list(managed),
+                "effective_agents": effective_agents or {},
+            }
+        ),
+    )
+
+
+def test_from_current_keeps_agent_max_turns_and_cache_lifetime(server):
+    # effective_agents names these max_turns and experimental_cache_ttl; the profile calls them
+    # maxTurns and experimental.cacheTtl.
+    _seed_current_snapshot(
+        server,
+        effective_agents={
+            "helper": {
+                "source": "user", "model": "sonnet", "effort": "low", "max_turns": 40, "experimental_cache_ttl": "1h",
+            },
+            "bare": {"source": "user", "model": None, "effort": None, "max_turns": None, "experimental_cache_ttl": None},
+        },
+    )
+    resp, payload = server.post_json("/api/profiles/from-current", {})
+    assert resp.status == 201, payload
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["agents"] == {
+        "helper": {"model": "sonnet", "effort": "low", "maxTurns": 40, "experimental.cacheTtl": "1h"}
+    }
+    # the file on disk is a valid profile that says the same
+    text = (server.options.config_dir / "profiles" / "my-current-settings.toml").read_text(encoding="utf-8")
+    assert "maxTurns = 40" in text and '"experimental.cacheTtl" = "1h"' in text
+    # a value out of range drops only itself
+    _seed_current_snapshot(
+        server,
+        effective_agents={"helper": {"source": "user", "model": "sonnet", "max_turns": 0, "experimental_cache_ttl": "2h"}},
+        ts="2026-09-19T13:00:00Z",
+    )
+    assert server.post_json("/api/profiles/from-current?replace=1", {})[0].status == 201
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["agents"] == {"helper": {"model": "sonnet"}}
+
+
+def test_from_current_leaves_out_project_agents_and_names_them(server):
+    _seed_current_snapshot(
+        server,
+        effective_agents={
+            "helper": {"source": "user", "model": "sonnet"},
+            "zeta-builder": {"source": "project", "model": "haiku", "max_turns": 10},
+            "builder": {"source": "project", "model": "haiku"},
+            "no-source": {"model": "opus"},
+        },
+    )
+    resp, payload = server.post_json("/api/profiles/from-current", {})
+    assert resp.status == 201, payload
+    # only agents of the user's own folder are kept; the project ones are named, sorted
+    assert payload["data"]["skipped_project_agents"] == ["builder", "zeta-builder"]
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["agents"] == {"helper": {"model": "sonnet"}}
+    # with none to leave out, the list is there and empty
+    _seed_current_snapshot(server, effective_agents={"helper": {"source": "user", "model": "sonnet"}}, ts="2026-09-19T13:00:00Z")
+    resp, payload = server.post_json("/api/profiles/from-current?replace=1", {})
+    assert payload["data"]["skipped_project_agents"] == []
+    assert payload["data"]["skipped_managed"] == []
+
+
+def test_from_current_keeps_model_settings(server):
+    _seed_current_snapshot(
+        server,
+        effective={
+            "effortLevel": "high",
+            "modelSettings": {
+                "claude-opus-5-5": {"effortLevel": "medium"},
+                # the hook records an entry with no effort level as None
+                "claude-sonnet-4-6": {"effortLevel": None},
+                # each model's entry is checked alone: these two drop only themselves
+                "claude-haiku-4-5": {"effortLevel": "max"},
+                "claude-fable-4.1": {"effortLevel": "low"},
+                "claude-opus-4-1[1m]": {"effortLevel": "xhigh", "autoCompactWindow": 300000},
+            },
+        },
+    )
+    resp, payload = server.post_json("/api/profiles/from-current", {})
+    assert resp.status == 201, payload
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["settings"] == {
+        "effortLevel": "high",
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "medium"},
+            "claude-opus-4-1[1m]": {"effortLevel": "xhigh", "autoCompactWindow": 300000},
+        },
+    }
+    # a managed modelSettings is left out and named, like any managed key
+    _seed_current_snapshot(
+        server,
+        effective={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+        managed=["modelSettings"],
+        ts="2026-09-19T13:00:00Z",
+    )
+    resp, payload = server.post_json("/api/profiles/from-current?replace=1", {})
+    assert payload["data"]["skipped_managed"] == ["modelSettings"]
+    assert "modelSettings" not in server.get_json("/api/profiles/my-current-settings")[1]["data"]["settings"]
 
 
 # -- context files, named windows ----------------------------------------
@@ -6600,8 +7410,9 @@ def test_recommendations_prompt_rejects_a_bad_window(server):
 
 def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_builds_it_once(server, monkeypatch):
     """``api._quick_context`` hands the Tools check the snapshot's ``agents`` map,
-    where the line is (``effective_agents`` never holds one), and builds the
-    merged snapshot once for it and for the settings."""
+    where the line is (``effective_agents`` never holds one), and reads one
+    merged snapshot for it and for the settings: the one kept for this store
+    change and project (PF1), so a repeat request builds none."""
     from claudeglass import quick_actions, snapshots
 
     server.store.upsert_snapshot(
@@ -6632,7 +7443,7 @@ def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_bui
     assert ctx.agents == {"reviewer": {"source": "user", "tools": ["Read", "Grep"]}}
     assert ctx.effective == {"model": "opus"}
     assert ctx.effective_agents == {"reviewer": {"source": "user", "model": "haiku"}}
-    assert len(merges) == 1
+    assert merges == []  # kept since the first request (PF1: per store change and project)
 
 
 def test_claude_md_reads_the_projects_folder_the_service_is_given_wherever_the_config_folder_is(

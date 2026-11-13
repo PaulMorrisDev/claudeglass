@@ -128,7 +128,19 @@ class _Draft:
         now = self.now(key, agent)
         if now == value or already_set(key, value, now):
             return
+        if key == "modelSettings" and isinstance(now, dict):
+            # Only the models (and keys) the change names, not every model's entry.
+            now = {
+                model_id: {sub: now[model_id].get(sub) for sub in sub_values}
+                for model_id, sub_values in value.items()
+                if isinstance(now.get(model_id), dict)
+            }
         what, tradeoff, note = SETTING_TEXT.get(key, ("", "", ""))
+        if key == "modelSettings" and all(
+            set(sub_values) == {"effortLevel"} for sub_values in value.values() if isinstance(sub_values, dict)
+        ):
+            # Only per-model effort levels: the flat effort level's trade-off applies.
+            tradeoff = SETTING_TEXT["effortLevel"][1]
         self.candidates.append(
             {
                 "key": key,
@@ -414,25 +426,36 @@ def _setup_text(row: dict) -> str:
 
 
 def _effort_override_note(draft: _Draft, model_id: str | None) -> str:
-    """F3/PROF-03: a per-model ``modelSettings`` effort, or
-    ``CLAUDE_CODE_EFFORT_LEVEL`` being set at all (``hooks/snapshot-config.py``'s
-    ``content_layers``), both beat the top-level ``effortLevel`` scalar a
-    profile's ``effortLevel`` change would set -- for the env var, for
-    every model; for ``modelSettings``, for the one model it names. A
-    candidate for it says so plainly rather than implying the profile
-    alone will move it: applying it still writes the setting (it's a
-    legitimate default for every other model), but this one needs
-    ``--effort`` instead."""
+    """F3/PROF-03: ``CLAUDE_CODE_EFFORT_LEVEL`` being set at all
+    (``hooks/snapshot-config.py``'s ``content_layers``) beats the
+    top-level ``effortLevel`` scalar a profile's ``effortLevel`` change
+    would set, for every model. A candidate for it says so plainly rather
+    than implying the profile alone will move it: applying it still
+    writes the setting (it's a legitimate default for every other model),
+    but this one needs ``--effort`` instead. (A model's own
+    ``modelSettings`` effort also beats the scalar, for that one model;
+    :func:`_model_with_own_effort` finds it and the draft offers that
+    entry instead.)"""
     if not model_id:
         return ""
     if draft.effort_level_env_set:
         return f" Won't apply to {model_id}: CLAUDE_CODE_EFFORT_LEVEL is set for this session; use --effort instead."
+    return ""
+
+
+def _model_with_own_effort(draft: _Draft, model_id: str | None) -> str | None:
+    """The key, as written in the settings, of the ``modelSettings`` entry
+    that gives ``model_id``'s model its own effort level, or ``None``:
+    without one, or while ``CLAUDE_CODE_EFFORT_LEVEL`` is set (it beats
+    that entry too), the plain ``effortLevel`` is the candidate."""
+    if not model_id or draft.effort_level_env_set:
+        return None
     model_settings = draft.effective.get("modelSettings")
     if isinstance(model_settings, dict):
         for key, entry in model_settings.items():
             if isinstance(entry, dict) and entry.get("effortLevel") and _alias(str(key)) == _alias(model_id):
-                return f" Won't apply to {model_id}: it already has its own effort level set; use --effort instead."
-    return ""
+                return str(key)
+    return None
 
 
 def _tasks(draft: _Draft, tables, task: str | None) -> tuple[list[str], str | None, str]:
@@ -475,10 +498,15 @@ def _tasks(draft: _Draft, tables, task: str | None) -> tuple[list[str], str | No
             # PROF-04: only ticked once the cheaper setup has enough
             # messages behind it to trust, not just enough to show.
             tick = (whatif._num(cheaper.get("cycles")) or 0) >= habits.TICK_MIN_GROUP
-            draft.add(
-                "effortLevel", None, cheaper["effort"], ticked=tick,
-                evidence=evidence + _effort_override_note(draft, cheaper.get("model")),
-            )
+            own = _model_with_own_effort(draft, cheaper.get("model"))
+            if own is not None:
+                # That model's own entry beats the plain effortLevel, so change the entry.
+                draft.add("modelSettings", None, {own: {"effortLevel": cheaper["effort"]}}, ticked=tick, evidence=evidence)
+            else:
+                draft.add(
+                    "effortLevel", None, cheaper["effort"], ticked=tick,
+                    evidence=evidence + _effort_override_note(draft, cheaper.get("model")),
+                )
         note = f"Save it, then launch Claude with it when you start {task_words(task)} work."
     profile_id = catalogue.task_profile(task)
     if profile_id is not None and not _catalogue_conflicts(draft, profile_id):
@@ -765,7 +793,12 @@ def _as_profile(candidates: list[dict]) -> tuple[dict, dict]:
     settings: dict = {}
     agents: dict = {}
     for c in candidates:
-        if c["agent"] is None:
+        if c["agent"] is None and c["key"] == "modelSettings":
+            # One entry per model, so candidates for different models (or keys) join.
+            merged = settings.setdefault("modelSettings", {})
+            for model_id, sub_values in c["value"].items():
+                merged[model_id] = {**merged.get(model_id, {}), **sub_values}
+        elif c["agent"] is None:
             settings[c["key"]] = c["value"]
         else:
             agents.setdefault(c["agent"], {})[c["key"]] = c["value"]

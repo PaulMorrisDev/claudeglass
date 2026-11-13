@@ -653,8 +653,9 @@ with no params it means all time rather than a 30-day default.
 `/api/sessions`, `/api/compactions`, `/api/impact` and `/api/backtest`
 accept them all but, unlike the report routes, list everything (all time)
 when none is given. Every other route (`/api/health`, `/api/session/<id>`,
-`/api/recache`, `/api/baseline`, `/api/profiles*`, `/api/setup`,
-`/api/setup/status`, `/api/capture`) ignores them.
+`/api/recache`, `/api/baseline`, `/api/profiles`, `/api/profiles/<id>`, `/api/setup`,
+`/api/setup/status`, `/api/capture`) ignores them; `/api/profile-suggestion`
+takes `window` and `project`, and `/api/profiles/<id>/diff` takes `project`.
 
 **Caching.** The service builds each window's report once per store
 change (`Store.change_token()`) or `config.toml` change (its
@@ -1042,7 +1043,10 @@ the store) plus every user profile written under
 watcher's `_scan_profiles`), each tagged with which of the two it came
 from.
 
-`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "suggested_profile_id": str|null, "active_profile_id": str|null, "active_profile_name": str|null}`.
+`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "active_profile_id": str|null, "active_profile_name": str|null}`.
+
+The list needs no report, so it answers at once and ignores `window` and
+`project`. The suggestion has its own route, below.
 
 A catalogue entry's `archetype`/`for` come straight from its shipped
 TOML document; `tasks` is `for` normalised to the capture task
@@ -1052,13 +1056,28 @@ none), the form `POST /api/whatif`'s `task` takes. A user entry never
 carries them (the `profiles` table
 only indexes `id`/`name`/`updated_at` — no `toml_path`, never
 API-returned). `updated_at` is `null` for a catalogue entry (nothing to
-timestamp). `suggested_profile_id` is the latest recorded baseline's own
-`suggested_profile` field (`null` if no baseline has been captured yet),
-so the UI can mark that entry in the list without a second round trip.
-`active_profile_id` is the profile `apply <profile>` last marked active
+timestamp). `active_profile_id` is the profile `apply <profile>` last marked active
 (`<config_dir>/active-profile`), `null` when none has been; ignored
 recommendations are kept under it. `active_profile_name` is its name
 (its id when it's no longer in the list).
+
+### `GET /api/profile-suggestion`
+
+The profile to suggest for a window and project, and why. Worked out live
+from the report for that window and project (`baseline.suggest_for_model`: the
+rule `init` and `baseline` store, run on that report's tables), so a cold call
+waits for the report build the page asks for anyway; the profile list is a
+route of its own so it never waits.
+
+Query: the usual `window` and `project` (see "Filtering by project"); an
+unknown project or window is a `400`.
+
+`data`: `{"suggested_profile_id": str|null, "suggested_reason": str|null}`.
+`suggested_reason` is the one plain sentence saying what decided it (for
+example "19 of 78 sessions in this window ran a workflow script."); the UI
+marks that entry in the list and shows the sentence under it. Both are `null`
+when the view has fewer than `baseline.SUGGEST_MIN_SESSIONS` (5) sessions. The
+stored baseline record is not read here: `/api/baseline` still returns it.
 
 ### `GET /api/profile-schema`
 
@@ -1066,9 +1085,20 @@ Every key a profile may set, for the dashboard's profile form.
 
 `data`: `{"settings": [Lever, ...], "agents": [Lever, ...], "env": [str, ...], "archetypes": [str, ...], "scopes": [{"key", "label"}, ...]}`,
 where a `Lever` is `{"key", "label", "kind", "values", "min", "max", "description", "tradeoff"}`.
-`kind` is `str`, `enum`, `int`, `bool` or `list[str]`; `values` is the
+`kind` is `str`, `enum`, `int`, `bool`, `list[str]`, `map[str,bool]`,
+`map[str,enum]` or `map[str,model]`; `values` is the
 allowed list for an `enum` (else `null`), `min`/`max` the range for an
-`int`. `label`, `description` and `tradeoff` come from
+`int`. `modelSettings` is the one `map[str,model]` lever: a table of model
+id to that model's own `effortLevel` (`low`, `medium`, `high` or `xhigh`)
+and `autoCompactWindow` (`"auto"`, or a whole number from 100,000 to
+1,000,000), the two keys of `profiles.schema.MODEL_SETTINGS_ALLOWLIST`
+(the second has the schema's `int|auto` kind). The route lists
+`modelSettings` among `settings` with the label "Per-model settings" and
+`values`, `min` and `max` of `null`; it does not list those two sub-keys,
+so `int|auto` is never returned here. The dashboard's profile form has no
+box for `modelSettings`: it keeps the one in the profile it starts from and
+shows it as one read-only line ("Per-model settings: claude-opus-5-5 (effortLevel: low)"); "Edit as JSON instead"
+changes it. `label`, `description` and `tradeoff` come from
 `fixes.LEVER_LABELS`/`fixes.SETTING_TEXT`, the same text the
 recommendation explainers use. `env` lists the environment variable
 names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
@@ -1078,9 +1108,15 @@ names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
 One profile's contents. `404` if `<id>` names neither a catalogue id
 nor an existing `<config_dir>/profiles/<id>.toml`.
 
-`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
-`setting_count` counts settings, agent keys and environment variables
-together.
+`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
+`roles` is the profile's `[roles.<role>]` tables as written (the only
+role is `writer`, the agent that writes code). `agents` is as resolved
+(`profiles.roles.resolve`): the profile's own agent tables, plus each
+role's keys on every one of the user's agents the latest config snapshot
+records (user and project agents together) that is named like a writer
+and can edit files. A role with no such agent adds nothing, and so does
+a role when no snapshot has recorded any agents. `setting_count` counts
+settings, the resolved agent keys and environment variables together.
 
 ### `GET /api/profiles/<id>/diff`
 
@@ -1096,7 +1132,11 @@ than erroring. `404` if `<id>` names neither a catalogue id nor an
 existing `<config_dir>/profiles/<id>.toml`.
 
 Query: `scope` — one of `user` (default), `project-local`, `repo` (same
-three scopes `profiles.diff`/`apply` use); `400` for anything else. This
+three scopes `profiles.diff`/`apply` use); `400` for anything else.
+`project` (additive, see "Filtering by project") reads the picked project's
+own newest snapshot for "now", the agents the roles go to and what wins over
+a change, as `/api/profile-goals` does; without it, the machine's newest
+snapshot. An unknown project is a `400`. This
 route never accepts a client-supplied project directory — doing so
 would put a raw filesystem path in the response body, which this
 service's privacy rule forbids regardless of who supplied it — so a
@@ -1104,16 +1144,55 @@ service's privacy rule forbids regardless of who supplied it — so a
 `--project-dir`; fill it in yourself when you run the command.
 
 `data`: `{"profile_id": str, "scope": str, "diff": str, "settings": [DiffRow, ...], "agents": [DiffRow, ...], "env": [DiffRow, ...], "apply_command": str, "dry_run_command": str, "launch_command": str, "prompt": str, "notes": [str, ...]}`,
-where a `DiffRow` is `{"key", "setting", "agent", "label", "description", "where", "current_value", "current_provenance", "proposed_value", "target_file", "managed"}`
+where a `DiffRow` is `{"key", "setting", "agent", "model", "role", "label", "description", "where", "overridden_by", "current_value", "current_provenance", "proposed_value", "target_file", "managed", "recorded"}`
 (`profiles.diff.DiffRow`'s own fields, split by key prefix into the
 three lists rather than left as one flat `rows` array — `settings.*` /
 `agents.<name>.*` / `env.*`). The display fields: `setting` is the key
 without its prefix (dotted agent keys such as `experimental.cacheTtl`
 stay whole), `agent` the agent's name for an `agents.*` row (else
-`null`), `label`/`description` its plain name and what it controls, and
+`null`), `role` `"writer"` when the row's key came from the profile's
+`[roles.writer]` table rather than from an `[agents.<name>]` table of
+its own (else `null`). A profile's `modelSettings` gives one `settings` row
+per model and key, keyed `settings.modelSettings.<id>.<key>` (a model id has
+no dot): its `setting` is `modelSettings.<key>` (`modelSettings.effortLevel`
+or `modelSettings.autoCompactWindow`), `model` is the id (else `null`),
+and `label`/`description` are the "for one model" texts. `recorded` is
+`false` when the snapshot has an entry for that model that lacks the key, so
+`current_value` `null` does not mean "not set": the config snapshot keeps a
+model's `effortLevel` and nothing else of its entry, so this is every
+`modelSettings.autoCompactWindow` row of a model that has an entry. The
+dashboard writes "not recorded" under "Now" for such a row, and `prompt`
+says "(now: not recorded)" and `diff` "not recorded" for it. It is `true` for
+every other row, including a model with no entry at all (nothing is set
+there). At user scope it is also `false` for an agent's rows when a project
+agent of the same name hides the user's: the snapshot holds only the project
+agent's values, so `current_value` is `null` there and the row is never
+"Already set". `label`/`description` its plain name and what it controls, and
 `where` the file the change is written to under the chosen `scope`
-(`fixes.profile_change_where`). `target_file` is where the key is set
+(`fixes.profile_change_where`). `overridden_by` is one plain sentence saying
+what wins over the change, or `null` (`fixes.profile_overridden_by`): a
+project file ranking above the target file that sets the key too (only when a
+`project` is asked for; without one the snapshot is whichever project's took
+it), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` over `autoCompactWindow`,
+`CLAUDE_CODE_EFFORT_LEVEL` over `effortLevel` and over a model's own
+`modelSettings.<id>.effortLevel` row, or models that have an effort
+level of their own (`modelSettings`) over `effortLevel`. The dashboard adds
+it to the "Set in" cell after `where`. `target_file` is where the key is set
 today.
+
+A profile's roles are resolved against the agents the latest snapshot
+records at the chosen `scope` (the `user` agents for `user`, the
+`project` agents for `project-local` and `repo`), so the rows, the diff
+and the prompt name the user's own agent. `notes` then says, in one
+sentence each: that no agent at this scope is named like a writer and
+can edit files, so no agent file changes (with, when the other scope has
+one, which target to pick instead); that several agents are named like a
+writer and each gets the changes; or, when the snapshot records no
+agents, that the user's agents have not been recorded yet and so no
+agent file is listed. A `project-local` or `repo` scope with no `project`
+picked cannot say which project's agents the command will see, so the
+role's keys are left out and the only role note asks for one project to
+be picked; with `project`, that project's own agents are read.
 
 `apply_command`/`launch_command` are the two lines
 `profiles.diff.apply_command` returns, split apart — the exact
@@ -1137,12 +1216,12 @@ the config hook records only the agents of the project a session
 started in, so the newest snapshot alone would show another project's
 agents as not set.
 
-This diff, and `POST /api/profiles/from-current`, always read the
-machine's newest snapshot and take no `project`: a profile is applied to
+`POST /api/profiles/from-current` always reads the machine's newest
+snapshot and takes no `project`: a profile is applied to
 your user settings (or to a project folder you name when you run the
-command), whichever project the dashboard is showing. The routes that
-judge a window do follow a picked project: with `project`,
-`/api/profile-goals`, `/api/quick-actions`, `/api/quick-actions/<id>` and
+command), whichever project the dashboard is showing. This diff, and the
+routes that judge a window, follow a picked project: with `project`,
+`/api/profiles/<id>/diff`, `/api/profile-goals`, `/api/quick-actions`, `/api/quick-actions/<id>` and
 `POST /api/whatif` read the picked project's own newest snapshot for
 "in force now" (the settings, and the agents widened over that project's
 snapshots only), as the report's own advice does
@@ -1392,6 +1471,18 @@ row; for `tasks`, its `saving_usd` and `effect_text` are then scaled to
 that task's own share of the window (`habits_by_task`, or the agent's
 task share of its own cost for an agent candidate) — `saving_usd` is
 `null` and `basis` says why when there's no clean share to scale by.
+When the model the cheaper setup ran on already has its own effort level
+in `modelSettings` (matched by its family, and unless
+`CLAUDE_CODE_EFFORT_LEVEL` is set, which beats every model's entry), `tasks`
+drafts a `modelSettings` candidate in place of the `effortLevel` one: `key`
+`"modelSettings"`, `agent` `null`, `label` "Per-model settings", and a
+`value` shaped `{<model id as written in the settings file>: {"effortLevel":
+<the cheaper effort>}}`. It is ticked by the same rule as the plain
+`effortLevel`. Its `now` is the same shape, holding only that model's
+current `effortLevel` (not every model's entry), and its `estimate` is a row
+that is not simulated ("This change isn't simulated."). Its `tradeoff` is the
+`effortLevel` one's. In `profile`, the
+ticked `modelSettings` candidates are merged model by model.
 `profile` holds the ticked changes and `whatif` their combined
 estimate, scaled the same way for `tasks`. `current` returns no
 candidates (`from_current: true`): the dashboard saves your current
@@ -1928,9 +2019,8 @@ this window".
 
 Some routes keep covering every project whichever one is picked:
 `/api/baseline` (the dashboard's "All time, all projects" chip beside
-the latest baseline) and `/api/recache`; `/api/profiles/<id>/diff` and
-`POST /api/profiles/from-current`, which read the machine's newest
-settings; and `/api/backtest`, which checks `project` and ignores it
+the latest baseline) and `/api/recache`; `POST /api/profiles/from-current`,
+which reads the machine's newest settings; and `/api/backtest`, which checks `project` and ignores it
 (the dashboard's "All projects" chip beside it says so while a project is
 picked). The hook and statusline rows of `/api/diagnostics` also stay
 machine-wide. The dashboard checks an unknown slug once with
@@ -2111,7 +2201,16 @@ Without it, a second save is `409` (`error.code: "conflict"`, message
 
 `data`: the `POST /api/profiles` result plus `skipped_managed`: the
 allowlisted setting names left out because managed settings control
-them. `201` on success.
+them, and `skipped_project_agents`: the names of agents that belong to one
+project (`effective_agents` source `project`), sorted, left out (`[]` when
+there are none). Only the user's own agents (source `user`) are saved,
+each with the `model`, `effort`, `maxTurns` and `experimental.cacheTtl` it
+sets (`effective_agents` calls the last two `max_turns` and
+`experimental_cache_ttl`): `apply` looks for an agent's file in the user's
+folder at its default scope, so a project agent in the profile would get the
+whole profile refused. `modelSettings` is saved a model at a time, each
+model's entry checked on its own, so one the schema refuses (no effort level
+recorded, an id with a dot) drops only itself. `201` on success.
 
 ### `POST /api/whatif`
 

@@ -9,28 +9,24 @@ model turns or agents once plan mode exits) and the purposes that tend \
 to run this way -- refactor, test-triage, review -- per \
 classify.classify_purpose. agents.topology_spawn_write's mean_write \
 column (recommend.py's spawn-cost rule threshold) is what a per-agent \
-first-turn write cost looks like for an implementer agent; keeping \
-omitClaudeMd explicit (false, i.e. not yet trimmed -- spawn-cost's own \
-rule only recommends flipping it once mean_write actually clears the \
-threshold for a *specific* corpus, which this shipped starting point \
-cannot know in advance) and pinning "experimental.cacheTtl" to 5m \
-matches ttl.ttl_by_agent_type's own per-agent-type lever text \
-("experimental.cacheTtl in <agent>.md") for a short-gap implementer \
-agent, whose turns run close together rather than waiting on a long \
-verification step. subagentPromptCacheTtl is the same 5m as the \
-fallback default for any other agent type this profile does not name \
-individually, per the plan's "per-subagent TTL" owner note (Appendix, \
-"TTL should be chosen per spawned subagent type ... with \
-subagentPromptCacheTtl only as the fallback default").
+first-turn write cost looks like for the agent that writes code, which \
+this profile moves to a lower-tier model at medium effort with a turn \
+cap (the [roles.writer] table: it goes to every one of your agents named \
+like implementer, fixer or builder that can edit files, so the profile \
+needs none of your agent names). subagentPromptCacheTtl is 5m for every \
+subagent, whose turns run close together rather than waiting on a long \
+verification step, per the plan's "per-subagent TTL" owner note \
+(Appendix, "TTL should be chosen per spawned subagent type ... with \
+subagentPromptCacheTtl only as the fallback default"); Claude Code reads \
+it before any agent file's own "experimental.cacheTtl", so no agent \
+file line is needed.
 """
 
 [settings]
 effortLevel = "medium"
 subagentPromptCacheTtl = "5m"
 
-[agents.claude-implementer]
+[roles.writer]
 model = "sonnet"
 effort = "medium"
 maxTurns = 60
-omitClaudeMd = false
-"experimental.cacheTtl" = "5m"
