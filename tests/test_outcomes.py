@@ -19,6 +19,7 @@ from test_counterfactual import (
     _agent_model_point,
     _agent_model_world,
     _agent_run,
+    _run_cost,
     _main_model_point,
     _main_model_world,
     _read_main_model,
@@ -614,6 +615,30 @@ def test_an_agents_model_fix_with_every_run_given_a_model_by_its_spawn_is_too_li
     # Four that the file decides are fewer than the five a reading needs.
     four = _read_agent_model([_agent_run(SONNET) for _ in range(4)] + [_agent_run(OPUS, "opus") for _ in range(8)])
     assert four.verdict == "too_little_data" and four.measured_usd is None
+
+
+def test_an_exact_fix_needs_three_sessions_after_however_many_runs_they_hold():
+    # Six runs the agent file decides are units enough, but they sit in two sessions.
+    before, _after, bundles = _agent_model_world([], [_agent_run(OPUS) for _ in range(6)], at=T)
+    after = []
+    for n in range(2):
+        runs = [_agent_run(SONNET) for _ in range(3)]
+        spawns = [("gp", impact._Transcript(cost=_run_cost(run), turns=1, model="x")) for run in runs]
+        after.append(
+            impact.SessionFacts(
+                start=T + timedelta(days=0.2 + n),
+                main=impact._Transcript(cost=1.0, turns=2),
+                session_id=f"a{n}",
+                spawns=spawns,
+                project="p",
+            )
+        )
+        bundles[f"a{n}"] = SimpleNamespace(top=None, subs=runs)
+    point = _agent_model_point(T)
+    reading = outcomes.read_fix(
+        point, "gp", "model", _agent_model_card(), before + after, [point], bundles, PRICING, NOW, START_CORPUS
+    )
+    assert (reading.verdict, reading.measured_usd) == ("too_little_data", None)
 
 
 def test_an_every_project_model_change_leaves_out_a_project_that_keeps_its_own_model():
