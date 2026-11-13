@@ -660,7 +660,20 @@ def plan_apply(
         merged = dict(existing)
         for key, value in settings_changes.items():
             spec = SETTINGS_ALLOWLIST.get(key)
-            if spec is not None and spec.kind.startswith("map[") and isinstance(existing.get(key), dict):
+            if spec is not None and spec.kind == "map[str,model]" and isinstance(existing.get(key), dict):
+                # Merge by model, then key by key within a model: a change
+                # to one model's effort keeps that model's window, any key
+                # of its entry this tool has no name for, and every other
+                # model.
+                old_models = existing[key]
+                merged[key] = {
+                    **old_models,
+                    **{
+                        model_id: {**(old_models[model_id] if isinstance(old_models.get(model_id), dict) else {}), **sub}
+                        for model_id, sub in value.items()
+                    },
+                }
+            elif spec is not None and spec.kind.startswith("map[") and isinstance(existing.get(key), dict):
                 # Merge by name: change only the entries the profile names.
                 merged[key] = {**existing[key], **value}
             else:

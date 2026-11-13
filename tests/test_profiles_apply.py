@@ -1171,6 +1171,95 @@ def test_apply_result_paths_are_all_under_caller_supplied_roots(tmp_path):
     assert str(result.active_profile_path).startswith(str(config_dir))
 
 
+def _model_settings_world(tmp_path, settings: dict):
+    claude_root = tmp_path / "home" / ".claude"
+    claude_root.mkdir(parents=True)
+    settings_path = claude_root / "settings.json"
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return claude_root / "claudeglass", claude_root, settings_path
+
+
+def test_apply_merges_one_models_entry_without_losing_the_rest(tmp_path):
+    existing = {
+        "model": "opus",
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300_000, "maxEffortLevel": "xhigh"},
+            "claude-sonnet-4-6": {"effortLevel": "low"},
+        },
+    }
+    config_dir, claude_root, settings_path = _model_settings_world(tmp_path, existing)
+    profile = _profile(
+        settings={
+            "modelSettings": {
+                "claude-opus-5-5": {"effortLevel": "medium"},
+                "claude-haiku-4-5": {"autoCompactWindow": "auto"},
+            }
+        }
+    )
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    apply_mod.execute(plan, config_dir=config_dir)
+    written = json.loads(settings_path.read_text(encoding="utf-8"))
+    # the named model changes only the key the profile names; every other
+    # key of its entry (even one this tool has no name for), every other
+    # model and every other setting stay as they were
+    assert written["modelSettings"] == {
+        "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300_000, "maxEffortLevel": "xhigh"},
+        "claude-sonnet-4-6": {"effortLevel": "low"},
+        "claude-haiku-4-5": {"autoCompactWindow": "auto"},
+    }
+    assert written["model"] == "opus"
+    # a file with no modelSettings at all gets the profile's, as written
+    config_dir2, claude_root2, settings_path2 = _model_settings_world(tmp_path / "second", {"model": "opus"})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir2, claude_root=claude_root2)
+    apply_mod.execute(plan, config_dir=config_dir2)
+    assert json.loads(settings_path2.read_text(encoding="utf-8"))["modelSettings"] == profile.settings["modelSettings"]
+
+
+def test_write_launch_overlay_carries_model_settings(tmp_path):
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    path = apply_mod.write_launch_overlay(profile, config_dir=tmp_path / "cfg")
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}
+    }
+
+
+def test_apply_of_a_profile_with_no_model_settings_leaves_the_files_model_settings_byte_for_byte(tmp_path):
+    existing = {
+        "effortLevel": "low",
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300_000},
+            "claude-sonnet-4-6[1m]": {"autoCompactWindow": "auto"},
+        },
+    }
+    config_dir, claude_root, settings_path = _model_settings_world(tmp_path, existing)
+    old_text = settings_path.read_text(encoding="utf-8")
+    block_start = old_text.index('"modelSettings"')
+    plan = apply_mod.plan_apply(
+        _profile(settings={"effortLevel": "high"}),
+        scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root,
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    new_text = settings_path.read_text(encoding="utf-8")
+    assert new_text[new_text.index('"modelSettings"'):] == old_text[block_start:]
+    assert json.loads(new_text)["effortLevel"] == "high"
+
+
+def test_revert_restores_a_file_whose_model_settings_an_apply_changed(tmp_path):
+    existing = {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300_000}}}
+    config_dir, claude_root, settings_path = _model_settings_world(tmp_path, existing)
+    original = settings_path.read_bytes()
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "low"}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    result = apply_mod.execute(plan, config_dir=config_dir)
+    assert settings_path.read_bytes() != original
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["modelSettings"]["claude-opus-5-5"] == {
+        "effortLevel": "low",
+        "autoCompactWindow": 300_000,
+    }
+    apply_mod.revert(result.ts, config_dir=config_dir)
+    assert settings_path.read_bytes() == original
+
+
 def test_map_settings_merge_by_name_and_revert_cleanly(tmp_path):
     # skillOverrides and enabledPlugins are objects keyed by name: a
     # profile naming one entry changes that entry and keeps the rest.
