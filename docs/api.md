@@ -382,7 +382,10 @@ poll (`config.toml` and `settings.json` only): `level`, `title`,
 expired), `enabled_at`, `until`, `timebox_days` (how many days a
 switch from off to on runs before it ends, when no end is given),
 `sample`, `metrics`, `feedback`,
-`coaching`, `projects_limited` (only whether `[capture] projects` is
+`coaching`, `tagger`, `after` (`stop` or `light`: what happens when the
+end passes) and `light` (a light sample is what runs now: the end has
+passed and `after` is `light`), `light_share` (the percent of sessions
+a light sample runs in: `sample`, or 20 if that is more), `projects_limited` (only whether `[capture] projects` is
 set, never the patterns) and `hooks_ok` (whether `settings.json` runs
 every hook the chosen metrics need; `true` when they need none). The
 dashboard fetches `GET /api/capture` for its banner when this block
@@ -2137,6 +2140,10 @@ Body: a JSON object with any of these keys:
 - `sample`: `100`, `50`, `25` or `10` (percent of sessions).
 - `until`: an ISO 8601 time in the future when capture switches
   itself off, or `""` for no end.
+- `tagger`: `claude` or `haiku` (who writes the tags).
+- `after`: `stop` (the default) or `light`: what happens when `until`
+  passes. `light` keeps a light sample of `task`, `level`, `size` and
+  `shift` in 1 session in 5 instead of stopping.
 
 Only from this machine: `403` unless the request comes from a
 loopback address, on top of the cross-site checks above (a service

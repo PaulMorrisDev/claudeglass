@@ -956,6 +956,17 @@ def _rule_subagent_volume(report: ReportModel, th: RecommendThresholds, archetyp
     return out
 
 
+def _summary_loss_evidence(report: ReportModel) -> list[tuple]:
+    """The share of summaries Claude said left out something the work needed,
+    for the two cards that move the compact window. Only the Work habits table
+    that ``capture_checks.lost_check`` lets through has it, so without the table
+    there is nothing to cite."""
+    share = _cell(report, "habits", "habits_summary_losses", "yes", "share_pct")
+    if not isinstance(share, (int, float)):
+        return []
+    return [_evidence("Summaries Claude said lost something the work needed", share, "habits", "habits_summary_losses", "yes")]
+
+
 def _rule_compaction_churn(report: ReportModel, th: RecommendThresholds, snapshot: Snapshot | None) -> list[Recommendation]:
     mean_per_session = _cell(report, "compactions", "compactions_summary", "Compactions per session (mean)", "value")
     dropped_share_row_key = "Dropped tokens (share of new_tokens: input+cache_creation)"
@@ -976,6 +987,7 @@ def _rule_compaction_churn(report: ReportModel, th: RecommendThresholds, snapsho
         evidence.append(
             _evidence("Dropped-token share of new tokens", dropped_share_pct, "compactions", "compactions_summary", dropped_share_row_key)
         )
+    evidence.extend(_summary_loss_evidence(report))
     return [
         Recommendation(
             id="compaction-churn",
@@ -1012,6 +1024,7 @@ def _rule_long_context_share(report: ReportModel, th: RecommendThresholds, snaps
         evidence.append(_evidence("Cache-read volume share from huge-context turns", share_pct, "recache", "recache_huge_context", row_key))
     if fires_on_p90:
         evidence.append(_evidence("Context size 9 in 10 main-session replies stay under", p90_ctx, "scorecard", "dimensions", "context_hygiene"))
+    evidence.extend(_summary_loss_evidence(report))
     return [
         Recommendation(
             id="long-context-share",
@@ -2737,6 +2750,7 @@ def _effort_mismatch_reported(
     cycles_idx = _col_index(table, "cycles")
     share_idx = _col_index(table, "thinking_pct")
     saving_idx = _col_index(table, "saving")
+    newest_idx = _col_index(table, "newest_tag")
     if None in (cycles_idx, share_idx, saving_idx):
         return []
     rows = [
@@ -2760,6 +2774,11 @@ def _effort_mismatch_reported(
         evidence.append(
             _evidence(f"Easy work at {effort} effort, thinking share of output", row[share_idx], "habits", "habits_effort_fit", row[0])
         )
+    # Say when the newest tag was written, once, only if every cited row's tags are a week or more behind your
+    # newest message (a filled cell): one fresh row means the evidence is not old. Dates are ISO, so max is latest.
+    if newest_idx is not None and all(newest_idx < len(row) and row[newest_idx] for row in rows):
+        latest = max(rows, key=lambda row: row[newest_idx])
+        evidence.append(_evidence("Newest tag behind this", latest[newest_idx], "habits", "habits_effort_fit", latest[0]))
     saving = sum(row[saving_idx] for row in rows if isinstance(row[saving_idx], (int, float)))
     lever, scope = _lever_scope("effortLevel", snapshot)
     return [

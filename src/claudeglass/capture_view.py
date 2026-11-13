@@ -40,6 +40,7 @@ TAG_EXAMPLE = "[cg: task=bugfix brief=clear]"
 CONNECT_COMMAND = "claudeglass capture connect"
 STATUS_COMMAND = "claudeglass capture status"
 ON_COMMAND = "claudeglass capture on"
+OFF_COMMAND = "claudeglass capture off"
 FEEDBACK_COMMAND = "claudeglass capture feedback on"
 BRIEF_COMMAND = "claudeglass capture brief on"
 
@@ -187,15 +188,26 @@ def amount_text(units, usd: float, period: str = "", *, prefix: str = "") -> str
     return amount.phrase(prefix) if amount is not None else "nothing"
 
 
-def describe(capture: CaptureConfig) -> str:
-    """One line: the level and, when on, its date, end and sample."""
+def one_session_in(capture: CaptureConfig) -> str:
+    """How often a light sample runs, as the hook runs it: ``1 session in 5``
+    at 20% of sessions, ``1 session in 10`` at 10%."""
+    return f"1 session in {round(100 / capture.light_share)}"
+
+
+def describe(capture: CaptureConfig, now: datetime | None = None) -> str:
+    """One line: the level and, when on, its date, end and sample. Once the
+    end has passed and a light sample was chosen, the line is that sample."""
     if not capture.is_on:
         return "Off"
+    if capture.light(now):
+        return f"Light sample (since {capture.until[:10]}, {capture.light_share}% of sessions)"
     parts = [catalogue.LEVEL_TITLES.get(capture.level, capture.level)]
     if capture.enabled_at:
         parts.append(f"since {capture.enabled_at[:10]}")
     if capture.until:
         parts.append(f"until {capture.until[:16].replace('T', ' ')}")
+        if capture.after == "light":
+            parts.append("then a light sample")
     if capture.sample < 100:
         parts.append(f"{capture.sample}% of sessions")
     if capture.haiku_tags:
@@ -209,9 +221,12 @@ def config_block(capture: CaptureConfig, now: datetime | None = None) -> dict:
     return {
         "level": capture.level,
         "title": catalogue.LEVEL_TITLES.get(capture.level, capture.level),
-        "describe": describe(capture),
+        "describe": describe(capture, now),
         "on": capture.is_on,
         "expired": expired,
+        "after": capture.after,
+        "light": capture.light(now),
+        "light_share": capture.light_share,
         "effective": capture.is_on and not expired,
         "enabled_at": capture.enabled_at,
         "until": capture.until,
@@ -802,12 +817,16 @@ def _banner(
         return {"on": False, "headline": invite, "notes": notes, "feedback_note": feedback_note, "unrated": waiting}
 
     expired = config["expired"]
-    parts = [f"Metrics capture: {config['title']}"]
-    if expired:
+    light = config["light"]
+    parts = ["Metrics capture: light sample" if light else f"Metrics capture: {config['title']}"]
+    if light:
+        parts.append(f"since {capture.until[:10]}")
+        parts.append(one_session_in(capture))
+    elif expired:
         parts.append(f"ended {capture.until[:10]}")
     elif capture.enabled_at:
         parts.append(f"since {capture.enabled_at[:10]}")
-    if capture.sample < 100:
+    if capture.sample < 100 and not light:
         parts.append(f"{capture.sample}% of sessions")
     if measured is not None and (measured["sessions"] or measured["subagents"]):
         parts.append(f"{measured['tokens_text']} tokens")
@@ -828,6 +847,20 @@ def _banner(
         )
         else None
     )
+    if light:
+        notes.append(
+            f"The full capture ended on {capture.until[:10]}. Claude now tags the kind, difficulty and size of the "
+            f"work, and task changes, in {one_session_in(capture)}."
+        )
+        notes.append(f"'{OFF_COMMAND}' stops it. '{ON_COMMAND}' starts full capture again.")
+        if hooks.get("ok") is False:
+            notes.append(hooks["summary"])
+        if low_coverage is not None:
+            notes.append(low_coverage)
+        return {
+            "on": True, "headline": " · ".join(parts), "notes": notes, "feedback_note": feedback_note,
+            "unrated": waiting,
+        }
     if expired:
         notes.append(
             f"Its end time ({capture.until[:16].replace('T', ' ')}) has passed, so nothing is captured now. "

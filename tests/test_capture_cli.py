@@ -625,6 +625,66 @@ def test_on_yes_connects_everything_and_a_second_run_changes_nothing(tmp_path):
     assert "already Essentials" in out and "already runs the capture hooks" in out
 
 
+def test_capture_on_takes_after(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "on", "--yes", "--after", "light")
+    assert rc == 0
+    assert load_config(config_dir=config_dir).capture.after == "light"
+    assert 'after = "light"' in (config_dir / "config.toml").read_text(encoding="utf-8")
+    # Saying stop writes it back, and a word that is neither is refused by the parser.
+    rc, out = _capture(config_dir, "on", "--yes", "--after", "stop")
+    assert load_config(config_dir=config_dir).capture.after == "stop"
+    with pytest.raises(SystemExit):
+        cli._make_parser().parse_args(["capture", "on", "--after", "never", "--config-dir", str(config_dir)])
+    # Without the flag the choice is left as it was.
+    _capture(config_dir, "on", "--yes", "--after", "light")
+    _capture(config_dir, "on", "--yes", "--sample", "50")
+    assert load_config(config_dir=config_dir).capture.after == "light"
+
+
+def test_status_says_a_light_sample_goes_on_after_the_end(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "essentials"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    assert "Metrics capture: Light sample (since 2020-01-01, 20% of sessions)" in out
+    assert "A light sample goes on" in out and "capture's notes, tags and signals have stopped" not in out
+
+
+def test_status_during_a_light_sample_lists_only_its_keys_and_their_size(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    assert "essentials: task, level, shift, size\n" in out
+    for left_out in ("brief", "prior", "check", "big_output", "session_end", "deep:", "free:"):
+        assert left_out not in out, left_out
+    # The size is the note and the tag of those four keys: no tool note and no agent judge.
+    assert "tokens of note when a session starts" in out and "tokens of tag at the end of each reply" in out
+    assert "large or web tool result" not in out and "subagent run" not in out
+    assert "hasn't judged an agent run" not in out
+    # Full capture, still running, lists everything it asks for.
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "deep"\nuntil = "2099-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, full = _capture(config_dir, "status")
+    assert "large or web tool result" in full and "big_output" in full
+
+
+@pytest.mark.parametrize(("sample", "share", "phrase"), [(100, 20, "1 session in 5"), (10, 10, "1 session in 10")])
+def test_status_names_the_share_the_light_sample_runs_in(tmp_path, sample, share, phrase):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        f'[capture]\nlevel = "essentials"\nsample = {sample}\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n',
+        encoding="utf-8",
+    )
+    rc, out = _capture(config_dir, "status")
+    assert f"Metrics capture: Light sample (since 2020-01-01, {share}% of sessions)" in out
+    assert f"and task changes, in {phrase}. " in out
+
+
 def test_levels_up_and_down_sync_the_entries(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "on", "--yes")

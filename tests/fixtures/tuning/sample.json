@@ -398,5 +398,39 @@
         "rebuilt": 4
       }
     }
+  },
+  "capture_checks": {
+    "lost": {
+      "cycles": 70,
+      "evidence": 35,
+      "yes": {"answers": 12, "evidence": 8},
+      "no": {"answers": 20, "evidence": 7}
+    },
+    "breaks": {
+      "cycles": 43,
+      "reused": 13,
+      "prior": {
+        "needed": {"answers": 14, "reused": 5},
+        "some": {"answers": 3, "reused": 0}
+      }
+    },
+    "check": {
+      "targeted": {"cycles": 16, "redone": 0},
+      "full": {"cycles": 13, "redone": 3},
+      "run": {"cycles": 23, "redone": 4},
+      "manual": {"cycles": 22, "redone": 2},
+      "none": {"cycles": 16, "redone": 1}
+    },
+    "level": {
+      "easy": {"pieces": 4, "reworked": 0, "admitted": 0},
+      "normal": {"pieces": 4, "reworked": 0, "admitted": 0},
+      "hard": {"pieces": 14, "reworked": 6, "admitted": 5}
+    },
+    "level_effort": {
+      "hard": {"high": {"pieces": 2, "reworked": 0}, "xhigh": {"pieces": 12, "reworked": 6}}
+    },
+    "level_family": {
+      "hard": {"opus": {"pieces": 13, "reworked": 6}, "fable": {"pieces": 1, "reworked": 0}}
+    }
   }
 }

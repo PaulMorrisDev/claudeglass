@@ -80,6 +80,10 @@ TAG_VOCAB: dict[str, tuple[str, ...]] = {
     "rules": ("used", "unused"),
     # Deep, main session
     "prior": ("needed", "some", "none"),
+    # Asked once, in the reply after a summary (``Metric.compact_line``,
+    # riding on ``prior``'s switch): whether the summary left out
+    # something the work needed.
+    "lost": ("yes", "no"),
     "detour": ("none", "dead-end", "reread", "overbuilt", "env", "flaky"),
     "check": ("targeted", "full", "build", "run", "manual", "none"),
     "out": ("needed", "part", "unneeded"),
@@ -211,6 +215,15 @@ CUSTOM_LEVEL = "custom"
 #: either of those, since ``onboarding`` imports from ``config`` and both
 #: already depend on this module.
 DEFAULT_CAPTURE_TIMEBOX_DAYS = 14
+
+#: What happens when the time-box ends (``[capture] after``): capture stops
+#: (the default), or a light sample goes on: only :data:`LIGHT_METRICS`, in
+#: at most :data:`LIGHT_SAMPLE` percent of sessions. The four are the keys
+#: most cards read and the ones the joins match sessions by. The hook keeps
+#: a copy of both (``hooks/capture_hook.py``), held to these by a test.
+AFTER_CHOICES = ("stop", "light")
+LIGHT_METRICS = ("task", "level", "size", "shift")
+LIGHT_SAMPLE = 20
 
 #: Display names for the levels, as the dashboard and CLI show them.
 LEVEL_TITLES = {
@@ -1919,6 +1932,11 @@ class Metric:
     main_extra_untagged: str = ""
     #: The note a PostToolUse hook adds after a matching tool result.
     tool_note: str = ""
+    #: A key line only a compaction's note carries (the SessionStart whose
+    #: source is ``compact``, in the main session, while Claude writes the
+    #: tags): after the key lines and before the skip line. Its key rides on
+    #: this metric's switch (``capture_tags.MAIN_TAG_FIELDS``).
+    compact_line: str = ""
     #: Other metrics it can't work without (a subagent's extras ride on
     #: ``result``).
     requires: tuple[str, ...] = ()
@@ -2136,6 +2154,8 @@ METRICS: tuple[Metric, ...] = (
         hooks=("SessionStart",),
         main_line="prior: needed|some|none (how much of the earlier conversation this work needed; always none "
         "on the first message)",
+        compact_line="lost: yes|no, in your next final reply only (yes = the summary just made left out something "
+        "this work needed, so you read it again or asked)",
         out_chars=10,
     ),
     Metric(
@@ -2149,10 +2169,10 @@ METRICS: tuple[Metric, ...] = (
         powers=("verification",),
         tag="check=targeted|full|build|run|manual|none",
         hooks=("SessionStart",),
-        main_line="check: targeted|full|build|run|manual|none (how you verified the change: targeted = ran the "
-        "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
-        "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no "
-        "check, or you changed nothing)",
+        main_line="check: targeted|full|build|run|manual|none, only if this reply changed a file (how you verified "
+        "it: targeted = ran the tests for the part changed; full = ran the whole test suite; build = only built "
+        "or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no "
+        "check)",
         out_chars=12,
     ),
     Metric(
@@ -3193,11 +3213,13 @@ def active_metrics(level: str, metrics=(), feedback=()) -> tuple[str, ...]:
     return ids + tuple(i for i in FEEDBACK_IDS if i in set(feedback))
 
 
-def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGER) -> str:
+def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGER, source: str = "") -> str:
     """The note the hook adds for ``scope`` (``"main"`` at session start,
     ``"subagent"`` at agent start) with the metrics in ``ids`` switched
     on; ``""`` when none of them asks anything there. While Haiku writes
     the tags (``tagger``), the main note asks for no ``[cg: ...]`` tag.
+    ``source`` is the SessionStart's: after a compaction (``compact``) the
+    main note also carries each metric's :attr:`Metric.compact_line`.
 
     ``hooks/capture_hook.py`` builds the same text from
     ``capture-catalogue.json`` (:func:`export_json`); a test holds the two
@@ -3218,7 +3240,8 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
         (m.main_extra_untagged or m.main_extra) if untagged else m.main_extra if main else m.sub_extra
         for m in enabled
     ]
-    codes = [m.id for m, line, x in zip(enabled, lines, extras) if line or x]
+    asks = [m.compact_line if main and not untagged and source == "compact" else "" for m in enabled]
+    codes = [m.id for m, line, x, ask in zip(enabled, lines, extras, asks) if line or x or ask]
     if not codes:
         return ""
     out = [f"{NOTE_MARKER}{NOTE_VERSION} {','.join(codes)}", NOTE_INTRO]
@@ -3229,13 +3252,14 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
     before_tag = [x for m, x in zip(enabled, extras) if x and main and m.extra_before_tag]
     after_tag = [x for m, x in zip(enabled, extras) if x and not (main and m.extra_before_tag)]
     out += before_tag
-    if any(lines):
+    if any(lines) or any(asks):
         if main:
             out.append(MAIN_TAG_INTRO)
         else:
             keys = any(line for m, line in zip(enabled, lines) if m.id != "result")
             out.append(SUB_TAG_INTRO.format(tag=SUB_TAG_WITH_KEYS if keys else SUB_TAG))
         out += [line for line in lines if line]
+        out += [ask for ask in asks if ask]
         if main:
             out.append(SKIP_KEY_LINE)
     out += after_tag
@@ -3295,10 +3319,10 @@ JUDGE_LINES = {
     "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the "
     "message only makes sense with it; some = it helped; none = a fresh request, and always none on the first "
     "message)",
-    "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the "
-    "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
-    "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, "
-    "or nothing changed)",
+    "check": "check: targeted|full|build|run|manual|none, only if Claude changed a file in this exchange (how "
+    "Claude verified it: targeted = ran the tests for the part changed; full = ran the whole test suite; build "
+    "= only built or type-checked; run = ran the program itself to see it work; manual = only read it back; "
+    "none = no check)",
 }
 
 
@@ -3442,6 +3466,7 @@ def export_json() -> dict:
                 "group": m.group,
                 "requires": list(m.requires),
                 "main_line": m.main_line,
+                "compact_line": m.compact_line,
                 "extra_keys": list(m.extra_keys),
                 "main_extra": m.main_extra,
                 "extra_before_tag": m.extra_before_tag,
@@ -4175,7 +4200,7 @@ def render_markdown() -> str:
     )
     p(
         "- `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] "
-        "[--sample N] [--yes] [--dry-run]` — turn it on (default level: Essentials)."
+        "[--sample N] [--after stop|light] [--yes] [--dry-run]` — turn it on (default level: Essentials)."
     )
     p("- `claudeglass capture level LEVEL` — change the level.")
     p(
@@ -4195,6 +4220,18 @@ def render_markdown() -> str:
         "lack of one) exactly as it is — the default only ever applies to a fresh switch-on. Capture whose "
         "end time has passed counts as off here: turning it back on (`capture on`, a level, or a new end on "
         f"the Capture page) starts a new span, {DEFAULT_CAPTURE_TIMEBOX_DAYS} days unless you say otherwise."
+    )
+    p("")
+    p(
+        "What happens at the end is your choice: `--after stop` (the default) stops capture, and `--after "
+        "light` keeps a light sample going instead, with \"When it ends\" on the Capture page as the same "
+        "choice. A light sample asks only for `task`, `level`, `size` and `shift` (the kind, difficulty and "
+        f"size of the work, and task changes), in {LIGHT_SAMPLE}% of sessions (1 in 5), or fewer if you "
+        "chose a smaller share. Those four are the tags most cards and the matching of sessions read, so "
+        "they stay fresh; every other tag stops at the end, and a card that rests on one says how old it "
+        "is. The banner reads \"Metrics capture: light sample\" and says when the full capture ended. "
+        "`capture off` stops the sample, and `capture on` starts full capture again. An older ClaudeGlass "
+        "ignores the choice and stops at the end."
     )
     p(
         "- `claudeglass capture enable METRIC...` / `capture disable METRIC...` — turn individual "

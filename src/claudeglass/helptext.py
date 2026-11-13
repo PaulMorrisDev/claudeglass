@@ -201,6 +201,7 @@ PLACEMENT: dict[str, str] = {
     "habits_prompt_flags": "advanced",
     "habits_skills": "advanced",
     "habits_tool_output": "advanced",
+    "habits_summary_losses": "advanced",
     "rework_headline": "keep",
     "rework_causes": "keep",
     "rework_admitted": "keep",
@@ -1576,6 +1577,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "redo_pct": ("Redone", "Messages whose work was redone, fixed or corrected next."),
             "met_pct": ("Met the goal", "From your feedback."),
             "saving": ("Lower effort would save, about", "Half the thinking on easy work at high effort or above."),
+            "newest_tag": (
+                "Newest tag",
+                "The date of Claude's newest tag in this row, when it is a week or more older than your newest message.",
+            ),
         },
         value_labels={
             f"{level}:{effort}": f"{level.capitalize()} work, {effort_label}"
@@ -1589,6 +1594,8 @@ TABLE_COPY: dict[str, TableCopy] = {
                 ("default", "default effort"),
             )
         },
+        # The date of the newest tag is for the row's detail, not the grid: the grid stays as it was.
+        lead_columns=["setup", "cycles", "avg_cost", "thinking_pct", "redo_pct", "met_pct", "saving"],
     ),
     "habits_setups": TableCopy(
         title="Best setup for each kind of task",
@@ -1851,6 +1858,26 @@ TABLE_COPY: dict[str, TableCopy] = {
             "outputs": ("Big outputs", "Replies that got 8,000 tokens or more back from it."),
             "tokens": ("Tokens", "Their size together."),
             "cost": ("Carrying them cost", "What keeping them in context cost."),
+        },
+    ),
+    "habits_summary_losses": TableCopy(
+        title="What summaries left out",
+        help=Help(
+            shows="Whether Claude said a conversation summary left out something the work needed, and how often the "
+            "transcript backs that up.",
+            read="Backed up means the work read or edited a file it had touched before the summary, or you "
+            "corrected it. This table appears only when the yes answers are backed up clearly more often than the "
+            "no answers.",
+            act="",
+        ),
+        columns={
+            "answer": ("Claude's answer", "Yes means Claude said the summary left out something the work needed."),
+            "answers": ("Answers", "Summaries Claude gave this answer to."),
+            "evidence_pct": (
+                "With a file read again or a correction",
+                "Answers where the work read or edited a file it touched before the summary, or you corrected it.",
+            ),
+            "share_pct": ("Share of answers", "Out of all the yes and no answers."),
         },
     ),
     "capture_usage": TableCopy(

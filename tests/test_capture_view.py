@@ -114,6 +114,69 @@ def test_on_notes_low_coverage_enough_data_and_expiry():
     assert not any(note.startswith("Enough collected") for note in notes)
 
 
+def test_the_banner_names_the_light_sample():
+    use = _use(cycles=30, tagged_cycles=30)
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light")
+    data = capture_view.view(light, units=API, use=use, now=now)
+    banner = data["banner"]
+    assert data["config"]["after"] == "light" and data["config"]["light"] is True
+    assert banner["on"] is True
+    assert banner["headline"].startswith("Metrics capture: light sample · since 2026-09-21 · 1 session in 5 · ")
+    assert "ended 2026-09-21" not in banner["headline"]
+    assert banner["notes"][:2] == [
+        "The full capture ended on 2026-09-21. Claude now tags the kind, difficulty and size of the work, "
+        "and task changes, in 1 session in 5.",
+        "'claudeglass capture off' stops it. 'claudeglass capture on' starts full capture again.",
+    ]
+    assert not any(note.startswith("Its end time") for note in banner["notes"])
+    assert capture_view.describe(light, now) == "Light sample (since 2026-09-21, 20% of sessions)"
+    # Chosen but not reached yet: the line says what comes next, and the banner is the running one.
+    early = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    assert "then a light sample" in capture_view.describe(light, early)
+    running = capture_view.view(light, units=API, use=use, now=early)
+    assert running["config"]["light"] is False and running["banner"]["headline"].startswith("Metrics capture: Essentials")
+    # The default still stops: the same moment reads as ended, and the line says nothing of a sample.
+    stopped = _on(until="2026-09-21T00:00:00+00:00")
+    assert "ended 2026-09-21" in capture_view.view(stopped, units=API, use=use, now=now)["banner"]["headline"]
+    assert "light" not in capture_view.describe(stopped, now).lower()
+
+
+@pytest.mark.parametrize(
+    ("sample", "share", "phrase"),
+    [(100, 20, "1 session in 5"), (50, 20, "1 session in 5"), (25, 20, "1 session in 5"), (10, 10, "1 session in 10")],
+)
+def test_the_light_sample_names_the_share_the_hook_runs(sample, share, phrase):
+    """The hook runs it in ``min(sample, LIGHT_SAMPLE)`` percent of sessions; each surface says that."""
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light", sample=sample)
+    data = capture_view.view(light, units=API, use=_use(cycles=30, tagged_cycles=30), now=now)
+    assert data["config"]["light_share"] == share
+    assert data["config"]["describe"] == f"Light sample (since 2026-09-21, {share}% of sessions)"
+    banner = data["banner"]
+    assert banner["headline"].startswith(f"Metrics capture: light sample · since 2026-09-21 · {phrase} · ")
+    # The chosen share of the full capture is not a second figure in the headline.
+    assert "% of sessions" not in banner["headline"]
+    assert banner["notes"][0].endswith(f"and task changes, in {phrase}.")
+
+
+def test_a_light_sample_whose_hook_entry_is_missing_says_so():
+    spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
+    health = CaptureHookHealth(
+        settings_path=Path("settings.json"), needed=(spec,), problems=["The command runs a file that is missing."],
+    )
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light")
+    use = _use(cycles=30, tagged_cycles=30)
+    hooks = capture_view.hooks_block(health)
+    notes = capture_view.view(light, units=API, use=use, hooks=health, now=now)["banner"]["notes"]
+    assert hooks["summary"] in notes
+    # The light sample's own two notes stay, and a connected hook adds nothing.
+    assert any(note.startswith("The full capture ended on 2026-09-21") for note in notes)
+    clean = capture_view.view(light, units=API, use=use, now=now)["banner"]["notes"]
+    assert hooks["summary"] not in clean
+
+
 def test_ended_capture_leaves_out_the_hook_cost_and_step_down_notes():
     spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
     health = CaptureHookHealth(

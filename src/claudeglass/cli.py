@@ -785,6 +785,13 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         default=None,
         help="capture this share of sessions, in percent (each session is in or out for its whole length)",
     )
+    sub.add_argument(
+        "--after",
+        choices=capture_catalogue.AFTER_CHOICES,
+        default=None,
+        help="what happens when it ends: stop (the default), or keep a light sample: the kind, difficulty and size "
+        "of the work, and task changes, in 1 session in 5",
+    )
     sub.add_argument("--yes", action="store_true", help="make the changes without asking (they are still printed)")
     sub.add_argument(
         "--dry-run",
@@ -4358,6 +4365,14 @@ _HAIKU_ERRORS = {
 }
 
 
+def _running_metrics(capture: CaptureConfig) -> tuple[str, ...]:
+    """The metrics the hook asks for now: the level's, or only the light
+    sample's four keys once the end has passed and a light sample runs."""
+    if capture.light():
+        return capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
+    return capture.active_metrics()
+
+
 def _haiku_lines(
     capture: CaptureConfig, config_dir: Path, agent_replies: Callable[[], frozenset[str]] | None = None
 ) -> list[str]:
@@ -4387,7 +4402,7 @@ def _haiku_lines(
                 "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
                 "change, once the hook's Stop entry is in settings.json."
             )
-    elif capture.is_on and capture_catalogue.tagged_keys(capture.active_metrics()):
+    elif capture.is_on and capture_catalogue.tagged_keys(_running_metrics(capture)):
         done = haiku_tags.summary(
             config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER, agent_reply_ids=agent_ids
         )
@@ -4395,7 +4410,7 @@ def _haiku_lines(
             lines += _haiku_done_lines(done, "filled in", "missing tag", "No tag")
         else:
             lines.append("Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one.")
-    if capture.is_on and capture_catalogue.agent_metric_ids(capture.active_metrics()):
+    if capture.is_on and capture_catalogue.agent_metric_ids(_running_metrics(capture)):
         done = haiku_tags.summary(config_dir, since=since, kind="agent", agent_reply_ids=agent_ids)
         if done.calls:
             lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
@@ -4436,9 +4451,15 @@ def _capture_status(
     capture: CaptureConfig, *, config_dir: Path, claude_root: Path, stdout, args=None, config: Config | None = None
 ) -> int:
     stdout.write(f"Metrics capture: {capture_view.describe(capture)}\n")
-    ids = capture.active_metrics()
+    ids = _running_metrics(capture)
     if capture.is_on:
-        if capture.expired():
+        if capture.light():
+            stdout.write(
+                "Its end time has passed, so full capture has stopped. A light sample goes on: Claude tags the kind, "
+                f"difficulty and size of the work, and task changes, in {capture_view.one_session_in(capture)}. "
+                "'claudeglass capture off' stops it; 'claudeglass capture on' starts full capture again.\n"
+            )
+        elif capture.expired():
             stdout.write(
                 "Its end time has passed, so capture's notes, tags and signals have stopped; coaching notes and the "
                 "feedback facts line, if you have them on, still run. 'claudeglass capture on' starts capture again.\n"
@@ -4646,6 +4667,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             changes["until"] = until
         if args.sample is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
             changes["sample"] = args.sample
+        if args.after is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
+            changes["after"] = args.after
     except ValueError as exc:
         stdout.write(f"{exc}\n")
         return 2
@@ -4698,8 +4721,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     if preview != current:
         if current.is_on and current.expired(now) and preview.is_on and not preview.expired(now):
             stdout.write("Its end time had passed, so this starts capture again for a new span.\n")
-        if capture_view.describe(current) != capture_view.describe(preview):
-            stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
+        if capture_view.describe(current, now) != capture_view.describe(preview, now):
+            stdout.write(f"Metrics capture: {capture_view.describe(current, now)} -> {capture_view.describe(preview, now)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":
             stdout.write(
                 "Deep also turns on the /cg-feedback survey with its facts line, the plan check, and Claude's "
@@ -4758,7 +4781,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             # the dashboard's route does, so the mod hears of it within its settings reload.
             mod_settings_mod.refresh_coaching(config_dir)
     elif action != "connect":
-        stdout.write(f"Metrics capture is already {capture_view.describe(current)}.\n")
+        stdout.write(f"Metrics capture is already {capture_view.describe(current, now)}.\n")
 
     skill_on = "feedback_skill" in preview.feedback
     brief_on = "brief_templates" in preview.coaching

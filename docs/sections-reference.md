@@ -1294,7 +1294,9 @@ columns of a table still divide by that table's own messages.
   messages, per message, thinking share of output, redone, met the
   goal, and for easy work at high effort or above, what lower effort
   would save (half the thinking, or a quarter of the output without
-  thinking).
+  thinking). The last column, the newest tag, holds the date of the row's
+  newest message when that is a week or more before your newest message,
+  and is empty otherwise.
 - `habits_setups` — per kind of task Claude reported, all levels
   together and then by how hard it said the work was (`all`, `easy`,
   `normal`, `hard`): each model family and effort the main session ran

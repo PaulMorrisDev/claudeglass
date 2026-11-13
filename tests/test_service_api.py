@@ -4707,6 +4707,17 @@ def test_post_capture_can_hand_the_tags_to_haiku(server):
     assert "Stop" in data["hooks"]["missing_events"]
 
 
+def test_post_capture_takes_after_and_refuses_other_words(server):
+    resp, payload = server.post_json("/api/capture", {"level": "essentials", "after": "light"})
+    assert resp.status == 200
+    assert payload["data"]["config"]["after"] == "light"
+    assert 'after = "light"' in _config_text(server)
+    resp, payload = server.post_json("/api/capture", {"after": "stop"})
+    assert resp.status == 200 and payload["data"]["config"]["after"] == "stop"
+    resp, payload = server.post_json("/api/capture", {"after": "never"})
+    assert resp.status == 400 and "'after' must be one of: stop, light" in payload["error"]["message"]
+
+
 def test_post_capture_turning_on_with_no_until_gets_the_default_time_box(server):
     # CAP-8: the dashboard's level picker posts only {"level": ...} when
     # turning capture on (its own "until" control only renders once
@@ -4768,6 +4779,8 @@ def test_post_capture_picks_metrics_sampling_end_and_feedback(server):
         {"until": "next week"},
         {"feedback": ["task"]},
         {"tagger": "gpt"},
+        {"after": "never"},
+        {"after": True},
     ],
 )
 def test_post_capture_refuses_bad_bodies(server, body):
