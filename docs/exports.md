@@ -381,6 +381,7 @@ there is nothing to count, and a file from before them never had them.
 | `cost_centres` | Where the window's spend went: for the main session, direct agents, workflow agents and each session's first call, the list-price amount in each of base read, above-base read, growth write, rewrite, post-compaction and output. A row or cell with no spend is left out. Amounts only: the parts of the base read are not in it |
 | `project_files` | The files that go into agents' runs: the CLAUDE.md files Claude Code loads, the files they import and the files agents read by habit. For each of the 40 that cost most: its extension class (`md`, `txt`, `json`, `config`, `code`, `other`, or `unknown` for a file this machine could not find), how it arrives (`auto`, `import` or `read`), its size now and each recent week's as a bucket (up to 1k, 2k, 5k, 10k and 20k tokens, or over), and, for the main session and each agent type, the share of its runs that had the file. A custom agent's runs count as `custom`. No name, path, hash or cost; `total` counts every file |
 | `compactions` | The conversation summaries Claude Code made. The main sessions, how many of them summarised and the summaries in them, by what triggered each (`auto`, `manual` or `other`); those made inside subagent and workflow runs; the tokens they dropped. With a rate card, at list prices: the cache write on the reply after each summary, the estimated cost of writing them, and, for the sessions that summarised 3 times or more, how many there were, what their main conversations cost and what that was in all main-session cost. Counts and amounts: no session, no summary text |
+| `figures` | The figures some advice rests on, which no page shows. Cost per reply in the main session, direct agents and workflow agents, by the context the reply read (under 100K, 100K to 200K, over 200K), and the same at Sonnet's rates. The replies that made one read-only lookup and their cost. How much the main session's context grew a reply. For each conversation summary: the context before and after, what it cost, what it saved on each later reply, and how many replies followed. Corrections after a summary against messages after as long a stretch without one. Spend by model and week. Cold returns by the context they came back to and the tokens written again. A model is named only by an id of ClaudeGlass's own rate card, or `other`. Sessions an older version read are counted apart, not as zero. |
 
 Your session ratings and tip-card answers on the dashboard count as they do
 there. They are read from its database without writing to it, and only their
@@ -389,9 +390,10 @@ counts reach the file.
 ### What it never holds
 
 Names, paths and hashes. No session id, project name, skill name or custom
-agent name (a custom agent counts as `custom`). No model id (models are
-reduced to a family). No prompt, reply, tool result or other text of yours or
-Claude's. The words in the file come from fixed lists in ClaudeGlass, never
+agent name (a custom agent counts as `custom`). No model id other than those
+of ClaudeGlass's own rate card: any other id, or one you added to your own
+`pricing.toml`, counts as `other`. No prompt, reply, tool result or other text
+of yours or Claude's. The words in the file come from fixed lists in ClaudeGlass, never
 from your data: every key of every map is one of those words, so a key can't
 carry anything either. See [SECURITY.md](../SECURITY.md#tuning-export-tuning)
 for the same guarantees as security properties.
