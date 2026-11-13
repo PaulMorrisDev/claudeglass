@@ -920,9 +920,10 @@ nothing else. One shell command that chains several reads is already a
 batch: it is not a single lookup, but it doesn't end a stretch, and its
 re-read counts in the saving. Every reply re-reads the whole context, so
 lookups sent one by one cost one re-read each, where one message holding
-them all would cost one. The saving counts the cache reads of the replies after the first of each
-stretch. A batched message still writes the tool results. It is an upper
-bound, since some lookups need the answer to the one before.
+them all would cost one. The saving counts the cache reads of the replies
+after the first of each stretch. A batched message still writes the tool
+results. It is an upper bound, since some lookups need the answer to the
+one before.
 
 **Starting context times replies.** What an agent starts with is read again
 on every reply. The product is an upper bound on what the starting context
