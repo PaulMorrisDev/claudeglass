@@ -935,8 +935,9 @@ ones the code enforces, not promises about intent:
 - **Only counts, list-price amounts and words from fixed lists.** The
   document never holds a name, a path, a hash, a session id, a project name,
   a skill name, a custom agent name (it counts as `custom`), a model id other
-  than those of ClaudeGlass's own rate card (any other id, or one you added to
-  your own `pricing.toml`, counts as `other`) or any text of yours or Claude's. Any new pattern
+  than those of ClaudeGlass's own rate card (a model is named by the id of the
+  packaged rate-card row ClaudeGlass prices it with, or `other` when no row
+  prices it) or any text of yours or Claude's. Any new pattern
   that reads a transcript's text runs in memory and the text is dropped.
 - **A closed description of what may appear.** `tuning.spec()` names every
   key. Every string must be one of the words it lists or match a tight

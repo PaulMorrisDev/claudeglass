@@ -15,8 +15,9 @@ file that fails the checks prints nothing.
 
 What is never in it: names, paths, hashes, session ids, project slugs,
 skill names, custom agent names (they count as ``custom``), model ids
-other than the packaged rate card's (they count as a family, or as
-``other``), and any text of yours or Claude's. Every map's
+other than the packaged rate card's (a model is named by the id of the
+packaged rate-card row ClaudeGlass prices it with, or ``other`` when no row
+prices it), and any text of yours or Claude's. Every map's
 keys come from a closed set built from the catalogues here, never from
 the data, so a key can't carry anything either. A problem line names the
 key path and the check, never the value or the key it found.

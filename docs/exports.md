@@ -391,8 +391,9 @@ counts reach the file.
 
 Names, paths and hashes. No session id, project name, skill name or custom
 agent name (a custom agent counts as `custom`). No model id other than those
-of ClaudeGlass's own rate card: any other id, or one you added to your own
-`pricing.toml`, counts as `other`. No prompt, reply, tool result or other text
+of ClaudeGlass's own rate card: a model is named by the id of the packaged
+rate-card row ClaudeGlass prices it with, or `other` when no row prices it. No
+prompt, reply, tool result or other text
 of yours or Claude's. The words in the file come from fixed lists in ClaudeGlass, never
 from your data: every key of every map is one of those words, so a key can't
 carry anything either. See [SECURITY.md](../SECURITY.md#tuning-export-tuning)
