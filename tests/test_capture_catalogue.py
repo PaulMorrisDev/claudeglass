@@ -72,8 +72,10 @@ def test_metrics_claude_writes_have_a_tag_and_a_note_and_the_rest_have_neither()
         if m.id == "coaching_notes":
             # The one coaching toggle that runs through the capture hook; Stop only keeps the
             # newest reply's time for the cold-return receipt and prints nothing, and SubagentStop
-            # only records that an agent run ended too big (split_run).
-            assert m.hooks == ("UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop")
+            # only records that an agent run ended too big (split_run), so it is listed only while
+            # that hint is on.
+            split = () if "split_run" in cat.LIVE_OFF_HINTS else ("SubagentStop",)
+            assert m.hooks == ("UserPromptSubmit", "PostToolUse", *split, "Stop")
         elif m.group in ("derived", "coaching") or m.id in ("feedback_note", "dashboard_rating"):
             assert not m.hooks, m.id
 
@@ -902,3 +904,28 @@ def test_the_catalogue_points_to_the_measured_hook_time_not_a_guess():
     assert sentence in cat.METRICS_BY_ID["coaching_notes"].why
     assert sentence in cat.render_markdown()
     assert "a few tens of milliseconds" not in cat.render_markdown()
+
+
+# -- an entry only while something switched on uses it -----------------------------------------
+
+
+def _entry_matchers(ids) -> dict[str, str]:
+    return {spec[1]: spec[2] for spec in cat.hook_specs(ids)}
+
+
+def test_an_entry_runs_only_while_something_switched_on_uses_it(monkeypatch):
+    # split_run is the one coaching hint that keeps anything when an agent run ends.
+    assert ("SubagentStop" in _entry_matchers(("coaching_notes",))) == ("split_run" not in cat.LIVE_OFF_HINTS)
+    assert "SubagentStop" in _entry_matchers((*cat.level_metrics("essentials"), "coaching_notes"))  # the agent judge's
+    # It comes back by itself once the hint is on again.
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", tuple(h for h in cat.LIVE_OFF_HINTS if h != "split_run"))
+    assert "SubagentStop" in _entry_matchers(("coaching_notes",))
+
+
+def test_deep_needs_no_entry_after_a_tool_result_while_haiku_writes_the_tags():
+    deep = cat.level_metrics("deep")
+    assert _entry_matchers(deep)["PostToolUse"] == "|".join(cat.BIG_OUTPUT_TOOLS)
+    assert "PostToolUse" not in _entry_matchers((*deep, cat.HAIKU_TAGGER_HOOK))
+    assert "PostToolUse" not in _entry_matchers(("big_output", cat.HAIKU_TAGGER_HOOK))
+    # Coaching notes still need theirs.
+    assert _entry_matchers((*deep, cat.HAIKU_TAGGER_HOOK, "coaching_notes"))["PostToolUse"] == "|".join(cat.COACHING_TOOLS)

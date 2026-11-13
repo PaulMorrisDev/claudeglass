@@ -225,6 +225,8 @@ DEEP_FEEDBACK = 'feedback = ["feedback_skill", "feedback_note", "feedback_remind
 HOOK_EVENTS = {
     ("full", "claude"): {"SessionStart", "SubagentStop", "UserPromptSubmit", "PostToolUse", "SessionEnd",
                          "Notification bg", "PermissionRequest bg", "Stop bg", "StopFailure bg"},
+    ("full", "haiku"): {"SubagentStop", "UserPromptSubmit", "SessionEnd", "Notification bg", "PermissionRequest bg",
+                        "Stop", "StopFailure bg"},
     ("light", "claude"): {"SessionStart", "UserPromptSubmit", "Stop bg"},
     ("light", "haiku"): {"UserPromptSubmit", "Stop"},
     ("ended", "claude"): {"UserPromptSubmit"},
@@ -241,6 +243,19 @@ def test_the_hook_entries_are_for_what_the_hook_runs_in_every_state(tmp_path, st
     assert events == HOOK_EVENTS[state, tagger]
     # The items on your messages are counted as running in every state, as the hook runs them.
     assert {"feedback_skill", "plan_check", "feedback_reminder"} <= set(capture.running_metrics())
+
+
+@pytest.mark.parametrize("state", sorted(STATE_TABLES))
+def test_coaching_notes_keep_their_own_entries_in_every_state(tmp_path, state):
+    capture = _capture_with(tmp_path, f'{STATE_TABLES[state]}\nfeedback = []\ncoaching = ["coaching_notes"]')
+    specs = {spec[1:] for spec in capture_catalogue.hook_specs(capture.hook_metrics())}
+    assert ("UserPromptSubmit", "", False) in specs
+    assert ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False) in specs
+    assert any(event == "Stop" for event, _matcher, _bg in specs)
+    # Nothing runs at an agent's end for coaching notes while split_run is off, and no agent metric runs
+    # past the end.
+    if state != "full" and "split_run" in capture_catalogue.LIVE_OFF_HINTS:
+        assert all(event != "SubagentStop" for event, _matcher, _bg in specs)
 
 
 def test_what_runs_follows_the_clock_it_is_given(tmp_path):

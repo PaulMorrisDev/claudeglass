@@ -123,6 +123,10 @@ Capture and dashboard:
   the rating reminder need.** `capture connect` no longer offers to take it
   out, and `capture status` counts both again. Past its end, capture asks
   only for the entries that still run.
+- **No hook runs where nothing switched on uses it.** Coaching notes no
+  longer start Python at every agent's end, and Deep adds no hook after
+  each read or web result while Haiku writes the tags. `capture status`
+  names a leftover entry, and `capture connect` takes it out.
 
 Cards and checks:
 

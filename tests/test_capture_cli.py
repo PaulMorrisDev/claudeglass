@@ -1900,8 +1900,9 @@ def _coaching_hooked(config_dir) -> list[tuple[str, str, bool]]:
 
 
 COACHING_HOOKS = [
-    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next call.
-    ("SubagentStop", "", False),
+    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next
+    # call: only while that hint is on.
+    *([] if "split_run" in cat.LIVE_OFF_HINTS else [("SubagentStop", "", False)]),
     ("UserPromptSubmit", "", False),
     ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
     # cold_return's state is kept by the Stop entry: the one entry that runs in the background.
@@ -2657,3 +2658,19 @@ def test_past_the_end_only_the_entries_that_still_run_are_needed(tmp_path):
     wanted = hook_health.capture_specs(load_config(config_dir).capture.hook_metrics(PAST_THE_END))
     assert "SessionStart" in {spec.event for spec in wanted}
     assert hook_health.check_capture(wanted, claude_root=config_dir.parent, config_dir=config_dir).ok
+
+
+def test_coaching_notes_alone_need_no_entry_at_an_agents_end(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    # The entry an earlier version wrote for split_run, which is off.
+    settings = _settings(config_dir)
+    settings["hooks"]["SubagentStop"] = [dict(settings["hooks"]["UserPromptSubmit"][0])]
+    (config_dir.parent / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    rc, out = _capture(config_dir, "status")
+    assert "settings.json also runs capture hooks that nothing switched on uses" in out
+    rc, out = _capture(config_dir, "connect", stdin="n\n")
+    assert "- Remove the capture hook that runs capture-hook.py when a subagent finishes.\n" in out
+    assert "Left unchanged." in out and "can't be captured" not in out

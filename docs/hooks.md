@@ -109,10 +109,10 @@ wait on. With coaching
 notes on, it is also registered for the `Agent` and `Workflow` tools, so
 it can keep the newest reply's time and, when `split_run` is on, say that
 an agent run was too big for one task. It reads no size
-from their results and never says a large result is large. It is also registered
-for SubagentStop, where it prints nothing: when `split_run` is on, it notes
+from their results and never says a large result is large. While `split_run` is on, it is also registered
+for SubagentStop, where it prints nothing: it notes
 that an agent run ended too big for one task, so the main session's next
-hook can say so, and while it is off it notes nothing. How long a call
+hook can say so. How long a call
 takes depends on the machine, and Python's own start
 is part of it. Setup > Capture and `claudeglass capture status` show the
 measured figure from your own sessions, which Claude Code times (about 124
