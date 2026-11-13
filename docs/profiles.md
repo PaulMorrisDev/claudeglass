@@ -213,8 +213,10 @@ in that project alone. "Set in" names
 the file the change is written to and, when something wins over it, says so
 in the same cell: a project file that sets the key too (only when a project
 is picked, since otherwise the settings are whichever project's were
-recorded last), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or `CLAUDE_CODE_EFFORT_LEVEL`
-being set, or a model with an effort level of its own. Then three ways to use it:
+recorded last), `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_EFFORT_LEVEL`
+or `ANTHROPIC_MODEL` being set, or a model with an effort level of its own.
+A row that sets `effortLevel` for your user settings says Opus 5.5 and later
+ignore it there, and the prompt says the same. Then three ways to use it:
 a prompt that asks Claude to make the changes and show you the diff
 first (`fixes.profile_prompt`), the `claudeglass apply <id>
 --dry-run` command, and a one-session `--launch` trial that changes no

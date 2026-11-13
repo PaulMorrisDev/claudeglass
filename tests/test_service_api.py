@@ -45,7 +45,7 @@ from claudeglass import discovery
 from claudeglass import report as report_mod
 from claudeglass.calibration import Calibration
 from claudeglass.config import ConfigError, load_config, load_session_overrides
-from claudeglass.fixes import PROMPT_RESTART
+from claudeglass.fixes import PROMPT_RESTART, USER_EFFORT_IGNORED
 from claudeglass.pricing import load_pricing
 from claudeglass.profiles import catalogue as profile_catalogue
 from claudeglass.profiles import schema as profile_schema
@@ -1399,7 +1399,7 @@ def test_profile_diff_reads_the_picked_projects_snapshot(two_project_server):
     # own file holds in alpha alone, so the effort level reads as your user settings set it. It names no
     # project file: which project's file it would be is not something the reader chose.
     data, row = effort_row("")
-    assert (row["current_value"], row["overridden_by"]) == ("medium", None)
+    assert (row["current_value"], row["overridden_by"]) == ("medium", USER_EFFORT_IGNORED)
     assert [r["agent"] for r in data["agents"]] == ["implementer"] * 3
     # What the agent notes say follows the pick too: with none picked a project target lists no agent
     # (which project's agents the command will see is not known); with alpha picked, alpha's own do.
@@ -1426,7 +1426,7 @@ def test_profile_diff_reads_the_picked_projects_snapshot(two_project_server):
     assert row["overridden_by"] is None
     # Project beta picked: its snapshot alone, so its value, no override and its (lack of a) writer.
     data, row = effort_row("?project=proj-beta")
-    assert (row["current_value"], row["overridden_by"]) == ("low", None)
+    assert (row["current_value"], row["overridden_by"]) == ("low", USER_EFFORT_IGNORED)
     assert data["agents"] == []
     assert any("None of your agents in ~/.claude/agents" in note for note in data["notes"])
     # Rows that are not settings carry the key with no value.

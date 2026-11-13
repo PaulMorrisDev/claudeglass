@@ -1200,8 +1200,10 @@ project file ranking above the target file that sets the key too (only when a
 `project` is asked for; without one the snapshot is whichever project's took
 it), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` over `autoCompactWindow`,
 `CLAUDE_CODE_EFFORT_LEVEL` over `effortLevel` and over a model's own
-`modelSettings.<id>.effortLevel` row, or models that have an effort
-level of their own (`modelSettings`) over `effortLevel`. The dashboard adds
+`modelSettings.<id>.effortLevel` row, `ANTHROPIC_MODEL` over `model`, models
+that have an effort level of their own (`modelSettings`) over `effortLevel`,
+or, at the `user` scope, the fact that Opus 5.5 and later ignore a user-level
+`effortLevel`. The dashboard adds
 it to the "Set in" cell after `where`. `target_file` is where the key is set
 today.
 

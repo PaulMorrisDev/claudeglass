@@ -1265,6 +1265,13 @@ _OVERRIDING_PROJECT_FILE = {
 }
 
 
+#: A user-level effortLevel, which current models ignore (model-config docs).
+USER_EFFORT_IGNORED = (
+    "Opus 5.5 and later ignore effortLevel in user settings. Run /effort on each model, or apply this profile to "
+    "a project, where it applies to every model."
+)
+
+
 def profile_overridden_by(
     row_key: str,
     scope: str,
@@ -1290,6 +1297,9 @@ def profile_overridden_by(
        (``CLAUDE_CODE_EFFORT_LEVEL``).
     4. ``settings.effortLevel`` while ``model_settings`` (the effective
        ``modelSettings``) gives models an effort level of their own.
+    4b. ``settings.effortLevel`` at the user target, with none of the
+       above: Opus 5.5 and later ignore it in user settings
+       (:data:`USER_EFFORT_IGNORED`).
     5. ``settings.autoCompactWindow`` while ``model_settings`` gives models
        an auto-compact window of their own.
 
@@ -1330,6 +1340,8 @@ def profile_overridden_by(
             return f"{ids[0]} has its own effort level, which wins for it."
         if ids:
             return f"{join_names(ids)} have their own effort level, which wins for them."
+        if scope == "user":
+            return USER_EFFORT_IGNORED
     if key == "autoCompactWindow":
         ids = sorted(
             str(model)
@@ -1346,7 +1358,8 @@ def profile_overridden_by(
 def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
     """A self-contained prompt asking Claude to make a profile's changes
     by hand: one line per changed, unmanaged key, naming the file, the
-    old and the new value."""
+    old and the new value, and what wins over it (a row's
+    ``overridden_by``, see :func:`profile_overridden_by`) when something does."""
     from .profiles.diff import split_agent_key
 
     _, _, who = PROFILE_SCOPE_WHERE.get(scope, PROFILE_SCOPE_WHERE["user"])
@@ -1369,6 +1382,7 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
         lines.append(
             f"- In {where}, set {field} to {json.dumps(row.get('proposed_value'))} "
             f"(now: {_human(row.get('current_value')) if row.get('recorded') is not False else 'not recorded'})."
+            + (f" {row['overridden_by']}" if row.get("overridden_by") else "")
         )
     if len(lines) == 1:
         return f'The settings profile "{name}" matches your current settings; there is nothing to change.'
@@ -1764,6 +1778,7 @@ __all__ = [
     "RESTART_NOTE",
     "SCOPE_NOTE",
     "SETTING_TEXT",
+    "USER_EFFORT_IGNORED",
     "already_set",
     "attach_fixes",
     "build_fix",

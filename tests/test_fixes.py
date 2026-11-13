@@ -148,7 +148,13 @@ def test_profile_overridden_by_says_the_effort_variable_wins_over_a_models_own_e
 
 
 def test_profile_overridden_by_names_each_case():
+    from claudeglass import fixes
     from claudeglass.fixes import profile_overridden_by
+
+    assert fixes.USER_EFFORT_IGNORED == (
+        "Opus 5.5 and later ignore effortLevel in user settings. Run /effort on each model, or apply this profile "
+        "to a project, where it applies to every model."
+    )
 
     def by(row_key, scope="user", provenance=None, env_names=(), effort_env_set=False, model_settings=None,
            project_picked=True):
@@ -183,7 +189,11 @@ def test_profile_overridden_by_names_each_case():
     assert by("settings.effortLevel", effort_env_set=True) == effort
     assert by("settings.model", effort_env_set=True) is None
     assert by("settings.model", env_names=["ANTHROPIC_MODEL"]) == "ANTHROPIC_MODEL is set and wins over this setting."
-    assert by("settings.effortLevel") is None
+    # A user-level effortLevel is ignored by current models; a project, local or managed target is not.
+    assert by("settings.effortLevel") == fixes.USER_EFFORT_IGNORED
+    assert by("settings.effortLevel", scope="repo") is None
+    assert by("settings.effortLevel", scope="project-local") is None
+    assert by("settings.model") is None
 
     # A model's own effort level wins for that model.
     assert by("settings.effortLevel", model_settings={"claude-opus-5-5": {"effortLevel": "high"}}) == (
@@ -197,12 +207,18 @@ def test_profile_overridden_by_names_each_case():
         "settings.effortLevel",
         model_settings={"a": {"effortLevel": "low"}, "b": {"effortLevel": "high"}, "c": {"effortLevel": "medium"}},
     ) == "a, b and c have their own effort level, which wins for them."
-    assert by("settings.effortLevel", model_settings={"c": {"autoCompactWindow": 200000}}) is None
+    assert by("settings.effortLevel", "repo", model_settings={"c": {"autoCompactWindow": 200000}}) is None
     assert by("settings.model", model_settings={"a": {"effortLevel": "low"}}) is None
 
-    # Nothing set anywhere.
-    assert by("settings.effortLevel", provenance={}, env_names=[], effort_env_set=False, model_settings={}) is None
-    assert by("settings.effortLevel", model_settings=None) is None
+    # Nothing set anywhere (at a project target; the user target says current models ignore it).
+    assert by("settings.effortLevel", "repo", provenance={}, env_names=[], effort_env_set=False, model_settings={}) is None
+    assert by("settings.effortLevel", "repo", model_settings=None) is None
+    # The order: the variable, then a model's own entry, then the user-level sentence.
+    assert by("settings.effortLevel", effort_env_set=True) == effort
+    assert by("settings.effortLevel", model_settings={"a": {"effortLevel": "low"}}) == (
+        "a has its own effort level, which wins for it."
+    )
+    assert by("settings.effortLevel", model_settings={"c": {"autoCompactWindow": 200000}}) == fixes.USER_EFFORT_IGNORED
     # The first that applies: a project file's sentence comes before the rest.
     assert by(
         "settings.effortLevel",
@@ -210,6 +226,21 @@ def test_profile_overridden_by_names_each_case():
         effort_env_set=True,
         model_settings={"a": {"effortLevel": "low"}},
     ) == local
+
+
+def test_the_profile_prompt_says_what_wins_over_a_row():
+    from claudeglass import fixes
+    from claudeglass.fixes import profile_prompt
+
+    row = {"key": "settings.effortLevel", "current_value": "high", "proposed_value": "medium"}
+    said = profile_prompt("p", [{**row, "overridden_by": fixes.USER_EFFORT_IGNORED}], "user")
+    assert said.splitlines()[1] == '- In ~/.claude/settings.json, set effortLevel to "medium" (now: high). ' + (
+        fixes.USER_EFFORT_IGNORED
+    )
+    # A row without the key reads as it did.
+    assert profile_prompt("p", [row], "user").splitlines()[1] == (
+        '- In ~/.claude/settings.json, set effortLevel to "medium" (now: high).'
+    )
 
 
 def test_profile_overridden_by_names_a_project_file_only_when_a_project_is_picked():
