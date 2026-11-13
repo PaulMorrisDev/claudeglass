@@ -1434,7 +1434,8 @@ drafts a `modelSettings` candidate in place of the `effortLevel` one: `key`
 <the cheaper effort>}}`. It is ticked by the same rule as the plain
 `effortLevel`. Its `now` is the same shape, holding only that model's
 current `effortLevel` (not every model's entry), and its `estimate` is a row
-that is not simulated ("This change isn't simulated."). In `profile`, the
+that is not simulated ("This change isn't simulated."). Its `tradeoff` is the
+`effortLevel` one's. In `profile`, the
 ticked `modelSettings` candidates are merged model by model.
 `profile` holds the ticked changes and `whatif` their combined
 estimate, scaled the same way for `tasks`. `current` returns no

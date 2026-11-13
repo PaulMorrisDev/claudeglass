@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from claudeglass.fixes import SETTING_TEXT
 from claudeglass.profiles import goals
 from claudeglass.units import Units
 
@@ -400,6 +401,8 @@ def test_tasks_goal_offers_the_per_model_effort_when_the_model_has_its_own():
     assert candidate["now"] == {"claude-sonnet-5": {"effortLevel": "low"}}
     assert candidate["ticked"] is True and candidate["agent"] is None
     assert candidate["label"] == "Per-model settings"
+    # it carries the flat effort level's trade-off, as the candidate it replaces did
+    assert candidate["tradeoff"] == SETTING_TEXT["effortLevel"][1] != ""
     assert candidate["evidence"].startswith("For bug fix work, sonnet at medium effort cost")
     # it is not simulated, and it reaches the profile under its model
     assert candidate["estimate"]["fidelity"] == "none"

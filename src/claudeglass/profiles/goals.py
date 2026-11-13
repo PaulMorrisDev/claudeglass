@@ -136,6 +136,11 @@ class _Draft:
                 if isinstance(now.get(model_id), dict)
             }
         what, tradeoff, note = SETTING_TEXT.get(key, ("", "", ""))
+        if key == "modelSettings" and all(
+            set(sub_values) == {"effortLevel"} for sub_values in value.values() if isinstance(sub_values, dict)
+        ):
+            # Only per-model effort levels: the flat effort level's trade-off applies.
+            tradeoff = SETTING_TEXT["effortLevel"][1]
         self.candidates.append(
             {
                 "key": key,
