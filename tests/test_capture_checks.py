@@ -107,11 +107,16 @@ class _Session:
         self.lines = [_head(session_id)]
         self.at = 0
         self.uses = 0
-        #: The context every reply from here on read.
+        #: The context every reply from here on read, and the output it wrote.
         self.ctx = 0
+        self.out = 50
 
     def context(self, tokens: int) -> "_Session":
         self.ctx = tokens
+        return self
+
+    def output(self, tokens: int) -> "_Session":
+        self.out = tokens
         return self
 
     def later(self, seconds: int) -> "_Session":
@@ -130,7 +135,10 @@ class _Session:
     def say(self, text: str, tag: str = "") -> "_Session":
         body = f"{text}\n{tag}" if tag else text
         self.lines.append(
-            turn_line(content=[{"type": "text", "text": body}], cache_read_input_tokens=self.ctx, **self._stamp())
+            turn_line(
+                content=[{"type": "text", "text": body}], cache_read_input_tokens=self.ctx, output_tokens=self.out,
+                **self._stamp(),
+            )
         )
         return self
 
@@ -142,7 +150,8 @@ class _Session:
             target.update(old_string="x", new_string="y")
         self.lines.append(
             turn_line(
-                content=[tool_use_block(tool, use_id, target)], cache_read_input_tokens=self.ctx, **self._stamp()
+                content=[tool_use_block(tool, use_id, target)], cache_read_input_tokens=self.ctx,
+                output_tokens=self.out, **self._stamp(),
             )
         )
         self.lines.append(user_block_line([tool_result_block(use_id, "ok")], **self._stamp()))
@@ -327,6 +336,69 @@ def test_break_answers_take_the_prior_word_at_each_break_and_whether_a_file_came
     assert _breaks(_parsed(tmp_path, _Session("calm").typed("start").say("one").typed("more").say("two"))) == []
 
 
+def _return(tmp_path, wait: int, *, context: int = 30_000, output: int = 50):
+    """One reply, then a message typed ``wait`` seconds later that reads the same file. The parsed transcript."""
+    tmp_path.mkdir(exist_ok=True)
+    session = _Session("ret").context(context).output(output)
+    session.typed("start").use("Read", "a.py").say("one", TAG.format("needed"))
+    session.later(wait).typed("back to it").use("Read", "a.py").say("two", TAG.format("needed"))
+    return _parsed(tmp_path, session)
+
+
+def _gap(top) -> float:
+    """Seconds from the last real reply before the final message to the reply that opens it."""
+    from claudeglass import capture
+
+    real = [t for t in capture._priced(top) if not t.is_synthetic]
+    opening = capture.prompt_cycles(top)[-1].turns[0]
+    before = real[real.index(opening) - 1]
+    return (capture._moment(opening.ts) - capture._moment(before.ts)).total_seconds()
+
+
+def test_a_gap_of_exactly_an_hour_is_a_break_and_a_second_less_is_not(tmp_path):
+    from claudeglass.capture_checks import BreakAnswer
+
+    on_the_hour = _return(tmp_path / "a", 3_598)
+    assert _gap(on_the_hour) == 3_600
+    assert _breaks(on_the_hour) == [BreakAnswer("needed", True)]
+    under = _return(tmp_path / "b", 3_597)
+    assert _gap(under) == 3_599
+    assert _breaks(under) == []
+
+
+def test_the_output_of_the_old_reply_counts_toward_the_twenty_thousand(tmp_path):
+    from claudeglass import capture
+    from claudeglass.capture_checks import BreakAnswer
+
+    # A reply's input and cache reads are 100 more than the context the session sets.
+    both = _return(tmp_path / "a", 7_200, context=17_900, output=2_000)
+    old = [t for t in capture._priced(both) if t.turn_index > 0][-3]
+    assert (old.ctx, old.output_tokens) == (18_000, 2_000)
+    assert _breaks(both) == [BreakAnswer("needed", True)]
+    one_short = _return(tmp_path / "b", 7_200, context=17_900, output=1_999)
+    assert _breaks(one_short) == []
+
+
+def test_the_estimated_summary_request_is_no_reply_to_measure_the_gap_from(tmp_path):
+    from claudeglass import capture
+    from claudeglass.capture_checks import BreakAnswer
+    from claudeglass.model import EventKind
+
+    # A summary 6,000 s into a 7,100 s gap. Parsing adds the estimated request that wrote it as a priced turn,
+    # and a summary in the gap ends the break (the gate that reads the event before the returning reply).
+    session = _Session("est").context(30_000).typed("start").use("Read", "a.py").say("one", TAG.format("needed"))
+    session.later(6_000).boundary().later(1_100).typed("back to it").use("Read", "a.py").say("two", TAG.format("needed"))
+    top = _parsed(tmp_path, session)
+    assert any(t.estimated for t in top.turns)
+    assert _breaks(top) == []
+    # Without that gate, the gap is the one from the last real reply, not the 1,100 s from the request.
+    opening = capture.prompt_cycles(top)[-1].turns[0]
+    opening.preceding_event_kinds = [
+        k for k in opening.preceding_event_kinds if k not in (EventKind.COMPACT_BOUNDARY, EventKind.COMPACT_SUMMARY)
+    ]
+    assert _breaks(top) == [BreakAnswer("needed", True)]
+
+
 def test_break_answers_leave_out_a_wait_for_a_usage_limit(tmp_path):
     top = _parsed(tmp_path, _break_session("flags"))
     wanted = len(_breaks(top))
@@ -446,6 +518,33 @@ def test_level_by_family_takes_the_model_family_most_of_a_pieces_turns_ran_on():
         "hard": {"opus": {"pieces": 1, "reworked": 1}, "sonnet": {"pieces": 1, "reworked": 1}, "other": {"pieces": 1, "reworked": 0}},
         "normal": {"fable": {"pieces": 1, "reworked": 0}},
     }  # fmt: skip
+
+
+def test_the_joins_do_not_count_a_turn_that_has_no_model():
+    from types import SimpleNamespace as NS
+
+    from claudeglass.capture_checks import level_by_effort, level_by_family
+
+    # One real turn, and two lines with an effort but no model (not replies the piece ran on).
+    cycles = {("s", 0): NS(turns=[_turn("claude-opus-5-5", "xhigh"), _turn("", "low"), _turn("", "low")])}
+    pieces = [_piece("hard", [("s", 0)])]
+    assert level_by_effort(pieces, cycles) == {"hard": {"xhigh": {"pieces": 1, "reworked": 0}}}
+    assert level_by_family(pieces, cycles) == {"hard": {"opus": {"pieces": 1, "reworked": 0}}}
+
+
+def test_the_joins_take_the_word_most_turns_had_and_not_the_first_turns():
+    from types import SimpleNamespace as NS
+
+    from claudeglass.capture_checks import level_by_effort, level_by_family
+
+    # The first turn is the only one on Sonnet at high effort; the two after it are Opus at xhigh.
+    cycles = {
+        ("s", 0): NS(turns=[_turn("claude-sonnet-5", "high")]),
+        ("s", 1): NS(turns=[_turn("claude-opus-5-5", "xhigh"), _turn("claude-opus-5-5", "xhigh")]),
+    }
+    pieces = [_piece("hard", [("s", 0), ("s", 1)], rework=1)]
+    assert level_by_effort(pieces, cycles) == {"hard": {"xhigh": {"pieces": 1, "reworked": 1}}}
+    assert level_by_family(pieces, cycles) == {"hard": {"opus": {"pieces": 1, "reworked": 1}}}
 
 
 def test_the_joins_leave_out_a_piece_whose_cycles_are_gone():
