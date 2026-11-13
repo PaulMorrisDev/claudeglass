@@ -3343,9 +3343,9 @@ def test_the_every_project_snapshot_is_built_once_per_store_change_and_project(s
     real = snapshots_mod.with_every_project_agents
     calls = []
 
-    def counting(snaps, canonical=None):
+    def counting(snaps, canonical=None, **kwargs):
         calls.append(len(snaps))
-        return real(snaps, canonical)
+        return real(snaps, canonical, **kwargs)
 
     monkeypatch.setattr(snapshots_mod, "with_every_project_agents", counting)
     for profile_id in ("implementation-heavy", "overseer-fanout", "workflow-ultracode", "implementation-heavy"):
@@ -8427,3 +8427,63 @@ def test_the_effort_check_says_the_variable_decides_when_the_snapshot_has_it_set
     without = effort_check(False)
     assert [f["title"] for f in without["fixes"]] == ["Main session: effort medium on claude-opus-5-5"]
     assert "CLAUDE_CODE_EFFORT_LEVEL sets its effort" not in without["summary"]
+
+
+# -- R3 view rule: the dashboard builds the settings the checks read for the view it answers ------------
+
+
+def _know_project(handle, slug: str) -> None:
+    """The store has a session of ``slug``, so ``slug`` is a project it knows."""
+    handle.store.upsert_session(
+        session_id=f"known-{slug}", project_slug=slug, project_root_path=_FAKE_ROOT, slug=slug,
+        first_ts="2026-09-18T12:00:00Z", last_ts="2026-09-18T13:00:00Z",
+    )
+
+
+def _effort_check_fix(tmp_path, monkeypatch, *, snapshots_of: str, picked: str | None = None, knows: str | None = None):
+    """The main-session fix of the effort check on a server whose newest config snapshot is ``snapshots_of``'s
+    and sets a flat ``effortLevel`` high in its shared project file, with a user file that records no
+    ``effortLevel``. The report's own sessions are ``proj-b``'s; ``picked`` is the project asked about and
+    ``knows`` another project the store has a session of. Every config snapshot is ``snapshots_of``'s."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    handle = _start_thinking_server(tmp_path, monkeypatch)
+    try:
+        # _start_server seeds one snapshot, for proj-a, that records no project key of its own: make it
+        # the same project's as the one below, so the store's snapshots come from one project only.
+        handle.store.upsert_snapshot(
+            project_slug="proj-a", project_root_path=_FAKE_ROOT, ts="2026-09-18T12:00:00Z", schema_version=1,
+            digest_json=json.dumps({"agents": {}, "project_slug": snapshot_project_key(snapshots_of)}),
+        )
+        _seed_settings_snapshot(
+            handle, snapshots_of, "2026-09-21T12:00:00Z", effort="high", layer="project_shared", user_settings={}
+        )
+        for slug in (picked, knows):
+            if slug:
+                _know_project(handle, slug)
+        resp, body = handle.get_json("/api/quick-actions/effort" + (f"?project={picked}" if picked else ""))
+        assert resp.status == 200, body
+        [fix] = [f for f in body["data"]["fixes"] if f.get("agent") is None]
+        return fix, json.dumps(body["data"])
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_the_effort_check_of_one_picked_project_still_reads_its_own_settings_file(tmp_path, monkeypatch):
+    """Guard: with one project picked, its project file decides the main session's level and the fix goes there."""
+    fix, _answer = _effort_check_fix(tmp_path, monkeypatch, snapshots_of="proj-b", picked="proj-b")
+    assert fix["command"] == "claudeglass apply --set effortLevel=medium --scope repo --project-dir . --dry-run"
+
+
+def test_the_effort_check_with_no_project_picked_names_no_projects_file_when_the_store_knows_several(
+    tmp_path, monkeypatch
+):
+    """The snapshots are one project's but the store knows two: the dashboard builds the settings for a view of
+    several projects, so the fix is the per-model entry in your user file and no answer names a project's file."""
+    fix, answer = _effort_check_fix(tmp_path, monkeypatch, snapshots_of="proj-a", knows="proj-z")
+    assert fix["command"] == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope user --dry-run"
+    )
+    # Your own user file is named; no project's is.
+    assert ".claude/settings" not in answer.replace("~/.claude/settings.json", "") and "--project-dir" not in answer

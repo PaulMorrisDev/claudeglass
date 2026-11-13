@@ -2011,7 +2011,11 @@ def _cmd_check(args: argparse.Namespace) -> int:
         snaps = snapshots.load_snapshots(config_dir)
         if not args.all_projects:
             snaps = snapshots.snapshots_for_projects(snaps, projects)
-        snapshot = snapshots.with_every_project_agents(snaps, snapshots.canonical_project_keys(projects))
+        canonical = snapshots.canonical_project_keys(projects)
+        snapshot = snapshots.with_every_project_agents(
+            snaps, canonical,
+            several_projects=snapshots.several_in_view(projects, canonical, all_projects=args.all_projects),
+        )
         effective_agents = snapshot.data.get("effective_agents") if snapshot is not None else None
         agent_files = snapshot.data.get("agents") if snapshot is not None else None
         claude_root, roots = _read_where(args, config_dir)
@@ -5441,7 +5445,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         project_keys = snapshots.snapshot_project_keys(discovery.slug_for(str(project_path)))
         latest_snapshot = snapshots.latest_for_keys(snaps, project_keys)
     else:
-        latest_snapshot = snaps[-1] if snaps else None
+        # No project named: with snapshots of several projects the newest is
+        # any one of them, so no project's own file is read (the view rule).
+        latest_snapshot = snapshots.for_view(snaps[-1], snapshots.spans_projects(snaps)) if snaps else None
 
     if args.launch:
         managed = set(snapshots.managed_keys(latest_snapshot)) if latest_snapshot else set()

@@ -2774,3 +2774,27 @@ def test_apply_agent_refuses_a_name_that_leaves_the_agents_folder(tmp_path, caps
         expected = rule if ":" not in name else plugin
         assert f"claudeglass apply: --agent {name!r}: {expected}" in err
     assert skill.read_text(encoding="utf-8") == "---\nname: x\n---\nbody\n"
+
+
+# -- R3-VIEW-RULE: a user-scope preview with snapshots of several projects names no project's file --
+
+
+def test_cmd_apply_user_scope_names_no_projects_file_when_snapshots_span_projects(tmp_path, capsys):
+    config_dir = tmp_path / "tl"
+    snapshots_dir = config_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    for ts, folder, provenance in (("20260101T000000Z", "project-b", {}),
+                                   ("20260201T000000Z", "project-a", {"effortLevel": "project_shared"})):
+        (snapshots_dir / f"{ts}.json").write_text(json.dumps({
+            "ts": ts, "schema_version": 2,
+            "project_slug": snapshot_project_key(discovery.slug_for(str(tmp_path / folder))),
+            "effective": {"effortLevel": "high"} if provenance else {},
+            "effective_provenance": provenance,
+            "user_settings": {},
+        }), encoding="utf-8")
+    root = tmp_path / "claude"
+    root.mkdir()
+    exit_code = cli.main(["apply", "--set", "effortLevel=medium", "--scope", "user", "--config-dir", str(config_dir),
+                          "--claude-root", str(root), "--dry-run"])
+    assert exit_code == 0
+    assert "this project's shared settings" not in capsys.readouterr().out

@@ -1391,3 +1391,42 @@ def test_env_var_set_reads_both_env_name_lists():
     assert snap_mod.env_var_set(snapshot(), "ANTHROPIC_MODEL") is False
     assert snap_mod.env_var_set(None, "ANTHROPIC_MODEL") is False
     assert snap_mod.MODEL_ENV == "ANTHROPIC_MODEL"
+
+
+# -- R3-VIEW-RULE: in a view of several projects no project's own file is read -------------------
+
+
+def _one(data):
+    return snap_mod.Snapshot(path=None, ts="20261001T000000Z", data={"project_slug": "C--Dev-alpha", **data})
+
+
+def test_a_view_of_several_projects_reads_a_project_files_key_as_your_user_file_sets_it():
+    snap = _one({
+        "effective": {"effortLevel": "high", "autoCompactWindow": 300000, "model": "opus",
+                      "modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+        "effective_provenance": {"effortLevel": "project_shared", "autoCompactWindow": "project_local",
+                                 "model": "managed", "modelSettings": "project_shared"},
+        "user_settings": {"effortLevel": "medium"},
+    })
+    built = snap_mod.with_every_project_agents([snap], several_projects=True)
+    assert snap_mod.effective_config(built) == {"effortLevel": "medium", "model": "opus"}
+    assert snap_mod.effective_provenance(built) == {"effortLevel": "user", "model": "managed"}
+    # The same rule twice changes nothing more.
+    again = snap_mod.for_view(built, True)
+    assert snap_mod.effective_provenance(again) == snap_mod.effective_provenance(built)
+    # A view of that one project reads its file as always.
+    assert snap_mod.effective_provenance(snap_mod.with_every_project_agents([snap])) == snap_mod.effective_provenance(snap)
+
+
+def test_without_your_user_files_values_a_project_files_key_reads_as_unset():
+    snap = _one({"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_shared"}})
+    assert snap_mod.effective_config(snap_mod.for_view(snap, True)) == {}
+
+
+def test_a_view_covers_several_projects_by_project_not_by_drive_letter_key():
+    canonical = snap_mod.canonical_project_keys(["C--Dev-alpha", "c--Dev-alpha", "C--Dev-beta"])
+    assert not snap_mod.several_in_view(["C--Dev-alpha", "c--Dev-alpha"], canonical)
+    assert snap_mod.several_in_view(["C--Dev-alpha", "C--Dev-beta"], canonical)
+    # An all-projects view covers every project the store knows, whatever the window holds.
+    assert snap_mod.several_in_view(["C--Dev-alpha"], canonical, all_projects=True)
+    assert not snap_mod.several_in_view(["C--Dev-alpha"], snap_mod.canonical_project_keys(["C--Dev-alpha"]), all_projects=True)

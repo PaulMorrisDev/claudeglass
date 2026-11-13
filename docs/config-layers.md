@@ -42,6 +42,38 @@ see them, which is exactly what `detect_drift`/`build_config_drift_table`
 exist to surface (a session whose *observed* behaviour disagrees with
 its snapshot's `effective` config implies one of these).
 
+### Which file a view reads (the view rule)
+
+Every card, Overview check, Setup goal, profile diff row, apply preview and
+fix reads a setting from the file that decides it, and a fix for it goes
+to that file: the highest layer that sets the key (`effective_provenance`;
+`modelSettings` is one file's block, as `build_effective_settings` takes
+each top-level key whole). Within one file a model's own `modelSettings`
+entry beats the file's flat value, and a higher file's flat value beats a
+lower file's entry for the model (model-config docs for effort; read in
+Claude Code 2.1.317's source for the auto-compact window, the per-model
+window work), so for the main session's effort the deciding file is the
+one `goals.main_effort_reading` names. A managed file is named, never
+offered as yours to change.
+
+A project's own files (`project_local`, `project_shared`) decide only in a
+view of that one project. A view covers several projects
+(`snapshots.several_in_view`) when its sessions come from more than one,
+or it is the all-projects view of a store that knows more than one, or its
+settings snapshots come from more than one (`spans_projects`). There a
+snapshot is one project's, so each key its project files set reads as your
+user file sets it, from the snapshot's `user_settings` (the hook's
+redacted copy of `~/.claude/settings.json`, the same redaction as
+`effective`), or as unset when your user file does not set it; managed
+settings are read as always. A card then stays open rather than closing on
+one project's file, and no fix names a project's file. `snapshots.view_settings`
+is the rule, applied once when the settings are built for the view
+(`with_every_project_agents(..., several_projects=)`, by the report, the
+CLI `check` and the dashboard; a user-scope `apply` with no project folder
+applies it when the snapshots span projects). The main-session model lever keeps its own per-project
+reading (`model_swap.main_setting`, `own_model_runs`), which prices each
+session against its own project's setting.
+
 ## What each layer records (`settings_layers[<layer>]`)
 
 - `present` — whether the file exists at all.

@@ -1235,7 +1235,10 @@ def make_handler(
         if project:
             snaps = snapshots_mod.snapshots_for_projects(snaps, project)
         canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
-        built = snapshots_mod.with_every_project_agents(snaps, canonical)
+        # No project picked covers every project the store knows, as the
+        # report built for the same view counts them (the view rule).
+        several = snapshots_mod.several_in_view(project or (), canonical, all_projects=not project)
+        built = snapshots_mod.with_every_project_agents(snaps, canonical, several_projects=several)
         with report_lock:
             if snapshot_parts["token"] != token:
                 snapshot_parts["token"], snapshot_parts["built"] = token, {}

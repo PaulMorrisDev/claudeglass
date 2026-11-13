@@ -2337,3 +2337,28 @@ def test_no_main_session_is_a_pick_while_the_model_variable_is_set(tmp_path):
               slug=snapshot_project_key("C--Dev-alpha"), user_settings={"model": "sonnet"})
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], plain)
     assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.PICKED] * 6
+
+
+# -- R3-VIEW-RULE: the report tells the settings builder what its view covers -----------------------
+
+
+def test_the_report_tells_the_settings_builder_when_its_view_covers_several_projects(tmp_path, monkeypatch):
+    from claudeglass import snapshots as snapshots_mod
+
+    seen = []
+    real = snapshots_mod.with_every_project_agents
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("several_projects"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(snapshots_mod, "with_every_project_agents", spy)
+    for folder in ("C--Dev-alpha", "C--Dev-beta"):
+        _main_sessions(tmp_path, folder, _days(_R11_OPUS, range(0, 3)))
+    config_dir = tmp_path / "tl"
+    # Snapshots of one project only: they do not span projects, the view does.
+    _r11_snapshots(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", "user"))
+    corpus = load_corpus([tmp_path / "projects" / f for f in ("C--Dev-alpha", "C--Dev-beta")], since="2000-01-01")
+    build_report(corpus, PRICING, Config(), projects=("C--Dev-alpha", "C--Dev-beta"), window="w",
+                 snapshots=load_snapshots(config_dir), config_dir=config_dir)
+    assert True in seen

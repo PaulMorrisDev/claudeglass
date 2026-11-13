@@ -2015,7 +2015,16 @@ def build_report(
     # here because the agent-model section reads the same one: an agent file
     # that names a run's model, or CLAUDE_CODE_SUBAGENT_MODEL, is not an
     # accident of inheriting.
-    latest_snapshot = snapshots_mod.with_every_project_agents(settings_snaps, canonical) if settings_snaps else None
+    # In a view of several projects no one project's files are read (the
+    # view rule, snapshots.view_settings), as the dashboard's and the CLI
+    # check's own settings are built.
+    view_slugs = {bundle.slug for bundle in corpus.sessions if bundle.slug} | set(projects)
+    several = snapshots_mod.several_in_view(view_slugs, canonical, all_projects=all_projects)
+    latest_snapshot = (
+        snapshots_mod.with_every_project_agents(settings_snaps, canonical, several_projects=several)
+        if settings_snaps
+        else None
+    )
     agent_models_stats = agent_models.compute_agent_models(
         all_results,
         pricing,
