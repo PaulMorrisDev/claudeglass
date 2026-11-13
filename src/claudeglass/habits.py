@@ -108,6 +108,30 @@ _HIGH_EFFORT = ("high", "xhigh", "max")
 #: confidence is capped when self-reports don't carry signal (see
 #: ``_self_report_calibration``).
 _LEVEL_ITEMS = frozenset({"effort_fit", "skip_plan_easy", "plan_hard"})
+#: Playbook items that rest on Claude's tags -> the tag keys each reads
+#: (:func:`_newest_tag` dates a card by them). ``better_briefs`` rests on
+#: Haiku's verdicts on agent runs instead (:data:`AGENT_TAG_KEYS`).
+ITEM_TAG_KEYS = {
+    "split_large": ("size",),
+    "paste_errors": ("task",),
+    "plan_hard": ("level",),
+    "skip_plan_easy": ("level",),
+    "effort_fit": ("level",),
+    "clear_between": ("shift", "prior"),
+    "brief_clearly": ("brief",),
+    "targeted_checks": ("check",),
+    "quiet_output": ("out",),
+    "skill_early": ("skill",),
+    "skill_unneeded": ("skill",),
+    "explore_research": ("found",),
+}
+#: The keys of an agent run's verdict, and the :class:`AgentFact` field
+#: that holds a key whose name differs from it.
+AGENT_TAG_KEYS = ("result", "agent_brief", "retry")
+_AGENT_FACT_FIELDS = {"agent_brief": "brief"}
+#: A card that rests on tags says how old the newest one is once your
+#: newest message is this many days later (:func:`_tag_age_line`).
+TAG_AGE_DAYS = 7
 #: Easy-at-high-effort messages before ``effort_fit`` fires -- the same
 #: number as ``recommend._EFFORT_MIN_MESSAGES`` (UX-3, "one shared effort
 #: threshold"): the habit item is ``COVERED_BY`` the ``effort-mismatch``
@@ -732,6 +756,8 @@ class AgentFact:
     cost: float
     depth: int = 1
     model: str = ""
+    #: When the run began: the first priced turn of its transcript.
+    ts: datetime | None = None
     report_tokens: int = 0
     report_carry: float = 0.0
     capped: bool = False
@@ -1758,6 +1784,7 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
             session_id=bundle.session_id,
             agent_type=sub.meta.agent_type or "general-purpose",
             week=_week(_moment(first.ts), out.tz),
+            ts=_moment(first.ts),
             cost=sum(sub_carry.costs),
             depth=max(1, sub.meta.spawn_depth or 1),
             model=_dominant(t.model for t in priced) or "",
@@ -2942,6 +2969,35 @@ _BUILDERS = (
 )
 
 
+def _newest_tag(h: Habits, item: Item) -> datetime | None:
+    """When the newest tag behind ``item`` was written: the newest message
+    whose tag holds a word for a key the card reads (:data:`ITEM_TAG_KEYS`),
+    or for ``better_briefs`` the newest agent run with a verdict. ``None``
+    when there is none, or the card reads no tags."""
+    if item.key == "better_briefs":
+        fields = [_AGENT_FACT_FIELDS.get(key, key) for key in AGENT_TAG_KEYS]
+        return max((a.ts for a in h.agents if a.ts is not None and any(getattr(a, f) for f in fields)), default=None)
+    keys = ITEM_TAG_KEYS.get(item.key, ())
+    return max(
+        (c.ts for c in h.cycles if c.ts is not None and c.tag is not None and any(getattr(c.tag, k, None) for k in keys)),
+        default=None,
+    )
+
+
+def _tag_age_line(h: Habits, item: Item) -> str:
+    """For a card that rests on Claude's tags (``reported`` among its
+    sources): the date of its newest tag, once your newest message is
+    :data:`TAG_AGE_DAYS` days or more after it, as capture ends by itself.
+    ``""`` otherwise."""
+    if "reported" not in item.sources:
+        return ""
+    newest = _newest_tag(h, item)
+    latest = max((c.ts for c in h.cycles if c.ts is not None), default=None)
+    if newest is None or latest is None or latest - newest < timedelta(days=TAG_AGE_DAYS):
+        return ""
+    return f"Claude's newest tag behind this is from {local_day(newest, h.tz)}. None of your messages since then has one."
+
+
 def playbook(h: Habits) -> list[Item]:
     """The habits worth trying, the largest weekly saving first; items
     without an estimate come after, most evidence first."""
@@ -2961,6 +3017,10 @@ def playbook(h: Habits) -> list[Item]:
         for item in items:
             if ITEMS[item.key][0] == "information" and item.key != "brief_clearly":
                 item.evidence += " " + _clauses(notes)
+    for item in items:
+        age = _tag_age_line(h, item)
+        if age:
+            item.evidence += " " + age
     items.sort(key=lambda i: (i.saving is None, -(i.saving or 0.0), -i.n))
     return items
 

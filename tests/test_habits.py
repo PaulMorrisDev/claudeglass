@@ -3522,6 +3522,66 @@ def test_the_brief_card_shows_when_the_comparison_holds_or_your_answers_say_requ
     assert habits.brief_card_shown(told)
 
 
+# -- a card that rests on tags says how old the newest one is ------------------------------------------
+
+TAG_AGE_LINE = "Claude's newest tag behind this is from {}. None of your messages since then has one."
+
+
+def _tagged_then_untagged(newest_message: str) -> Habits:
+    """Clear and vague asks tagged on 2026-10-23, and one untagged message on ``newest_message``."""
+    return Habits(tz="UTC", cycles=[
+        *_briefed("clear", [1.0] * 5, week="2026-10-23"), *_briefed("vague", [3.0] * 5, week="2026-10-23"),
+        _cycle(newest_message),
+    ])
+
+
+def test_a_card_on_tags_gives_the_date_of_its_newest_tag_when_a_week_old():
+    item = _by_key(habits.playbook(_tagged_then_untagged("2026-11-08")))["brief_clearly"]
+    assert item.sources == ("reported",)
+    assert item.evidence.endswith(" " + TAG_AGE_LINE.format("2026-10-23"))
+    assert habits.TAG_AGE_DAYS == 7
+
+
+def test_no_date_while_tags_are_fresh():
+    item = _by_key(habits.playbook(_tagged_then_untagged("2026-10-29")))["brief_clearly"]
+    assert "newest tag" not in item.evidence
+    # A week to the day is old enough.
+    item = _by_key(habits.playbook(_tagged_then_untagged("2026-10-30")))["brief_clearly"]
+    assert item.evidence.endswith(TAG_AGE_LINE.format("2026-10-23"))
+
+
+def test_the_date_follows_the_keys_the_card_reads():
+    newer = CaptureTag(task="bugfix", level="easy", size="s", shift="build")
+    h = Habits(tz="UTC", cycles=[
+        *(_cycle("2026-10-23", tag=CaptureTag(check="full")) for _ in range(5)),
+        *(_cycle("2026-11-08", tag=newer) for _ in range(2)),
+    ])
+    item = _by_key(habits.playbook(h))["targeted_checks"]
+    assert item.evidence.endswith(TAG_AGE_LINE.format("2026-10-23"))
+    # The newer cycles are tagged, only not with check, so the message's own newest tag is later.
+    assert habits._newest_tag(h, item).date().isoformat() == "2026-10-23"
+
+
+def test_the_date_of_agent_verdicts_is_the_start_of_the_newest_agent_run_that_has_one():
+    old, new = datetime(2026, 10, 23, 9, tzinfo=timezone.utc), datetime(2026, 11, 8, 9, tzinfo=timezone.utc)
+    h = Habits(tz="UTC", cycles=[_cycle("2026-11-08")], agents=[
+        *(_agent(ts=old, retry="brief") for _ in range(2)), _agent(ts=new),
+    ])
+    item = _by_key(habits.playbook(h))["better_briefs"]
+    assert item.evidence.endswith(TAG_AGE_LINE.format("2026-10-23"))
+    assert habits.AGENT_TAG_KEYS == ("result", "agent_brief", "retry")
+
+
+def test_an_inferred_card_gets_no_date():
+    h = Habits(tz="UTC", cycles=[
+        _cycle("2026-10-23", tag=CaptureTag(shift="build")),
+        _stale(week="2026-11-08", gap_s=habits.LONG_BREAK_S),
+    ])
+    item = _by_key(habits.playbook(h))["clear_between"]
+    assert item.sources == ("inferred",)
+    assert "newest tag" not in item.evidence
+
+
 def _briefs_notes(h: Habits) -> list[str]:
     return _table(habits.section_from(h), "habits_briefs").notes
 
