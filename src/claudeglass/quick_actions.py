@@ -244,6 +244,13 @@ def _merge_fixes(*groups: list[dict]) -> list[dict]:
 #: would have suggested: not that nothing is worth changing.
 _IGNORED_ONLY = "The only change this check would suggest is on a card you ignored."
 
+#: What the models check says when the one change it would suggest is the main
+#: session's model and ANTHROPIC_MODEL picks that model.
+_MAIN_MODEL_LEFT_TO_ENV = (
+    "The main session would have cost less on {model}, but ANTHROPIC_MODEL picks its model, "
+    "so there is no setting to change."
+)
+
 
 def _goal(ctx: Context, goal_id: str) -> dict:
     """The goal's draft without the candidates an ignored card already
@@ -298,11 +305,13 @@ def _models(ctx: Context) -> dict:
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_main_left_out(rows) + _models_set_elsewhere(rows)
-    if ctx.model_env_set and any(r.get("agent_type") == TOP and r.get("best_cheaper_alternative_model") for r in rows):
+    blocked = _main_model_left_to_env(ctx)
+    main_picked = _models_main_picked(ctx, rows)
+    if blocked is not None or (ctx.model_env_set and main_picked):
         from .advice import MODEL_ENV_WINS
 
         tips.append({"title": "ANTHROPIC_MODEL picks your main session's model", "text": MODEL_ENV_WINS})
-    picked =" ".join(text for text in (_models_main_picked(ctx, rows), _models_main_said(rows)) if text)
+    picked = " ".join(text for text in (main_picked, _models_main_said(rows)) if text)
     # The agent-model cards (agents that ran on a larger model than their
     # work needed): an advice-level one makes the check "act". Each one's
     # own fix is offered either way; an info-level one with no prompt in
@@ -319,6 +328,7 @@ def _models(ctx: Context) -> dict:
             _IGNORED_ONLY
             if draft["removed"]
             else picked
+            or (_MAIN_MODEL_LEFT_TO_ENV.format(model=blocked["value"]) if blocked is not None else "")
             or "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
@@ -498,6 +508,16 @@ def _models_main_said(rows: list[dict]) -> str:
             f"{_sessions(own)} ran in projects that set their own model. Pick one of those projects to see them."
         )
     return " ".join(sentences)
+
+
+def _main_model_left_to_env(ctx: Context) -> dict | None:
+    """The main-session model change the models goal would draft were
+    ANTHROPIC_MODEL not set, or ``None``. The variable picks the model,
+    so the check offers no setting for it and says so."""
+    if not ctx.model_env_set:
+        return None
+    draft = _goal(replace(ctx, model_env_set=False), "models")
+    return next((c for c in draft["candidates"] if c["agent"] is None and c["key"] == "model"), None)
 
 
 def _models_main_picked(ctx: Context, rows: list[dict]) -> str:

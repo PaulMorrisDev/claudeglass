@@ -16,6 +16,7 @@ from claudeglass import agent_models, capture_catalogue, discovery, known_savers
 from claudeglass import quick_actions as qa
 from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
 from claudeglass.model import Recommendation, SettingChange
+from claudeglass.profiles import goals
 from claudeglass.units import Units
 
 from test_whatif import _model, _table
@@ -233,6 +234,85 @@ def test_the_models_check_says_anthropic_model_wins(tmp_path):
     assert [f["title"] for f in result["fixes"]] == ["Explore: use haiku"]
     tip = {"title": "ANTHROPIC_MODEL picks your main session's model", "text": advice.MODEL_ENV_WINS}
     assert tip in result["tips"] and tip not in plain["tips"]
+
+
+_ENV_TIP_TITLE = "ANTHROPIC_MODEL picks your main session's model"
+_BLOCKED_SUMMARY = (
+    "The main session would have cost less on sonnet, but ANTHROPIC_MODEL picks its model, so there is no setting "
+    "to change."
+)
+
+
+def _env_model(*, main_pct=40.0, explore_cheaper=False):
+    """``_full_model`` with the main session's cheaper-model share set, and
+    Explore's cheaper model kept or taken away."""
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-1] = main_pct
+    if not explore_cheaper:
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+    return model
+
+
+def _env_tip(result):
+    from claudeglass import advice
+
+    return [t for t in result["tips"] if t["title"] == _ENV_TIP_TITLE and t["text"] == advice.MODEL_ENV_WINS]
+
+
+def test_the_models_check_says_so_when_the_variable_blocks_the_only_change(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(), effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["status"] == "ok"
+    assert result["summary"] == _BLOCKED_SUMMARY
+    assert "Every agent is already" not in result["summary"]
+    assert len(_env_tip(result)) == 1
+    assert [f for f in result["fixes"] if "Main session" in f["title"]] == []
+
+
+def test_the_models_check_adds_no_variable_tip_for_a_change_it_would_not_draft(tmp_path):
+    """The main session's cheaper model saves less than the goal's bar, so the
+    variable blocks nothing: no tip, and the summary is the unset one."""
+    under = _env_model(main_pct=goals.MIN_SHARE_PCT - 1)
+    result = qa.run("models", _ctx(tmp_path, model=under, effective_agents={"Explore": {}}, model_env_set=True))
+    unset = qa.run("models", _ctx(tmp_path, model=under, effective_agents={"Explore": {}}))
+    assert _env_tip(result) == []
+    assert result["summary"] == unset["summary"] and result["summary"].startswith("Every agent is already")
+    assert result["tips"] == unset["tips"]
+
+
+def test_the_models_check_keeps_the_variable_tip_when_the_setting_already_names_the_model(tmp_path):
+    """Fable sessions, the setting on Opus (the case ``_models_main_picked``
+    says): the variable tip stays beside the "already says" sentences."""
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-4], swap.rows[0][-3] = "claude-fable-5-1", "claude-opus-4-7"
+    swap.rows[1][-3], swap.rows[1][-2] = None, 0
+    _with_session_counts(model, (29, 24, 0, 5), (10, 10, 0, 0))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": "opus"}, model_env_set=True))
+    assert len(_env_tip(result)) == 1
+    assert result["summary"] == (
+        "Your model setting already says opus. 24 main sessions in this window still ran on a larger model."
+    )
+
+
+def test_the_models_check_keeps_an_agent_change_and_the_variable_tip_together(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(explore_cheaper=True),
+                                   effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["Explore: use haiku"]
+    assert len(_env_tip(result)) == 1
+
+
+def test_the_models_check_adds_no_variable_tip_for_an_ignored_main_model_card(tmp_path):
+    model = _env_model()
+    model.recommendations = [_main_sonnet_card()]
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}},
+                                   skip_keys=frozenset({"model-tier-main"}), model_env_set=True))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert _env_tip(result) == []
+    # The goal's draft under the variable never holds the ignored change, so it
+    # counts nothing as removed and the summary is the plain "every agent" one.
+    assert result["summary"].startswith("Every agent is already")
 
 
 def test_models_check_says_where_each_agents_model_is_set(tmp_path):
