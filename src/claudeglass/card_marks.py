@@ -14,7 +14,8 @@ A card is **shown** when its title is drawn on a page you have open, and
    snapshots up to it) holds, for every change, a value that is not the same
    (:func:`snapshots.same_value` on the flattened key) as the value in force
    when the card was first shown (the merged snapshot of those taken at or
-   before that time; unset when there was none), from some snapshot after it
+   before that time; with none, the first one taken after it, so a setting
+   that was never changed does not count as set), from some snapshot after it
    through the newest one, unbroken. A setting (not an agent's field) is read
    in the project whose snapshot was in force when the card was first shown,
    so another project's session, on a value it has always held, moves nothing.
@@ -83,18 +84,23 @@ def landing(
             cache[i] = snapshots_mod.with_every_project_agents(snaps[: i + 1], canonical)
         return cache[i]
 
+    # The snapshot in force when the card was first shown is the baseline; with
+    # none yet, the first one after it is, and only a move after that counts.
     start = None
     for i, when in enumerate(stamps):
         if when is not None and when <= first_shown:
             start = i
-    then = merged(start) if start is not None else None
-    own = _own_project(snaps, start, canonical, cache) if start is not None else None
+    if start is None:
+        start = next((i for i, when in enumerate(stamps) if when is not None), None)
+    if start is None:
+        return None
+    own = _own_project(snaps, start, canonical, cache)
 
     def read(i: int, change: dict):
         """The value ``change`` names at snapshot ``i``: an agent's field from
         the merge, a setting from the project the card was first shown in."""
         snap = merged(i)
-        if change["target"] != "agent" and own is not None and own[i] is not None:
+        if change["target"] != "agent" and own[i] is not None:
             snap = own[i]
         return value_in(snap, change)
 
@@ -106,9 +112,9 @@ def landing(
         agents = merged(i).data.get("agents")
         return not (isinstance(agents, dict) and change["agent"] in agents)
 
-    before = [read(start, c) if start is not None else None for c in changes]
+    before = [read(start, c) for c in changes]
     run = None
-    for i in range((start + 1) if start is not None else 0, len(snaps)):
+    for i in range(start + 1, len(snaps)):
         if stamps[i] is None:
             continue
         moved = merged(i) is not None and all(

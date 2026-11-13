@@ -64,8 +64,21 @@ def test_a_setting_moved_back_before_the_newest_snapshot_has_not_landed():
 def test_a_setting_already_moved_before_the_card_was_shown_has_not_landed():
     snaps = [_snap(0, effective={"model": "sonnet"})]
     assert _land([_model("sonnet")], snaps, _day(1)) is None
-    # Unset when shown, set by the first snapshot after it: that is a move.
-    assert _land([_model("sonnet")], snaps, _day(0) - timedelta(hours=1)) == (_day(0), True)
+
+
+def test_a_card_shown_before_any_snapshot_takes_the_first_one_as_what_was_set():
+    shown = _day(1)
+    # The setting was sonnet all along; the first snapshot comes after the card was shown.
+    assert _land([_model("sonnet")], [_snap(3, effective={"model": "sonnet"})], shown) is None
+    snaps = [_snap(3, effective={"model": "sonnet"}), _snap(4, effective={"model": "sonnet"})]
+    assert _land([_model("sonnet")], snaps, shown) is None
+    # Only a move after that first snapshot counts.
+    snaps = [_snap(3, effective={"model": "opus"}), _snap(5, effective={"model": "sonnet"})]
+    assert _land([_model("sonnet")], snaps, shown) == (_day(5), True)
+    # A snapshot with an unreadable time is not the baseline.
+    snaps = [_snap(2, effective={"model": "opus"}, ts="not a time"), _snap(3, effective={"model": "opus"}),
+             _snap(5, effective={"model": "sonnet"})]
+    assert _land([_model("sonnet")], snaps, shown) == (_day(5), True)
 
 
 def test_every_change_of_a_card_must_move():
