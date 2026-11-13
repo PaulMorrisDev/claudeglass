@@ -3370,7 +3370,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         background.see(d, line_stats.line_start)
 
         line_ts = d.get("timestamp")
-        plan_watch.at =line_ts if isinstance(line_ts, str) else ""
+        plan_watch.at = line_ts if isinstance(line_ts, str) else ""
         if isinstance(line_ts, str) and line_ts:
             line_at = _utc(line_ts)
             if line_at is not None and (latest_at is None or line_at > latest_at):

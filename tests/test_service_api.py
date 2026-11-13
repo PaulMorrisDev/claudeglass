@@ -6806,6 +6806,38 @@ def test_the_silent_line_leaves_out_sessions_the_mod_ran_in_on_a_surface_that_dr
         handle.store.close()
 
 
+def test_the_silent_line_reads_only_the_mod_events_near_the_window(tmp_path, monkeypatch):
+    """The window is the replay's days; an event from before the day ahead of it is not read."""
+    from claudeglass import capture as capture_mod
+
+    handle, _settings = _silent_line_server(tmp_path, monkeypatch, {"now": _hooks_ok})
+    asked = []
+    real = Store.read_mod_events
+
+    def read(self, **kwargs):
+        rows = real(self, **kwargs)
+        asked.append((kwargs, [row["session_id"] for row in rows]))
+        return rows
+
+    monkeypatch.setattr(Store, "read_mod_events", read)
+    try:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
+        def present(at):
+            return {"ts": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "present", "surface": "desktop"}
+
+        assert handle.store.replace_mod_events("session-old", [present(now - timedelta(days=capture_mod.HISTORY_DAYS + 5))]) == 1
+        assert handle.store.replace_mod_events("session-new", [present(now - timedelta(hours=3))]) == 1
+        _silent_note(handle)
+        reads = [rows for kwargs, rows in asked if kwargs.get("since")]
+        assert reads and all(rows == ["session-new"] for rows in reads)
+        since = datetime.strptime(asked[-1][0]["since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        assert abs((now - since) - timedelta(days=capture_mod.HISTORY_DAYS + 1)) < timedelta(minutes=5)
+    finally:
+        handle.close()
+        handle.store.close()
+
+
 def test_capture_names_a_live_hint_that_had_moments_and_no_tip(tmp_path, monkeypatch):
     """Two stored sessions each hold a big paste and no note from the hook: with coaching notes on, the hook
     entries in order and the setup older than the pastes, the coaching row carries the line."""

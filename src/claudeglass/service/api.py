@@ -1732,7 +1732,7 @@ def make_handler(
             thresholds=ratings_mod.coaching_thresholds(config.thresholds, coaching_mod.read(options.config_dir)),
             since=since,
             until=now,
-            mod_events=store.read_mod_events(),
+            mod_events=store.read_mod_events(since=(since - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")),
         )
         return usage, occasions
 
