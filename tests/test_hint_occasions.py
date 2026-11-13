@@ -508,6 +508,27 @@ def test_coaching_spans_read_the_log_and_skip_what_it_cannot(tmp_path):
     assert hint_occasions.coaching_spans(config_dir, end) == [(on, off)]
 
 
+def test_coaching_on_before_the_log_and_another_coaching_item_toggled_since(tmp_path):
+    """The switch-on record was pruned (retention) or never written (config.toml edited by hand); since then
+    another coaching item was switched. Coaching notes was on the whole time and is on now."""
+    config_dir, _ = _env(tmp_path)
+    end = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    log = [_switch(datetime(2026, 9, 20, tzinfo=timezone.utc), ["coaching_notes"], ["coaching_notes", "brief_templates"])]
+    (config_dir / "capture-log.jsonl").write_text("\n".join(json.dumps(r) for r in log) + "\n", encoding="utf-8")
+    assert hint_occasions.coaching_spans(config_dir, end) == [(floor, end)]
+    # Switched off later: the time before the switch-off counts, from the start of time.
+    off = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    log.append(_switch(off, ["coaching_notes", "brief_templates"], ["brief_templates"]))
+    (config_dir / "capture-log.jsonl").write_text("\n".join(json.dumps(r) for r in log) + "\n", encoding="utf-8")
+    assert hint_occasions.coaching_spans(config_dir, end) == [(floor, off)]
+    # The export's on_hours is the time on in the window, not 0.
+    log.pop()
+    occ = _collect(tmp_path, {"s1": _PASTE}, env=_env(tmp_path / "b", log=log))
+    assert occ.on_hours == int((UNTIL - SINCE).total_seconds() // 3600)
+    assert occ.hints["big_paste"].occasions == 1
+
+
 def test_a_session_the_mod_ran_in_off_the_desktop_is_counted_apart(tmp_path):
     corpus = _corpus(tmp_path, {"s1": _PASTE, "s2": _PASTE})
 

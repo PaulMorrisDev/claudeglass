@@ -74,9 +74,11 @@ def coaching_spans(config_dir, end: datetime) -> list[tuple[datetime, datetime]]
     runs to ``end``. A log with no ``coaching`` change at all, or no
     ``config_dir``, gives one span from the earliest time to ``end``: on since
     before the log began (the callers ask only when it is on now). A ``ts``
-    that does not parse is skipped. A ``retention_days`` shorter than the
-    window can prune the switch-on record, and the spans then cover the whole
-    window: it is the user's own setting."""
+    that does not parse is skipped. The first record that names
+    ``coaching_notes`` in its ``from`` while no span is open (the switch-on
+    record was pruned by a short ``retention_days``, or coaching notes was
+    switched on by editing ``config.toml``) opens a span at the start of
+    time: it was on before the log says so."""
     records = config_mod.load_capture_log(config_dir) if config_dir else []
     spans: list[tuple[datetime, datetime]] = []
     opened: datetime | None = None
@@ -92,6 +94,8 @@ def coaching_spans(config_dir, end: datetime) -> list[tuple[datetime, datetime]]
         if at is None:
             continue
         seen = True
+        if "coaching_notes" in before and opened is None:
+            opened = _FLOOR
         if "coaching_notes" in after and "coaching_notes" not in before:
             opened = opened or at
         elif "coaching_notes" in before and "coaching_notes" not in after and opened is not None:
