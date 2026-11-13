@@ -248,16 +248,26 @@ function usdOf(value) {
 // only when the lever has no saving for it. A workflow agent's runs are
 // no lever's and span every type a script named, so their saving comes
 // from all the spend.
-function agentModelItems(group, agents) {
+// A row an ignored card took out (skipAgents) prices nothing any more, so
+// that type's inherited saving joins, at most as large as the row it
+// replaces: ignoring a card never raises the headline.
+function agentModelItems(group, agents, skipAgents) {
   if (group.id !== "agent-model-inherited" || group.severity !== "advice") return [];
+  var skipped = skipAgents || {};
   var priced = {};
+  var ceiling = {};
   agents.forEach(function (row) {
-    if (usdOf(row.saving_usd)) priced[row.agent_type] = true;
+    var usd = usdOf(row.saving_usd);
+    if (!usd) return;
+    if (skipped[row.agent_type]) ceiling[row.agent_type] = usd;
+    else priced[row.agent_type] = true;
   });
   var items = [];
   group.members.forEach(function (rec) {
     var usd = usdOf(rec.saving_usd);
-    if (usd && !priced[rec.agent_type]) items.push({ usd: usd, agent: rec.agent_type === WORKFLOW_AGENT ? null : rec.agent_type });
+    if (!usd || priced[rec.agent_type]) return;
+    if (ceiling[rec.agent_type] !== undefined) usd = Math.min(usd, ceiling[rec.agent_type]);
+    items.push({ usd: usd, agent: rec.agent_type === WORKFLOW_AGENT ? null : rec.agent_type });
   });
   return items;
 }
@@ -314,7 +324,7 @@ function availableSaving(levers, groups, tables, ignored) {
     if (group.severity !== "action" && group.severity !== "advice") return;
     if (LEVER_RULES[group.id]) return;
     if (AGENT_MODEL_RULES[group.id]) {
-      agentModelItems(group, agents).forEach(function (item) {
+      agentModelItems(group, agents, skip.agents).forEach(function (item) {
         items.push(item);
       });
       return;

@@ -257,7 +257,8 @@ Cards and checks:
 - **The Overview's headline saving leaves out cards you ignored.** An
   ignored model card takes out its main session or agent row, and an
   ignored auto-compact, tool-output or wasted-replies card takes out its
-  lever.
+  lever. Ignoring a card never raises the headline, and no agent is
+  counted twice.
 - **The main session's model card offers no setting while ANTHROPIC_MODEL
   is set.** The variable wins over the model setting, so the card, the
   Models check and the profile diff say so instead, and the Setup goal

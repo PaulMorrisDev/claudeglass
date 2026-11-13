@@ -529,7 +529,11 @@ that order, each as a heading with a one-line answer beside it.
    left out. A card you ignored takes out its model row or the lever it is
    the finding of (`LEVER_CARD`). An inherited agent-model action's saving joins only while
    its card is Worth considering, and only where the model lever has no
-   saving for that agent type (`agentModelItems`): a workflow agent's,
+   saving for that agent type (`agentModelItems`). A lever row a card you
+   ignored takes out does not count as that saving, so the inherited action
+   still joins, but at most at the ignored row's saving: ignoring a card
+   never raises the headline, and an agent type is never counted twice. A
+   workflow agent's,
    which has no lever, is a share of all the spend. The other two
    agent-model cards add nothing. A card at For your information level
    adds nothing either: the headline counts only the changes worth

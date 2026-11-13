@@ -1343,3 +1343,31 @@ def test_an_empty_status_line_table_reads_by_why_it_is_empty() -> None:
     # A word the grid has no sentence for falls back to the table's plain one, never to nothing.
     assert _empty_text({"name": "context_budget_statusline", "empty_variant": "elsewhere"}) == _empty_text(other)
     assert _empty_text({"name": "habits_by_shape", "empty_variant": "desktop"})[0].startswith("No main sessions")
+
+
+
+# -- N4: ignoring an agent's model card keeps its open inherited card's saving --
+
+
+def test_ignoring_a_model_tier_card_counts_the_open_inherited_card_once_and_never_raises_the_headline():
+    agents = [["top-level", 100, 40], ["implementer", 60, 30], ["reviewer", 40, 10]]
+    levers = [{"key": "model_swap", "usd": 80}]
+
+    def inherited(usd):
+        return {"id": "agent-model-inherited", "severity": "advice",
+                "members": [{"id": "agent-model-inherited", "key": "agent-model-inherited:implementer",
+                             "agent_type": "implementer", "saving_usd": usd}]}
+
+    tier = {"id": "model-tier", "severity": "advice",
+            "members": [{"id": "model-tier", "key": "model-tier", "agent_type": None,
+                         "changes": [{"key": "model", "agent": "implementer"}, {"key": "model", "agent": "reviewer"}]}]}
+    open_all = _available(levers, [inherited(25)], agents)
+    ignored = _available(levers, [inherited(25)], agents, [tier])
+    without_card = _available(levers, [], agents, [tier])
+    # The inherited card is still open, so its saving is still on offer.
+    assert ignored > without_card
+    assert ignored <= open_all
+    # Counted once, and never more than the model row the ignore took out.
+    big = _available(levers, [inherited(500)], agents, [tier])
+    assert big == pytest.approx(_available(levers, [inherited(30)], agents, [tier]))
+    assert big <= _available(levers, [inherited(500)], agents)
