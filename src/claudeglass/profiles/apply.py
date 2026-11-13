@@ -375,44 +375,66 @@ def _resolve_agents_dir(scope: str, project_path: Path | None, claude_root: Path
 # -- roles -----------------------------------------------------------------
 
 
-def _agent_files(agents_dir: Path) -> dict[str, dict]:
-    """The agent files in ``agents_dir`` as :func:`roles.writers` reads
-    them: name -> ``{"tools": ..., "disallowedTools": ...}``. The name is
-    the frontmatter ``name``, else the file's stem. A file with no
-    frontmatter is not an agent and is left out. A file whose name is not
-    its stem, or whose frontmatter cannot be read, is left out too:
-    ``apply`` patches ``<agents_dir>/<name>.md`` only, so it could not
-    write such a file anyway."""
+def _agent_files(agents_dir: Path) -> tuple[dict[str, dict], frozenset[str]]:
+    """The agent files under ``agents_dir`` as :func:`roles.writers` reads
+    them, and which of them ``apply`` can patch.
+
+    Claude Code reads the agents folder recursively and names an agent by
+    its frontmatter ``name`` (the file's stem when there is none), so that is
+    how they are found: ``(agents, patchable)`` with ``agents`` = name ->
+    ``{"tools": ..., "disallowedTools": ...}``. A file with no frontmatter is
+    not an agent and is left out (Claude Code does not load it and neither
+    does the snapshot hook); nor is a file whose frontmatter cannot be
+    read. ``patchable`` holds the names whose file is exactly
+    ``<agents_dir>/<name>.md``: ``apply`` patches that path only, so an agent
+    kept in a subfolder, or in a file not named after it, is found but left
+    as it is."""
     found: dict[str, dict] = {}
-    for path in sorted(agents_dir.glob("*.md")):
+    patchable: set[str] = set()
+    for path in sorted(agents_dir.rglob("*.md")):
         try:
             fields = parse_frontmatter(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, FrontmatterError):
             continue
         if not fields:
             # No frontmatter block (or one this parser reads as none, such
-            # as a file that opens with a byte-order mark): Claude Code does
-            # not load it as an agent, and neither does the snapshot hook.
+            # as a file that opens with a byte-order mark).
             continue
         name = fields.get("name") if isinstance(fields.get("name"), str) and fields.get("name") else path.stem
-        if name != path.stem:
+        exact = path.parent == agents_dir and path.name == f"{name}.md"
+        if name in found and name in patchable and not exact:
             continue
         found[name] = {"tools": fields.get("tools"), "disallowedTools": fields.get("disallowedTools")}
-    return found
+        if exact:
+            patchable.add(name)
+    return found, frozenset(patchable)
 
 
-def _role_notes(matched: dict[str, tuple[str, ...]], label: str) -> tuple[str, ...]:
-    """The sentence for a role that found no agent (``label`` is the agents
-    folder as the refusal line names paths), or found several."""
+def _role_notes(patched: tuple[str, ...], left: tuple[str, ...], label: str) -> tuple[str, ...]:
+    """What a ``[roles.writer]`` table did not do, in one plain sentence
+    each (``label`` is the agents folder as the refusal line names paths):
+    no agent is named like a writer and can edit files; several are, and each
+    gets the changes; or writers that were found but ``apply`` cannot patch
+    (``left``) are named. The no-writer sentence is printed only when no
+    such agent exists at all."""
     notes: list[str] = []
-    for found in matched.values():
-        if not found:
+    if not patched and not left:
+        notes.append(
+            f"No agent in {label} is named like implementer, fixer or builder and can edit files. "
+            "The changes for the agent that writes code are left out."
+        )
+    if len(patched) > 1:
+        notes.append(roles_mod.several_writers_note(patched))
+    if left:
+        if len(left) == 1:
             notes.append(
-                f"No agent in {label} is named like implementer, fixer or builder and can edit files. "
-                "The changes for the agent that writes code are left out."
+                f"Left as it is, because the file is in a subfolder or not named after the agent: {left[0]}."
             )
-        elif len(found) > 1:
-            notes.append(roles_mod.several_writers_note(found))
+        else:
+            notes.append(
+                "Left as they are, because the file is in a subfolder or not named after the agent: "
+                f"{roles_mod.join_names(left)}."
+            )
     return tuple(notes)
 
 
@@ -603,9 +625,14 @@ def plan_apply(
     # ``force`` never creates a file for one.
     role_notes: tuple[str, ...] = ()
     if profile.roles:
-        resolved = roles_mod.resolve(profile, _agent_files(agents_dir))
+        agent_files, patchable = _agent_files(agents_dir)
+        resolved = roles_mod.resolve(profile, {n: f for n, f in agent_files.items() if n in patchable})
+        if resolved.matched:
+            left = tuple(n for n in roles_mod.writers(agent_files) if n not in patchable)
+            role_notes = _role_notes(
+                resolved.matched.get("writer", ()), left, _relative_label(agents_dir, claude_root_or_project)
+            )
         profile = resolved.profile
-        role_notes = _role_notes(resolved.matched, _relative_label(agents_dir, claude_root_or_project))
 
     # -- settings overlay --
     settings_changes = {k: v for k, v in profile.settings.items() if k not in managed_keys}

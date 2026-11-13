@@ -363,12 +363,15 @@ Where the agents come from:
   drawer reads the picked project's own agents; with no project picked it
   cannot know which project the command will be run in, so it leaves the
   role's keys out and asks for one project to be picked.
-- **`apply`**: the `*.md` files in the target scope's agents folder
-  (`<claude-root>/agents` or `<project>/.claude/agents`), read with
+- **`apply`**: the `*.md` files under the target scope's agents folder
+  (`<claude-root>/agents` or `<project>/.claude/agents`), subfolders
+  included as Claude Code reads them, read with
   `frontmatter.parse_frontmatter`. The agent's name is the frontmatter
-  `name`, else the file name; a file whose frontmatter name differs from its file
-  name, or whose frontmatter does not parse, is skipped, since `apply`
-  patches `<name>.md` only.
+  `name`, else the file name. A file with no frontmatter (or one that does
+  not parse) is not an agent and is skipped. `apply` patches
+  `<agents folder>/<name>.md` only, so a writer whose file is in a
+  subfolder or is not named after the agent is found but left as it is,
+  and named in one sentence.
 
 What the user is told: with no writer at the target, one sentence in the
 drawer (and in `apply`'s output) that no agent file changes and that the
@@ -960,6 +963,9 @@ still apply and `apply` prints "No agent in `<folder>` is named like
 implementer, fixer or builder and can edit files. The changes for the
 agent that writes code are left out." (`ApplyPlan.role_notes`, printed
 after the change explanations in `--dry-run` and in a real apply). With
-several writers it prints one sentence naming them. A writer whose
-frontmatter `name` differs from its file name is not found, as `apply`
-could not patch it either.
+several writers it prints one sentence naming them. A writer `apply`
+cannot patch (its file is in a subfolder or not named after the agent) is
+named in "Left as it is, because the file is in a subfolder or not named
+after the agent: `<name>`." (or "Left as they are, ...: `<a>` and `<b>`."),
+and the no-writer sentence is printed only when no such agent exists at
+all.

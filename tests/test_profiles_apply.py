@@ -610,6 +610,103 @@ def test_a_writer_file_that_starts_with_a_byte_order_mark_is_left_alone(tmp_path
     assert (agents_dir / "implementer.md").read_bytes() == text.encode("utf-8")
 
 
+def _put(agents_dir, relative: str, text: str) -> None:
+    path = agents_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _plan_with_files(tmp_path, files: dict[str, str], **kwargs):
+    from claudeglass.profiles import catalogue
+
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {})
+    for relative, text in files.items():
+        _put(agents_dir, relative, text)
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="user",
+        project_path=None,
+        config_dir=config_dir,
+        claude_root=claude_root,
+        **kwargs,
+    )
+    return plan, config_dir, claude_root, agents_dir
+
+
+def test_writers_the_cli_cannot_patch_are_named_in_one_note_and_nothing_is_refused(tmp_path):
+    """Claude Code reads the agents folder recursively and names an agent by
+    its frontmatter, but apply patches ``<agents folder>/<name>.md`` only.
+    A writer kept in a subfolder, in a file not named after it, or with a
+    different capital letter is found, left as it is, and named: the
+    no-writer note would be false for it."""
+    files = {
+        "impl.md": _agent_text("implementer", "Read, Edit"),
+        "team/fixer.md": _agent_text("fixer", "Read, Edit"),
+        "Builder.md": _agent_text("builder", "Read, Edit"),
+    }
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(tmp_path, files)
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert plan.role_notes == (
+        "Left as they are, because the file is in a subfolder or not named after the agent: "
+        "builder, fixer and implementer.",
+    )
+    # with --force no file is created for any of them
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(tmp_path / "forced", files, force=True)
+    assert plan.blocked == ()
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert sorted(p.relative_to(agents_dir).as_posix() for p in agents_dir.rglob("*") if p.is_file()) == sorted(files)
+    for relative, text in files.items():
+        assert (agents_dir / relative).read_text(encoding="utf-8") == text
+
+
+def test_one_writer_the_cli_cannot_patch_is_named_with_the_singular_sentence(tmp_path):
+    plan, *_ = _plan_with_files(tmp_path, {"team/fixer.md": _agent_text("fixer", "Read, Edit")})
+    assert plan.blocked == ()
+    assert plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: fixer.",
+    )
+
+
+def test_a_writer_file_named_after_another_writer_name_is_not_patched_under_its_stem(tmp_path):
+    """The name against stem guard: ``impl.md`` says it is ``implementer``,
+    so the plan would look for ``implementer.md`` and refuse the whole apply
+    (or, with --force, create a new file) unless the guard keeps it out."""
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(
+        tmp_path,
+        {"impl.md": _agent_text("implementer", "Read, Edit"), "tester.md": _agent_text("tester", "Read, Edit")},
+        force=True,
+    )
+    assert plan.blocked == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["tester"]
+    assert plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: implementer.",
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert not (agents_dir / "implementer.md").exists()
+
+
+def test_a_subfolder_writer_beside_a_patchable_one_is_named_and_the_other_is_patched(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(
+        tmp_path,
+        {"implementer.md": _agent_text("implementer", "Read, Edit"), "team/fixer.md": _agent_text("fixer", "Read, Edit")},
+    )
+    assert plan.blocked == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["implementer"]
+    assert plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: fixer.",
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert "effort" not in parse_frontmatter((agents_dir / "team" / "fixer.md").read_text(encoding="utf-8"))
+
+
+def test_the_no_writer_note_is_printed_only_when_no_writer_exists_anywhere_in_the_folder(tmp_path):
+    plan, *_ = _plan_with_files(tmp_path / "none", {"team/helper.md": _agent_text("helper", "Read, Edit")})
+    assert [n.startswith("No agent in agents is named like") for n in plan.role_notes] == [True]
+    plan, *_ = _plan_with_files(tmp_path / "readonly", {"team/implementer.md": _agent_text("implementer", "Read")})
+    assert [n.startswith("No agent in agents is named like") for n in plan.role_notes] == [True]
+
+
 def test_apply_of_a_role_profile_reads_the_project_agents_at_a_project_scope(tmp_path):
     from claudeglass.profiles import catalogue
 
