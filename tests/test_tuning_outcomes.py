@@ -169,6 +169,30 @@ def test_two_views_of_one_fix_are_one_and_the_every_project_row_is_the_one_read(
     assert seen == [("general-purpose", "tools", 2.0, 20.0)]
 
 
+def test_rows_of_equal_rank_for_one_fix_are_read_by_the_first(world, points, monkeypatch):
+    points.append(_point(SEP_10, ["agents.general-purpose.tools"]))
+    seen = []
+
+    def spy(point, agent, key, prediction, *args, **kw):
+        seen.append((agent, key, prediction.saving_usd, prediction.basis))
+        return _reading()
+
+    monkeypatch.setattr(outcomes_mod, "read_fix", spy)
+    # Two cards of one rule and agent that landed on one change point, both in the every-project view: the
+    # same rank, so neither is the point's own and the first stays the one read.
+    rows = [
+        _row("k1", landed=SEP_10, saving=1.0, priced_on=10.0),
+        _row("k2", landed=SEP_10, saving=2.0, priced_on=20.0),
+    ]
+    doc = _build(world, outcomes=_inputs(rows))
+    assert doc["outcomes"]["landed"] == 1
+    assert seen == [("general-purpose", "tools", 1.0, 10.0)]
+    # The same two in the other order: still the first.
+    seen.clear()
+    _build(world, outcomes=_inputs(rows[::-1]))
+    assert seen == [("general-purpose", "tools", 2.0, 20.0)]
+
+
 def test_a_fix_before_the_window_or_in_a_project_the_export_does_not_cover_is_not_counted(world, points):
     points += [
         _point(JUL_01, ["agents.old.tools"]),
@@ -214,6 +238,21 @@ def test_a_measured_loss_is_lost_usd_and_a_saving_saved_usd(world, points, monke
     monkeypatch.setattr(outcomes_mod, "read_fix", lambda *args, **kw: _reading())
     (bare,) = _build(world, outcomes=_inputs(rows))["outcomes"]["cards"]
     assert not {"predicted_usd", "saved_usd", "lost_usd"} & set(bare)
+
+
+def test_a_control_that_reads_unclear_is_judged_and_one_with_too_little_data_is_not(world, points, monkeypatch):
+    points.append(_point(SEP_10, ["agents.alpha.tools", "agents.beta.tools", "agents.gamma.tools", "agents.delta.tools"]))
+    readings = {
+        "alpha": _reading(control="holds"),
+        "beta": _reading(control="unclear"),
+        "gamma": _reading(control="worse"),
+        "delta": _reading(control="too_little_data"),
+    }
+    monkeypatch.setattr(outcomes_mod, "read_fix", lambda point, agent, *args, **kw: readings[agent])
+    rows = [_row(f"k-{name}", agent=name, landed=SEP_10) for name in readings]
+    doc = _build(world, outcomes=_inputs(rows))
+    # Only the control with too few sessions to say is left out of those judged.
+    assert doc["outcomes"]["controls"] == {"judged": 3, "worse": 1}
 
 
 def test_a_profile_change_is_a_lever_row_and_an_unknown_key_is_other(world, points, monkeypatch):
