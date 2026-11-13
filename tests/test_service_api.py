@@ -2049,6 +2049,19 @@ def test_post_cross_site_sec_fetch_site_is_forbidden(server):
     assert not (server.options.config_dir / "profiles" / "csrf-test.toml").exists()
 
 
+def test_post_same_site_sec_fetch_site_is_forbidden(server):
+    """Another port on the same host is the same site, so a page served there sends
+    Sec-Fetch-Site: same-site. SECURITY.md refuses anything but same-origin or none."""
+    for headers in (
+        {"Sec-Fetch-Site": "same-site"},
+        {"Origin": f"http://127.0.0.1:{server.port + 1}", "Sec-Fetch-Site": "same-site"},
+    ):
+        resp, raw = server.request("POST", "/api/profiles", body={"id": "same-site-test"}, headers=headers)
+        body = json.loads(raw)
+        assert resp.status == 403 and body["error"]["code"] == "forbidden", headers
+    assert not (server.options.config_dir / "profiles" / "same-site-test.toml").exists()
+
+
 def test_post_same_origin_is_allowed(server):
     resp, body = server.post_json(
         f"/api/sessions/{server.session_id}/tags",
