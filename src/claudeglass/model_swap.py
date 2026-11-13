@@ -141,14 +141,51 @@ _ALREADY_CHEAPEST_LABEL = "already on the cheapest model"
 _MAIN_SESSION_BELOW_FLOOR = frozenset({"haiku"})
 _MAIN_FLOOR_LABEL = "Sonnet is the smallest model suggested for your main session"
 
-#: Why a main session is left off the lever: it started before its
-#: project's model moved to Sonnet or smaller (``BEFORE_CHANGE``, from
-#: ``compute_model_swap``'s ``main_lever``), or its own model is Sonnet or
-#: smaller already (``SETTLED``).
+#: Why a main session is left off the lever. From ``compute_model_swap``'s
+#: ``main_lever``: it started before its project's model moved to Sonnet or
+#: smaller (``BEFORE_CHANGE``); it ran on a larger model though its
+#: project's setting said Sonnet or smaller then (``PICKED``); or, in a view
+#: of several projects, its project's own files set its model, which a
+#: change to your user settings can't reach (``OWN_MODEL``). Or its own model
+#: is Sonnet or smaller already (``SETTLED``).
 BEFORE_CHANGE = "before_change"
 SETTLED = "settled"
+PICKED = "picked"
+OWN_MODEL = "own_model"
 _BEFORE_CHANGE_LABEL = "every main session started before its project moved to Sonnet or smaller"
-_LEFT_OUT_LABEL = "every main session ran on Sonnet or smaller, or started before its project moved there"
+_PICKED_LABEL = "every main session was picked on a larger model against a Sonnet setting"
+_OWN_MODEL_LABEL = "every main session ran in a project that sets its own model"
+_LEFT_OUT_LABEL = "no main session is left that a settings change would reach"
+
+#: ``effective_provenance``'s layer names to ``fixes.py``'s scopes: where a
+#: change to a setting that layer holds goes.
+_LAYER_SCOPE = {"user": "user", "project_local": "project-local", "project_shared": "repo", "managed": "managed"}
+
+
+def layer_scope(layer: object) -> str:
+    """The ``fixes.py`` scope a change to a setting held in ``layer`` goes
+    to; ``"user"`` for a layer it doesn't name."""
+    return _LAYER_SCOPE.get(layer, "user") if isinstance(layer, str) else "user"
+
+
+def main_setting(report: object) -> tuple[object, str] | None:
+    """The main session's ``model`` setting a change would be made to in the
+    view ``report`` covers, and the ``fixes.py`` scope it goes to, as the
+    main-model lever reads it (``ReportMeta.main_model_setting``): the main
+    model's card, the Models check's fix and the models goal read it so they
+    and the saving never disagree. ``None`` in a view of several projects,
+    with no snapshot, or for a report without it: read the view's own
+    setting then."""
+    reading = getattr(getattr(report, "meta", None), "main_model_setting", None)
+    if not isinstance(reading, dict) or "scope" not in reading:
+        return None
+    return reading.get("value"), str(reading["scope"])
+
+
+def above_main_floor(model: object) -> bool:
+    """Whether a main-session model is known to be larger than Sonnet: a
+    model of unknown family is neither at the floor nor above it."""
+    return isinstance(model, str) and workstyle.model_tier(model) > _TIER_FAMILIES.index("sonnet")
 
 
 def at_main_floor(model: object) -> bool:
@@ -350,8 +387,11 @@ class TierVerdict:
 
     ``state`` is one of ``"cheaper_available"`` / ``"already_cheapest"``
     / ``"main_floor"`` (the main session on Sonnet: never moved to Haiku)
-    / ``"before_change"`` (no main session counts, and some started before
-    their project moved to Sonnet or smaller)
+    / ``"before_change"`` (no main session counts, and every one not on
+    Sonnet or smaller started before its project moved there) / ``"picked"``
+    (every one was picked on a larger model against a Sonnet setting) /
+    ``"own_model"`` (every one ran in a project that sets its own model) /
+    ``"left_out"`` (no main session counts, for more than one reason)
     / ``"unknown_tier"`` / ``"no_data"`` / ``"set_elsewhere"`` (a named
     agent type none of whose runs followed its agent file's model: a
     workflow script or the spawn named it) / ``"no_lever"`` (a workflow
@@ -406,10 +446,18 @@ def _tier_verdict(row: "ModelSwapTypeStats", pricing: Pricing) -> TierVerdict:
         return TierVerdict("no_lever", None, 0.0, 0.0, f"{setter} sets its model, so there is no agent file to change")
     stats = row.lever if row.lever is not None else row
     if row.key == "top-level" and stats.spawns == 0 and row.spawns > 0:
-        if row.before_change_runs:
-            label = _LEFT_OUT_LABEL if row.settled_runs else _BEFORE_CHANGE_LABEL
-            return TierVerdict("before_change", None, 0.0, 0.0, label)
-        return TierVerdict("main_floor", None, 0.0, 0.0, _MAIN_FLOOR_LABEL)
+        reasons = [
+            (state, label)
+            for count, state, label in (
+                (row.before_change_runs, "before_change", _BEFORE_CHANGE_LABEL),
+                (row.picked_runs, "picked", _PICKED_LABEL),
+                (row.own_model_runs, "own_model", _OWN_MODEL_LABEL),
+                (row.settled_runs, "main_floor", _MAIN_FLOOR_LABEL),
+            )
+            if count
+        ]
+        state, label = reasons[0] if len(reasons) == 1 else ("left_out", _LEFT_OUT_LABEL)
+        return TierVerdict(state, None, 0.0, 0.0, label)
     if stats.spawns == 0 and row.spawns > 0:
         return TierVerdict(
             "set_elsewhere", None, 0.0, 0.0,
@@ -504,11 +552,15 @@ class ModelSwapTypeStats:
     workflow_runs: int = 0
     spawn_model_runs: int = 0
     #: Main sessions the lever leaves out, counted on the row, not on the
-    #: lever: those from before their project moved to Sonnet or smaller
-    #: (``compute_model_swap``'s ``main_lever``), and those already on
-    #: Sonnet or smaller.
+    #: lever, by ``compute_model_swap``'s ``main_lever``: those from before
+    #: their project moved to Sonnet or smaller, those picked on a larger
+    #: model against a Sonnet setting, and those of projects that set their
+    #: own model in a view of several projects; and those already on Sonnet
+    #: or smaller.
     before_change_runs: int = 0
     settled_runs: int = 0
+    picked_runs: int = 0
+    own_model_runs: int = 0
 
     @property
     def observed_model(self) -> str | None:
@@ -568,9 +620,9 @@ def compute_model_swap(
     A main session whose own model is Sonnet or smaller counts on its row
     but not on the lever (:data:`SETTLED`): it is already where the card
     would move it. ``main_lever``, when given, says for the others whether
-    one started before its project's model moved to Sonnet or smaller
-    (:data:`BEFORE_CHANGE`) or ``None``. Such a run counts on its row but
-    not on the lever, as a workflow run does on a subagent's row.
+    one is left out, and why (:data:`BEFORE_CHANGE`, :data:`PICKED`,
+    :data:`OWN_MODEL`), or ``None``. Such a run counts on its row but not
+    on the lever, as a workflow run does on a subagent's row.
     """
     del thresholds  # see docstring: accepted for signature symmetry only
 
@@ -599,6 +651,10 @@ def compute_model_swap(
             stats.before_change_runs += 1
         elif reason == SETTLED:
             stats.settled_runs += 1
+        elif reason == PICKED:
+            stats.picked_runs += 1
+        elif reason == OWN_MODEL:
+            stats.own_model_runs += 1
         # A run the lever decides counts on both, each in the same order,
         # so the row's own totals add up exactly as they would alone.
         targets = (stats, stats.lever) if setter in _LEVER_SETTERS and reason is None else (stats,)
@@ -697,6 +753,8 @@ def build_section(
             Column(key="spawn_model_runs", label="Runs given a model when started", kind="int"),
             Column(key="before_change_runs", label="Main sessions from before their project moved to Sonnet", kind="int"),
             Column(key="settled_runs", label="Main sessions already on Sonnet or smaller", kind="int"),
+            Column(key="picked_runs", label="Main sessions on a larger model under a Sonnet setting", kind="int"),
+            Column(key="own_model_runs", label="Main sessions in projects that set their own model", kind="int"),
         ]
     )
 
@@ -740,6 +798,8 @@ def build_section(
                 row_stats.spawn_model_runs,
                 row_stats.before_change_runs,
                 row_stats.settled_runs,
+                row_stats.picked_runs,
+                row_stats.own_model_runs,
             ]
         )
         rows.append(row)
@@ -985,6 +1045,8 @@ def _rule_model_tier(
     spawn_model_idx = _col_index(table, "spawn_model_runs")
     before_change_idx = _col_index(table, "before_change_runs")
     settled_idx = _col_index(table, "settled_runs")
+    picked_idx = _col_index(table, "picked_runs")
+    own_model_idx = _col_index(table, "own_model_runs")
     alt_model_idx = _col_index(table, "best_cheaper_alternative_model")
     alt_label_idx = _col_index(table, "best_cheaper_alternative")
     saving_usd_idx = _col_index(table, "saving_usd")
@@ -1025,6 +1087,8 @@ def _rule_model_tier(
         spawn_model_runs = _count(row, spawn_model_idx)
         before_change_runs = _count(row, before_change_idx)
         settled_runs = _count(row, settled_idx)
+        picked_runs = _count(row, picked_idx)
+        own_model_runs = _count(row, own_model_idx)
         if agent_type == "top-level":
             frontmatter_note = f'Set "model": "{alt_model}" in settings.json'
             reach = ""
@@ -1070,6 +1134,8 @@ def _rule_model_tier(
                             ("Runs given a model when started (not counted)", spawn_model_runs),
                             ("Main sessions from before their project moved to Sonnet (not counted)", before_change_runs),
                             ("Main sessions already on Sonnet or smaller (not counted)", settled_runs),
+                            ("Main sessions picked against a Sonnet setting (not counted)", picked_runs),
+                            ("Main sessions in projects that set their own model (not counted)", own_model_runs),
                         )
                         if count
                     ),
@@ -1157,8 +1223,13 @@ __all__ = [
     "TierVerdict",
     "RULES",
     "BEFORE_CHANGE",
+    "OWN_MODEL",
+    "PICKED",
     "SETTLED",
+    "above_main_floor",
     "at_main_floor",
+    "layer_scope",
+    "main_setting",
     "compute_model_swap",
     "model_set_by",
     "set_elsewhere_sentence",
