@@ -339,6 +339,107 @@ def test_break_answers_leave_out_a_wait_for_a_usage_limit_and_a_message_you_did_
     assert len(_breaks(top)) == wanted - 2
 
 
+# -- the joins: tags against what became of the work ----------------------------------------------------------
+
+
+def _fact(check, *, redone=False, changed=True, tagged=True):
+    from claudeglass.habits import CycleFact
+    from claudeglass.model import CaptureTag
+
+    return CycleFact(
+        session_id="s", ts=None, week="", cost=0.0, turns=1, redone=redone, changed=changed,
+        tag=CaptureTag(check=check) if tagged else None,
+    )  # fmt: skip
+
+
+def test_redone_by_check_counts_the_changed_cycles_that_were_tagged_with_a_check_word():
+    from claudeglass.capture_checks import redone_by_check
+
+    cycles = [
+        _fact("full", redone=True), _fact("full"), _fact("full", changed=False, redone=True),
+        _fact("run", redone=True), _fact("run", redone=True), _fact(None, redone=True), _fact("manual", tagged=False),
+        _fact("not a word", redone=True),
+    ]  # fmt: skip
+    assert redone_by_check(cycles) == {"full": {"cycles": 2, "redone": 1}, "run": {"cycles": 2, "redone": 2}}
+    assert redone_by_check([]) == {}
+
+
+def _piece(level, ids, *, rework=0, admitted=0):
+    from claudeglass.pieces import WorkPiece
+
+    return WorkPiece(cycle_ids=tuple(ids), level=level, rework=rework, admitted=admitted)
+
+
+def _turn(model, effort):
+    from types import SimpleNamespace as NS
+
+    return NS(model=model, effort=effort)
+
+
+def _joined_world():
+    """Three hard pieces (two reworked, one admitted), a normal one and a piece whose cycles carried no level;
+    efforts and models as the turns of their cycles say, the most common of each deciding."""
+    from types import SimpleNamespace as NS
+
+    cycles = {
+        ("s", 0): NS(turns=[_turn("claude-opus-5-5", "xhigh"), _turn("claude-opus-5-5", "xhigh"), _turn("claude-haiku-4-5", None)]),
+        ("s", 1): NS(turns=[_turn("claude-sonnet-5", "high")]),
+        ("s", 2): NS(turns=[_turn("claude-opus-5-5", "high"), _turn("", "low")]),
+        ("s", 3): NS(turns=[_turn("some-other-model", "ultra")]),
+        ("s", 4): NS(turns=[_turn("claude-fable-5-2", None)]),
+        ("s", 5): NS(turns=[_turn("claude-opus-5-5", "medium")]),
+    }  # fmt: skip
+    pieces = [
+        _piece("hard", [("s", 0)], rework=2, admitted=1),
+        _piece("hard", [("s", 1), ("s", 2)], rework=1),
+        _piece("hard", [("s", 3)]),
+        _piece("normal", [("s", 4)], admitted=2),
+        _piece("", [("s", 5)], rework=1),
+    ]
+    return pieces, cycles
+
+
+def test_pieces_by_level_count_the_reworked_and_the_admitted_ones():
+    from claudeglass.capture_checks import pieces_by_level
+
+    pieces, _cycles = _joined_world()
+    assert pieces_by_level(pieces) == {
+        "hard": {"pieces": 3, "reworked": 2, "admitted": 1},
+        "normal": {"pieces": 1, "reworked": 0, "admitted": 1},
+    }
+
+
+def test_level_by_effort_takes_the_effort_most_of_a_pieces_turns_ran_at():
+    from claudeglass.capture_checks import level_by_effort
+
+    pieces, cycles = _joined_world()
+    # The first piece ran at xhigh (two turns of three); the second at high (the turn with no model is not
+    # counted); a word the list does not have, and a turn with no effort, are the default.
+    assert level_by_effort(pieces, cycles) == {
+        "hard": {"xhigh": {"pieces": 1, "reworked": 1}, "high": {"pieces": 1, "reworked": 1}, "default": {"pieces": 1, "reworked": 0}},
+        "normal": {"default": {"pieces": 1, "reworked": 0}},
+    }  # fmt: skip
+
+
+def test_level_by_family_takes_the_model_family_most_of_a_pieces_turns_ran_on():
+    from claudeglass.capture_checks import level_by_family
+
+    pieces, cycles = _joined_world()
+    # Opus ran two turns of the first piece's three; the second piece's two turns tie, and the first one wins;
+    # a model with no family is other.
+    assert level_by_family(pieces, cycles) == {
+        "hard": {"opus": {"pieces": 1, "reworked": 1}, "sonnet": {"pieces": 1, "reworked": 1}, "other": {"pieces": 1, "reworked": 0}},
+        "normal": {"fable": {"pieces": 1, "reworked": 0}},
+    }  # fmt: skip
+
+
+def test_the_joins_leave_out_a_piece_whose_cycles_are_gone():
+    from claudeglass.capture_checks import level_by_effort, level_by_family
+
+    pieces = [_piece("hard", [("gone", 0)], rework=1)]
+    assert level_by_effort(pieces, {}) == {} and level_by_family(pieces, {}) == {}
+
+
 def test_habits_collect_gathers_the_answers_of_every_main_session(tmp_path):
     from pathlib import Path
     from types import SimpleNamespace as NS

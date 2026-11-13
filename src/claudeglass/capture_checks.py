@@ -11,16 +11,37 @@ worth showing. After a summary about half of the answering cycles read a
 file again or are corrected whatever Claude answered, so the check needs
 the ``yes`` answers to show the evidence clearly more often than the ``no``
 answers do. No person switches it.
+
+**The break question** (``prior``). Deep asks ``prior`` on every reply, so
+the message that comes back after a long break already carries Claude's
+word on how much of the earlier conversation the work needed.
+:func:`break_answers` pairs that word with whether the work read or edited a
+file touched before the break. It runs only for the tuning export.
+
+**The joins** (:func:`redone_by_check`, :func:`pieces_by_level`,
+:func:`level_by_effort`, :func:`level_by_family`) set what Claude tagged
+against what became of the work, as counts, for the tuning export. They read
+what ``habits`` already works out for each message and ``pieces`` for each
+piece of work, and decide nothing: on today's data no group is big enough to
+build a tip on.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from fractions import Fraction
 
 from . import capture as capture_mod
+from . import capture_catalogue as catalogue
 from . import compaction
 from .model import EventKind, TranscriptResult, Turn
+from .profiles.schema import _EFFORT_LEVELS
+
+#: The efforts a turn can run at, and ``default`` for a turn that recorded none (or a word not in the list).
+EFFORTS = (*_EFFORT_LEVELS, "default")
+#: The model families a piece can run on, and ``other`` for any model that is none of them.
+FAMILIES = (*catalogue.AGENT_MODEL_TIERS, "other")
 
 #: ``yes`` answers and ``no`` answers it takes before the check can pass.
 LOST_MIN_ANSWERS = 10
@@ -173,3 +194,75 @@ def lost_check(answers) -> LostCheck:
         yes_share, no_share = Fraction(yes_evidence, len(yes)), Fraction(no_evidence, len(no))
         passed = yes_share >= LOST_MIN_YES_EVIDENCE and yes_share - no_share >= LOST_MIN_MARGIN
     return LostCheck(len(yes), yes_evidence, len(no), no_evidence, passed)
+
+
+def redone_by_check(cycles) -> dict[str, dict[str, int]]:
+    """For each ``check`` word, how many of the messages that changed
+    something and were tagged with it (``cycles``, ``Habits.cycles``, whose
+    tag is the settled one) were redone by the messages after them. A
+    message that changed nothing is left out: no check is asked of it."""
+    found: dict[str, dict[str, int]] = {}
+    for cycle in cycles:
+        word = getattr(cycle.tag, "check", None) if cycle.tag is not None else None
+        if not cycle.changed or word not in catalogue.TAG_VOCAB["check"]:
+            continue
+        row = found.setdefault(word, {"cycles": 0, "redone": 0})
+        row["cycles"] += 1
+        row["redone"] += int(cycle.redone)
+    return found
+
+
+def pieces_by_level(pieces) -> dict[str, dict[str, int]]:
+    """For each ``level`` word (the hardest a piece of work was tagged
+    with, ``WorkPiece.level``), its pieces, those that needed rework and
+    those with a mistake Claude admitted."""
+    found: dict[str, dict[str, int]] = {}
+    for piece in pieces:
+        if piece.level not in catalogue.TAG_VOCAB["level"]:
+            continue
+        row = found.setdefault(piece.level, {"pieces": 0, "reworked": 0, "admitted": 0})
+        row["pieces"] += 1
+        row["reworked"] += int(piece.rework > 0)
+        row["admitted"] += int(piece.admitted > 0)
+    return found
+
+
+def _joined_by(pieces, cycles_by_id, word_of) -> dict[str, dict[str, dict[str, int]]]:
+    """``{level: {word: {"pieces", "reworked"}}}``, where ``word_of(turn)``
+    names a turn that has a model and a piece takes the word most of its
+    turns have (the first seen winning a tie). A piece whose cycles are
+    gone is left out."""
+    found: dict[str, dict[str, dict[str, int]]] = {}
+    for piece in pieces:
+        if piece.level not in catalogue.TAG_VOCAB["level"]:
+            continue
+        counts = Counter(
+            word_of(turn)
+            for key in piece.cycle_ids
+            if key in cycles_by_id
+            for turn in cycles_by_id[key].turns
+            if turn.model
+        )
+        if not counts:
+            continue
+        row = found.setdefault(piece.level, {}).setdefault(counts.most_common(1)[0][0], {"pieces": 0, "reworked": 0})
+        row["pieces"] += 1
+        row["reworked"] += int(piece.rework > 0)
+    return found
+
+
+def level_by_effort(pieces, cycles_by_id) -> dict[str, dict[str, dict[str, int]]]:
+    """Each ``level`` word by the effort most of its pieces' turns ran at
+    (``cycles_by_id``: ``(session id, index)`` to prompt cycle, as the
+    pieces name their cycles): its pieces and those that needed rework."""
+    return _joined_by(pieces, cycles_by_id, lambda turn: turn.effort if turn.effort in EFFORTS else "default")
+
+
+def level_by_family(pieces, cycles_by_id) -> dict[str, dict[str, dict[str, int]]]:
+    """Each ``level`` word by the model family most of its pieces' turns
+    ran on: its pieces and those that needed rework."""
+    from .habits import family  # habits imports this module
+
+    return _joined_by(
+        pieces, cycles_by_id, lambda turn: (name if (name := family(turn.model)) in FAMILIES else "other")
+    )
