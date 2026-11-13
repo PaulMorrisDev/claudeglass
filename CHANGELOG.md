@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds counts and words from fixed lists. `figures.models` names a model
   by its id on ClaudeGlass's own rate card, or `other`. Data quality links
   to those figures.
+- **The tuning file has an `outcomes` block: what became of the fixes that
+  landed.** By card rule or profile setting, and kind of agent: how many
+  landed, were measured, saved at least half of what was estimated, or had
+  too little data, and how your corrections and rework moved after them. A
+  fix is measured only where the measure is honest: the same replies priced
+  both ways for a model, fast mode, cache lifetime or raised compaction
+  window, and the context at the start of each agent run for an agent's
+  tools, CLAUDE.md, skills or MCP servers, when its estimate takes out at
+  least 45% of that start. Cards and logged estimates now record the figure
+  their saving was priced on (`priced_on`); it never reaches the file.
+- **The tuning file may now be up to 320 KB (it was 256 KB)**, because two
+  blocks were added.
 - **The dashboard keeps a record of the cards it showed and copied, and of
   which fixes landed** (store version 12), for the tuning file's `cards`
   block. It stays on this machine, a rebuild keeps it, and `serve --purge`
@@ -96,6 +108,12 @@ Capture and dashboard:
 - **Save my current settings keeps each agent's most-replies limit and
   cache lifetime and each model's own settings**, and leaves project agents
   out and names them, so `apply` no longer refuses the saved profile.
+- **"Saved so far" for a model change counts only what the setting
+  decided.** For an agent, runs a spawn or a workflow script gave a model
+  are left out. For the main session, sessions that ran on another model
+  than the one the change sets are left out, and so is a project whose
+  sessions before the change never ran the old one. When none is left, the
+  Changes page says the change has not changed what you paid.
 
 Cards and checks:
 
@@ -135,6 +153,8 @@ Cards and checks:
   a larger model while their project's setting said Sonnet are left out and
   counted. With several projects, so are projects that set their own
   model. The Models check, the what-if and the profile goal agree with it.
+- **The model-tier card names its cost for what it is**: the cost of the
+  runs the change reaches, not the whole row's observed cost.
 - **The tools, skills and MCP cards read the agent's `disallowedTools`.** A
   tool on it is not offered again, an entry such as `Bash(git push *)`
   withholds the whole tool, and the tools card says a withheld tool is on
@@ -209,6 +229,19 @@ Coaching:
   counted as single lookups.
 - **`agent-report-size` leaves workflow agents out**, and its why shows the
   mean report size.
+- **A logged estimate that records what it was priced on is judged on the
+  work after the change**, the way the outcomes block reads a fix, and its
+  measured figure is the share of the estimate that came true, on the
+  estimate's own scale. Estimates are no longer adjusted by verdicts judged
+  the old way: calibration learns only from estimates this version logs, so
+  one that read "calibrated" may read plain until three new ones for the
+  same setting are judged. An estimate logged before keeps its verdict.
+- **An estimate nothing can check now says so.** The Changes page reads
+  "Can't be checked from your sessions." and `claudeglass backtest` lists
+  it as `not_measured`: a setting with no honest measure, an estimate too
+  small a share of the start, or a change nothing prices exactly. It is
+  closed at once when the setting or the estimate decides it, otherwise 30
+  days after the change.
 
 ## [0.16.0] - 2026-10-09
 
