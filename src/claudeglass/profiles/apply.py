@@ -378,15 +378,21 @@ def _resolve_agents_dir(scope: str, project_path: Path | None, claude_root: Path
 def _agent_files(agents_dir: Path) -> dict[str, dict]:
     """The agent files in ``agents_dir`` as :func:`roles.writers` reads
     them: name -> ``{"tools": ..., "disallowedTools": ...}``. The name is
-    the frontmatter ``name``, else the file's stem. A file whose name is not
-    its stem, or whose frontmatter cannot be read, is left out: ``apply``
-    patches ``<agents_dir>/<name>.md`` only, so it could not write such a
-    file anyway."""
+    the frontmatter ``name``, else the file's stem. A file with no
+    frontmatter is not an agent and is left out. A file whose name is not
+    its stem, or whose frontmatter cannot be read, is left out too:
+    ``apply`` patches ``<agents_dir>/<name>.md`` only, so it could not
+    write such a file anyway."""
     found: dict[str, dict] = {}
     for path in sorted(agents_dir.glob("*.md")):
         try:
             fields = parse_frontmatter(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, FrontmatterError):
+            continue
+        if not fields:
+            # No frontmatter block (or one this parser reads as none, such
+            # as a file that opens with a byte-order mark): Claude Code does
+            # not load it as an agent, and neither does the snapshot hook.
             continue
         name = fields.get("name") if isinstance(fields.get("name"), str) and fields.get("name") else path.stem
         if name != path.stem:

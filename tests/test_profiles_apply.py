@@ -551,6 +551,45 @@ def test_apply_of_a_role_profile_leaves_out_a_writer_that_cannot_edit_a_misnamed
     assert len(plan.role_notes) == 1 and plan.role_notes[0].startswith("No agent in agents is named like")
 
 
+def test_a_writer_named_file_with_no_frontmatter_is_not_an_agent(tmp_path):
+    """Claude Code does not load a markdown file with no frontmatter as an
+    agent and the snapshot hook skips it, so a role must not reach it: it
+    would make the whole apply fail on a file that is not an agent."""
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path,
+        {
+            "implementer": _agent_text("implementer", "Read, Edit"),
+            "writing-style": "Prefer short sentences.\n",
+            "testing": "# Notes on testing\n",
+        },
+    )
+    assert plan.blocked == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["implementer"]
+    assert plan.role_notes == ()
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert (agents_dir / "writing-style.md").read_text(encoding="utf-8") == "Prefer short sentences.\n"
+    assert "model: sonnet" in (agents_dir / "implementer.md").read_text(encoding="utf-8")
+
+
+def test_a_writer_file_that_starts_with_a_byte_order_mark_is_left_alone(tmp_path):
+    """The parser reads a file that opens with a byte-order mark as having
+    no frontmatter, so it is not found as a writer: the apply succeeds, the
+    file is not touched, and the no-writer note says so."""
+    text = "\ufeff" + _agent_text("implementer", "Read, Edit")
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {})
+    (agents_dir / "implementer.md").write_bytes(text.encode("utf-8"))
+    from claudeglass.profiles import catalogue
+
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"), scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert len(plan.role_notes) == 1 and plan.role_notes[0].startswith("No agent in agents is named like")
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert (agents_dir / "implementer.md").read_bytes() == text.encode("utf-8")
+
+
 def test_apply_of_a_role_profile_reads_the_project_agents_at_a_project_scope(tmp_path):
     from claudeglass.profiles import catalogue
 
