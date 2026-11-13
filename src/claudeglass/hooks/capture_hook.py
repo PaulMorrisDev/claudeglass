@@ -76,7 +76,9 @@ connect``):
   sent one at a time (``drip_feed``), a huge paste, a whole read of a large saved output (``quiet_output``, never inside an agent), a plan
   approved after a lot of planning, or a message sent in plan mode after a
   lot of planning (the note asks Claude to end the plan it submits with
-  the tip to approve it with a clear context). A tip
+  the tip to approve it with a clear context). The hints in the catalogue's
+  ``coaching.off_live`` (``capture_catalogue.LIVE_OFF_HINTS``) say nothing:
+  what is listed here is what each does once it is switched back on. A tip
   reaches you through
   Claude: the note's first sentence tells it to write the tip and its
   last line is the tip, word for word, so the reply carries it in every
@@ -2537,10 +2539,8 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     began from a brief of ``split_brief_chars`` characters or more (not a
     workflow agent's: its brief is its script's). Only
     counts by those two words are kept, under the session: nothing of the
-    run's type, brief or words. They are kept while the mod runs too: it
-    tells the run on the agent's row, so only :func:`coaching_for` leaves
-    it out then, and a run that ended too big before the mod stopped is
-    still there to be told. Nothing is kept while ``split_run`` is off live
+    run's type, brief or words. They are kept whether or not the mod runs:
+    the mod never tells these runs. Nothing is kept while ``split_run`` is off live
     (nothing reads the counts), and a run that finds the claim on the state
     held (:func:`_claimed`) is not counted. Returns whether the state
     changed."""
