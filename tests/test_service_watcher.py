@@ -2206,3 +2206,24 @@ def test_a_row_whose_relative_path_resolves_to_another_folder_is_kept(tmp_path, 
     store.upsert_profile(profile_id="p1", name="p1", toml_path=str(Path("other") / "p1.toml"))
     FileWatcher(store, _options(tmp_path, config_dir=Path("cfg"))).run_once()
     assert [p["id"] for p in store.profiles()] == ["p1"]
+
+
+def test_a_linked_profile_file_whose_target_is_deleted_leaves_no_row(tmp_path, store):
+    """A dotfiles manager links the file in: the folder is compared, the link is not followed."""
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "dotfiles" / "linked.toml"
+    target.parent.mkdir()
+    target.write_text('id = "linked"\n', encoding="utf-8")
+    try:
+        (folder / "linked.toml").symlink_to(target)
+    except OSError:
+        pytest.skip("this machine does not let the test make a symbolic link")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["linked"]
+    target.unlink()
+    # The dangling link itself is still counted as a file that can't be read.
+    watcher.run_once()
+    assert store.profiles() == []

@@ -1626,12 +1626,15 @@ class FileWatcher:
         is elsewhere (a fixture, a store moved between config folders) is
         kept: it is not this scan's to drop. Folders are compared resolved,
         so a row stored under a relative config folder is still this
-        folder's under the absolute one (what is stored does not change)."""
+        folder's under the absolute one (what is stored does not change).
+        Only the folder is resolved, never the file: a file linked in from
+        elsewhere (a dotfiles manager) is this folder's, and when its target
+        is deleted the link is no file any more."""
         try:
             folder = profiles_dir.resolve()
             for profile_id, toml_path in self.store.profile_files().items():
-                path = Path(toml_path).resolve()
-                if path.parent == folder and not path.is_file():
+                path = Path(toml_path)
+                if path.parent.resolve() == folder and not path.is_file():
                     self._time_store(stats, self.store.forget_profile, profile_id)
         except Exception as exc:
             stats.errors += 1
