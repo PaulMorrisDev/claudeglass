@@ -91,7 +91,7 @@ Compare the context read per reply across the rows. It shows whether a
 fresh start would have paid, before you rely on the saving above. The
 Builds after a plan check on the Overview says the same in a sentence
 and points here. It is information: the saving stays with the card.
-The live `plan_fresh` hint does not read it.
+The `plan_fresh` hint does not read it.
 
 ## How often a plan is sent back
 
@@ -182,10 +182,12 @@ added?"). They show as `plan_covered`, `plan_gap` and `plan_new` in
   waste figures.
 
 The daily run also writes your handoff answers into `coaching.json`
-(see [coaching.md](coaching.md)). With more than half `yes` the live
-`plan_fresh` hint speaks sooner, after `plan_handoff_min_dropped_tokens`
-divided by `coaching_rearm_factor`. With more than half `no` it is off,
-because a fresh start would have lost what the build needed.
+(see [coaching.md](coaching.md)). With more than half `yes` the
+`plan_fresh` hint, once it is switched back on, speaks sooner, after
+`plan_handoff_min_dropped_tokens` divided by `coaching_rearm_factor`. With
+more than half `no` it is off, because a fresh start would have lost what
+the build needed. The hint is off for everyone now
+([coaching](coaching.md#the-hints)).
 
 With fewer answers the card is as above.
 
