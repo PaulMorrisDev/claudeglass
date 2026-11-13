@@ -74,6 +74,41 @@ def test_every_catalogue_profile_round_trips_through_dump_and_load(profile_id):
     assert reloaded == original
 
 
+#: The four profiles that used to name the owner's own agents
+#: (``claude-implementer``, ``verification-runner``).
+_OWNER_AGENT_PROFILES = ("implementation-heavy", "overseer-fanout", "workflow-ultracode", "overnight-batch")
+
+
+@pytest.mark.parametrize("profile_id", _OWNER_AGENT_PROFILES)
+def test_no_catalogue_profile_names_an_agent(profile_id):
+    """A shipped profile cannot know the user's agent names, so it names a
+    role (``[roles.writer]``) and never an agent file."""
+    profile = get(profile_id)
+    assert profile.agents == {}
+    for name in ("claude-implementer", "verification-runner"):
+        assert name not in profile.notes
+    has_role = profile_id != "overnight-batch"
+    assert list(profile.roles) == (["writer"] if has_role else [])
+
+
+@pytest.mark.parametrize("profile_id", _OWNER_AGENT_PROFILES)
+def test_no_catalogue_agent_line_is_outranked_or_a_default(profile_id):
+    """``subagentPromptCacheTtl`` outranks every agent file's cache lifetime,
+    so a role line for it changes nothing while the profile sets the
+    setting; ``omitClaudeMd = false`` is Claude Code's default."""
+    profile = get(profile_id)
+    for fields in (*profile.agents.values(), *profile.roles.values()):
+        if "subagentPromptCacheTtl" in profile.settings:
+            assert "experimental.cacheTtl" not in fields
+        assert fields.get("omitClaudeMd") is not False
+
+
+def test_the_writer_role_keeps_the_values_the_agent_blocks_had():
+    assert get("implementation-heavy").roles == {"writer": {"model": "sonnet", "effort": "medium", "maxTurns": 60}}
+    assert get("overseer-fanout").roles == {"writer": {"effort": "medium", "maxTurns": 60}}
+    assert get("workflow-ultracode").roles == {"writer": {"maxTurns": 40}}
+
+
 def test_get_returns_none_for_unknown_id():
     assert get("not-a-real-profile") is None
 
