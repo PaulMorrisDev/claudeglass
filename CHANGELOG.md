@@ -196,6 +196,9 @@ Coaching:
   `apply` doesn't refuse it.
 - **The effort level's trade-off says Claude Code doesn't keep `max` in
   settings**: use `/effort max` for a session.
+- **`capture remove` also switches off the plan check and the rating
+  reminder**, which need the hook entries it takes out, and names the ones
+  it switched off. The `/cg-feedback` and `/cg-brief` skills stay.
 - **`spawn-task-prompt` names the workflow run or session** that holds at
   least half the brief text.
 - **`agent-model-asked` counts only later calls of the same agent type on
