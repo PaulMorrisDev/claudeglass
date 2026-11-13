@@ -216,14 +216,42 @@ Claude Code settings file (it writes only its own overlay under
 `<config-dir>/profiles/`). "Save my current settings as a profile"
 saves your latest
 config snapshot's allowlisted, non-managed values as a user profile
-(`POST /api/profiles/from-current`), and "Edit settings directly" is a
-form built from `GET /api/profile-schema`. None of these change your
+(`POST /api/profiles/from-current`; see below), and "Edit settings
+directly" is a form built from `GET /api/profile-schema`. None of these change your
 Claude Code config; only running the command, or Claude acting on the
 prompt with your permission, does. Either way, restart Claude Code
 afterwards: it reads settings and agent files when it starts, so a
 session that is already open keeps the old ones. The dashboard says so
 under the prompt and command, the prompt asks Claude to remind you, and
 `apply` prints it after the change.
+
+#### Save my current settings
+
+"Save my current settings as a profile" writes the profile
+`my-current-settings` (or the `id` and `name` it is given; a second save
+asks before replacing the first). It keeps, from the latest config
+snapshot:
+
+- every allowlisted setting that is set and not managed by your
+  organisation, each checked on its own, so one value out of range drops
+  only itself;
+- `modelSettings`, a model at a time: each model's entry is checked
+  alone, so a model with no effort level recorded, or an id the schema
+  refuses, drops only itself. The snapshot keeps a model's `effortLevel`
+  and nothing else of its entry, so a model's compact window is not
+  saved;
+- each of **your own** agents (the files in `~/.claude/agents`) with the
+  `model`, `effort`, `maxTurns` and `"experimental.cacheTtl"` it sets. The
+  snapshot calls the last two `max_turns` and `experimental_cache_ttl`
+  (`diff._EFFECTIVE_AGENT_FIELD` maps them).
+
+Agents that belong to one project are left out: `apply` patches an
+agent's file in the folder of the scope it is run at, and at its default
+(user) scope a project agent has no file there, so a profile naming one
+was refused whole, settings included. The save returns their names as
+`skipped_project_agents` and the status line says "Left out, because they
+belong to one project: {names}." A profile keeps no scope; applying it
+picks one, as for any profile.
 
 A profile only ever names a lever this project can already trace back
 to a real, observable effect in a report — never an invented setting —
