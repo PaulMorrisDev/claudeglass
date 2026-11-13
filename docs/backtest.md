@@ -97,7 +97,7 @@ figure on the sessions after the change ("An estimate that says what it was pric
    totals' *ratio*, not their exact dollar difference, as what the
    verdict below is built from.
 5. **Verdict**, one of a closed set: `as_estimated`, `smaller`,
-   `larger`, `opposite`, `too_little_data`.
+   `larger`, `opposite`, `too_little_data`, `not_measured`.
 
 ### An estimate that says what it was priced on
 
@@ -120,9 +120,9 @@ setting.
   change. The estimate is the tokens it said it takes out of each start,
   carried the same way. A start-context fix is measured only when its estimate takes out at least 45% of the start: where nothing changed, starts moved by up to 22% on their own.
 - **Any other setting** has no honest measure (cost per session moves with the
-  kind of work by more than an estimate's size), so the row stays unjudged
-  ("Not judged yet.") and expires like one that never matched. Waiting does not
-  change that.
+  kind of work by more than an estimate's size), so the row is closed
+  out as `not_measured` ("Can't be checked from your sessions."), the same day
+  it is matched. Waiting does not change that.
 - **Fewer than 5 runs after the change** (5 on each side for the start-context
   measure) waits, then closes out as `too_little_data` once a later change
   bounds it, as above.
@@ -144,6 +144,7 @@ steps 2 to 4, unchanged.
 | `larger` | The measured effect is more than double the predicted one. |
 | `opposite` | The measured direction is statistically significant and the opposite sign from the prediction (a predicted saving that cost more instead, or vice versa). |
 | `too_little_data` | Too few sessions on one side to tell, and the window has since closed (a later change point bounds it), so no more sessions can ever arrive to help. |
+| `not_measured` | Nothing in your sessions can check this estimate: the setting has no honest measure, the estimate is too small a share of the start, or nothing prices the change exactly. It is closed at once when the setting or the estimate decides it, otherwise 30 days after the change. It has no measured amount and teaches calibration nothing. |
 
 A predicted amount under $0.01 (either way) is treated as "predicted no
 real effect": any measurable effect at all is `larger`; no significant
@@ -195,7 +196,7 @@ starts at the newest change in any project.
 
 Once at least `backtest.MIN_JUDGED_FOR_CALIBRATION` (3) of your own
 past predictions for the same `(agent, measure_key)` have been judged
-— excluding `too_little_data` ones, which have no measured amount —
+— excluding `too_little_data` and `not_measured` ones, which have no measured amount —
 `backtest.calibration_multipliers` averages their `measured_usd /
 predicted_usd` ratios into one multiplier per key. `whatif.estimate`
 applies a matching multiplier to that row's `saving_usd`, and its

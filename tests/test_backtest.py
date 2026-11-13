@@ -583,7 +583,7 @@ def test_an_outcomes_reading_is_stored_on_the_scale_of_the_estimate_it_judged(
         assert shown["measured_text"] == shown["predicted_text"]
 
 
-def test_a_prediction_on_a_lever_with_no_honest_measure_stays_unjudged(tmp_path, monkeypatch):
+def test_a_prediction_on_a_lever_with_no_honest_measure_is_closed_out_as_not_measured(tmp_path, monkeypatch):
     t0 = datetime.now(timezone.utc)
     config_dir, result = _apply(tmp_path, {"effortLevel": "medium"})
     point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
@@ -597,15 +597,68 @@ def test_a_prediction_on_a_lever_with_no_honest_measure_stays_unjudged(tmp_path,
     _priced_prediction(store, "effortLevel", t0)
     _no_rate_path(monkeypatch)
     # Even with a later change bounding the window, and sessions on both sides, the rate path is never
-    # taken for it and the row waits: waiting does not change what cannot be measured.
+    # taken for it. Waiting does not change what cannot be measured, so it is closed out, not left waiting.
     _snapshot(config_dir, point_ts + timedelta(hours=5), {"customKey": "a"})
     _snapshot(config_dir, point_ts + timedelta(hours=6), {"customKey": "b"})
     judged = backtest.judge_predictions(
         store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=1)
     )
-    assert judged == 0
+    assert judged == 1
+    assert store.predictions(judged=False) == []
+    [row] = store.predictions(judged=True)
+    assert row["verdict"] == "not_measured" and row["measured_usd"] is None and row["measured_pct"] is None
+    assert row["change_ts"] == point_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert backtest.present([row], UNITS)[0]["verdict_text"] == "Can't be checked from your sessions."
+
+
+def _not_measured_world(tmp_path, monkeypatch, note, now_days):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"model": "sonnet"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    store = Store(":memory:")
+    store.open()
+    _priced_prediction(store, "model", t0)
+    reading = outcomes.Reading(method="exact", verdict="not_measured", note=note)
+    monkeypatch.setattr(outcomes, "read_fix", lambda *args, **kw: reading)
+    judged = backtest.judge_predictions(
+        store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=now_days)
+    )
+    return store, judged
+
+
+def test_a_not_measured_reading_decided_by_the_estimate_closes_at_once(tmp_path, monkeypatch):
+    store, judged = _not_measured_world(tmp_path, monkeypatch, "no saving to take a share of", 2)
+    assert judged == 1
+    [row] = store.predictions(judged=True)
+    assert (row["verdict"], row["measured_usd"]) == ("not_measured", None)
+
+
+@pytest.mark.parametrize(("days", "closed"), [(2, False), (31, True)])
+def test_a_not_measured_reading_more_sessions_could_change_waits_out_thirty_days(tmp_path, monkeypatch, days, closed):
+    store, judged = _not_measured_world(tmp_path, monkeypatch, "the basis prices to nothing on these units", days)
+    assert judged == int(closed)
+    if closed:
+        [row] = store.predictions(judged=True)
+        assert row["verdict"] == "not_measured"
+        return
     [row] = store.predictions(judged=False)
-    assert row["verdict"] is None and backtest.present([row], UNITS)[0]["verdict_text"] == "Not judged yet."
+    assert backtest.present([row], UNITS)[0]["verdict_text"] == "Not judged yet."
+
+
+def test_a_prediction_closed_as_not_measured_says_it_cant_be_checked():
+    rows = [{"id": "p", "verdict": "not_measured", "predicted_usd": 1.0, "measured_usd": None}]
+    [shown] = backtest.present(rows, UNITS)
+    assert shown["verdict_text"] == "Can't be checked from your sessions."
+    assert shown["measured_text"] == ""
+
+
+def test_calibration_learns_nothing_from_a_prediction_closed_as_not_measured():
+    store = _judged_store([(None, "model", 1.0, None)] * 3)
+    for row in store.predictions(judged=True):
+        store.judge_prediction(row["id"], change_ts="2026-09-21T09:00:00Z", verdict="not_measured", measured_usd=None, measured_pct=None)
+    assert backtest.calibration_multipliers(store) == {}
 
 
 @pytest.mark.parametrize(("bounded", "judged_as"), [(False, None), (True, "too_little_data")])

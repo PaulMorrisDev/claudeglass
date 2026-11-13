@@ -536,6 +536,28 @@ def test_backtest_lists_judged_and_pending_predictions(tmp_path, capsys):
     assert_privacy({"out": out})
 
 
+def test_backtest_lists_a_prediction_closed_as_not_measured_with_the_judged_ones(tmp_path, capsys):
+    from claudeglass.service.serve import STORE_FILENAME
+    from claudeglass.service.store import Store
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    store = Store(config_dir / STORE_FILENAME)
+    store.open()
+    store.upsert_prediction(
+        prediction_id="pred-closed", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="experimental.cacheTtl",
+        agent="gp", predicted_usd=1.0, predicted_pct=None, fidelity="ceiling", priced_on=12.0,
+    )
+    store.judge_prediction("pred-closed", change_ts="2026-09-21T09:00:00Z", verdict="not_measured", measured_usd=None, measured_pct=None)
+    store.close()
+
+    exit_code = cli.main(["backtest", "--config-dir", str(config_dir)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "not_measured" in out
+    assert "still waiting" not in out
+
+
 def test_no_argv_with_no_data_exits_1(capsys):
     # The autouse fixture points HOME/CLAUDE_CONFIG_DIR at an empty tmp
     # dir, so the default "report" subcommand's default project (this

@@ -87,7 +87,7 @@ from .pricing import Pricing
 from .units import Units
 
 #: Closed verdict vocabulary persisted to ``predictions.verdict``.
-VERDICTS = ("as_estimated", "smaller", "larger", "opposite", "too_little_data")
+VERDICTS = ("as_estimated", "smaller", "larger", "opposite", "too_little_data", "not_measured")
 
 #: A predicted saving smaller than this (either way) is treated as "predicted
 #: no real effect" -- any measured effect at all is then "larger" than predicted,
@@ -192,10 +192,12 @@ def _judge_priced(
 ) -> _Judgement | None:
     """A prediction that says what it was priced on, read by
     :func:`outcomes.read_fix`: the measure that fits its lever, the estimate
-    priced on the same work. ``None`` when the lever has no honest measure
-    (or the figure prices to nothing): it is not judged, now or later. A
-    reading with too little data is ``enough=False``, for the caller to wait
-    on or close out. Otherwise the reading's ratio of measured to predicted,
+    priced on the same work. A reading that cannot be made (the lever has no
+    honest measure, the estimate is too small a share of the start, nothing
+    prices the change) is closed out as ``not_measured`` once nothing later
+    can change it (:data:`outcomes.FINAL_NOTES`, else the after side's 30
+    days); until then ``None``, for the caller to try again. A reading with
+    too little data is ``enough=False``, for the caller to wait on or close out. Otherwise the reading's ratio of measured to predicted,
     applied to the row's own estimate, goes through :func:`_verdict` as the
     rate path's figures do."""
     from . import outcomes  # outcomes reads this module's change-point matching
@@ -208,6 +210,10 @@ def _judge_priced(
         sessions, points, bundles, pricing, now, corpus_start,
     )
     if reading.verdict == "not_measured":
+        # Nothing in the sessions can check it. Closed at once when the lever or the estimate decides that,
+        # else once the after side has run out, since more sessions could still change the reading.
+        if reading.note in outcomes.FINAL_NOTES or now >= point.ts + outcomes.AFTER_MAX:
+            return _Judgement("not_measured", None, None, True)
         return None
     if reading.verdict == "too_little_data":
         return _Judgement(None, None, None, False)
@@ -303,8 +309,7 @@ def judge_predictions(
         if prediction.get("priced_on") is not None:
             result = _judge_priced(prediction, point, sessions, points, bundles, pricing, now, corpus_start)
             if result is None:
-                # Nothing to judge it by: no honest measure for the lever, which waiting
-                # does not change.
+                # A reading more sessions could still change: try again next time.
                 continue
             if not result.enough:
                 if following is None:
@@ -386,6 +391,7 @@ _VERDICT_TEXT = {
     "larger": "Measured effect was larger than estimated.",
     "opposite": "Went the other way from the estimate.",
     "too_little_data": "Not enough sessions after the change to judge it.",
+    "not_measured": "Can't be checked from your sessions.",
 }
 
 

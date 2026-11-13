@@ -73,10 +73,18 @@ START_SENSITIVE = (
 #: changed, the median start of an agent's spawns moved by up to 21.6% between two
 #: fortnights on the frozen data, so a smaller basis cannot be told from that.
 START_FLOOR = 0.45
-#: Why a start-context reading under :data:`START_FLOOR` is not a verdict.
+#: Why a fix reads ``not_measured``.
+NOTE_NO_MEASURE = "lever has no honest measure"
+NOTE_NO_BASIS = "the card or profile names no basis"
+NOTE_NO_SAVING = "no saving to take a share of"
+NOTE_PRICES_TO_NOTHING = "the basis prices to nothing on these units"
+#: A start-context reading under :data:`START_FLOOR` is not a verdict.
 NOTE_BASIS_TOO_SMALL = "the basis is too small a share of the start to tell from noise"
-#: Why an exact reading has no price once there are units and sessions enough to ask for one.
+#: An exact reading has no price once there are units and sessions enough to ask for one.
 NOTE_NO_EXACT_PRICE = "no exact price for this change"
+#: A ``not_measured`` reading whose note is one of these is decided by the lever and the
+#: estimate alone, so no later session changes it; any other waits out AFTER_MAX.
+FINAL_NOTES = frozenset({NOTE_NO_MEASURE, NOTE_NO_BASIS, NOTE_NO_SAVING})
 VERDICTS = ("half_or_more", "under_half", "too_little_data", "not_measured")
 GUARD_STATES = ("holds", "worse", "unclear", "too_little_data")
 METHODS = ("exact", "start_context", "none")
@@ -385,15 +393,15 @@ def _measure(
     figures and the verdict."""
     reading = Reading(method=method, verdict="not_measured")
     if method == "none":
-        reading.note = "lever has no honest measure"
+        reading.note = NOTE_NO_MEASURE
         return reading
     basis = prediction.basis if prediction is not None else None
     saving = prediction.saving_usd if prediction is not None else None
     if not _usable(basis):
-        reading.note = "the card or profile names no basis"
+        reading.note = NOTE_NO_BASIS
         return reading
     if method == "exact" and not _usable(saving):
-        reading.note = "no saving to take a share of"
+        reading.note = NOTE_NO_SAVING
         return reading
 
     measured = predicted = 0.0
@@ -479,7 +487,7 @@ def _measure(
         reading.short_export = method == "start_context" and point.ts - LOOKBACK < corpus_start
         return reading
     if predicted <= 0:
-        reading.note = "the basis prices to nothing on these units"
+        reading.note = NOTE_PRICES_TO_NOTHING
         return reading
     reading.measured_usd, reading.predicted_usd = measured, predicted
     reading.verdict = "half_or_more" if measured / predicted >= 0.5 else "under_half"

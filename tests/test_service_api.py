@@ -4346,6 +4346,12 @@ def test_backtest_is_empty_without_predictions(server):
     assert "too_little_data" in payload["data"]["verdicts"]
 
 
+def test_backtest_lists_not_measured_among_the_verdicts(server):
+    resp, payload = server.get_json("/api/backtest")
+    assert resp.status == 200
+    assert "not_measured" in payload["data"]["verdicts"]
+
+
 def test_backtest_lists_a_logged_prediction_after_a_matching_apply(server):
     from claudeglass.profiles import apply as apply_mod
     from claudeglass.profiles.schema import load_dict

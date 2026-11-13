@@ -1751,7 +1751,7 @@ other unjudged one, and is dropped 90 days after it was made.
 `data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "priced_on", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
 Newest prediction first. `verdict` is `null` until a matching change
 point closes the window enough to judge it, then one of the closed set
-`as_estimated`, `smaller`, `larger`, `opposite` or `too_little_data`
+`as_estimated`, `smaller`, `larger`, `opposite`, `too_little_data` or `not_measured`
 (`verdicts` lists them). `predicted_text`, `measured_text` and
 `verdict_text` are server-formatted, billing-mode-aware sentences
 (`backtest.present`) — the dashboard never formats a dollar amount or a
