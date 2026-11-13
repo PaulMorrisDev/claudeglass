@@ -338,14 +338,19 @@ on, so reading it again changes nothing, and rows older than
 adds the `card_marks` table: one row per card per view of the dashboard (the
 project it was shown in, or every project), holding the card's key, the rule
 and agent it is about, the settings it asked you to change, its estimated
-saving, and when it was first shown, first copied (its own prompt), first
+saving and the basis that saving rests on (the tokens it takes out of each
+start, or the observed cost it is a share of; empty when the card names none),
+and when it was first shown, first copied (its own prompt), first
 copied in the project's all-fixes prompt, and, once that view is drawn again,
 when it left the list with every setting it names moved (`landed_at`, and
 whether the settings hold the card's own values). It is written by
 `POST /api/recommendations/marks`, stays on this machine and is returned by
 no route; only counts and fixed words from it reach a tuning export. Rows
 older than `retention_days` (180 by default) are removed. A store at 11 gains
-the table in place. Version 9,
+the table in place, with a nullable `predictions.basis` column beside it (the
+`basis` of the prediction log's line, below); a store already stamped 12 by an
+earlier build of this release gains both `basis` columns when it is opened.
+Version 9,
 from the /cg-feedback
 redesign, added the rating's `why`, `missed_in`, `tip` and
 `tip_hint` columns and the `session_plan_feedback` and `tip_feedback`
@@ -1640,7 +1645,7 @@ prediction an earlier version closed as `too_little_data`, once, because
 their windows were cut too short then. Such a prediction waits like any
 other unjudged one, and is dropped 90 days after it was made.
 
-`data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
+`data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "basis", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
 Newest prediction first. `verdict` is `null` until a matching change
 point closes the window enough to judge it, then one of the closed set
 `as_estimated`, `smaller`, `larger`, `opposite` or `too_little_data`
@@ -1648,7 +1653,9 @@ point closes the window enough to judge it, then one of the closed set
 `verdict_text` are server-formatted, billing-mode-aware sentences
 (`backtest.present`) — the dashboard never formats a dollar amount or a
 verdict itself. `measured_usd`/`measured_text` stay `null` until
-judged. `judged_just_now` is how many predictions this call judged for
+judged. `basis` is the number the estimate was a share of when it was logged
+(the observed cost it repriced, or the tokens per start it takes out), `null`
+when the estimate named none; no verdict reads it yet. `judged_just_now` is how many predictions this call judged for
 the first time (a stale answer can be served while a change is worked
 out in the background, as with `/api/impact`).
 
@@ -2166,7 +2173,9 @@ saving could be estimated is then appended to this tool's own
 `prediction-log.jsonl` (`config.append_prediction_log`) — always the
 *uncalibrated* estimate (`uncalibrated_usd`/`uncalibrated_fidelity`
 when present, `saving_usd`/`fidelity` otherwise), so calibrating an
-already-calibrated number never compounds. The dashboard sets this
+already-calibrated number never compounds. Each line also carries a
+`basis` key: the number the estimate is a share of, `null` when it names none
+(`config.append_prediction_log`'s `basis`). The dashboard sets this
 only for a change you mean to track, not for interactive "what if"
 exploration. A logged row reaches `GET /api/backtest` once the file
 watcher's next tick ingests it (`service.watcher._scan_predictions`)

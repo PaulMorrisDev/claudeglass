@@ -33,7 +33,11 @@ Each row is one settings key, on one occasion: `measure_key` (the raw
 settings key, e.g. `"model"`, `"subagentPromptCacheTtl"`), an optional
 `agent` (an agent-scoped change), and the *uncalibrated* `predicted_usd`
 — never a calibrated figure, so calibrating an already-calibrated
-number can never compound (see "Calibration" below).
+number can never compound (see "Calibration" below). A row also holds a
+`basis`: the number the estimate is a share of, such as the observed cost it
+repriced or the tokens per start it takes out, or nothing (`null`) when the
+estimate names none. It is kept so that a later check can price the same
+basis on the sessions after the change; no verdict reads it yet.
 
 ## The method, in five steps
 
