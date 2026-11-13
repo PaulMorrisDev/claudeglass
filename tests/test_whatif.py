@@ -264,6 +264,18 @@ def test_fast_mode_off_reprices_fast_applied_turns_at_standard():
     assert row["effect_text"] == f"Saves 12.00 USD {PERIOD}"
 
 
+def test_whatif_does_not_estimate_model_settings():
+    # A nested value (model id -> its own settings) is one row that is not simulated, not an error.
+    value = {"claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300000}, "other": {"autoCompactWindow": "auto"}}
+    [row] = _estimate({"modelSettings": value})["rows"]
+    assert row["key"] == "modelSettings" and row["value"] == value
+    assert row["saving_usd"] is None and row["fidelity"] == "none"
+    assert row["basis"] == "This change isn't simulated."
+    # beside another setting it still gets its own row
+    rows = _estimate({"modelSettings": value, "fastMode": False})["rows"]
+    assert [r["key"] for r in rows] == ["modelSettings", "fastMode"]
+
+
 def test_fast_mode_on_is_not_simulated():
     [row] = _estimate({"fastMode": True})["rows"]
     assert row["saving_usd"] is None and row["fidelity"] == "none"
