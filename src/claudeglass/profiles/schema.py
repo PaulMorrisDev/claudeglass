@@ -69,6 +69,7 @@ __all__ = [
     "agent_name_problem",
     "shown_name",
     "AGENT_NAME_RULE",
+    "AGENT_NAME_USABLE",
     "AGENT_NAME_PLUGIN",
     "load_profile",
     "loads_profile",
@@ -316,8 +317,11 @@ AGENT_NAME_RULE = (
 )
 #: Why a plugin's agent (``plugin:agent``) is refused in a profile.
 AGENT_NAME_PLUGIN = "this is a plugin's agent, and a profile can change only your own agent files"
-#: The rule in the words a rename hint uses ("Rename it to <this> ...").
-AGENT_RENAME_WORDS = "one word of letters, digits, dots, underscores and hyphens"
+#: The rule as a sentence of its own, for a hint that says how to rename an agent.
+AGENT_NAME_USABLE = (
+    "A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens, "
+    "starts with a letter or digit, and is at most 128 characters."
+)
 
 
 def _agent_name_part_ok(part: str) -> bool:

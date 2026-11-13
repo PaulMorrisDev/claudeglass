@@ -879,7 +879,10 @@ def test_the_tasks_goal_finds_the_models_own_entry_under_every_spelling(observed
         assert "modelSettings" not in by_key and by_key["effortLevel"]["value"] == "medium"
 
 
-_RENAME_WORDS = "one word of letters, digits, dots, underscores and hyphens"
+def _usable() -> str:
+    from claudeglass.profiles.schema import AGENT_NAME_USABLE
+
+    return AGENT_NAME_USABLE
 
 
 def test_a_goal_draft_leaves_out_a_plugin_agent_and_a_refused_name_and_counts_only_the_refused():
@@ -899,14 +902,16 @@ def test_a_goal_draft_leaves_out_a_plugin_agent_and_a_refused_name_and_counts_on
         assert "reviewer" in agents and not agents & {"superpowers:explorer", "Code Reviewer"}, goal
         assert schema.validate({"id": "x", **out["profile"]}) == [], goal
         # One agent (counted once for its two changes), never named.
-        assert out["note"] == f"One agent is left out of these changes because its name isn't {_RENAME_WORDS}.", goal
+        assert out["note"] == (
+            f"One agent is left out of these changes because ClaudeGlass can't use its name. {_usable()}"
+        ), goal
         assert "Code Reviewer" not in json.dumps(out), goal
 
 
 def test_the_draft_note_counts_several_refused_names_and_says_nothing_for_a_plugin_agent_alone():
     rec = NS(title="x", changes=[_change("model", "a b", "sonnet"), _change("model", "c\nd", "sonnet")])
     note = goals.draft("recommendations", _report([rec]), UNITS)["note"]
-    assert note == f"2 agents are left out of these changes because their names aren't {_RENAME_WORDS}."
+    assert note == f"2 agents are left out of these changes because ClaudeGlass can't use their names. {_usable()}"
     rec = NS(title="x", changes=[_change("model", "superpowers:explorer", "sonnet")])
     out = goals.draft("recommendations", _report([rec]), UNITS)
     assert out["candidates"] == [] and out["note"] is None
@@ -958,3 +963,35 @@ def test_in_a_view_of_several_projects_a_project_files_flat_level_is_not_read():
     [candidate] = out["candidates"]
     assert candidate["key"] == "modelSettings" and candidate["value"] == {"claude-opus-5-5": {"effortLevel": "medium"}}
     assert "This project's" not in candidate["evidence"]
+
+
+def test_the_name_rule_sentence_is_the_rule_and_the_limit():
+    from claudeglass.profiles import schema
+
+    assert schema.AGENT_NAME_USABLE == (
+        "A name ClaudeGlass can use " + schema.AGENT_NAME_RULE.removeprefix("an agent name ") + "."
+    )
+    assert f"{schema.AGENT_NAME_MAX} characters" in schema.AGENT_NAME_USABLE
+
+
+@pytest.mark.parametrize("name", ["_helper", "docs..writer", "reviewer-" + "x" * 121])
+def test_the_rename_hints_are_true_of_a_refused_name_that_is_already_one_word(name):
+    """A name the rule refuses for its start, its dots or its length has no bad character: none of the three
+    hints may say it isn't one word, or has characters, and each carries the whole rule."""
+    from claudeglass import fixes
+    from claudeglass.model import Recommendation, SettingChange
+    from claudeglass.profiles import roles, schema
+
+    assert schema.agent_name_problem(name) is not None
+    rec = Recommendation(
+        id="model-tier", title="Cheaper model", why="It costs less.", agent_type=name,
+        changes=[SettingChange(target="agent", key="model", agent=name, value="sonnet")],
+    )
+    [fix] = fixes.build_fixes(rec)
+    texts = [fix_text for _title, fix_text in fix["explainer"]]
+    texts += [roles.unusable_writers_note(1), roles.unusable_writers_note(2)]
+    texts.append(goals.draft("recommendations", _report([NS(title="x", changes=[_change("model", name, "sonnet")])]), UNITS)["note"])
+    for text in texts:
+        assert "has characters" not in text and "isn't one word" not in text and "one word of" not in text, text
+    for text in texts[-4:]:
+        assert schema.AGENT_NAME_USABLE in text, text

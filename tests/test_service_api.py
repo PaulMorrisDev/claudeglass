@@ -8242,8 +8242,8 @@ def test_a_recorded_writer_with_an_unusable_name_is_left_out_and_not_named(serve
     assert {r["agent"] for r in data["agents"]} == {"fixer"}
     assert "bypassPermissions" not in data["prompt"] and "bypassPermissions" not in json.dumps(data["notes"])
     assert (
-        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. Rename it to one word of "
-        "letters, digits, dots, underscores and hyphens to include it."
+        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
+        f"{profile_schema.AGENT_NAME_USABLE} Rename it to include it."
     ) in data["notes"]
     _seed_agents(
         server,
@@ -8253,8 +8253,8 @@ def test_a_recorded_writer_with_an_unusable_name_is_left_out_and_not_named(serve
     data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
     assert data["agents"] == []
     assert (
-        "2 agents that write code have names ClaudeGlass can't use, so they are left out. Rename each to one word of "
-        "letters, digits, dots, underscores and hyphens to include it."
+        "2 agents that write code have names ClaudeGlass can't use, so they are left out. "
+        f"{profile_schema.AGENT_NAME_USABLE} Rename each to include it."
     ) in data["notes"]
     card = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
     assert card["agents"] == {}

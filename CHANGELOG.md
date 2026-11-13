@@ -140,7 +140,7 @@ Capture and dashboard:
   `POST /api/profiles` or `apply --agent` with another name is refused, so
   `apply` can no longer write a file outside the agents folders. A card
   about such an agent offers no prompt, and a writer with such a name is
-  left out and counted, never named; both say how to rename it. Goal
+  left out and counted, never named; both state what a usable name is. Goal
   drafts and "Save my current settings" leave such agents out and say how
   many, and goal drafts and quality tips no longer offer a change to a
   plugin's agent. Agent names in copied prompts are in quotes. A saved

@@ -27,7 +27,7 @@ from ..snapshots import AUTO_COMPACT_WINDOW_ENV, SETTINGS_LAYER_NAMES
 from ..units import Units
 from . import catalogue
 from .diff import _EFFECTIVE_AGENT_FIELD
-from .schema import _EFFORT_LEVELS, _MODEL_ID_RE, AGENT_RENAME_WORDS, agent_name_problem
+from .schema import _EFFORT_LEVELS, _MODEL_ID_RE, AGENT_NAME_USABLE, agent_name_problem
 
 TOP = whatif.TOP
 
@@ -1007,8 +1007,11 @@ def names_left_out_note(count: int) -> str:
     """The draft's sentence for ``count`` (1 or more) agents left out
     because the agent-name rule refuses their names."""
     if count == 1:
-        return f"One agent is left out of these changes because its name isn't {AGENT_RENAME_WORDS}."
-    return f"{count} agents are left out of these changes because their names aren't {AGENT_RENAME_WORDS}."
+        return f"One agent is left out of these changes because ClaudeGlass can't use its name. {AGENT_NAME_USABLE}"
+    return (
+        f"{count} agents are left out of these changes because ClaudeGlass can't use their names. "
+        f"{AGENT_NAME_USABLE}"
+    )
 
 
 def _as_profile(candidates: list[dict]) -> tuple[dict, dict]:

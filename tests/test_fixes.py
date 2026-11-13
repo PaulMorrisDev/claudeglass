@@ -1301,12 +1301,14 @@ def test_plugin_of_and_the_agent_name_rule_agree_on_a_plugins_agent():
 
 def test_no_fix_for_a_name_says_the_name_is_why_and_how_to_rename_it():
     from claudeglass import fixes
+    from claudeglass.profiles import schema
 
     title, text = fixes.NO_FIX_FOR_NAME
     assert title == "No fix to copy"
+    # fixes.py spells the sentence out (it imports schema lazily): this pins that copy.
     assert text == (
-        "This agent's name has characters ClaudeGlass can't put in a prompt or a command. Rename it to "
-        "one word of letters, digits, dots, underscores and hyphens, and cards about its later runs can offer a fix."
+        "ClaudeGlass can't put this agent's name in a prompt or a command. "
+        f"{schema.AGENT_NAME_USABLE} Rename the agent, and cards about its later runs can offer a fix."
     )
 
 

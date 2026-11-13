@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 
 from .. import agent_roles
 from ..recommend import _FILE_TOOLS, _NOT_OVERRIDABLE, read_agent_tools
-from .schema import AGENT_RENAME_WORDS, ROLES, Profile, agent_name_problem
+from .schema import AGENT_NAME_USABLE, ROLES, Profile, agent_name_problem
 
 __all__ = [
     "ROLE_WORDS",
@@ -100,11 +100,11 @@ def unusable_writers_note(count: int) -> str:
     if count == 1:
         return (
             "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
-            f"Rename it to {AGENT_RENAME_WORDS} to include it."
+            f"{AGENT_NAME_USABLE} Rename it to include it."
         )
     return (
         f"{count} agents that write code have names ClaudeGlass can't use, so they are left out. "
-        f"Rename each to {AGENT_RENAME_WORDS} to include it."
+        f"{AGENT_NAME_USABLE} Rename each to include it."
     )
 
 

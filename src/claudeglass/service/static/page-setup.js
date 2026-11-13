@@ -284,9 +284,9 @@ export function renderProfiles(panel) {
         (skipped.length ? " Left out, because your organisation's policy sets them: " + skipped.join(", ") + "." : "") +
         (projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "") +
         (nameAgents === 1
-          ? " Left out, because of its name: one agent. Rename it to one word of letters, digits, dots, underscores and hyphens to include it."
+          ? " Left out, because of its name: one agent. A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens. It starts with a letter or digit and is at most 128 characters. Rename it to include it."
           : nameAgents > 1
-            ? " Left out, because of their names: " + nameAgents + " agents. Rename each to one word of letters, digits, dots, underscores and hyphens to include it."
+            ? " Left out, because of their names: " + nameAgents + " agents. A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens. It starts with a letter or digit and is at most 128 characters. Rename each to include it."
             : "");
       toast("Your current settings are saved as a profile.");
       refreshList();

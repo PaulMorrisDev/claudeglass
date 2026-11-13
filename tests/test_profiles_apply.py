@@ -1456,8 +1456,9 @@ def test_apply_leaves_out_a_writer_file_with_an_unusable_name(tmp_path):
     )
     assert not [a for a in plan.actions if a.kind == "agent_frontmatter"]
     assert (
-        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. Rename it to one word of "
-        "letters, digits, dots, underscores and hyphens to include it."
+        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
+        "A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters. Rename it to include it."
     ) in plan.role_notes
 
 

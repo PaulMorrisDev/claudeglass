@@ -4621,12 +4621,17 @@ def test_the_estimate_is_drawn_from_the_changes_the_chosen_target_makes() -> Non
 
 
 def test_save_current_settings_says_how_many_agents_were_left_out_for_their_names():
+    from claudeglass.profiles.schema import AGENT_NAME_MAX, AGENT_NAME_USABLE
+
     js = _app_js()
     assert "body.data.skipped_name_agents" in js
-    assert (" Left out, because of its name: one agent. Rename it to one word of letters, digits, dots, "
-            "underscores and hyphens to include it.") in js
-    assert '" Left out, because of their names: " + nameAgents + " agents. Rename each to one word of letters, ' \
-           'digits, dots, underscores and hyphens to include it."' in js
+    # The page has its own copy of the sentence, in two sentences (the copy scan allows 25 words
+    # to one): this pins it against schema.AGENT_NAME_USABLE.
+    usable = AGENT_NAME_USABLE.replace(", starts with", ". It starts with").replace(", and is at most", " and is at most")
+    assert usable.count(". ") == 1 and f"at most {AGENT_NAME_MAX} characters." in usable
+    assert f'" Left out, because of its name: one agent. {usable} Rename it to include it."' in js
+    assert (f'" Left out, because of their names: " + nameAgents + " agents. {usable} Rename each to '
+            'include it."') in js
 
 
 def test_a_profile_card_with_a_problem_shows_it_and_offers_nothing_to_open():

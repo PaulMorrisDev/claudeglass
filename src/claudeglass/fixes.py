@@ -1424,8 +1424,9 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
 #: ``schema.agent_name_problem`` (plugin agents allowed).
 NO_FIX_FOR_NAME = (
     "No fix to copy",
-    "This agent's name has characters ClaudeGlass can't put in a prompt or a command. Rename it to one word of "
-    "letters, digits, dots, underscores and hyphens, and cards about its later runs can offer a fix.",
+    "ClaudeGlass can't put this agent's name in a prompt or a command. A name ClaudeGlass can use holds only "
+    "letters, digits, single dots, underscores and hyphens, starts with a letter or digit, and is at most 128 "
+    "characters. Rename the agent, and cards about its later runs can offer a fix.",
 )
 
 
