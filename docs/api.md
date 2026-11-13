@@ -1050,7 +1050,9 @@ and `autoCompactWindow` (`"auto"`, or a whole number from 100,000 to
 `modelSettings` among `settings` with the label "Per-model settings" and
 `values`, `min` and `max` of `null`; it does not list those two sub-keys,
 so `int|auto` is never returned here. The dashboard's profile form has no
-box for `modelSettings`: it keeps the one in the profile it starts from. `label`, `description` and `tradeoff` come from
+box for `modelSettings`: it keeps the one in the profile it starts from and
+shows it as one read-only line ("Per-model settings: claude-opus-5-5 (effortLevel: low)"); "Edit as JSON instead"
+changes it. `label`, `description` and `tradeoff` come from
 `fixes.LEVER_LABELS`/`fixes.SETTING_TEXT`, the same text the
 recommendation explainers use. `env` lists the environment variable
 names a profile may set (`profiles.schema.ENV_ALLOWLIST`).

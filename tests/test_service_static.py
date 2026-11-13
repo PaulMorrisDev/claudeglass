@@ -984,6 +984,9 @@ def test_a_per_model_row_names_its_model_and_says_when_its_value_is_not_recorded
     assert "row.recorded === false" in _function_source(source, "diffRowSame")
     editor = _function_source(source, "buildProfileEditor")
     assert 'lever.kind !== "map[str,model]"' in editor
+    # what the form carries through is shown, read-only, in one line under the existing label
+    assert 'profileLeverLabels(schema).modelSettings + ": " + _diffRowValue(carriedModelSettings)' in editor
+    assert editor.count("showCarriedModelSettings()") == 3  # the function and its two calls
     assert "doc.settings.modelSettings = carriedModelSettings" in editor
 
 

@@ -630,6 +630,15 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
     settingsGrid.appendChild(f.node);
   });
   form.appendChild(settingsGrid);
+  // What the form carries through, one read-only line; "Edit as JSON instead" changes it.
+  var carriedLine = el("p", { class: "notes", id: "profile-form-model-settings", hidden: true });
+  form.appendChild(carriedLine);
+  function showCarriedModelSettings() {
+    carriedLine.textContent = carriedModelSettings
+      ? profileLeverLabels(schema).modelSettings + ": " + _diffRowValue(carriedModelSettings)
+      : "";
+    carriedLine.hidden = !carriedModelSettings;
+  }
 
   form.appendChild(el("h3", { text: "Settings for one agent" }));
   form.appendChild(el("p", { class: "notes", text: "Written to that agent's file. Use the agent's name as it appears under Agents & context." }));
@@ -726,12 +735,14 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
     });
     agentBlocks.length = 0;
     carriedModelSettings = null;
+    showCarriedModelSettings();
     if (!startSelect.value) return;
     fetchJson("/api/profiles/" + encodeURIComponent(startSelect.value)).then(function (result) {
       var body = result.body;
       if (!body || body.ok !== true) return;
       var p = body.data;
       carriedModelSettings = p.settings.modelSettings || null;
+      showCarriedModelSettings();
       settingFields.forEach(function (f) {
         setLeverValue(f, p.settings[f.lever.key]);
       });
