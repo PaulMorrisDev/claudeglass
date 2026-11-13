@@ -4759,6 +4759,16 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Main session: sessions that ran on Sonnet or smaller. The main session is never moved below "
                 "Sonnet, so the saving leaves them out.",
             ),
+            "picked_runs": (
+                "Picked against the setting",
+                "Main session: sessions that ran on a larger model though their project's setting said Sonnet or "
+                "smaller. A settings change can't reach them, so the saving leaves them out.",
+            ),
+            "own_model_runs": (
+                "In a project with its own model",
+                "Main session: sessions of projects that set their own model, in a view of several projects. A "
+                "change to your user settings can't reach them, so the saving leaves them out.",
+            ),
         },
         value_labels={
             "top-level": "Main session",

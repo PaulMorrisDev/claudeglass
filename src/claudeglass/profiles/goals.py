@@ -719,6 +719,11 @@ def draft(
         raise KeyError(goal_id)
     tables = whatif._Tables(model)
     d = _Draft(goal, dict(effective or {}), dict(effective_agents or {}), [], effort_level_env_set)
+    reading = model_swap.main_setting(model)
+    if reading is not None:
+        # The main session's model setting as the saving reads it, so a
+        # candidate never names a current value the saving disagrees with.
+        d.effective["model"] = reading[0]
     recommendations = getattr(model, "recommendations", ()) or ()
     tasks: list[str] = []
     note = None

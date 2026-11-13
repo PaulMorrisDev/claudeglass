@@ -274,9 +274,11 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         )
         if not alt:
             continue
-        now = ctx.setting_now("model") if agent == "top-level" else ctx.agent_now(agent, "model")
+        now = _main_setting(ctx)[0] if agent == "top-level" else ctx.agent_now(agent, "model")
+        # A main-session setting at Sonnet or smaller is never raised (G3).
+        # The saving reads the same setting, so it prices nothing then.
         main_there = agent == "top-level" and model_swap.at_main_floor(now)
-        if (already_set("model", _family_alias(alt), now) or main_there) and not (
+        if main_there or already_set("model", _family_alias(alt), now) and not (
             agent == "top-level" and _several_projects(ctx)
         ):
             # Already on the cheaper model. In a view of several projects one
@@ -320,46 +322,77 @@ _TIER_BASIS = (
 )
 
 
+def _main_setting(ctx: _Context) -> tuple:
+    """The main session's model setting now and the ``fixes.py`` scope a
+    change to it goes to, as the saving reads it (``model_swap.main_setting``);
+    in a view of several projects, or with no reading, the view's own
+    setting and ``None``."""
+    reading = model_swap.main_setting(ctx.report)
+    return reading if reading is not None else (ctx.setting_now("model"), None)
+
+
+#: The parts of the main card's "It leaves out" sentence: the evidence
+#: label each count is read by, and how one and several read alone.
+_LEFT_OUT_PARTS = (
+    ("already on Sonnet or smaller", "already on Sonnet or smaller", "already on Sonnet or smaller"),
+    ("from before their project moved", "from before its project moved to Sonnet or smaller",
+     "from before their project moved to Sonnet or smaller"),
+    ("picked against a Sonnet setting", "picked against a Sonnet setting", "picked against a Sonnet setting"),
+    ("in projects that set their own model", "in a project that sets its own model",
+     "in projects that set their own model"),
+)
+
+
+def _left_out_sentence(rec: Recommendation) -> str:
+    """The main card's "It leaves out" sentence, or ``""``: one part names
+    its sessions, several are joined after their total, the last with
+    "and"."""
+    counts = [(_int(_evidence_value(rec, label)), one, many) for label, one, many in _LEFT_OUT_PARTS]
+    parts = [(n, one, many) for n, one, many in counts if n]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        ((n, one, many),) = parts
+        return f" It leaves out the {n:,} main session{'s' if n != 1 else ''} {one if n == 1 else many}."
+    already = bool(counts[0][0])
+    words = []
+    for n, one, many in parts:
+        if many.startswith("from before") and already:
+            many = "from before their project moved there"
+        words.append(f"{n:,} {one if n == 1 and not many.startswith('from before') else many}")
+    listed = ", ".join(words[:-1]) + f", and {words[-1]}"
+    return f" It leaves out {sum(n for n, _one, _many in parts):,} main sessions: {listed}."
+
+
 def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) -> Recommendation:
     """The main session's model, one tier down. ``model_swap`` never
     suggests Haiku here (its ``main_floor`` verdict), so this is only ever
     Opus to Sonnet or Fable to Opus."""
     rec, _agent, alt, saving, observed = row
     family = _family_alias(alt).capitalize()
-    current = ctx.setting_now("model")
-    already = _int(_evidence_value(rec, "already on Sonnet or smaller"))
-    before = _int(_evidence_value(rec, "from before their project moved"))
-    if already and before:
-        since = (
-            f" It leaves out {already + before:,} main sessions: {already:,} already on Sonnet or smaller, and "
-            f"{before:,} from before their project moved there."
-        )
-    elif already:
-        since = (
-            f" It leaves out the {already:,} main session{'s' if already != 1 else ''} already on Sonnet or smaller."
-        )
-    elif before:
-        since = (
-            f" It leaves out the {before:,} main session{'s' if before != 1 else ''} from before "
-            f"{'its' if before == 1 else 'their'} project moved to Sonnet or smaller."
-        )
-    else:
-        since = ""
+    current, where = _main_setting(ctx)
+    since = _left_out_sentence(rec)
     # In a view of several projects the setting may already say the cheaper
-    # model, because one project's sessions ran on a larger one anyway.
-    # A setting at Sonnet or smaller is already there: the card never raises it.
-    at_floor = model_swap.at_main_floor(current)
-    set_already = already_set("model", _family_alias(alt), current) or at_floor
+    # model, above the Sonnet line (Opus, for sessions on Fable), because one
+    # project's sessions ran on a larger one anyway. A setting at Sonnet or
+    # smaller never gets here (_merge_model_tier).
+    set_already = already_set("model", _family_alias(alt), current)
     if set_already:
-        named = _family_alias(str(current)).capitalize() if at_floor else family
-        since += f" Your model setting already says {named}, and the sessions it counts still ran on a larger model."
+        since += f" Your model setting already says {family}, and the sessions it counts still ran on a larger model."
+    scope = "managed" if rec.scope == "managed" else (
+        where or _advice_scope(rec.scope)
+    )
     change = SettingChange(
         target="settings",
         key="model",
         value=_family_alias(alt),
         current=current if current not in (None, _UNKNOWN) else f"not set (used {observed or 'unknown'})",
-        note="This changes the model for your main session in every project.",
-        scope=_advice_scope(rec.scope),
+        note=(
+            "This changes the model for your main session in this project only."
+            if scope in ("project-local", "repo")
+            else "This changes the model for your main session in every project."
+        ),
+        scope=scope,
         saving=ctx.money(saving, prefix="At most "),
     )
     return Recommendation(

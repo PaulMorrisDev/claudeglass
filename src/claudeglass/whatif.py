@@ -188,13 +188,13 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
             if counted is not None and total and counted < total:
                 since = f", on {int(counted):,} of its {int(total):,} sessions"
             row = file_row
-        elif _num(row.get("before_change_runs")):
+        elif any(_num(row.get(k)) for k in ("before_change_runs", "picked_runs", "own_model_runs")):
+            others = any(_num(row.get(k)) for k in ("settled_runs", "picked_runs", "own_model_runs"))
             return _row(
                 key, label, value, None, "none",
-                "Every main session in this window started before its project moved to Sonnet or smaller."
-                if not _num(row.get("settled_runs"))
-                else "Every main session in this window ran on Sonnet or smaller, or started before its project "
-                "moved there.",
+                "No main session in this window is left for a settings change to reach."
+                if others
+                else "Every main session in this window started before its project moved to Sonnet or smaller.",
             )
     # A report without meta.model_ids falls back to matching column names.
     model_ids = getattr(getattr(tables.model, "meta", None), "model_ids", None) or {}
