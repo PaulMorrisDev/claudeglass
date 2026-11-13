@@ -237,7 +237,11 @@ def _shift(lines: list[dict], days: float) -> list[dict]:
 
 
 def test_the_hints_counted_are_the_live_hints():
-    assert hint_occasions.HINTS == tuple(agreement.live_hints())
+    assert hint_occasions.HINTS == tuple(agreement.live_hints()), (
+        "A coaching hint was switched on or off: update hint_occasions.HINTS and LABELS to the hints that speak "
+        "(capture_catalogue.live_coaching_hints()), so the Capture page never says a hint that is off had a moment "
+        "and no tip came."
+    )
     assert hint_occasions.HINTS == ("drip_feed", "big_paste", "status_poll")
     assert hint_occasions.HEADLESS_PREFIX == capture_hook._HEADLESS_ENTRYPOINT
     assert set(hint_occasions.LABELS) == set(hint_occasions.HINTS)

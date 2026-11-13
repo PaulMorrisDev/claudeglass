@@ -102,7 +102,7 @@ function renderPromptingSection(section, container) {
       emptyState(
         "None of these habits turned up in this window.",
         null,
-        "Coaching notes warn you about small requests, huge pastes and checks on a background task as they happen."
+        "Coaching notes flag some of these as they happen."
       )
     );
   } else {

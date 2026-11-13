@@ -2,12 +2,7 @@
 (``agreement_profiles.py``).
 
 A check returns the disagreements it found, so each test expects the empty
-list. Two halves are expected to fail today, for reasons the plan already
-names, and is marked ``xfail(strict=True)`` so that fixing the cause makes
-the test fail until the mark is removed:
-
-- check 6 (generated text names only live hints) waits on R1, the text
-  pass: the catalogue's coaching-notes text still describes hints that are off.
+list. No check is expected to fail today.
 """
 
 from __future__ import annotations
@@ -78,11 +73,6 @@ def test_a_card_and_a_check_about_one_setting_give_the_same_advice(built, name):
     assert _disagreements(agreement.check_same_setting, built(name)) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R1: the coaching-notes text still describes hints that are switched off (a large read, an agent run "
-    "that ended too big, a plan, a break, background agents), in the catalogue and in the generated docs/capture.md",
-)
 def test_generated_text_names_only_live_hints():
     assert agreement.check_live_hints() == []
 

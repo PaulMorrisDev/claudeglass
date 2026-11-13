@@ -717,6 +717,17 @@ def test_a_project_file_gets_five_prompts_to_copy_and_edits_nothing():
         ]
 
 
+def test_the_prompts_that_name_an_agent_definition_name_both_places_and_subfolders():
+    where = "~/.claude/agents/<name>.md or .claude/agents/<name>.md, or a folder inside them"
+    fixes = {fix["title"]: fix for fix in cmr.project_file_fixes(_file_row(), UNITS)}
+    assert f"({where})" in fixes["Split it by who needs it"]["prompt"]
+    # The second sentence of the drop-the-read prompt would pass 25 words with the paths in it, so it has its own.
+    assert (
+        "Its definition is at ~/.claude/agents/<name>.md or .claude/agents/<name>.md, or in a folder inside them."
+        in fixes["Put the essential lines in the agent definition and drop the read"]["prompt"]
+    )
+
+
 def test_the_explainer_says_who_reads_the_file_and_what_cutting_it_saves():
     [fix, *_rest] = cmr.project_file_fixes(_file_row(), UNITS)
     sections = dict(fix["explainer"])

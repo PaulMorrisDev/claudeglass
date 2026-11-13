@@ -151,8 +151,8 @@ These settings live in `config.toml`, in the config folder
   in its store (`service.db`). Older sessions are removed on every poll.
   `serve --retention-days N` overrides it for one run. It must be
   between 1 and 36500, and leaving it unset keeps every session. The
-  dashboard's own records (capture signals, the capture log and the
-  usage log) are removed after 180 days unless you set it.
+  dashboard's own records (capture signals, the capture log, the
+  usage log and card marks) are removed after 180 days unless you set it.
 - **Managed settings.** The SessionStart hook also records your
   organisation's managed settings file, redacted like your own settings.
   It records the names of the keys that file sets, too. The file is

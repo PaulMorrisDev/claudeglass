@@ -929,10 +929,12 @@ it is missing or matches no project).
 `data`: `{"prompt", "files": [{"file", "fixes"}, ...], "several", "other",
 "cards", "keys", "left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
 one opening line, then each fix's own `prompt` (as in
-`/api/recommendations`) minus its own closing (the "show me the diff"
-and restart lines, or the question about where a standing rule applies)
-under a `## <file>` header line per file, files in the order the cards
-come, then one shared closing that states those once. A prompt two cards
+`/api/recommendations`) minus the closing a setting change ends with (its
+"show me the diff" and restart lines), the restart reminder, or the
+question about where a standing rule applies, under a `## <file>` header
+line per file, files in the order the cards come, then one shared closing
+that states those once. A workflow fix keeps its own "show me ..." line,
+which the shared closing's one diff per file covers. A prompt two cards
 share appears once, and a workflow card whose files are "A or B" sits
 under the matching exact file when there is one. Groups that are no file
 (`## No file`, `## Other`) come last. Fixes are counted in one
@@ -2163,7 +2165,7 @@ Body: a JSON object with any of these keys:
 - `tagger`: `claude` or `haiku` (who writes the tags).
 - `after`: `stop` (the default) or `light`: what happens when `until`
   passes. `light` keeps a light sample of `task`, `level`, `size` and
-  `shift` in 1 session in 5 instead of stopping.
+  `shift` in 1 session in 5, or fewer with a `sample` under 20, instead of stopping.
 
 Only from this machine: `403` unless the request comes from a
 loopback address, on top of the cross-site checks above (a service

@@ -25,8 +25,10 @@ exactly when the call set none, so an agent with no ``agent_model_alias``
 inherited. The agent's role is its canonical word
 (``TranscriptMeta.role_word``, see ``agent_roles``) and what it did is
 whether a reply edited a file or wrote to a path outside the temp dir
-(``Turn.edit_kind``/``Turn.shell_write_count``). A role word that writes
-code, and a write, is a writer; so is an agent with no word that edited
+(``Turn.edit_kind``/``Turn.shell_write_count``). ``decide-apply`` counts
+only the replies that wrote code (``Turn.edit_code_count``/
+``Turn.shell_code_write_count``), not a report, plan or ledger. A role word
+that writes code, and a write, is a writer; so is an agent with no word that edited
 code in several replies. Integrators and deciders are never writers.
 
 Three layers, mirroring ``model_swap.py``'s own shape:
@@ -180,7 +182,8 @@ class AgentModelGroup:
     #: which is never repriced, and unused when the rate card has no
     #: Sonnet alias).
     cost_on_sonnet: float = 0.0
-    #: Replies that edited a file or wrote to a path outside the temp dir.
+    #: Replies that edited a file or wrote to a path outside the temp dir; on a
+    #: ``decide-apply`` group, only the replies that wrote code.
     write_turns: int = 0
     workflow_run_ids: set[str] = field(default_factory=set)
     #: ``YYYY-MM-DD`` of each agent's first reply; "" until one is seen.

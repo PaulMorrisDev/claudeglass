@@ -28,8 +28,8 @@ Five tables (:func:`build_section`, section key ``"context_budget"``):
   small per-module accumulators), split into the shared prefix the call
   read from cache, what the session wrote itself and the first prompt
   that went in uncached, next to estimated buckets in tokens for human
-  prompt, skills listing, memory files (the CLAUDE.md family and rules from
-  the config snapshot, plus the auto memory the sessions' first calls
+  prompt, skills listing, memory files (the user and project CLAUDE.md files and the rules
+  with no ``paths:`` list from the config snapshot, plus the auto memory the sessions' first calls
   carried), your own custom agents and MCP tools, then Claude Code's own
   system prompt and built-in tools (:func:`startup_sizes`, measured from
   the first call's record) and a residual "everything else" bucket (P0
@@ -1663,7 +1663,8 @@ def _build_baseline_table(
             "Agents from plugins are part of the agent roster but not counted here; Claude Code's "
             "Custom agents category includes them. "
             "Memory files (est) adds the auto memory (MEMORY.md) the first calls carried to the "
-            "CLAUDE.md files and rules in your config snapshot. "
+            "CLAUDE.md files and project rules that load at the start. "
+            "Rules with a paths: list and CLAUDE.md files in subfolders are left out. "
             "\"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
             "about them. It adds what keeping them cost, from the same per-server prices as the tool search "
             "section. A server built into the desktop app is shown with its cost and has nothing to remove. "

@@ -349,7 +349,7 @@ _LEFT_OUT_PARTS = (
     ("from before their project moved", "from before its project moved to Sonnet or smaller",
      "from before their project moved to Sonnet or smaller"),
     ("picked against a Sonnet setting", "picked against a Sonnet setting", "picked against a Sonnet setting"),
-    ("in projects that set their own model", "in a project that sets its own model",
+    ("in projects that set their own model", "in a project with its own model",
      "in projects that set their own model"),
 )
 
@@ -379,8 +379,8 @@ def _left_out_sentence(rec: Recommendation) -> str:
     words = []
     for n, one, many in parts:
         if many.startswith("from before") and already:
-            many = "from before their project moved there"
-        words.append(f"{n:,} {one if n == 1 and not many.startswith('from before') else many}")
+            one, many = "from before its project moved there", "from before their project moved there"
+        words.append(f"{n:,} {one if n == 1 else many}")
     listed = ", ".join(words[:-1]) + f", and {words[-1]}"
     return f" It leaves out {sum(n for n, _one, _many in parts):,} main sessions: {listed}."
 

@@ -393,7 +393,9 @@ session, when each hint last showed, how many times and how long it
 rests, and those three numbers, keyed by the same salted session hash
 as the signals, and, for the agent runs that ended too big and have not
 been told yet, the count of each of two words; entries older than a day
-are dropped. A hint you said you already knew also
+are dropped. When the `claude` command that runs Claude Haiku isn't signed
+in, it also holds the time, an hour on, when the hook will ask it again
+(`judge`). A hint you said you already knew also
 carries a flag, `once`, that is true or absent. `coaching.json` holds
 hint ids from the fixed list in the catalogue, and numbers. Neither ever leaves `<config-dir>`. See
 [docs/coaching.md](docs/coaching.md).

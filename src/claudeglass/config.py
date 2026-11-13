@@ -186,17 +186,24 @@ class CaptureConfig:
         (``capture_catalogue.active_metrics``)."""
         return capture_catalogue.active_metrics(self.level, self.metrics, self.feedback)
 
-    def hook_metrics(self) -> tuple[str, ...]:
+    def hook_metrics(self, now: datetime | None = None) -> tuple[str, ...]:
         """What the capture hook's settings.json entries are for: the
-        metrics on, plus the coaching toggles that run through the hook
-        (``coaching_notes``), whatever the level, and
+        metrics the hook asks for now (the level's, or only
+        ``capture_catalogue.LIGHT_METRICS`` and what they need while a light
+        sample runs, :meth:`light`), plus the coaching toggles that run
+        through the hook (``coaching_notes``), whatever the level, and
         ``capture_catalogue.HAIKU_TAGGER_HOOK`` while Haiku writes the
         tags."""
+        metrics = (
+            capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
+            if self.light(now)
+            else self.active_metrics()
+        )
         hooked = tuple(
             i for i in capture_catalogue.COACHING_IDS if i in self.coaching and capture_catalogue.METRICS_BY_ID[i].hooks
         )
         haiku = (capture_catalogue.HAIKU_TAGGER_HOOK,) if self.haiku_tags else ()
-        return self.active_metrics() + hooked + haiku
+        return metrics + hooked + haiku
 
     @property
     def haiku_tags(self) -> bool:

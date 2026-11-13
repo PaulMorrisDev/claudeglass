@@ -1812,11 +1812,16 @@ or made a scratch (temp-dir) edit; **OTHER** otherwise. A turn that both
 edits *and* runs a test/build command in the same turn lands in
 IMPLEMENTATION, since DISCOVERY/IMPLEMENTATION are checked first — noted
 here since a turn usually does one or the other, not both. A scratch
-edit is one to a file in the system temp dir or `/tmp/`, whether its
-path is written with backslashes, forward slashes or Git Bash's `/c/`,
-and in any case. Parses before `PARSER_VERSION` 36 matched only the
-temp dir's own spelling, so a forward-slash path on Windows counted as
-a real edit.
+edit is one to a file in a temp folder, whether its path is written with
+backslashes, forward slashes or Git Bash's `/c/`, and in any case. A temp
+folder is told by the shape of the path from its root: the Windows user
+and system Temp folders (also in long-path, WSL and Cygwin form), macOS's
+`/var/folders/.../T/` and `/private/tmp/`, and `/tmp/` and `/var/tmp/`.
+The reading machine's own temp folder counts too, so a service, an export
+or another machine counts the same edits. A folder named `temp` inside a
+project is not one. Parses before `PARSER_VERSION` 51 knew only the
+reading machine's temp folder, and parses before 36 matched only its own
+spelling, so a forward-slash path on Windows counted as a real edit.
 
 - `phases_summary` — turns, new tokens, cache-read tokens, output
   tokens, cost and cost share per phase.
@@ -2109,7 +2114,7 @@ one.
   measured (list prices) and `window_days`. `rare_sizes` gives each
   rarely used tool's definition, deferred names and instructions in tokens
   per spawn (`tool=definition/deferred/instructions`), so a card can work
-  the amounts out again for the tools the agent's file still lists. Whether the skills list and the
+  the amounts out again for the tools the agent's file still lists. `rule_kept_tools` names the tools the `workflow-subagent` rule put in `keep_tools`, which the card's why names apart. Whether the skills list and the
   agent list really go with their tools is not in Claude Code's docs, so
   the `spawn-tools-list` card asks for a before and after check.
 - `agent_startup_servers` — per agent type (report only): one row per MCP
@@ -2599,7 +2604,7 @@ via `recommend.render_patch_set`, showing the before and after value for
 each lever. A managed-scope lever is marked
 `# managed by policy -- shown for reference only`.
 
-The `spawn-tools-list`, `spawn-unused-skills`, `spawn-unused-mcp`, `spawn-claude-md` and `agent-model-inherited` cards for a built-in agent type with no agent file (general-purpose, Explore, Plan, statusline-setup) say a file named like the agent in `.claude/agents/` replaces the built-in, so the change goes there. The `agent-model-asked` card does not: a model named in the call overrides an agent file's `model:` line.
+The `spawn-tools-list`, `spawn-unused-skills`, `spawn-unused-mcp`, `spawn-claude-md` and `agent-model-inherited` cards for a built-in agent type with no agent file (general-purpose, Explore, Plan, statusline-setup) say a file named like the agent replaces the built-in, so the change goes there, and name the file their fix writes: `~/.claude/agents/<agent>.md`, or `.claude/agents/<agent>.md` for a project fix. The `agent-model-asked` card does not: a model named in the call overrides an agent file's `model:` line.
 
 With metrics capture on, some rules read the `habits` section too. Each
 cites the cell it used:

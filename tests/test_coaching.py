@@ -4576,6 +4576,27 @@ def test_a_hint_nothing_in_the_hook_raises_is_listed_once_and_keeps_its_words_fo
     assert not set(cat.NO_TRIGGER_HINTS) & set(cat.LIVE_OFF_HINTS)
 
 
+def _hints_after_a_tool_result(source: str) -> set[str]:
+    """The hints ``_coaching_for`` can raise on a call that is not a message you send: the hint names in the
+    branches after its ``if event == "UserPromptSubmit":`` (the approved plan, then every other tool result)."""
+    tree = ast.parse(source)
+    func = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_coaching_for")
+    branch = next(
+        n for n in ast.walk(func)
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+        and isinstance(n.test.left, ast.Name) and n.test.left.id == "event"
+        and any(isinstance(c, ast.Constant) and c.value == "UserPromptSubmit" for c in n.test.comparators)
+    )
+    return {
+        node.value for part in branch.orelse for node in ast.walk(part)
+        if isinstance(node, ast.Constant) and node.value in cat.COACHING_HINTS
+    }
+
+
+def test_the_hints_given_after_a_tool_result_are_the_catalogues():
+    assert _hints_after_a_tool_result(MODULE.read_text(encoding="utf-8")) == set(cat.TOOL_RESULT_HINTS)
+
+
 @pytest.mark.parametrize("hint", _LIVE_OFF)
 def test_live_off_a_hint_the_replay_found_more_often_wrong_than_right_gives_no_note(tmp_path, monkeypatch, hint):
     case = _live_off_cases(tmp_path)[hint]

@@ -1034,6 +1034,7 @@ def build_section(
             "Relayed: Claude is told to show this tip every time, so a tip it left out was missed.",
             "Judged relevant: Claude shows the tip only when your message calls for it, so a tip it left out "
             "was not a miss.",
+            "No tip asked: the note was for Claude alone, so it has no tip to pass on.",
             "Found useful: the share of your answers and of Claude's own misfire calls that said the tip was useful.",
         ],
     )

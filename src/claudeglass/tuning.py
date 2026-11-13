@@ -1533,7 +1533,9 @@ def _agents(ctx: _Ctx) -> dict:
     tools list, is what that saves over the window at list prices, by the
     same types (:func:`_startup_diet_usd`). ``probes`` counts the
     agents' replies, those that made one read-only call and nothing else,
-    those by shell command, and the runs of two or more in a row.
+    those by shell command, and the runs of two or more lookup replies in a
+    row (a reply whose shell command chains several reads is in a run but is
+    not a single call).
     ``report_turns`` counts the main session's replies to a background
     agent's or a workflow's report by what they did
     (``habits.REPORT_KINDS``). ``launches`` count the runs by how they were

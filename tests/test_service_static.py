@@ -735,10 +735,12 @@ def test_habits_playbook_caps_featured_cards_and_collapses_the_rest() -> None:
     assert "appendHabitCards" in body
 
 
-def test_the_empty_habits_state_names_every_habit_the_notes_still_warn_about() -> None:
-    """The coaching notes still warn about small requests (drip_feed), huge pastes (big_paste) and
-    checks on a background task (status_poll), so the empty state names all three."""
-    assert "small requests, huge pastes" in _static_text("page-habits.js")
+def test_the_empty_habits_state_does_not_list_the_hints_that_speak() -> None:
+    """Which hints speak changes by one line in the catalogue, so the empty state says only that coaching
+    notes flag some of these habits."""
+    page = _static_text("page-habits.js")
+    assert "Coaching notes flag some of these as they happen." in page
+    assert "small requests, huge pastes" not in page
 
 
 def test_habits_digest_money_cards_follow_the_billing_mode() -> None:
@@ -2808,14 +2810,14 @@ def test_the_project_picker_says_what_follows_it_and_what_covers_every_project()
     still cover every project, each with its own chip or row group: the
     picker's note names both, never the old "Settings always cover every
     project". Profiles follows the pick (its suggestion and its drawer), and the
-    note says so."""
+    note's list says so."""
     picker = _function_source(_app_js(), "initProjectPicker")
-    assert "Your changes, settings and CLAUDE.md files follow the pick too." in picker
+    assert "Your changes, settings, profiles and CLAUDE.md files follow the pick too." in picker
     assert (
         "The latest baseline, whether your estimates came true, and the hook and statusline checks always cover "
         "every project." in picker
     )
-    assert "Profiles follows the project you pick." in picker
+    assert "Profiles follows the project you pick." not in picker
     assert "Profiles uses your newest settings from any project." not in picker
     assert "Settings and Data quality always cover every project" not in picker
     # Each part named as covering every project says so where it shows.
