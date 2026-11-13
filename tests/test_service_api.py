@@ -1579,6 +1579,44 @@ def test_profile_diff_notes_when_no_agent_writes_code_and_where_one_is(server):
     assert [n for n in notes if "agent that writes code" in n] == [no_writer_project]
 
 
+def test_a_user_writer_hidden_behind_a_project_agent_of_the_same_name_is_still_a_user_writer(server):
+    """The hook merges the agents map with the project agent winning, so a
+    user ``implementer`` that a project's ``implementer`` shadows is recorded
+    only as the project entry (``shadowed_by_project``). ``apply`` at user
+    scope reads the disk and changes ``~/.claude/agents/implementer.md``, so
+    the drawer must count it as a user agent too, its tools unknown."""
+    server.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts="2026-10-01T12:00:00Z",
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "effective": {"effortLevel": "high"},
+                "effective_provenance": {"effortLevel": "user"},
+                "managed_keys": [],
+                "agents": {
+                    "implementer": {
+                        "name": "implementer",
+                        "source": "project",
+                        "tools": ["Read"],
+                        "shadowed_by_project": True,
+                    },
+                    "reviewer": {"name": "reviewer", "source": "user", "tools": ["Read"]},
+                },
+                "effective_agents": {},
+            }
+        ),
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert [(r["agent"], r["where"]) for r in data["agents"]] == [("implementer", "~/.claude/agents/implementer.md")] * 3
+    assert not any("agent that writes code" in n for n in data["notes"])
+    # at a project target the entry is the project's own agent, and its own
+    # tools line (Read only) says it cannot edit
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo")[1]["data"]
+    assert data["agents"] == []
+
+
 def test_profile_diff_says_when_several_agents_write_code(server):
     _seed_agents(
         server,

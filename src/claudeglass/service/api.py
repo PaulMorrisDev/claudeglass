@@ -2558,6 +2558,19 @@ def make_handler(
     def _agents_from(agents: dict, *sources: str) -> dict:
         return {name: entry for name, entry in agents.items() if entry.get("source") in sources}
 
+    def _user_agents(agents: dict) -> dict:
+        """The user's own agent files in the recorded map. The hook merges
+        the map with a project agent winning, so a user agent that a
+        project's agent of the same name shadows is recorded only as the
+        project entry (``shadowed_by_project``). ``apply`` at user scope
+        reads the disk and changes that user file, so it counts here too,
+        its tools unknown (the entry's are the project's)."""
+        found = _agents_from(agents, "user")
+        for name, entry in agents.items():
+            if entry.get("shadowed_by_project") and name not in found:
+                found[name] = {"source": "user"}
+        return found
+
     def _other_scope_note(names: tuple[str, ...], scope: str) -> str:
         """The sentence added to the no-writer note when the other target
         file has a writer. The quoted target names are the picker's own
@@ -2603,10 +2616,11 @@ def make_handler(
                 (),
             )
         if scope is None:
-            resolved = profile_roles.resolve(profile, _agents_from(recorded, "user", "project"))
+            both = {**_agents_from(recorded, "project"), **_user_agents(recorded)}
+            resolved = profile_roles.resolve(profile, both)
             return resolved.profile, (), resolved.matched.get("writer", ())
-        here, there = ("user", "project") if scope == "user" else ("project", "user")
-        resolved = profile_roles.resolve(profile, _agents_from(recorded, here))
+        here = _user_agents(recorded) if scope == "user" else _agents_from(recorded, "project")
+        resolved = profile_roles.resolve(profile, here)
         found = resolved.matched.get("writer")
         if found is None:
             return resolved.profile, (), ()
@@ -2621,7 +2635,8 @@ def make_handler(
             f"None of {whose} in {folder} is named like implementer, fixer or builder and can edit files, "
             "so no agent file changes."
         )
-        elsewhere = profile_roles.writers(_agents_from(recorded, there))
+        there = _agents_from(recorded, "project") if scope == "user" else _user_agents(recorded)
+        elsewhere = profile_roles.writers(there)
         if elsewhere:
             note += " " + _other_scope_note(elsewhere, scope)
         return resolved.profile, (note,), ()
