@@ -656,8 +656,10 @@ COACH_STATE_FILE = "coach-state.json"
 #: any tool not named here.
 COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode", *SPAWN_TOOLS)
 
-#: The live hints: after a tool result (the first three) and when you send a message (the rest), most useful first
-#: when more than one applies. ``split_run`` is the exception that comes
+#: The coaching hints, after a tool result (:data:`TOOL_RESULT_HINTS`) or
+#: when you send a message (the rest), most useful first when more than one
+#: applies; :func:`live_coaching_hints` says which speak. ``split_run`` is
+#: the exception that comes
 #: from two places: after an agent or workflow call, and with a background
 #: task's finishing message, because what it reports (an agent run that
 #: summarised its own context, or began from a very long brief) is
@@ -716,6 +718,23 @@ NO_TRIGGER_HINTS = (
     "report_reread",
 )
 
+#: The hints the hook can give after a tool result (``PostToolUse``):
+#: ``plan_fresh`` at an approved plan, ``split_run`` after an agent or
+#: workflow call, ``quiet_output`` after a read. ``plan_fresh`` and
+#: ``split_run`` also come with a message you send; every other hint comes
+#: only then. A test holds this to the hook's own branches.
+TOOL_RESULT_HINTS = ("plan_fresh", "split_run", "quiet_output")
+
+
+def live_coaching_hints() -> list[str]:
+    """The coaching hints that speak, in :data:`COACHING_HINTS` order: not
+    switched off (:data:`LIVE_OFF_HINTS`) and still raised by the hook (not
+    :data:`NO_TRIGGER_HINTS`). The text that names the hints is built from
+    this, so switching a hint on or off is one line here and a regenerate."""
+    skip = {*LIVE_OFF_HINTS, *NO_TRIGGER_HINTS}
+    return [hint for hint in COACHING_HINTS if hint not in skip]
+
+
 #: Hints that no longer show live. Their notes are still in old
 #: transcripts, so the parser still knows the words and keeps those notes
 #: as the hint they were instead of ``other``. ``clear_context`` is now a
@@ -758,17 +777,17 @@ FEEDBACK_HINTS = ("plan_check", "rating_reminder")
 CONDITIONAL_TIP_HINTS = ("big_paste",)
 
 #: The hints the ClaudeGlass mod delivers itself, in its own UI, while it
-#: is running for a session (``capture_hook._mod_present``): the capture
-#: hook leaves their notes out then, so Claude is not asked to pass on a
-#: tip you are already shown, and nothing is stamped as shown. The first
-#: four are what you do before sending (the mod's hint line shows them
-#: before the cost is paid); ``plan_fresh`` is a status line at plan
-#: approval. ``report_reread``, ``split_run`` and ``rating_reminder`` are
-#: the hook's again: the mod no longer draws agent rows or end-of-reply
-#: notes. ``plan_fresh_early``
-#: (Claude writes it inside the plan), ``quiet_output``, ``plan_check``,
-#: the facts line and the capture note steer Claude or feed a skill, so
-#: they stay with the hook. Every name is a hint of
+#: is running for a session and its present file's ``shows`` lists the
+#: surface that serves the hint (:data:`MOVED_TO_MOD_SHOWN_ON`;
+#: ``capture_hook._moved``): the capture hook leaves their notes out then,
+#: so Claude is not asked to pass on a tip you are already shown, and
+#: nothing is stamped as shown. Four are what you do before sending (the
+#: mod's hint line shows them before the cost is paid); ``plan_fresh`` is a
+#: status line at plan approval. Every other hint stays with the hook,
+#: ``split_run`` and the rating reminder too (the mod no longer draws agent
+#: rows or end-of-reply notes), and so do ``plan_check``, the facts line and
+#: the capture note, which steer Claude or feed a skill. A hint in
+#: :data:`LIVE_OFF_HINTS` is shown by neither. Every name is a hint of
 #: :data:`COACHING_HINTS` or :data:`FEEDBACK_HINTS`.
 MOVED_TO_MOD = frozenset(
     {
@@ -1871,6 +1890,68 @@ CLAUDE_ONLY_HINTS = ("quiet_output",)
 #: the tips.
 CLAUDE_ONLY_HINT_TITLES: dict[str, str] = {"quiet_output": "reading a saved output whole"}
 
+#: What the tip question calls each tip (``{hint title}``), by hint id:
+#: one per tip in :data:`COACHING_TIP`. The ids are the closed vocabulary
+#: of the tag's ``tip_hint``.
+TIP_HINT_TITLES: dict[str, str] = {
+    "plan_fresh": "building a plan in a fresh session",
+    "plan_fresh_early": "approving a plan with a clear context",
+    "drip_feed": "sending small requests one at a time",
+    "big_paste": "pasting a lot of text",
+    "status_poll": "asking how background work is going",
+    "cold_return": "coming back after a break",
+    "report_reread": "starting background agents in a long session",
+    "split_run": "giving agents smaller pieces of work",
+}
+
+
+def _joined(parts: list[str]) -> str:
+    """``a``; ``a and b``; ``a, b and c``."""
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _coaching_notes_what() -> str:
+    """The ``coaching_notes`` metric's ``what``: the hints that speak, by
+    title (:func:`live_coaching_hints`), and that the others are off."""
+    live = live_coaching_hints()
+    titles = {**TIP_HINT_TITLES, **CLAUDE_ONLY_HINT_TITLES}
+    off = [hint for hint in COACHING_HINTS if hint not in live and hint not in NO_TRIGGER_HINTS]
+    if live:
+        speak = f"Hints that speak now: {_joined([titles[hint] for hint in live])}."
+        if off:
+            speak += " The others are off until the replay finds them right more often than wrong."
+    else:
+        speak = "No hint speaks now: each is off until the replay finds it right more often than wrong."
+    return (
+        "Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook "
+        "adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip. "
+        f"{speak} Vague corrections, the same request again and stopping Claude again and again are counted "
+        "after the fact on Work habits, with no live note. So is a big task without a plan."
+    )
+
+
+def _coaching_notes_why() -> str:
+    """The ``coaching_notes`` metric's ``why``: what the notes cost and
+    what each hook entry keeps, saying the cold-return and split-run parts
+    only while those hints speak."""
+    live = live_coaching_hints()
+    text = (
+        "Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to 140 "
+        "tokens, re-read on every later reply of the session. Claude Code waits for the hook after each message "
+        "you send. It also waits after each file read, web search or web fetch, approved plan, and agent or "
+        "workflow start. Setup > Capture and 'claudeglass capture status' show how many runs, the median time "
+        "each and the time summed, from your own sessions. A hook after each reply runs in the background and "
+        "keeps only the time and size of Claude's newest reply."
+    )
+    if "cold_return" in live:
+        text += " That keeps the cache check right after a resume."
+    if "split_run" in live:
+        text += " A hook when an agent run ends keeps only whether it ended too big, as counts."
+    else:
+        text += " A hook also runs when an agent run ends, and keeps nothing for coaching notes."
+    return text
+
+
 #: A message that, sent after a break, is not new work and so gets no
 #: ``cold_return`` receipt: a go-ahead that carries on ("yes, fix the
 #: wrapper", "you may merge all the PRs", "go ahead and ...") or a retry
@@ -2379,22 +2460,8 @@ METRICS: tuple[Metric, ...] = (
         group="coaching",
         section="coaching",
         title="Coaching notes from Claude",
-        what="Live hints for where the status line doesn't show, such as the desktop app. When one applies, a "
-        "hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large "
-        "read or web result, an agent run that ended too big for one task (it had to summarise its own "
-        "context, or began from a very long brief), a plan approved "
-        "on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, "
-        "asking how background work is going while it still runs, or starting background agents when the session "
-        "already holds a lot of context, since each report they send back re-reads it. It also flags how you prompt: small "
-        "requests sent one at a time, or a huge paste. Vague corrections, the same request again and stopping "
-        "Claude again and again are counted after the fact on Work habits, with no live note. So is a big "
-        "task without a plan.",
-        why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
-        "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
-        "read or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show "
-        "how many runs, the median time each and the time summed, from your own sessions. A hook after each reply "
-        "runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is "
-        "right after a resume. A hook when an agent run ends keeps only whether it ended too big, as counts.",
+        what=_coaching_notes_what(),
+        why=_coaching_notes_why(),
         powers=("context", "tool_output", "delegation", "planning"),
         hooks=("UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop"),
     ),
@@ -2556,20 +2623,6 @@ FEEDBACK_FACT_KEYS = (
     "tip",
     "admits",
 )
-
-#: What the tip question calls each tip (``{hint title}``), by hint id:
-#: one per tip in :data:`COACHING_TIP`. The ids are the closed vocabulary
-#: of the tag's ``tip_hint``.
-TIP_HINT_TITLES: dict[str, str] = {
-    "plan_fresh": "building a plan in a fresh session",
-    "plan_fresh_early": "approving a plan with a clear context",
-    "drip_feed": "sending small requests one at a time",
-    "big_paste": "pasting a lot of text",
-    "status_poll": "asking how background work is going",
-    "cold_return": "coming back after a break",
-    "report_reread": "starting background agents in a long session",
-    "split_run": "giving agents smaller pieces of work",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -3396,7 +3449,7 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     (``coaching_notes``) add the message you send and approved plans to
     that, in one PostToolUse entry shared with the tool note, and a
     ``SubagentStop`` entry that records an agent run that ended too big
-    (``split_run``). The feedback
+    (``split_run``) while that hint is on. The feedback
     items that answer a message you send (:data:`FEEDBACK_MESSAGE_IDS`) add
     that entry on their own. SessionEnd runs as the session closes, when
     nothing waits on it; the other signals run in the background. While Haiku writes the tags
@@ -3424,9 +3477,9 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     if agents or coach:
         # In the foreground, as Stop is for Haiku: it only hands the run to
         # a worker and returns, and claude -p exits without waiting for a
-        # background hook. Coaching notes need it too, to record that a run
-        # ended too big (``split_run``) before the foreground agent call
-        # that started it returns.
+        # background hook. Coaching notes need it too, while ``split_run`` is on,
+        # to record that a run ended too big before the foreground agent
+        # call that started it returns.
         specs.append((HOOK_SCRIPT, "SubagentStop", "", False))
     if coach or asks_on_message:
         specs.append((HOOK_SCRIPT, "UserPromptSubmit", "", False))
@@ -4242,7 +4295,7 @@ def render_markdown() -> str:
         "- `claudeglass capture connect` — add the settings.json hook entries the metrics you've "
         "chosen need."
     )
-    p("- `claudeglass capture remove` — switch off and take those hook entries back out.")
+    p("- `claudeglass capture remove` — take those hook entries back out, and switch off what needs them: capture, coaching notes, the plan check and the rating reminder.")
     p("- `claudeglass capture feedback on|off` — the `/cg-feedback` skill and its status-line reminder.")
     p("- `claudeglass capture brief on|off` — the `/cg-brief` skill.")
     p(
