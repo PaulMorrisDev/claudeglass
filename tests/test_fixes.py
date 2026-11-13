@@ -58,6 +58,28 @@ def test_prompt_names_the_model_for_a_per_model_row():
     )
 
 
+def test_a_prompt_that_names_an_agent_file_says_it_may_sit_in_a_subfolder():
+    from claudeglass import fixes
+    from claudeglass.fixes import profile_prompt
+    from claudeglass.model import Recommendation, SettingChange
+
+    text = profile_prompt("Lean", [{"key": "agents.reviewer.effort", "current_value": None, "proposed_value": "low"}], "user")
+    assert fixes.AGENT_FILE_ELSEWHERE in text
+    assert "If there is none, the agent is built into Claude Code: say so and don't create one." in text
+    assert "If an agent file doesn't exist" not in text
+    for key in ("agent-report-size", "run-split"):
+        assert "or a folder inside them" in fixes._WORKFLOW_PROMPTS[key], key
+
+    def prompt(change):
+        rec = Recommendation(id="x", severity="advice", category="settings", title="x", changes=[change])
+        return fixes.prompt_for(rec, change)
+
+    assert fixes.AGENT_FILE_ELSEWHERE in prompt(SettingChange(target="agent", key="model", agent="reviewer", value="sonnet"))
+    assert fixes.AGENT_FILE_ELSEWHERE not in prompt(SettingChange(key="model", value="sonnet"))
+    new_file = SettingChange(target="agent", key="model", agent="Explore", value="sonnet", new_agent_file=True)
+    assert fixes.AGENT_FILE_ELSEWHERE not in prompt(new_file)
+
+
 def test_prompt_says_not_recorded_for_a_value_the_snapshot_does_not_keep():
     from claudeglass.fixes import profile_prompt
 

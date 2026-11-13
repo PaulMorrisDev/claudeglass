@@ -989,9 +989,11 @@ TABLE_COPY: dict[str, TableCopy] = {
     "prompting_tips": TableCopy(
         title="Coaching tips shown",
         help=Help(
-            shows="For each coaching hint that asks for a tip, how many tips were shown. Some were passed on by "
+            shows="For each coaching hint, how many notes it added and how many tips were shown. Some were passed on by "
             "Claude in its reply. Others were shown by ClaudeGlass itself inside Claude Code. It also shows how often "
-            "Claude called a tip a misfire. Your own answers about each tip sit beside them. They come from "
+            "Claude called a tip a misfire. "
+            "A note meant for Claude alone asks for no tip, so its row counts notes and misfires. "
+            "Your own answers about each tip sit beside them. They come from "
             "/cg-feedback, a session rating, or the rating buttons on a card.",
             read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
             "when your message calls for it, so fewer of those show and that's no miss. A tip you called wrong, "
@@ -1002,12 +1004,17 @@ TABLE_COPY: dict[str, TableCopy] = {
         columns={
             "hint": ("Hint", "The coaching hint."),
             "notes": ("Notes", "How many times the hint's note was added."),
-            "shown": ("Passed on by Claude", "How many of those replies ended with a ClaudeGlass tip."),
+            "shown": (
+                "Passed on by Claude",
+                "How many of those replies held that note's own tip. If the note came alone with its message, a "
+                "reply with only the \"ClaudeGlass tip:\" label counts too.",
+            ),
             "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip, in sessions this version read."),
             "relay": (
                 "Passed on, of notes",
                 "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "
-                "whether your message called for it. Empty where ClaudeGlass showed the tip itself.",
+                "whether your message called for it. Empty where ClaudeGlass showed the tip itself. "
+                "No tip asked means the note was for Claude alone.",
             ),
             "glass": (
                 "Shown by Glass",
@@ -1033,6 +1040,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cold_return": "Back after a break",
             "report_reread": "Background agents in a long session",
             "split_run": "Agent runs that ended too big",
+            "quiet_output": "Reading a saved output whole",
         },
     ),
     "prompting_glass": TableCopy(
@@ -1429,7 +1437,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Of them by shell command",
                 "Those that ran as a shell command, such as cat, grep or ls, not as a Read, Grep or Glob call.",
             ),
-            "runs": ("Runs of two or more", "Stretches of two or more single read-only calls in a row."),
+            "runs": (
+                "Runs of two or more",
+                "Stretches of two or more lookup replies in a row. A shell command that chains several reads "
+                "counts in a stretch, though not as a single call.",
+            ),
             "batch_cost": (
                 "Re-reads a batch would spare",
                 "What the replies after the first of each run paid to read the cache. One message holding the "
@@ -4874,7 +4886,7 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Finding",
                 "No model set means the agent ran on your main session's model. Asked for a larger model means "
                 "the call named Opus or Fable. Decided and changed code means a review or judging agent also "
-                "edited files on a larger model.",
+                "changed code on a larger model. Writing its report, a plan or a log doesn't count.",
             ),
             "runs": ("Agents", "How many agents this row counts, one per run."),
             "roles": (
@@ -4895,7 +4907,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "saving_pct": ("Saving %", "That saving as a share of cost."),
             "write_turns": (
                 "Edit replies",
-                "Replies in which an agent edited a file or wrote one from the shell, across these agents.",
+                "Replies in which an agent edited a file or wrote one from the shell, across these agents. "
+                "On a decided-and-changed-code row, only the replies that changed code.",
             ),
             "workflow_runs": (
                 "Workflow runs",
@@ -5721,8 +5734,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "skills_listing_est": ("Skills list (est.)", "The list of skills Claude Code sent, estimated from its length."),
             "memory_files_est": (
                 "CLAUDE.md and rules (est.)",
-                "Your CLAUDE.md files and project rules, estimated from file size, and the auto memory "
-                "(MEMORY.md) the first replies carried. Blank without a settings snapshot.",
+                "Your CLAUDE.md files and project rules that load at the start, estimated from file size, and the "
+                "auto memory (MEMORY.md) the first replies carried. Rules with a paths: list and CLAUDE.md files "
+                "in subfolders load only when needed, so they are left out. A snapshot from before this version "
+                "counts every rule until a new session starts. Blank without a settings snapshot.",
             ),
             "custom_agents_est": (
                 "Your own agents (est.)",
@@ -5751,7 +5766,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "controllable_est": (
                 "What you can change (est.)",
-                "The skills list, CLAUDE.md and rules, and the MCP tools of servers you can turn off, together. "
+                "The skills list, the CLAUDE.md files and project rules that load at the start, and the MCP tools of servers you can turn off, together. "
                 "The part of the first call a setting can shrink. Servers built into the desktop app are left out.",
             ),
             "system_prompt_est": (

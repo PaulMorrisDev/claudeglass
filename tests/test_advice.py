@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import itertools
+import re
+
 from claudeglass import advice, fixes, known_savers
 from claudeglass.model import (
     Column,
@@ -132,7 +135,7 @@ def test_the_main_model_card_says_which_sessions_it_leaves_out():
     # Picks against a Sonnet setting, and projects that set their own model.
     assert "It leaves out the 1 main session picked against a Sonnet setting." in main_why(0, 0, 1)
     assert "It leaves out the 4 main sessions picked against a Sonnet setting." in main_why(0, 0, 4)
-    assert "It leaves out the 1 main session in a project that sets its own model." in main_why(0, 0, 0, 1)
+    assert "It leaves out the 1 main session in a project with its own model." in main_why(0, 0, 0, 1)
     assert "It leaves out the 6 main sessions in projects that set their own model." in main_why(0, 0, 0, 6)
     # Three or four reasons (H10): no list, the counts are in the evidence lines and the tip.
     assert (
@@ -151,6 +154,15 @@ def test_the_main_model_card_says_which_sessions_it_leaves_out():
         "reach." in main_why(1, 1, 1, 1)
     )
     assert "already says" not in main_why(0, 0, 4)
+    assert "It leaves out 4 main sessions: 3 already on Sonnet or smaller, and 1 from before its project moved there." in main_why(3, 1)
+    assert (
+        "It leaves out 2 main sessions: 1 from before its project moved to Sonnet or smaller, and 1 in a project "
+        "with its own model." in main_why(0, 1, 0, 1)
+    )
+    for counts in itertools.product((0, 1, 3), repeat=4):
+        for sentence in re.split(r"(?<=[.!?])\s+", main_why(*counts)):
+            if sentence.startswith("It leaves out"):
+                assert len(sentence.split()) <= 25, (counts, sentence)
 
 
 def test_a_main_setting_at_sonnet_or_smaller_gets_no_main_card_in_any_view():

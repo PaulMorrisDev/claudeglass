@@ -181,7 +181,8 @@ export function submitted(snap: GlassSnap, settings: GlassSettings, input: { tex
 
 /**
  * Whether a main-session call to a launching tool (Workflow) sent its work to the background: the call asked
- * for it, or its result says it launched that way (capture_hook._background_start).
+ * for it, or its result says it launched that way (the fields capture_hook._is_async_launch reads, or a
+ * workflow's taskType).
  */
 export function startedInBackground(input: Record<string, unknown>, output: unknown, text: string | undefined): boolean {
   if (input.run_in_background === true) return true

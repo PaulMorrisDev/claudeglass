@@ -53,6 +53,14 @@ RESTART_NOTE = (
 #: files, so the reminder comes at the moment the change is saved.
 PROMPT_RESTART = "Once it's saved, remind me to restart Claude Code so it picks up the change."
 
+#: Said wherever a prompt names an agent's file by its usual path: Claude
+#: Code also reads agent files in folders inside the agents folder, and goes
+#: by the name in the frontmatter, which the snapshot does not keep per file.
+AGENT_FILE_ELSEWHERE = (
+    "If an agent's file isn't at that path, find it in a folder inside the agents folder by the name in its "
+    "frontmatter."
+)
+
 #: Shown instead of :data:`RESTART_NOTE` after a "from now on" prompt
 #: (:data:`PROMPT_SCOPE`), whose change isn't a file save Claude Code
 #: reads at startup -- it's a rule Claude asks where to keep.
@@ -389,9 +397,9 @@ _WORKFLOW_PROMPTS = {
     ),
     "agent-report-size": (
         "{agent} sends back long final reports, and each one stays in my main session's context. Please "
-        "read {agent}'s agent file (~/.claude/agents/{agent}.md or .claude/agents/{agent}.md) and propose "
+        "read {agent}'s agent file (~/.claude/agents/{agent}.md or .claude/agents/{agent}.md, or a folder inside them) and propose "
         "one or two lines for its prompt asking for a short report: findings, file paths and next steps, "
-        "not the working. If {agent} has no agent file (it is built into Claude Code), propose a sentence I "
+        "not the working. If no file there names {agent} in its frontmatter, it is built into Claude Code: propose a sentence I "
         "can add to the task prompts I send it instead. Show me the diff before saving. Claude Code will ask "
         "my permission before editing files under .claude."
     ),
@@ -472,7 +480,7 @@ _WORKFLOW_PROMPTS = {
         "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
         "is large, give it one part per run, and start a fresh {agent} for the next part with a short note of "
         "what's done, what's left and the files involved, rather than one long run. If {agent} has an agent file "
-        "(~/.claude/agents/{agent}.md or .claude/agents/{agent}.md), propose a line asking it to end each run with "
+        "(~/.claude/agents/{agent}.md or .claude/agents/{agent}.md, or a folder inside them), propose a line asking it to end each run with "
         "that note. Show me the diff before saving. Claude Code will ask my permission before editing files under "
         ".claude."
     ),
@@ -1134,6 +1142,8 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
             ask = f"{prepare} Then, in {path}, set {change.key} to {json.dumps(change.value)}{where}."
     else:
         ask = f"In {path}, change {change.key}: {change.suggested}."
+    if change.target == "agent" and not change.new_agent_file and (change.scope or rec.scope) != "managed":
+        ask += " " + AGENT_FILE_ELSEWHERE
     why = rec.why or rec.title
     lines = [
         f"I want to change a setting for {subject}. {ask}",
@@ -1272,7 +1282,7 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
     if len(lines) == 1:
         return f'The settings profile "{name}" matches your current settings; there is nothing to change.'
     lines.append(
-        "If an agent file doesn't exist, the agent is built into Claude Code: say so and don't create one. "
+        AGENT_FILE_ELSEWHERE + " If there is none, the agent is built into Claude Code: say so and don't create one. "
         "Before saving, restate the changes and show me the diff. Claude Code will ask my permission to "
         "edit files under .claude; that is expected. Change nothing else. " + PROMPT_RESTART
     )
@@ -1598,6 +1608,7 @@ def attach_fixes(recommendations: list[Recommendation]) -> None:
 
 
 __all__ = [
+    "AGENT_FILE_ELSEWHERE",
     "LEVER_LABELS",
     "PROFILE_SCOPE_WHERE",
     "PROMPT_RESTART",

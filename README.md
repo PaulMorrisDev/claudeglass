@@ -71,9 +71,8 @@ answered from your own sessions:
   prompting habits that cost extra replies, such as small requests sent
   one at a time, the same request sent again or asking how it's going,
   and what each cost.
-  Turn on coaching notes and small requests sent one at a time, a huge
-  paste or a check on background work are flagged the moment you send
-  them.
+  Turn on coaching notes and some of these are flagged the moment you
+  send the message.
 - **"Did my change work?"** It records your settings as each session
   starts, and compares the sessions before a change with those after
   it: Your changes shows each one's effect on the measures it should
@@ -423,7 +422,7 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 | A SessionStart hook (`snapshot-config.py`) that records your settings as each session starts. It runs in the background. | `init`, when you connect | None |
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
 | The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep. | [Metrics capture](#metrics-capture) | See its levels |
-| The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools, an approved plan and a call that starts an agent or a workflow, never after a shell or MCP tool; also on SubagentStop, where it only notes a run that ended too big. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
+| The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools, an approved plan and a call that starts an agent or a workflow, never after a shell or MCP tool; also on SubagentStop, which prints nothing. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
 | The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
 | The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
 
@@ -472,10 +471,13 @@ Live coaching has its own switches, on **Setup › Capture** or with
 `capture enable` and `capture disable`. All three are off by default,
 and they work at any capture level, Off included:
 
-- **Coaching notes** (`coaching_notes`). When a hint applies, such as a
-  large tool output, a return after the prompt cache expired or several
-  small requests in a row, the hook adds a short note and Claude passes
-  the tip on. Where your app shows hook messages, you also see a
+- **Coaching notes** (`coaching_notes`). When a hint applies, the hook
+  adds a short note and Claude passes the tip on. Some hints stay off until
+  a replay of real sessions finds them right more often than wrong.
+  [`docs/capture.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/capture.md#live-coaching)
+  names the ones that speak, and, once coaching notes are on, `capture
+  status` the ones that are off.
+  Where your app shows hook messages, you also see a
   one-line notice the moment you send the message. They're made for the
   desktop app, where the status line doesn't show.
 - **Coaching line** (`coaching_line`). The same kind of hint in the

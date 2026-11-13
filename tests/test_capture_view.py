@@ -114,6 +114,14 @@ def test_on_notes_low_coverage_enough_data_and_expiry():
     assert not any(note.startswith("Enough collected") for note in notes)
 
 
+def test_the_coaching_notes_question_says_when_notes_come_from_the_live_list(monkeypatch):
+    assert "after a tool result" not in capture_view.COACHING_NOTES_ON
+    assert "when you send a message" in capture_view.COACHING_NOTES_ON
+    assert not set(catalogue.live_coaching_hints()) & set(catalogue.TOOL_RESULT_HINTS)
+    monkeypatch.setattr(catalogue, "LIVE_OFF_HINTS", ())
+    assert "after a tool result" in capture_view.coaching_notes_on_text()
+
+
 def test_the_banner_names_the_light_sample():
     use = _use(cycles=30, tagged_cycles=30)
     now = datetime(2026, 9, 22, tzinfo=timezone.utc)

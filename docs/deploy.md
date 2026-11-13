@@ -356,6 +356,12 @@ Three layers, from "always runs" to "manual, occasional":
    `service.db` in it on first start without a manual `docker exec ...
    chown` step.
 
+   In this layout the dashboard looks for your own CLAUDE.md, rules,
+   agents and skills in the folder above `--config-dir` (`/data`), not in
+   `/data/claude`, so its CLAUDE.md and skills checks miss them. The `check`
+   and `review` commands take `--claude-root /data/claude` for that; the
+   dashboard has no such flag.
+
    A `--network none` container has no network namespace connectivity
    at all beyond loopback — if `/api/health` still answers `ok: true`
    from inside it, the service provably made no outbound connection to

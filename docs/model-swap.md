@@ -111,7 +111,7 @@ as themselves. A rate card of your own sets its own aliases.
 
 | Table | What it shows |
 |---|---|
-| `model_swap_by_agent_type` | One row per agent type (`"top-level"` for the main conversation, else `TranscriptMeta.agent_type` or `"unknown"`): spawns, priced turns, unpriced turns (unknown model), observed model, observed cost, one `Cost at <model-id>` column per model in `pricing.toml`, the best cheaper alternative (model id and human label), the ceiling saving in USD and %, and the lever text (`settings.json` for top-level, `<type>.md`'s frontmatter for a subagent, `none (the workflow script sets it)` for `workflow-subagent`, `none (Claude Code picks)` for forks and untyped runs). Then, added at the end: `lever_runs`, `lever_priced_turns`, `lever_model` and `lever_cost` (the runs the lever decides; for top-level, every run), `workflow_runs` and `spawn_model_runs` (the runs set elsewhere). The saving is priced on the lever runs only. |
+| `model_swap_by_agent_type` | One row per agent type (`"top-level"` for the main conversation, else `TranscriptMeta.agent_type` or `"unknown"`): spawns, priced turns, unpriced turns (unknown model), observed model, observed cost, one `Cost at <model-id>` column per model in `pricing.toml`, the best cheaper alternative (model id and human label), the ceiling saving in USD and %, and the lever text (`settings.json` for top-level, `<type>.md`'s frontmatter for a subagent, `none (the workflow script sets it)` for `workflow-subagent`, `none (Claude Code picks)` for forks and untyped runs). Then, added at the end: `lever_runs`, `lever_priced_turns`, `lever_model` and `lever_cost` (the runs the lever decides; for top-level, every main session not left out, below), `workflow_runs` and `spawn_model_runs` (the runs set elsewhere), and for top-level `before_change_runs`, `settled_runs`, `picked_runs` and `own_model_runs` (the main sessions left out). The saving is priced on the lever runs only. |
 | `model_swap_summary` | One row: the corpus-wide ceiling if every subagent type whose agent-file runs are on Fable or Opus moved one tier down. Its observed cost and saving cover those runs only. Excludes the top-level row and any Fable/Opus agent type that's already at or below its next tier's cost at today's volumes. |
 | `model_swap_agent_file_runs` | Report tier. One row per named subagent type with at least one `agent file` run: runs, priced turns, observed model and cost, and a `Cost at <model-id>` column per model, for those runs only. The what-if engine prices an agent's model change from this table. |
 | `model_swap_agent_models` | Not built by `build_section`: `report.build_report` appends it. One row per group of agents and finding, for agents that ran on a larger model than their work needed. See [the section below](#agents-that-ran-on-a-larger-model-than-their-work-needed). |
@@ -130,6 +130,12 @@ Every row's "best cheaper alternative" state is one of:
   alternative is empty and the saving `0.0`, so no card, Savings lever,
   goal or quick action offers it; the `Cost at <model-id>` columns still
   show what Haiku would have cost.
+- **before_change**, **picked**, **own_model** and **left_out** — the
+  top-level row has no main session left for the lever. Every one not
+  already on Sonnet or smaller started before its project moved there,
+  ran on a larger model though its project's setting said Sonnet or
+  smaller, or, in a view of several projects, ran in a project that sets
+  its own model. `left_out` is a mix of those reasons. The saving is `0.0`.
 - **unknown_tier** — the observed model's family isn't recognised, or
   the rate card has no alias for the next family down.
 - **no_data** — no priced turns for this agent type.
@@ -138,6 +144,18 @@ Every row's "best cheaper alternative" state is one of:
   The label says how many of each. No `.md` advice.
 - **no_lever** — `workflow-subagent`, `fork` or `unknown`: no agent file
   sets the model at all.
+
+A main session counts by the model it ran on. The top-level lever leaves
+out, and counts on the row, a session already on Sonnet or smaller
+(`settled_runs`), one that started before its project's setting moved to
+Sonnet or smaller (`before_change_runs`), one that ran on a larger model
+though its project's setting said Sonnet or smaller when it started
+(`picked_runs`), and, in a view of several projects, one in a project
+whose own settings file sets `model` (`own_model_runs`), which a change to
+your user settings can't reach. A project that follows your user settings
+reads them from every snapshot after its own latest one. The main-model
+card, the Models check, the what-if and the profile goal read the same
+setting, so none of them offers a change the saving doesn't count.
 
 Only `cheaper_available` ever carries a non-zero saving, so the table
 never implies a saving where none exists.

@@ -621,11 +621,12 @@ def check_bundle(inp: Inputs) -> list[str]:
 #: from the catalogue is added). A new hint has no entry until someone writes
 #: one: ``test_agreement`` fails for it, so a check never skips a hint it
 #: cannot recognise.
+#: "web result" and "approving a plan" are left out: the big_output metric and the plan check use them for themselves.
 HINT_WORDS: dict[str, tuple[str, ...]] = {
     "plan_fresh": ("plan approved", "building a plan"),
-    "plan_fresh_early": ("approving a plan", "plan approved", "clear context"),
+    "plan_fresh_early": ("plan approved", "clear context"),
     "split_run": ("ended too big", "smaller pieces of work", "very long brief"),
-    "quiet_output": ("large read", "web result", "saved output"),
+    "quiet_output": ("large read", "saved output"),
     "report_reread": ("starting background agents", "background agents"),
     "drip_feed": ("small requests", "one at a time"),
     "big_paste": ("huge paste", "big paste", "pasting a lot"),

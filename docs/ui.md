@@ -435,10 +435,10 @@ all-projects report, `loadProjects()`).
 - An unknown project in the address (an old bookmark, a moved folder) is
   checked once (`checkProject`, asking `/api/sessions?limit=1&project=`).
   The dashboard then shows every project, and a toast says why.
-- The menu's note says what follows the pick: your changes, settings and
-  CLAUDE.md files, as well as the window's figures. The latest baseline,
+- The menu's note says what follows the pick: your changes, settings,
+  profiles and CLAUDE.md files, as well as the window's figures. The latest baseline,
   whether your estimates came true, and the hook and statusline checks
-  always cover every project. Profiles follows the project you pick.
+  always cover every project.
   In the page:
   - Your changes lists the changes that apply in the project (those for
     every project and its own), each judged on that project's sessions.
@@ -827,7 +827,8 @@ detail scrolls) and the one picked.
   header line per file (`/api/recommendations/prompt`). It leaves out
   ignored cards, cards whose fix has landed (the "fixed" variant),
   information-only cards, unconfirmed changes and managed settings. The
-  prompt states its closing (show me the diff, restart) once, and the
+  prompt states the setting changes' closing (show me the diff, restart)
+  once, a workflow fix keeps its own diff line, and the
   note beside the button gives the number of open fixes, then how many
   files they edit, plus the fixes that span several files or set a
   standing rule and the ones that touch no file. If the browser refuses

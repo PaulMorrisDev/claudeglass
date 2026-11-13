@@ -104,6 +104,10 @@ from the global `--days`, `--since` and `--until`. Without
 `--all-projects`, a check reads the project you're in, and the settings
 it reports are that project's own.
 
+`--claude-root PATH` is the Claude Code folder that holds your CLAUDE.md,
+`rules/`, `agents/` and `skills/`. By default it is the folder above
+`--config-dir`, never one worked out from `--projects-root`.
+
 ### `review`
 
 Reviews your CLAUDE.md files or your skills: size, how often each is
@@ -120,7 +124,7 @@ one project's sessions are read, so a skill Claude never used is hidden
 in that project's `.claude/settings.local.json`, not for every project.
 `check skills` does the same. `review claude-md` follows the selected
 projects too: it lists their CLAUDE.md files and rules and your own, and
-`check claude-md` does the same.
+`check claude-md` does the same. `--claude-root PATH` works as for `check`.
 
 ### `serve`
 
@@ -355,7 +359,7 @@ python -m claudeglass capture on --level essentials --for 7d
 | `on`, `off`, `level LEVEL` | Turn capture on or off, or change the level. Anything that uses more tokens shows a cost warning and asks first |
 | `enable METRIC...`, `disable METRIC...` | Turn single metrics on or off. `capture status` lists their ids |
 | `connect` | Add the hook entries the chosen metrics need to `settings.json`, after showing the diff |
-| `remove` | Switch capture off and take the hook entries out, after showing the diff |
+| `remove` | Take the hook entries out, after showing the diff, and switch off what needs them: capture, coaching notes, the plan check and the rating reminder |
 | `feedback on\|off` | Add or remove the `/cg-feedback` skill and its status-line reminder. Off also turns off Deep's rating reminder and plan check. The skill's facts line needs the hook entry from `connect`; `on` says so while it is missing. See [`coaching.md`](coaching.md#the-surveys-notes) |
 | `brief on\|off` | Add or remove the `/cg-brief` skill, which asks for what a request is missing before Claude starts |
 | `refresh` | Work out your coaching notes' own numbers (`coaching.json`) from your last 30 days now, as the dashboard's service does once a day. `--dry-run` prints them without writing. See [`coaching.md`](coaching.md) |
@@ -368,7 +372,7 @@ python -m claudeglass capture on --level essentials --for 7d
 | `--until DATE` | Switch it off at this date or time instead |
 | `--no-limit` | Run until you switch it off, instead of the default 14 days |
 | `--sample {100,50,25,10}` | Capture this percentage of sessions, picked at random per session |
-| `--after {stop,light}` | What happens when the end passes: `stop` (the default), or keep a light sample: the kind, difficulty and size of the work, and task changes, in 1 session in 5. See [`capture.md`](capture.md#turning-it-on-off-or-removing-it) |
+| `--after {stop,light}` | What happens when the end passes: `stop` (the default), or keep a light sample: the kind, difficulty and size of the work, and task changes, in 1 session in 5, or fewer if you chose a smaller share. See [`capture.md`](capture.md#turning-it-on-off-or-removing-it) |
 | `--yes` | Make the changes without asking. They're still printed |
 | `--dry-run` | Show what would change, without changing it |
 | `--claude-root PATH` | As for `init` |

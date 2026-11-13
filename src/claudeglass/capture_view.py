@@ -142,12 +142,20 @@ COST_NOTES = {
 
 #: Said when ``coaching_notes`` is turned on, before the yes/no: what the
 #: notes are, when they come and what they cost.
-COACHING_NOTES_ON = (
-    "Coaching notes: when a hint applies, a hook adds a short note (about 50 to 140 tokens) to Claude's context, "
-    "after a tool result or when you send a message, and Claude acts on it or tells you in one line. "
-    "They run at any capture level, at most one of a kind every half hour in a session. "
-    "'claudeglass capture status' shows how many there were and what they cost."
-)
+def coaching_notes_on_text() -> str:
+    """:data:`COACHING_NOTES_ON`, built from the hints that speak: it names
+    tool results only while one of them can follow a tool result."""
+    after_tool = any(hint in catalogue.TOOL_RESULT_HINTS for hint in catalogue.live_coaching_hints())
+    return (
+        "Coaching notes: when a hint applies, a hook adds a short note to Claude's context, about 50 to 140 "
+        f"tokens. It comes when you send a message{' or after a tool result' if after_tool else ''}. "
+        "Claude acts on it or tells you in one line. "
+        "They run at any capture level, at most one of a kind every half hour in a session. "
+        "'claudeglass capture status' shows how many there were and what they cost."
+    )
+
+
+COACHING_NOTES_ON = coaching_notes_on_text()
 
 #: Said when the tagger changes (``capture tagger``): who writes the tags
 #: now, what that sends where, and what it costs.
@@ -1108,6 +1116,7 @@ __all__ = [
     "BRIEF_SKILL_NOTES",
     "BRIEF_SKILL_STATES",
     "COACHING_NOTES_ON",
+    "coaching_notes_on_text",
     "ON_COMMAND",
     "OVERHEAD_DAYS",
     "SKILL_NOTES",

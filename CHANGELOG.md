@@ -10,8 +10,295 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Actions › Recommendations has one Copy prompt for a project's open
-  fixes**, grouped under a header per file. It leaves out cards that only
-  inform, and counts files honestly.
+  fixes**, grouped under a header per file. It leaves out ignored cards,
+  fixed ones, cards that only inform, unconfirmed changes and managed
+  settings. The note beside it gives the open fixes and how many files
+  they edit. `GET /api/recommendations/prompt` needs `project`.
+- **Profiles change the agent that writes code, whatever you named it.** A
+  profile's `[roles.writer]` goes to your own agents named like
+  implementer, fixer or builder that can edit files. With none, the
+  settings still apply and a note says so. The shipped profiles no longer
+  name the author's agents. `apply` finds agents in subfolders too, and
+  names any it leaves as they are.
+- **Setup › Profiles suggests a profile for the window and project you
+  pick, and says why.** It needs 5 sessions. "Set in" says what wins over
+  a change, such as a project file or an environment variable. The
+  suggestion has its own route, `GET /api/profile-suggestion`.
+- **A profile can set the effort level and the summary point of one
+  model** (`modelSettings`), and `apply --set
+  modelSettings.<model>.<key>=VALUE` sets one key. A value the snapshot
+  doesn't keep reads "not recorded". ClaudeGlass 0.16.0 rejects a profile
+  file that holds `modelSettings`.
+- **Capture can keep a light sample after its end** (`capture on --after
+  light`, or "When it ends" on Setup › Capture): the kind, difficulty and
+  size of the work, and task changes, in 1 session in 5, or fewer if you
+  chose a smaller share. The default is still to stop.
+- **At Deep, capture asks once after a summary whether it lost something
+  the work needed** (`lost=yes|no`, on the first reply after it). A table
+  of the answers appears on Work habits once they pass a check.
+- **A card that rests on tags says how old its newest tag is** when that
+  tag is a week older than your newest message that would have had one.
+- **Setup › Capture says when a coaching hint had its moment in two or more
+  sessions and no tip came**, and points to `capture status`.
+- **The tuning file can carry more optional blocks**: how the dashboard's
+  cards were shown, copied, ignored and landed (`cards`), when a live hint
+  had its moment (`hint_occasions`), the figures some advice rests on
+  (`figures`), how capture's answers line up with what happened
+  (`capture_checks`), and how many sessions it covers (`coverage`). Each
+  holds counts and words from fixed lists. `figures.models` names a model
+  by its id on ClaudeGlass's own rate card, or `other`. Data quality links
+  to those figures.
+- **The dashboard keeps a record of the cards it showed and copied, and of
+  which fixes landed** (store version 12), for the tuning file's `cards`
+  block. It stays on this machine, a rebuild keeps it, and `serve --purge`
+  deletes it.
+- **Fable 5.2 and Mythos 5.2 have rate card rows, and `fable` and `best`
+  now mean Fable 5.2.** Fable 5.1 keeps its row.
+- **`check` and `review` take `--claude-root`**, the folder that holds your
+  CLAUDE.md, rules, agents and skills.
+
+### Fixed
+
+Costs and parsing:
+
+- **Shell reads are counted as they ran.** A `||` fallback on the next line
+  or in a subshell is one read, a commit message inside `"$( ... )"` is
+  text, and `git grep`, `git ls-files | xargs grep` and `Get-ChildItem
+  -Recurse | Select-String` are reads. The Single lookups figures move
+  with it.
+- **A scratch file in a temp folder is told from your work by its path**,
+  so the dashboard, an export and another machine count code writes alike.
+- **The command-line report and the exports say how many sessions they
+  cover** when some transcripts were not found, and the tuning file reads
+  those sessions from what the dashboard kept. One damaged session no
+  longer stops the export.
+
+Capture and dashboard:
+
+- **Copy buttons work in the desktop app's browser pane.** When the browser
+  refuses the clipboard, the copy is tried again through a selected text
+  field.
+- **The Overview's headline saving leaves out cards shown for information
+  only.**
+- **Claude Haiku waits an hour when the `claude` command isn't signed in**,
+  instead of failing on every call, and Setup › Capture and `capture
+  status` say so.
+- **`capture status` names a hook entry coaching notes need that
+  `settings.json` lacks.**
+- **`capture connect` and setup add hook entries only for hook files on
+  disk, and a refresh puts back a missing launcher**, so a failed install no
+  longer leaves entries that fail on every call.
+- **An update cut short no longer silences coaching notes.** The catalogue
+  is written before the hook's module and the launcher last, and a module
+  beside an older catalogue keeps the off hints off and the others on.
+- **A capture change made with `claudeglass capture` reaches the mod's
+  settings file at once.**
+- **Save my current settings keeps each agent's most-replies limit and
+  cache lifetime and each model's own settings**, and leaves project agents
+  out and names them, so `apply` no longer refuses the saved profile.
+
+Cards and checks:
+
+- **The agent-decide-apply card counts only writes to code, whatever tool
+  wrote them.** Reports, ledgers, plans and scratch files no longer flag an
+  agent, and an Edit or Write to code in a `.claude/worktrees` folder counts
+  as it does from the shell. A log, `.csv`, `.tsv` or `.jsonl` file is never
+  code, and only the folders below the one the session began in make a file
+  a document, so a repository under a folder named `docs` keeps its writes.
+- **The effort-mismatch card fires only when docs or light edits are most
+  sessions, pools high, xhigh and max effort, and cites each row.**
+- **The memory-at-start figure leaves out rules with a `paths:` list and
+  nested CLAUDE.md files.** Older snapshots count every rule until the next
+  session start.
+- **The hook-block-resent card says the blocked calls not sent again would
+  run too, and that its saving does not subtract them.**
+- **A card you ignored no longer leads any check**, and a check whose only
+  change was on an ignored card says so. The habits saving names its
+  source. The CLAUDE.md figures say what they count, and
+  the shared CLAUDE.md card names the file it is about.
+- **The pointer to the largest part of startup no longer names a "baseline"
+  the action never shows.**
+- **Updating re-reads your transcripts once.** The parser is now version
+  52, so the dashboard rebuilds its rows from them on the first start after
+  you upgrade. A session whose transcripts Claude Code has deleted keeps
+  its stored figures, as before. A figure this version counts differently
+  now leaves that session out instead of reading it as zero. Data quality
+  says how many.
+- **The capture audit counts `queue-operation.content` as read**, so its
+  unread-key alarm stops.
+- **Cards for built-in agents say a same-named agent file replaces the
+  built-in, and name the file their fix writes** (`~/.claude/agents/`, or
+  `.claude/agents/` for a project fix).
+- **The main-session model card prices only the sessions a settings change
+  would reach.** A session counts by the model it ran on. Sessions already
+  on Sonnet or smaller, from before their project moved there, or picked on
+  a larger model while their project's setting said Sonnet are left out and
+  counted. With several projects, so are projects that set their own
+  model. The Models check, the what-if and the profile goal agree with it.
+- **The tools, skills and MCP cards read the agent's `disallowedTools`.** A
+  tool on it is not offered again, an entry such as `Bash(git push *)`
+  withholds the whole tool, and the tools card says a withheld tool is on
+  that line.
+- **The CLAUDE.md and skills checks read the project folders the report
+  read**, and the CLAUDE.md check offers its cards' fixes when no file
+  shows how often it was sent.
+
+Coaching:
+
+- **`report_reread` is retired, and `coaching_report_reread_tokens` now has no
+  effect.** The blinded replay found it more often wrong than right.
+- **`quiet_output`, `split_run` and `cold_return` are narrowed, and
+  `plan_fresh` names the plan file, for when they speak again.**
+  `quiet_output` is then only for a whole read of a saved output in the
+  main session, and Claude saying the note does not apply mutes it.
+- **Parallel messages draw one note per hint.** Every write to
+  `coach-state.json` takes a claim file; a call that loses it skips only its
+  own hint or upkeep, and a stale claim is taken over safely. On Windows,
+  a write another call holds open is tried again, and a note whose record
+  could not be saved is skipped rather than given twice.
+- **The mod's present file lists what it has drawn (`shows`), and the hook
+  hands hints over only when the mod has drawn the line.** The four
+  hint-line hints move when it lists `hint`, `plan_fresh` when it lists
+  `status`. The mod lists those two only while coaching notes apply to the
+  session. An older mod without the key keeps the old rule, and a message
+  sent now writes the file at once, so a hint line drawn a moment ago counts.
+- **A tip counts as passed on only when the reply holds the note's own
+  words.** The bare "ClaudeGlass tip:" label counts for a note that came
+  alone with its message.
+- **`plan_fresh`, `plan_fresh_early`, `split_run`, `quiet_output` and
+  `cold_return` are off for everyone** until their new rules pass the
+  replay. `capture status` names them, and which notes to Claude were muted. An
+  older mod stays quiet for them too: the `muted` list ClaudeGlass writes for
+  it holds them.
+
+### Changed
+
+- **The tools, skills and MCP cards read the agent's current `tools:` line.**
+  A card closes when the rare tools left on it fall under the bar, a card
+  never adds a tool, and `advisor` is listed with the tools Claude Code always
+  adds. A known tools line also stops the generic `spawn-cost` card.
+- **The workflow tools card keeps Edit, Write, MultiEdit, NotebookEdit, Bash
+  and PowerShell on its line once any workflow agent called them, on any
+  model,** and its saving is for that line. Earlier versions could leave
+  them off: if you made an agent file from that line, add back the ones
+  your workflow agents use.
+- **The subagent startup write is priced at the first call's own 5-minute and
+  1-hour split**, and at the 5-minute rate when it recorded none.
+- **`spawn-claude-md` holds back on a tie** between runs that said they used
+  CLAUDE.md and runs that said they didn't. An agent whose tools line names a
+  file tool, or, with no line, whose spawns edited files, and with no run
+  saying it didn't use CLAUDE.md, gets an info card that moves the rules
+  into its agent file first. The card carries its saving.
+- **Capture asks `check` only on a reply that changed a file**, and the
+  targeted-checks card counts only those replies.
+- **The shipped profiles drop lines that did nothing**: agent cache
+  lifetimes that `subagentPromptCacheTtl` outranks, and `omitClaudeMd =
+  false`. `discovery-scrape` no longer names the built-in Explore agent, so
+  `apply` doesn't refuse it.
+- **The effort level's trade-off says Claude Code doesn't keep `max` in
+  settings**: use `/effort max` for a session.
+- **`capture remove` also switches off the plan check and the rating
+  reminder**, which need the hook entries it takes out, and names the ones
+  it switched off. The `/cg-feedback` and `/cg-brief` skills stay.
+- **`spawn-task-prompt` names the workflow run or session** that holds at
+  least half the brief text.
+- **`agent-model-asked` counts only later calls of the same agent type on
+  Sonnet or smaller**, and no longer shows an unmeasured 0. A fixed card asks
+  only for a check and says how many later calls named Sonnet.
+- **`agent-batch-probes` is gone**, and chained shell reads are no longer
+  counted as single lookups.
+- **`agent-report-size` leaves workflow agents out**, and its why shows the
+  mean report size.
+
+## [0.16.0] - 2026-10-09
+
+### Added
+
+- **The mod shows some hints itself.** While the ClaudeGlass mod runs in a
+  session (it says so in `mod/present/<session id>.json`), the capture hook leaves out
+  `cold_return`, `status_poll`, `drip_feed`, `big_paste`, `report_reread`,
+  `split_run`, `plan_fresh` and the rating reminder, and doesn't mark them
+  as shown, so they return if the mod stops. The mod writes what it showed to
+  `mod/sensor/<session id>.json`; the dashboard reads those files into a new
+  `mod_events` table (store schema 10), keeping closed words and counts only.
+  The Work habits tips table now counts the tips Claude passed on and the
+  ones the mod showed, by where, and a second table counts the sessions the
+  mod ran in.
+- **Those hints now come before you send.** The mod decides `drip_feed`,
+  `big_paste`, `status_poll` and `cold_return` from your draft and shows one at
+  a time on the hint line, `plan_fresh` on the status line when you approve a
+  plan, and the rating reminder as an end-of-reply note. Same thresholds, rest
+  rules, `muted` and `once` as the hook.
+- **Does the mod help? A measured comparison.** Once the mod has run in a
+  session of the window, Work habits gets **Sessions with and without
+  ClaudeGlass**: cost per reply, the context when the session ended,
+  cold-cache sends per 100 replies to your messages, sessions with two or more
+  conversation summaries and tips per Desktop session, with both groups' values
+  and session counts. Agent SDK runs are left out of both groups. Under 10
+  sessions in a group it says there are too few to compare; otherwise it states
+  the gap in words and says whether a seeded resampling finds it measurable (a
+  99% interval, as five figures are compared). It makes no claim that the mod
+  caused the gap.
+- **A live view inside Claude Code: the ClaudeGlass mod.** A plugin for
+  Claude Code 2.1.286 or later, added with `/plugin install claudeglass
+  --marketplace PaulMorrisDev/claudeglass`. A band above the prompt shows
+  how full the context is, how many replies are left before Claude
+  summarises, and what the session has cost. One more segment appears only
+  when it matters. The spinner shows the same fill and the reply's cost, and the
+  band narrows to short forms as the window does. Details are in
+  [`docs/mod.md`](docs/mod.md).
+- **The `/glass` pane.** `/glass`, or the Glass button on the band, opens a
+  pane with four tabs: Now, Agents, Compaction and Startup. Each opens with
+  one plain sentence, lists its rows as text and offers at most one main
+  action with a key. Now answers what is filling the context. Startup shows
+  what every request carries before you type, split into what you control
+  (MCP servers by name, CLAUDE.md and memory, skills), Claude Code's own, and
+  what was added as you work. More detail or `/glass detail` switches to the
+  Detailed view, and What these mean explains each figure.
+- **Notes at the end of a reply, and a cache rebuild line.** At most one
+  note every 5 replies, under the same rest rules as the capture hook. The
+  kinds are replies left, a large tool output, a second model switch,
+  repeated summaries and a summary that rebuilt the cache. When a reply
+  rewrote the whole context unexpectedly, a line names the cost and the
+  likely cause.
+- **Agents tab and agent rows.** Each agent shows its model, what it is
+  doing in plain words and its cost, running first. The line also sits under
+  the Agent call in the conversation, with the report re-read and run too big
+  notes. A row's second line in Detailed shows its type, figures and tools.
+- **A compaction review.** The mod keeps a list of what you said, decided and
+  changed, plus pins from `/glass pin`. It checks the list against each
+  conversation summary. The Compaction tab says when Claude summarised and
+  lists only what may be missing, with one Add these back button that
+  drafts a note and sends nothing. Before a summary, Fill in /compact drafts
+  a `/compact Keep:` command from the items you tick. Opt-in
+  switches hold an automatic summary once and re-add your pins.
+- **Prompt help.** The hint line flags a draft that starts a new topic over a
+  large context, names no file, or asks to read everything. `/glass tighten` has Haiku rewrite a draft shorter, shown as a
+  diff with Use this and Keep mine. `/glass guard` asks before a costly
+  send, and `/glass budget` sets a budget for the session.
+- **The release ships the mod as a zip.** Each release attaches
+  `claudeglass-mod.zip` for people who run the mod from a folder with
+  `CLAUDE_CODE_PLUGIN_DIRS` or `--plugin-dir`. `update --finish` now says how
+  to add the mod and where to read about it, and never installs it itself.
+  The settings file the mod reads, `mod/settings.json`, is written by
+  `update --finish` and kept fresh by the dashboard's service.
+- **The mod's Startup tab breaks the tools down.** Built-in tools are a row under You control. Detailed lists each one and each MCP server's largest tools with their sizes, and says how to drop a built-in tool you never use.
+- **The `/glass` pages are easier to read.** Rows keep their figures in line, sections have a gap, and the Settings button gathers the three switches in one place. The footer's dashboard link follows the page. Now shows a colour key, spend as shares that add up to 100 and what the heaviest calls did. The session total is a share of the 5-hour limit only if the session began in the current window and the share is under 100%. Agents rows are named by task. Compaction opens one view at a time. Startup collapses tools that load only when asked for and lists the ten largest tools. On the Desktop it counts the app's own servers under Claude Code's own. It advises on a built-in tool Claude hasn't used.
+- **The dashboard lists every tool a session starts with.** Agents & context → Context has a table of each built-in tool and MCP server, its size at the start and how often sessions used it. On Subagents, the chart's tool definitions name their three largest.
+
+### Changed
+
+- **Re-cache turns show the API's own reason for a cache miss**, and a miss
+  the API blames on a changed prefix is no longer called an expiry.
+- **The cost record names spend on a response stopped by safeguards.**
+- **"Agent list (est)" is now "Your own agents (est)"**; plugin agents were
+  never in that figure.
+- **The mod's settings file no longer carries rating-reminder fields nothing
+  reads**, and dead mod code went with them.
+- **SECURITY.md and the capture docs name the four background hooks and say
+  what headless runs get.**
+- **The command and whole-percent Node tests run in CI, and the Haiku worker
+  end-to-end tests run on Windows.**
 
 ### Fixed
 
@@ -121,57 +408,6 @@ Capture and dashboard:
   it.** It printed `/plugin install python -m claudeglass ...`, taking the
   mod's name for this command.
 
-Cards and checks:
-
-- **The agent-decide-apply card counts only writes to code, whatever tool
-  wrote them.** Reports, ledgers, plans and scratch files no longer flag an
-  agent, and an Edit or Write to code in a `.claude/worktrees` folder counts
-  as it does from the shell. Transcripts are read again once (parser 47).
-- **The effort-mismatch card fires only when docs or light edits are most
-  sessions, pools high, xhigh and max effort, and cites each row.**
-- **The memory-at-start figure leaves out rules with a `paths:` list and
-  nested CLAUDE.md files.** Older snapshots count every rule until the next
-  session start.
-- **The hook-block-resent card says the blocked calls not sent again would
-  run too, and that its saving does not subtract them.**
-- **The models and habits checks leave out cards you ignored, and the habits
-  saving names its source.** The CLAUDE.md figures say what they count, and
-  the shared CLAUDE.md card names the file it is about.
-- **The pointer to the largest part of startup no longer names a "baseline"
-  the action never shows.**
-- **Updating re-reads your transcripts once.** The parser changed four times
-  on this branch (to version 49), so the dashboard rebuilds its rows from
-  them on the first start after you upgrade.
-- **The capture audit counts `queue-operation.content` as read**, so its
-  unread-key alarm stops.
-- **Cards for built-in agents say a same-named file in `.claude/agents/`
-  replaces the built-in.** The asked-model card no longer points at that file,
-  because a model named in the call overrides it.
-
-Coaching:
-
-- **`report_reread` is retired, and `coaching_report_reread_tokens` now has no
-  effect.** The blinded replay found it more often wrong than right.
-- **`quiet_output` speaks only for a whole read of a saved output, and only in
-  the main session.** Claude saying the note does not apply now mutes it
-  (parser 49).
-- **`split_run` and `cold_return` are narrowed, and `plan_fresh` names the
-  plan file** for when they speak again.
-- **Parallel messages draw one note per hint.** Every write to
-  `coach-state.json` takes a claim file; a call that loses it skips only its
-  own hint or upkeep, and a stale claim is taken over safely.
-- **The mod's present file lists what it has drawn (`shows`), and the hook
-  hands hints over only when the mod has drawn the line.** The four
-  hint-line hints move when it lists `hint`, `plan_fresh` when it lists
-  `status`. An older mod without the key keeps today's rule, and a message
-  sent now writes the file at once, so a hint line drawn a moment ago counts.
-- **A tip counts as passed on only when the reply holds the note's own
-  words.** The bare "ClaudeGlass tip:" label counts for a note that came
-  alone with its message.
-- **`plan_fresh`, `plan_fresh_early`, `split_run`, `quiet_output` and
-  `cold_return` are off for everyone** until their new rules pass the
-  replay. `capture status` names them, and which notes to Claude were muted.
-
 The mod:
 
 - **The mod notes which app a Desktop, VS Code or mobile session runs in.** It
@@ -186,116 +422,7 @@ The mod:
 - **With auto-compact off, the band and the Checkpoint pane say Claude won't
   summarise by itself** instead of naming a point near the end of the window.
 
-### Changed
-
-- **Re-cache turns show the API's own reason for a cache miss**, and a miss
-  the API blames on a changed prefix is no longer called an expiry.
-- **The cost record names spend on a response stopped by safeguards.**
-- **"Agent list (est)" is now "Your own agents (est)"**; plugin agents were
-  never in that figure.
-- **The mod's settings file no longer carries rating-reminder fields nothing
-  reads**, and dead mod code went with them.
-- **The tools, skills and MCP cards read the agent's current `tools:` line.**
-  A card closes when the rare tools left on it fall under the bar, a card
-  never adds a tool, and `advisor` is listed with the tools Claude Code always
-  adds. A known tools line also stops the generic `spawn-cost` card.
-- **The subagent startup write is priced at the first call's own 5-minute and
-  1-hour split**, and at the 5-minute rate when it recorded none.
-- **`spawn-claude-md` holds back on a tie** between runs that said they used
-  CLAUDE.md and runs that said they didn't. An agent whose tools line names a
-  file tool, or, with no line, whose spawns edited files, gets an info card
-  that moves the rules into its agent file first. The card carries its saving.
-- **`spawn-task-prompt` names the workflow run or session** that holds at
-  least half the brief text.
-- **`agent-model-asked` counts only later calls of the same agent type on
-  Sonnet or smaller**, and no longer shows an unmeasured 0. A fixed card asks
-  only for a check and says how many later calls named Sonnet.
-- **`agent-batch-probes` is gone**, and chained shell reads are no longer
-  counted as single lookups.
-- **`agent-report-size` leaves workflow agents out**, and its why shows the
-  mean report size.
-- **SECURITY.md and the capture docs name the four background hooks and say
-  what headless runs get.**
-- **The command and whole-percent Node tests run in CI, and the Haiku worker
-  end-to-end tests run on Windows.**
-
-## [0.16.0] - 2026-10-09
-
-### Added
-
-- **The mod shows some hints itself.** While the ClaudeGlass mod runs in a
-  session (it says so in `mod/present/<session id>.json`), the capture hook leaves out
-  `cold_return`, `status_poll`, `drip_feed`, `big_paste`, `report_reread`,
-  `split_run`, `plan_fresh` and the rating reminder, and doesn't mark them
-  as shown, so they return if the mod stops. The mod writes what it showed to
-  `mod/sensor/<session id>.json`; the dashboard reads those files into a new
-  `mod_events` table (store schema 10), keeping closed words and counts only.
-  The Work habits tips table now counts the tips Claude passed on and the
-  ones the mod showed, by where, and a second table counts the sessions the
-  mod ran in.
-- **Those hints now come before you send.** The mod decides `drip_feed`,
-  `big_paste`, `status_poll` and `cold_return` from your draft and shows one at
-  a time on the hint line, `plan_fresh` on the status line when you approve a
-  plan, and the rating reminder as an end-of-reply note. Same thresholds, rest
-  rules, `muted` and `once` as the hook.
-- **Does the mod help? A measured comparison.** Once the mod has run in a
-  session of the window, Work habits gets **Sessions with and without
-  ClaudeGlass**: cost per reply, the context when the session ended,
-  cold-cache sends per 100 replies to your messages, sessions with two or more
-  conversation summaries and tips per Desktop session, with both groups' values
-  and session counts. Agent SDK runs are left out of both groups. Under 10
-  sessions in a group it says there are too few to compare; otherwise it states
-  the gap in words and says whether a seeded resampling finds it measurable (a
-  99% interval, as five figures are compared). It makes no claim that the mod
-  caused the gap.
-- **A live view inside Claude Code: the ClaudeGlass mod.** A plugin for
-  Claude Code 2.1.286 or later, added with `/plugin install claudeglass
-  --marketplace PaulMorrisDev/claudeglass`. A band above the prompt shows
-  how full the context is, how many replies are left before Claude
-  summarises, and what the session has cost. One more segment appears only
-  when it matters. The spinner shows the same fill and the reply's cost, and the
-  band narrows to short forms as the window does. Details are in
-  [`docs/mod.md`](docs/mod.md).
-- **The `/glass` pane.** `/glass`, or the Glass button on the band, opens a
-  pane with four tabs: Now, Agents, Compaction and Startup. Each opens with
-  one plain sentence, lists its rows as text and offers at most one main
-  action with a key. Now answers what is filling the context. Startup shows
-  what every request carries before you type, split into what you control
-  (MCP servers by name, CLAUDE.md and memory, skills), Claude Code's own, and
-  what was added as you work. More detail or `/glass detail` switches to the
-  Detailed view, and What these mean explains each figure.
-- **Notes at the end of a reply, and a cache rebuild line.** At most one
-  note every 5 replies, under the same rest rules as the capture hook. The
-  kinds are replies left, a large tool output, a second model switch,
-  repeated summaries and a summary that rebuilt the cache. When a reply
-  rewrote the whole context unexpectedly, a line names the cost and the
-  likely cause.
-- **Agents tab and agent rows.** Each agent shows its model, what it is
-  doing in plain words and its cost, running first. The line also sits under
-  the Agent call in the conversation, with the report re-read and run too big
-  notes. A row's second line in Detailed shows its type, figures and tools.
-- **A compaction review.** The mod keeps a list of what you said, decided and
-  changed, plus pins from `/glass pin`. It checks the list against each
-  conversation summary. The Compaction tab says when Claude summarised and
-  lists only what may be missing, with one Add these back button that
-  drafts a note and sends nothing. Before a summary, Fill in /compact drafts
-  a `/compact Keep:` command from the items you tick. Opt-in
-  switches hold an automatic summary once and re-add your pins.
-- **Prompt help.** The hint line flags a draft that starts a new topic over a
-  large context, names no file, or asks to read everything. `/glass tighten` has Haiku rewrite a draft shorter, shown as a
-  diff with Use this and Keep mine. `/glass guard` asks before a costly
-  send, and `/glass budget` sets a budget for the session.
-- **The release ships the mod as a zip.** Each release attaches
-  `claudeglass-mod.zip` for people who run the mod from a folder with
-  `CLAUDE_CODE_PLUGIN_DIRS` or `--plugin-dir`. `update --finish` now says how
-  to add the mod and where to read about it, and never installs it itself.
-  The settings file the mod reads, `mod/settings.json`, is written by
-  `update --finish` and kept fresh by the dashboard's service.
-- **The mod's Startup tab breaks the tools down.** Built-in tools are a row under You control. Detailed lists each one and each MCP server's largest tools with their sizes, and says how to drop a built-in tool you never use.
-- **The `/glass` pages are easier to read.** Rows keep their figures in line, sections have a gap, and the Settings button gathers the three switches in one place. The footer's dashboard link follows the page. Now shows a colour key, spend as shares that add up to 100 and what the heaviest calls did. The session total is a share of the 5-hour limit only if the session began in the current window and the share is under 100%. Agents rows are named by task. Compaction opens one view at a time. Startup collapses tools that load only when asked for and lists the ten largest tools. On the Desktop it counts the app's own servers under Claude Code's own. It advises on a built-in tool Claude hasn't used.
-- **The dashboard lists every tool a session starts with.** Agents & context → Context has a table of each built-in tool and MCP server, its size at the start and how often sessions used it. On Subagents, the chart's tool definitions name their three largest.
-
-### Fixed
+Docs:
 
 - The hooks page listed `Grep` and `Glob` among the tools the hook runs after. It
   doesn't: both are left out because their results can't reach the size a
