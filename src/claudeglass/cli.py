@@ -5388,7 +5388,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
 
         for line in explanation:
             print(line)
-        if explanation:
+        for line in plan.role_notes:
+            print(line)
+        if explanation or plan.role_notes:
             print()
         print(plan.diff_text if plan.diff_text else "No changes to apply.")
         if plan.skipped_managed:
@@ -5423,6 +5425,8 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         return 1
 
     for line in explanation:
+        print(line)
+    for line in plan.role_notes:
         print(line)
     if plan.overridden:
         print("Already overridden by a higher-precedence layer (writing won't change what Claude Code uses):")

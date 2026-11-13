@@ -23,7 +23,7 @@ from .. import agent_roles
 from ..recommend import _FILE_TOOLS, _NOT_OVERRIDABLE, read_agent_tools
 from .schema import ROLES, Profile
 
-__all__ = ["ROLE_WORDS", "Resolved", "is_writer", "resolve", "writers"]
+__all__ = ["ROLE_WORDS", "Resolved", "is_writer", "join_names", "resolve", "several_writers_note", "writers"]
 
 #: Each role in the words a user reads it as.
 ROLE_WORDS = {"writer": "agent that writes code"}
@@ -43,6 +43,20 @@ def is_writer(name: str, fields: Mapping | None) -> bool:
     fields = fields if isinstance(fields, Mapping) else {}
     tools = read_agent_tools(fields.get("tools"), fields.get("disallowedTools"))
     return any(tools.offered(tool) for tool in _FILE_TOOLS)
+
+
+def join_names(names: tuple[str, ...] | list[str]) -> str:
+    """``a``, ``a and b`` or ``a, b and c``."""
+    names = list(names)
+    return " and ".join(names) if len(names) <= 2 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def several_writers_note(names: tuple[str, ...] | list[str]) -> str:
+    """The sentence for a profile whose writer role went to more than one
+    agent (``names``, two or more), so nobody is surprised that each
+    changed."""
+    both = "both" if len(names) == 2 else "all"
+    return f"{join_names(names)} are {both} named like an agent that writes code, so each gets these changes."
 
 
 def writers(agents: Mapping[str, Mapping]) -> tuple[str, ...]:

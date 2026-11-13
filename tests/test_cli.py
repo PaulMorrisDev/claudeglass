@@ -255,6 +255,50 @@ def test_cmd_apply_user_scope_agent_patch_finds_claude_root_agents_file(tmp_path
     assert "model: sonnet" in (agents_dir / "reviewer.md").read_text(encoding="utf-8")
 
 
+def test_cmd_apply_prints_the_no_writer_note_and_exits_0_on_dry_run(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    for name in ("researcher", "reviewer"):
+        (agents_dir / f"{name}.md").write_text(f"---\nname: {name}\ntools: Read, Grep\n---\n\nBody.\n", encoding="utf-8")
+    note = (
+        "No agent in agents is named like implementer, fixer or builder and can edit files. "
+        "The changes for the agent that writes code are left out."
+    )
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--dry-run"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    assert "would be refused" not in captured.err
+    # the note follows the change explanations and comes before the diff
+    assert captured.out.index("Change: effortLevel") < captured.out.index(note) < captured.out.index("+++")
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    written = json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))
+    assert written["effortLevel"] == "medium"
+
+
+def test_cmd_apply_of_a_role_profile_patches_the_users_writer_and_prints_no_note(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "implementer.md").write_text(
+        "---\nname: implementer\ntools: Read, Edit\nmodel: opus\n---\n\nBody.\n", encoding="utf-8"
+    )
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert "named like" not in captured.out
+    assert "model: sonnet" in (agents_dir / "implementer.md").read_text(encoding="utf-8")
+
+
 def test_cmd_apply_claude_root_flag_overrides_default(tmp_path):
     explicit_root = tmp_path / "explicit-claude-root"
     config_dir = tmp_path / "claudeglass"

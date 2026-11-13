@@ -113,6 +113,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import snapshots as snapshots_mod
+from . import roles as roles_mod
 from .frontmatter import FrontmatterError, parse_frontmatter, patch_frontmatter
 from .schema import SETTINGS_ALLOWLIST, Profile
 
@@ -223,6 +224,10 @@ class ApplyPlan:
     diff_text: str
     blocked: tuple[str, ...] = ()
     overridden: tuple[str, ...] = ()
+    #: PF1: what a role in the profile (``[roles.writer]``) did or did not
+    #: reach among the user's own agent files -- no agent named like a
+    #: writer, or several -- one plain sentence each. Never blocks.
+    role_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +370,44 @@ def _resolve_agents_dir(scope: str, project_path: Path | None, claude_root: Path
     if project_path is None:
         raise ValueError(f"scope={scope!r} requires project_path")
     return project_path / ".claude" / "agents"
+
+
+# -- roles -----------------------------------------------------------------
+
+
+def _agent_files(agents_dir: Path) -> dict[str, dict]:
+    """The agent files in ``agents_dir`` as :func:`roles.writers` reads
+    them: name -> ``{"tools": ..., "disallowedTools": ...}``. The name is
+    the frontmatter ``name``, else the file's stem. A file whose name is not
+    its stem, or whose frontmatter cannot be read, is left out: ``apply``
+    patches ``<agents_dir>/<name>.md`` only, so it could not write such a
+    file anyway."""
+    found: dict[str, dict] = {}
+    for path in sorted(agents_dir.glob("*.md")):
+        try:
+            fields = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, FrontmatterError):
+            continue
+        name = fields.get("name") if isinstance(fields.get("name"), str) and fields.get("name") else path.stem
+        if name != path.stem:
+            continue
+        found[name] = {"tools": fields.get("tools"), "disallowedTools": fields.get("disallowedTools")}
+    return found
+
+
+def _role_notes(matched: dict[str, tuple[str, ...]], label: str) -> tuple[str, ...]:
+    """The sentence for a role that found no agent (``label`` is the agents
+    folder as the refusal line names paths), or found several."""
+    notes: list[str] = []
+    for found in matched.values():
+        if not found:
+            notes.append(
+                f"No agent in {label} is named like implementer, fixer or builder and can edit files. "
+                "The changes for the agent that writes code are left out."
+            )
+        elif len(found) > 1:
+            notes.append(roles_mod.several_writers_note(found))
+    return tuple(notes)
 
 
 # -- planning ---------------------------------------------------------------
@@ -548,6 +591,16 @@ def plan_apply(
     blocked: list[str] = []
     claude_root_or_project = project_path if project_path is not None else claude_root
 
+    # PF1: a role (``[roles.writer]``) goes to the user's own agents at this
+    # scope, found by name; the rest of the plan sees an ordinary profile
+    # that names real agent files, so a role never lands in ``blocked`` and
+    # ``force`` never creates a file for one.
+    role_notes: tuple[str, ...] = ()
+    if profile.roles:
+        resolved = roles_mod.resolve(profile, _agent_files(agents_dir))
+        profile = resolved.profile
+        role_notes = _role_notes(resolved.matched, _relative_label(agents_dir, claude_root_or_project))
+
     # -- settings overlay --
     settings_changes = {k: v for k, v in profile.settings.items() if k not in managed_keys}
     skipped_managed += [f"settings.{k}" for k in profile.settings if k in managed_keys]
@@ -707,6 +760,7 @@ def plan_apply(
         diff_text=diff_text,
         blocked=tuple(blocked),
         overridden=tuple(overridden),
+        role_notes=role_notes,
     )
 
 

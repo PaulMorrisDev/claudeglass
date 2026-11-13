@@ -419,6 +419,179 @@ def test_force_creates_missing_agent_file_from_scratch(tmp_path):
     assert parse_frontmatter(agent_path.read_text(encoding="utf-8"))["model"] == "opus"
 
 
+def _agent_text(name: str | None, tools: str, model: str = "opus") -> str:
+    head = f"name: {name}\n" if name else ""
+    return f"---\n{head}tools: {tools}\nmodel: {model}\n---\n\nBody.\n"
+
+
+def _role_world(tmp_path, agents: dict[str, str]):
+    """A user whose own agent files are ``agents`` (file stem -> text)."""
+    claude_root = tmp_path / "home" / ".claude"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    for stem, text in agents.items():
+        (agents_dir / f"{stem}.md").write_text(text, encoding="utf-8")
+    return claude_root, tmp_path / "home" / ".claude" / "claudeglass", agents_dir
+
+
+def _plan_role_profile(tmp_path, agents, profile=None, **kwargs):
+    from claudeglass.profiles import catalogue
+
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, agents)
+    plan = apply_mod.plan_apply(
+        profile or catalogue.get("implementation-heavy"),
+        scope=kwargs.pop("scope", "user"),
+        project_path=kwargs.pop("project_path", None),
+        config_dir=config_dir,
+        claude_root=claude_root,
+        **kwargs,
+    )
+    return plan, config_dir, claude_root, agents_dir
+
+
+def test_apply_of_a_role_profile_with_no_writer_writes_the_settings(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path,
+        {
+            "researcher": _agent_text("researcher", "Read, Grep"),
+            "reviewer": _agent_text("reviewer", "Read, Grep"),
+        },
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert plan.role_notes == (
+        "No agent in agents is named like implementer, fixer or builder and can edit files. "
+        "The changes for the agent that writes code are left out.",
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    written = json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))
+    assert written == {"effortLevel": "medium", "subagentPromptCacheTtl": "5m"}
+    assert "model: opus" in (agents_dir / "researcher.md").read_text(encoding="utf-8")
+
+
+def test_apply_of_a_role_profile_patches_the_users_writer(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path,
+        {
+            "implementer": _agent_text("implementer", "Read, Grep, Edit, Write, Bash"),
+            "researcher": _agent_text("researcher", "Read, Grep"),
+            "reviewer": _agent_text("reviewer", "Read, Grep"),
+        },
+    )
+    assert plan.blocked == ()
+    assert plan.role_notes == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["implementer"]
+    apply_mod.execute(plan, config_dir=config_dir)
+    fm = parse_frontmatter((agents_dir / "implementer.md").read_text(encoding="utf-8"))
+    assert (fm["model"], fm["effort"], fm["maxTurns"]) == ("sonnet", "medium", 60)
+    assert "experimental.cacheTtl" not in fm and "omitClaudeMd" not in fm
+    # a read-only agent is left alone
+    assert "effort" not in parse_frontmatter((agents_dir / "researcher.md").read_text(encoding="utf-8"))
+
+
+def test_apply_of_a_role_profile_says_when_several_agents_write_code(tmp_path):
+    plan, *_ = _plan_role_profile(
+        tmp_path,
+        {
+            "tester": _agent_text("tester", "Read, Edit"),
+            "implementer": _agent_text("implementer", "Read, Edit"),
+            "researcher": _agent_text("researcher", "Read"),
+        },
+    )
+    assert sorted(a.agent_name for a in plan.actions if a.kind == "agent_frontmatter") == ["implementer", "tester"]
+    assert plan.role_notes == (
+        "implementer and tester are both named like an agent that writes code, so each gets these changes.",
+    )
+    plan, *_ = _plan_role_profile(
+        tmp_path / "three",
+        {
+            "tester": _agent_text("tester", "Read, Edit"),
+            "implementer": _agent_text("implementer", "Read, Edit"),
+            "fixer": _agent_text("fixer", "Read, Edit"),
+        },
+    )
+    assert plan.role_notes == (
+        "fixer, implementer and tester are all named like an agent that writes code, so each gets these changes.",
+    )
+
+
+def test_apply_of_a_role_profile_leaves_out_a_writer_that_cannot_edit_a_misnamed_file_and_a_broken_one(tmp_path):
+    plan, *_ = _plan_role_profile(
+        tmp_path,
+        {
+            # named like a writer, but cannot edit
+            "implementer": _agent_text("implementer", "Read, Grep"),
+            # the file's frontmatter name is not its stem: apply could not patch it
+            "builder": _agent_text("something-else", "Read, Edit"),
+            # frontmatter this parser cannot read
+            "fixer": "---\nname: fixer\ntools: [Edit\n---\n",
+            "notes": "no frontmatter at all\n",
+        },
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert len(plan.role_notes) == 1 and plan.role_notes[0].startswith("No agent in agents is named like")
+
+
+def test_apply_of_a_role_profile_reads_the_project_agents_at_a_project_scope(tmp_path):
+    from claudeglass.profiles import catalogue
+
+    project = tmp_path / "proj"
+    project_agents = project / ".claude" / "agents"
+    project_agents.mkdir(parents=True)
+    (project_agents / "builder.md").write_text(_agent_text("builder", "Read, Edit"), encoding="utf-8")
+    claude_root, config_dir, user_agents = _role_world(
+        tmp_path, {"implementer": _agent_text("implementer", "Read, Edit")}
+    )
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="project-local",
+        project_path=project,
+        config_dir=config_dir,
+        claude_root=claude_root,
+    )
+    assert [a.path for a in plan.actions if a.kind == "agent_frontmatter"] == [project_agents / "builder.md"]
+    no_writer = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="project-local",
+        project_path=tmp_path / "other",
+        config_dir=config_dir,
+        claude_root=claude_root,
+    )
+    assert no_writer.role_notes == (
+        f"No agent in {Path('.claude') / 'agents'} is named like implementer, fixer or builder and can edit files. "
+        "The changes for the agent that writes code are left out.",
+    )
+
+
+def test_an_explicit_agent_with_no_file_is_still_refused(tmp_path):
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"implementer": _agent_text("implementer", "Edit")})
+    profile = _profile(settings={}, agents={"ghost": {"model": "opus"}}, roles={"writer": {"effort": "low"}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    assert len(plan.blocked) == 1 and "no agent file found for 'ghost'" in plan.blocked[0]
+    assert not (agents_dir / "ghost.md").exists()
+
+
+def test_force_never_creates_a_file_for_a_role(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path, {"researcher": _agent_text("researcher", "Read")}, force=True
+    )
+    assert plan.blocked == ()
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert sorted(p.name for p in agents_dir.iterdir()) == ["researcher.md"]
+
+
+def test_explicit_agent_values_win_over_the_role_when_both_name_the_writer(tmp_path):
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"implementer": _agent_text("implementer", "Edit")})
+    profile = _profile(
+        settings={}, agents={"implementer": {"model": "haiku"}}, roles={"writer": {"model": "sonnet", "effort": "low"}}
+    )
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    apply_mod.execute(plan, config_dir=config_dir)
+    fm = parse_frontmatter((agents_dir / "implementer.md").read_text(encoding="utf-8"))
+    assert (fm["model"], fm["effort"]) == ("haiku", "low")
+
+
 def test_force_does_not_affect_allow_tracked(tmp_path):
     """--force's only job is creating a missing agent file from scratch;
     it must not also waive the tracked-file refusal (that is
