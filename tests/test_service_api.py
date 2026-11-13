@@ -7216,8 +7216,9 @@ def test_recommendations_prompt_rejects_a_bad_window(server):
 
 def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_builds_it_once(server, monkeypatch):
     """``api._quick_context`` hands the Tools check the snapshot's ``agents`` map,
-    where the line is (``effective_agents`` never holds one), and builds the
-    merged snapshot once for it and for the settings."""
+    where the line is (``effective_agents`` never holds one), and reads one
+    merged snapshot for it and for the settings: the one kept for this store
+    change and project (PF1), so a repeat request builds none."""
     from claudeglass import quick_actions, snapshots
 
     server.store.upsert_snapshot(
@@ -7248,7 +7249,7 @@ def test_the_tools_check_is_given_the_tools_lines_of_the_merged_snapshot_and_bui
     assert ctx.agents == {"reviewer": {"source": "user", "tools": ["Read", "Grep"]}}
     assert ctx.effective == {"model": "opus"}
     assert ctx.effective_agents == {"reviewer": {"source": "user", "model": "haiku"}}
-    assert len(merges) == 1
+    assert merges == []  # kept since the first request (PF1: per store change and project)
 
 
 def test_claude_md_reads_the_projects_folder_the_service_is_given_wherever_the_config_folder_is(
