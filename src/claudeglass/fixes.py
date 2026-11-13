@@ -1147,6 +1147,74 @@ def profile_change_where(key: str, scope: str) -> str:
     return settings_path
 
 
+#: The project file a ``snapshots.SETTINGS_LAYER_NAMES`` layer is, for the
+#: "sets it too and wins" sentence. ``managed`` is not here: the diff
+#: already says "Locked by your organisation's policy" for it.
+_OVERRIDING_PROJECT_FILE = {
+    "project_local": ".claude/settings.local.json",
+    "project_shared": ".claude/settings.json",
+}
+
+
+def profile_overridden_by(
+    row_key: str,
+    scope: str,
+    provenance: dict,
+    env_names: list | tuple | set,
+    effort_env_set: bool,
+    model_settings: dict | None,
+    project_picked: bool,
+) -> str | None:
+    """What wins over a profile diff row's change, in plain words, or
+    ``None``: the first that applies, in order.
+
+    1. A settings key that a project file ranking above ``scope``'s file
+       (``snapshots.SETTINGS_LAYER_NAMES``, ``apply._SCOPE_LAYER``) sets
+       too, per ``provenance`` (``{key: layer}``). Said only when a
+       ``project_picked``: with none, the snapshot is whichever project's
+       took it, and the sentence would name a project the reader did not
+       choose.
+    2. ``settings.autoCompactWindow`` while ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
+       is among ``env_names``.
+    3. ``settings.effortLevel`` while ``effort_env_set``
+       (``CLAUDE_CODE_EFFORT_LEVEL``).
+    4. ``settings.effortLevel`` while ``model_settings`` (the effective
+       ``modelSettings``) gives models an effort level of their own.
+
+    Pure: the caller reads the snapshot."""
+    from .profiles.apply import _SCOPE_LAYER
+    from .profiles.roles import join_names
+
+    if not row_key.startswith("settings."):
+        return None
+    key = row_key[len("settings.") :]
+    precedence = {name: rank for rank, name in enumerate(snapshots_mod.SETTINGS_LAYER_NAMES)}
+    target = _SCOPE_LAYER.get(scope)
+    layer = provenance.get(key)
+    if (
+        project_picked
+        and target in precedence
+        and layer in _OVERRIDING_PROJECT_FILE
+        and precedence[layer] < precedence[target]
+    ):
+        return f"This project's {_OVERRIDING_PROJECT_FILE[layer]} sets it too and wins."
+    if key == "autoCompactWindow" and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
+        return f"{snapshots_mod.AUTO_COMPACT_WINDOW_ENV} is set and wins over this setting."
+    if key == "effortLevel":
+        if effort_env_set:
+            return "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+        ids = sorted(
+            str(model)
+            for model, entry in (model_settings or {}).items()
+            if isinstance(entry, dict) and entry.get("effortLevel")
+        )
+        if len(ids) == 1:
+            return f"{ids[0]} has its own effort level, which wins for it."
+        if ids:
+            return f"{join_names(ids)} have their own effort level, which wins for them."
+    return None
+
+
 def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
     """A self-contained prompt asking Claude to make a profile's changes
     by hand: one line per changed, unmanaged key, naming the file, the
@@ -1509,6 +1577,7 @@ __all__ = [
     "fix_group",
     "fix_note",
     "profile_change_where",
+    "profile_overridden_by",
     "profile_prompt",
     "project_prompt",
     "prompt_for",

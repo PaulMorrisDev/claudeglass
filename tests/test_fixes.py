@@ -28,6 +28,87 @@ def test_profile_prompt_says_so_when_nothing_changes():
     assert "nothing to change" in text
 
 
+def test_profile_overridden_by_names_each_case():
+    from claudeglass.fixes import profile_overridden_by
+
+    def by(row_key, scope="user", provenance=None, env_names=(), effort_env_set=False, model_settings=None,
+           project_picked=True):
+        return profile_overridden_by(
+            row_key, scope, provenance or {}, env_names, effort_env_set, model_settings, project_picked
+        )
+
+    # A project file that sets the key too, and ranks above the target file.
+    shared = "This project's .claude/settings.json sets it too and wins."
+    local = "This project's .claude/settings.local.json sets it too and wins."
+    assert by("settings.model", provenance={"model": "project_shared"}) == shared
+    assert by("settings.model", provenance={"model": "project_local"}) == local
+    assert by("settings.model", "repo", {"model": "project_local"}) == local
+    # Not above the target file: the same file, a lower one, or the managed layer.
+    assert by("settings.model", "repo", {"model": "project_shared"}) is None
+    assert by("settings.model", "repo", {"model": "user"}) is None
+    assert by("settings.model", "project-local", {"model": "project_shared"}) is None
+    assert by("settings.model", "project-local", {"model": "project_local"}) is None
+    assert by("settings.model", provenance={"model": "managed"}) is None
+    assert by("settings.model", provenance={"model": "user"}) is None
+    assert by("settings.model", provenance={"other": "project_shared"}) is None
+    # Agent and env rows are not settings keys.
+    assert by("agents.builder.model", provenance={"model": "project_shared"}) is None
+    assert by("env.MAX_THINKING_TOKENS", provenance={"MAX_THINKING_TOKENS": "project_shared"}) is None
+
+    # The two environment variables.
+    window = "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
+    assert by("settings.autoCompactWindow", env_names=["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]) == window
+    assert by("settings.autoCompactWindow", env_names=["OTHER"]) is None
+    assert by("settings.model", env_names=["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]) is None
+    effort = "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+    assert by("settings.effortLevel", effort_env_set=True) == effort
+    assert by("settings.model", effort_env_set=True) is None
+    assert by("settings.effortLevel") is None
+
+    # A model's own effort level wins for that model.
+    assert by("settings.effortLevel", model_settings={"claude-opus-5-5": {"effortLevel": "high"}}) == (
+        "claude-opus-5-5 has its own effort level, which wins for it."
+    )
+    assert by(
+        "settings.effortLevel",
+        model_settings={"b": {"effortLevel": "low"}, "a": {"effortLevel": "high"}, "c": {"autoCompactWindow": 200000}},
+    ) == "a and b have their own effort level, which wins for them."
+    assert by(
+        "settings.effortLevel",
+        model_settings={"a": {"effortLevel": "low"}, "b": {"effortLevel": "high"}, "c": {"effortLevel": "medium"}},
+    ) == "a, b and c have their own effort level, which wins for them."
+    assert by("settings.effortLevel", model_settings={"c": {"autoCompactWindow": 200000}}) is None
+    assert by("settings.model", model_settings={"a": {"effortLevel": "low"}}) is None
+
+    # Nothing set anywhere.
+    assert by("settings.effortLevel", provenance={}, env_names=[], effort_env_set=False, model_settings={}) is None
+    assert by("settings.effortLevel", model_settings=None) is None
+    # The first that applies: a project file's sentence comes before the rest.
+    assert by(
+        "settings.effortLevel",
+        provenance={"effortLevel": "project_local"},
+        effort_env_set=True,
+        model_settings={"a": {"effortLevel": "low"}},
+    ) == local
+
+
+def test_profile_overridden_by_names_a_project_file_only_when_a_project_is_picked():
+    from claudeglass.fixes import profile_overridden_by
+
+    args = ("settings.model", "user", {"model": "project_shared"}, (), False, None)
+    assert profile_overridden_by(*args, True) == "This project's .claude/settings.json sets it too and wins."
+    # Without a project picked the snapshot is whichever project's took it, so the sentence would name
+    # a project the reader did not choose.
+    assert profile_overridden_by(*args, False) is None
+    # The environment and per-model sentences do not depend on the pick.
+    env = ("settings.effortLevel", "user", {"effortLevel": "project_shared"}, ("CLAUDE_CODE_AUTO_COMPACT_WINDOW",), True, {})
+    assert profile_overridden_by(*env, False) == "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+    window = ("settings.autoCompactWindow", "user", {}, ("CLAUDE_CODE_AUTO_COMPACT_WINDOW",), False, None)
+    assert profile_overridden_by(*window, False) == "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
+    own = ("settings.effortLevel", "user", {}, (), False, {"m": {"effortLevel": "low"}})
+    assert profile_overridden_by(*own, False) == "m has its own effort level, which wins for it."
+
+
 def test_build_fixes_gives_an_actionable_workflow_rule_a_where_trade_off_undo_explainer_and_a_prompt():
     """UX-8 (rest): a recommendation with no ``SettingChange`` (pure
     workflow advice) used to get either a prompt-only fix with an empty
