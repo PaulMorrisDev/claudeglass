@@ -99,6 +99,67 @@ def test_model_tier_cards_merge_into_one_with_a_change_per_agent_type():
     assert "yours to make" in main_card.why
 
 
+def _priced_report(columns, rows, name="model_swap_by_agent_type", section="model_swap") -> ReportModel:
+    table = Table(name=name, columns=[Column(key=k, label=k) for k in columns], rows=rows)
+    return ReportModel(
+        meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)),
+        sections=[Section(key=section, title=section, tables=[table])],
+        diagnostics=Diagnostics(lines=1000),
+    )
+
+
+_SWAP_COLUMNS = ["agent_type", "observed_model", "best_cheaper_alternative_model", "saving_usd", "observed_cost", "lever_cost"]
+
+
+def test_the_model_tier_cards_say_what_their_saving_was_priced_on():
+    report = _priced_report(
+        _SWAP_COLUMNS,
+        [
+            ["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0, 100.0, 80.0],
+            ["reviewer", "claude-sonnet-5", "claude-haiku-4-5-20251001", 50.0, 90.0, 70.0],
+        ],
+    )
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {"reviewer": {"source": "project"}}})
+    out = advice.finish([_tier("top-level"), _tier("reviewer")], report, snap, Units())
+    (agent_card,) = [r for r in out if r.id == "model-tier"]
+    (main_card,) = [r for r in out if r.id == "model-tier-main"]
+    # The cost of the runs the setting decides: the figure the saving is a share of.
+    assert main_card.priced_on == 80.0
+    assert agent_card.priced_on == 70.0
+    # The sentences are their own fields.
+    assert isinstance(main_card.saving_basis, str) and main_card.saving_basis
+
+
+def test_a_model_tier_card_falls_back_to_the_observed_cost_without_the_lever_cost_column():
+    report = _priced_report(
+        _SWAP_COLUMNS[:5],
+        [["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0, 100.0]],
+    )
+    out = advice.finish([_tier("top-level")], report, None, Units())
+    (main_card,) = [r for r in out if r.id == "model-tier-main"]
+    assert main_card.priced_on == 100.0
+
+
+def test_the_merged_model_tier_card_leaves_priced_on_none_when_it_covers_several_agents():
+    report = _priced_report(
+        _SWAP_COLUMNS,
+        [
+            ["reviewer", "claude-sonnet-5", "claude-haiku-4-5-20251001", 50.0, 90.0, 70.0],
+            ["general-purpose", "claude-sonnet-5", "claude-haiku-4-5-20251001", 10.0, 40.0, 20.0],
+        ],
+    )
+    out = advice.finish([_tier("reviewer"), _tier("general-purpose")], report, None, Units())
+    (card,) = [r for r in out if r.id == "model-tier"]
+    assert len(card.changes) == 2
+    assert card.priced_on is None  # one saving over two agents' costs: no single figure
+
+
+def test_a_model_tier_card_with_no_cost_in_the_table_leaves_priced_on_none():
+    out = advice.finish([_tier("reviewer")], _model_swap_report([["reviewer", "claude-sonnet-5", "claude-haiku-4-5-20251001", 50.0]]), None, Units())
+    (card,) = [r for r in out if r.id == "model-tier"]
+    assert card.priced_on is None
+
+
 def test_the_model_tier_card_names_runs_an_agent_file_does_not_decide():
     """A workflow script or a model named at spawn sets some runs' model:
     the card says how many and where that model is really set, and names
@@ -241,6 +302,25 @@ def test_cache_ttl_and_effort_cards_are_dropped_when_already_set():
     assert advice.finish(recs, report, snap, Units()) == []
 
 
+def test_the_ttl_switch_card_says_the_observed_cost_its_saving_is_a_share_of():
+    report = _priced_report(
+        ["agent_type", "cost_observed", "saving_usd"],
+        [["verification-runner", 40.0, 6.0]],
+        name="ttl_by_agent_type",
+        section="ttl",
+    )
+    rec = Recommendation(
+        id="ttl-switch",
+        severity="advice",
+        agent_type="verification-runner",
+        evidence=[("TTL recommendation", "switch to 1h", "ttl", "verification-runner")],
+    )
+    (out,) = advice.finish([rec], report, None, Units())
+    assert out.saving_usd == 6.0 and out.priced_on == 40.0
+    (bare,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert bare.priced_on is None
+
+
 def test_already_set_matches_model_aliases_and_maps():
     assert fixes.already_set("model", "sonnet", "claude-sonnet-5")
     assert not fixes.already_set("model", "haiku", "claude-sonnet-5")
@@ -288,6 +368,26 @@ def test_compaction_window_wins_over_churn_and_takes_the_setting_from_long_conte
     assert long_ctx.lever is None and long_ctx.changes == [] and long_ctx.category == "workflow"
     # Sorted by saving within a severity.
     assert ids[0] == "compaction-window"
+
+
+def test_the_compaction_window_card_says_the_observed_cost_its_saving_is_a_share_of():
+    window = _compaction(
+        "compaction-window",
+        title="Set autoCompactWindow to at least 250,000",
+        evidence=[
+            ("Observed cost (top-level, window=none)", 60.0, "x", "none"),
+            ("Candidate 250,000: modelled saving after rediscovery correction", 12.0, "x", "250,000"),
+        ],
+    )
+    (out,) = [r for r in advice.finish([window], _model_swap_report([]), None, Units()) if r.id == "compaction-window"]
+    assert out.priced_on == 60.0
+    bare = _compaction(
+        "compaction-window",
+        title="Set autoCompactWindow to at least 250,000",
+        evidence=[("Candidate 250,000: modelled saving after rediscovery correction", 12.0, "x", "250,000")],
+    )
+    (out,) = [r for r in advice.finish([bare], _model_swap_report([]), None, Units()) if r.id == "compaction-window"]
+    assert out.priced_on is None
 
 
 def test_compaction_window_is_dropped_when_already_at_or_below_the_floor():
