@@ -54,8 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too little data, and how your corrections and rework moved after them. A
   fix is measured only where the measure is honest: the same replies priced
   both ways for a model, fast mode, cache lifetime or raised compaction
-  window, and the context at the start of each agent run for an agent's
-  tools, CLAUDE.md, skills or MCP servers, when its estimate takes out at
+  window, and the context at the start: of each agent run for an agent's
+  tools, CLAUDE.md, skills or MCP servers, and of each main session for
+  CLAUDE.md, plugins, skills or MCP servers, when its estimate takes out at
   least 45% of that start. Cards and logged estimates now record the figure
   their saving was priced on (`priced_on`); it never reaches the file.
 - **The tuning file may now be up to 320 KB (it was 256 KB)**, because two
