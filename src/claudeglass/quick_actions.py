@@ -67,6 +67,12 @@ class Context:
     #: Whether ANTHROPIC_MODEL was set when the settings were read
     #: (``snapshots.env_var_set``): it wins over the model setting.
     model_env_set: bool = False
+    #: Whether CLAUDE_CODE_EFFORT_LEVEL was set when the settings were read
+    #: (``snapshots.effort_level_env_set``): it wins over every effort setting.
+    effort_level_env_set: bool = False
+    #: N2: each effective key's settings layer (``snapshots.effective_provenance``),
+    #: for the effort level in force (``goals.main_effort_reading``).
+    effective_provenance: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +280,7 @@ def _goal(ctx: Context, goal_id: str) -> dict:
         period=ctx.period,
         skip_keys=ctx.skip_keys,
         model_env_set=ctx.model_env_set,
+        provenance=ctx.effective_provenance,
     )
     ignored = _ignored_changes(ctx)
     kept, removed = [], []
@@ -665,12 +672,12 @@ def _effort(ctx: Context) -> dict:
         _rec_fixes(_recommendations(ctx, {"effort-mismatch"})),
         _goal_fixes(ctx, draft, _effort_title),
     )
+    already = _main_effort_already_set(ctx)
     if not fixes:
         return _result(
             "ok",
-            _IGNORED_ONLY
-            if draft["removed"]
-            else f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
+            " ".join(text for text in (_IGNORED_ONLY if draft["removed"] else "", already) if text)
+            or f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
             table=table,
         )
     over = sum(1 for r in rows if (whatif._num(r.get("thinking_share")) or 0.0) > goals.THINKING_PCT)
@@ -682,9 +689,45 @@ def _effort(ctx: Context) -> dict:
             else f"{len(fixes)} effort change{'s' if len(fixes) != 1 else ''} would think less."
         )
         + " Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
-        "check {{page:changes}} after a few sessions.",
+        "check {{page:changes}} after a few sessions."
+        + (f" {already}" if already else ""),
         table=table,
         fixes=fixes,
+    )
+
+
+#: N2: what the effort check says of the main session once its level is set.
+_EFFORT_ALREADY_SET = (
+    "The main session's effort is already {level} for {model}, so there is no setting to change. "
+    "The table counts every reply in the window, including any from before it was set."
+)
+
+
+def _main_effort_already_set(ctx: Context) -> str:
+    """:data:`_EFFORT_ALREADY_SET` when the main session spent at least
+    ``goals.THINKING_PCT`` of its output thinking and its effort is already
+    medium or lower for its model (``goals.main_effort_reading``: why the
+    thinking goal and the effort card drop it), else ``""``. Not while
+    CLAUDE_CODE_EFFORT_LEVEL is set (``ctx.effort_level_env_set``, or the
+    effort card's ``env`` variant): no setting decides the level then."""
+    if ctx.effort_level_env_set:
+        return ""
+    tables = whatif._Tables(ctx.model)
+    main = tables.row("agents", "topology_effort_by_agent_type", goals.TOP)
+    if main is None or (whatif._num(main.get("thinking_share")) or 0.0) < goals.THINKING_PCT:
+        return ""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "effort-mismatch" and rec.variant == "env" for rec in recs):
+        return ""
+    observed = next(
+        (r.get("observed_model") for r in tables.rows("model_swap", "model_swap_by_agent_type") if r.get("agent_type") == goals.TOP),
+        None,
+    )
+    level = goals.main_effort_in_force(ctx.effective, ctx.effective_provenance, observed)
+    if level not in goals.EFFORT_DONE:
+        return ""
+    return _EFFORT_ALREADY_SET.format(
+        level=level, model=goals._canonical_model(goals._main_model_id(observed)) or "its model"
     )
 
 

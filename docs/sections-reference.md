@@ -2622,7 +2622,15 @@ cites the cell it used:
   "N of M (P%)" and the pooled percent. The card offers no settings change
   in user settings or while `CLAUDE_CODE_EFFORT_LEVEL` is set: Opus 5.5 and
   later ignore a user `effortLevel`, so it asks for `/effort medium`. In a
-  project, local or managed file it changes `effortLevel` there.
+  project, local or managed file it changes `effortLevel` there. Outside the
+  variable's case the card closes once the settings already give the main
+  session's model `low` or `medium` (`goals.main_effort_reading`): its own
+  `modelSettings` entry, matched by canonical id, unless a flat `effortLevel`
+  in a higher file wins; a flat level in a project, local or managed file;
+  a flat user level only on Opus 5, Fable 5.1, Fable 5 and earlier models.
+  A session on two models is read for its first one. The card is dropped,
+  not shown as fixed, and Your changes shows the saved setting as a
+  settings change.
 - `spawn-claude-md` is held back when at least as many of an agent type's
   runs said they used CLAUDE.md as said they didn't (a tie holds it back),
   and cites the ones that didn't. With no runs that said, it still fires.

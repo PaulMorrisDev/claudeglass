@@ -49,6 +49,8 @@ def _ctx(tmp_path, model=None, **kw):
         since_ts=kw.get("since_ts"),
         until_ts=kw.get("until_ts"),
         model_env_set=kw.get("model_env_set", False),
+        effort_level_env_set=kw.get("effort_level_env_set", False),
+        **({"effective_provenance": kw["effective_provenance"]} if "effective_provenance" in kw else {}),
     )
 
 
@@ -3111,3 +3113,41 @@ def test_a_plugin_agent_retried_on_a_larger_model_names_its_plugin_not_an_agent_
         " It comes from the superpowers plugin, so there is no agent file of yours to change. "
         "Don't pick haiku for this agent's work."
     )
+
+
+# -- N2: once the main session's effort is set, the check says so --------------
+
+
+def test_the_effort_check_says_the_level_is_already_set_once_effort_medium_is_saved(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    effective = {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective=effective,
+                                   effective_provenance={"effortLevel": "user", "modelSettings": "user"}))
+    assert [f for f in result["fixes"] if f.get("agent") is None] == []
+    assert qa._EFFORT_ALREADY_SET.format(level="medium", model="claude-opus-5-5") in result["summary"]
+    assert "No agent spends more than" not in result["summary"]
+
+
+def test_a_user_level_medium_does_not_count_as_set_on_opus_5_5(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "medium"},
+                                   effective_provenance={"effortLevel": "user"}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    assert "already" not in result["summary"]
+
+
+def test_the_effort_check_never_says_the_level_is_set_while_the_variable_decides(tmp_path):
+    """CLAUDE_CODE_EFFORT_LEVEL beats every setting, so "already medium" would say a setting decides when the
+    variable does, even when no effort card (which fires on light work only) is there to say so."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    effective = {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+    provenance = {"effortLevel": "user", "modelSettings": "user"}
+    plain = qa.run("effort", _ctx(tmp_path, model=model, effective=effective, effective_provenance=provenance))
+    assert "is already medium" in plain["summary"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective=effective, effective_provenance=provenance,
+                                   effort_level_env_set=True))
+    assert "is already medium" not in result["summary"]

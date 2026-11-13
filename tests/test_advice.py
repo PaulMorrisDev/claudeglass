@@ -1272,3 +1272,54 @@ def test_a_compaction_card_names_a_model_whose_own_window_wins():
         "claude-opus-5-5 has its own auto-compact window, which wins for it. "
         "To change a model's own window, run /autocompact with the new size in a session on that model."
     )
+
+
+
+# -- N2: the effort card closes once the main session's model gets medium ------
+
+#: What /effort medium writes on Opus 5.5: its own level beside the old flat one.
+_SAVED_BY_EFFORT = {
+    "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+    "effective_provenance": {"effortLevel": "user", "modelSettings": "user"},
+}
+
+
+def _effort_on(model_cell, snapshot_data):
+    report = _model_swap_report([["top-level", model_cell, None, None]])
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=snapshot_data)
+    return [r for r in advice.finish([_reported_effort_rec()], report, snap, Units()) if r.id == "effort-mismatch"]
+
+
+def _user(effective):
+    return {"effective": effective, "effective_provenance": {key: "user" for key in effective}}
+
+
+@pytest.mark.parametrize(
+    "model_cell, snapshot_data, closed",
+    [
+        ("claude-opus-5-5", _SAVED_BY_EFFORT, True),
+        ("us.anthropic.claude-opus-5-5-v1:0", _SAVED_BY_EFFORT, True),
+        ("claude-opus-5-5 (+1 more)", _SAVED_BY_EFFORT, True),
+        ("claude-opus-5-5", _user({"modelSettings": {"claude-opus-5-5": {"effortLevel": "low"}}}), True),
+        ("claude-opus-5-5", _user({"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}}), False),
+        ("claude-opus-5", _user({"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}), False),
+        # A flat level in user settings: Opus 5.5 ignores it, Opus 5 and earlier read it.
+        ("claude-opus-5-5", _user({"effortLevel": "medium"}), False),
+        ("claude-opus-5", _user({"effortLevel": "medium"}), True),
+        ("claude-sonnet-4-5", _user({"effortLevel": "low"}), True),
+        # A project file's flat level beats a model's own level in your user settings.
+        (
+            "claude-opus-5-5",
+            {
+                "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+                "effective_provenance": {"effortLevel": "project_shared", "modelSettings": "user"},
+            },
+            False,
+        ),
+        ("claude-opus-5-5", {"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_local"}}, True),
+        # CLAUDE_CODE_EFFORT_LEVEL wins over every setting: the card stays and says so.
+        ("claude-opus-5-5", {**_SAVED_BY_EFFORT, "content_layers": {"effort_level_env_set": True}}, False),
+    ],
+)
+def test_the_effort_card_closes_once_the_main_sessions_model_gets_medium_or_lower(model_cell, snapshot_data, closed):
+    assert (_effort_on(model_cell, snapshot_data) == []) is closed

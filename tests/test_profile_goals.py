@@ -910,3 +910,24 @@ def test_the_draft_note_counts_several_refused_names_and_says_nothing_for_a_plug
     rec = NS(title="x", changes=[_change("model", "superpowers:explorer", "sonnet")])
     out = goals.draft("recommendations", _report([rec]), UNITS)
     assert out["candidates"] == [] and out["note"] is None
+
+
+# -- N2: a level already medium or lower is not offered again -----------------
+
+
+@pytest.mark.parametrize("level", ["low", "medium"])
+def test_the_thinking_goal_offers_nothing_for_a_model_already_at_medium_or_lower(level):
+    out = goals.draft(
+        "thinking", _with_observed_model("claude-opus-5-5"), UNITS,
+        effective={"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": level}}},
+        provenance={"effortLevel": "user", "modelSettings": "user"},
+    )
+    assert out["candidates"] == []
+
+
+def test_a_managed_effort_level_gets_no_thinking_candidate():
+    out = goals.draft(
+        "thinking", _with_observed_model("claude-opus-5-5"), UNITS,
+        effective={"effortLevel": "high"}, provenance={"effortLevel": "managed"},
+    )
+    assert out["candidates"] == []

@@ -1535,6 +1535,10 @@ or by the model's existing entry as written. `now` is that model's own level,
 so a top-level `effortLevel` does not count as already in effect. Without a
 recorded model, with a name that has no canonical id (a gateway's own name),
 or while `CLAUDE_CODE_EFFORT_LEVEL` is set, it drafts `effortLevel`.
+It drafts nothing when the settings already give that model `low` or
+`medium`, or a managed file sets its level (`main_effort_reading`, which
+reads `effective_provenance`: `draft(..., provenance=)`, passed by the goal
+route and the CLI).
 While `ANTHROPIC_MODEL` is set, the `models` goal drafts no change to the main
 session's model, as the variable picks it.
 `profile` holds the ticked changes and `whatif` their combined

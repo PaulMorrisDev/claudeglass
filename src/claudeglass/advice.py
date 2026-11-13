@@ -61,6 +61,8 @@ from .snapshots import (
     auto_compact_window,
     auto_compact_window_env_set,
     effective_config,
+    effective_config_in_force,
+    effective_provenance,
     effort_level_env_set,
     env_var_set,
 )
@@ -594,6 +596,9 @@ def _drop_applied(recs: list[Recommendation]) -> list[Recommendation]:
     is dropped."""
     out = []
     for rec in recs:
+        # N2: a card with no setting to change whose ask is already in force.
+        if rec.variant == "applied":
+            continue
         if rec.changes:
             pending = [c for c in rec.changes if not already_set(c.key, c.value, c.current)]
             if not pending:
@@ -873,6 +878,20 @@ def _effort_lever(rec: Recommendation, ctx: _Context, note: str) -> None:
             "CLAUDE_CODE_EFFORT_LEVEL is set, and it wins over /effort and every effort setting. "
             "Set it to medium where you set it, or remove it."
         )
+        rec.changes = []
+        return
+    from .profiles import goals
+
+    snapshot = ctx.snapshot
+    level = goals.main_effort_in_force(
+        effective_config_in_force(snapshot) if snapshot is not None else {},
+        effective_provenance(snapshot) if snapshot is not None else {},
+        ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model"),
+    )
+    if level in goals.EFFORT_DONE:
+        # N2: the main session's model already gets medium or lower, from
+        # whichever file decides it (/effort's own save among them).
+        rec.variant = "applied"
         rec.changes = []
         return
     if scope in ("repo", "project-local", "managed"):

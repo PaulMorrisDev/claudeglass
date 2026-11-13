@@ -237,13 +237,15 @@ Cards and checks:
   Opus 5.5 and later ignore effortLevel in your user settings, so the card
   asks for /effort medium, which Claude Code saves per model. While
   CLAUDE_CODE_EFFORT_LEVEL is set, it says the variable wins. The
-  auto-compact cards name a model whose own window wins.
+  auto-compact cards name a model whose own window wins. The card goes once
+  the main session's model already has low or medium from the file that
+  decides it, and the effort check says the level is already set.
 - **The thinking goal and the Overview effort check set the main session's
   effort for the model it ran on, as /effort does.** A user-level
   effortLevel did nothing on Opus 5.5 and later. The entry goes under the
   model's canonical id, so a dated, [1m], Bedrock or Vertex id gets one
   `apply` accepts, and a model name it cannot read gets the plain effort
-  level.
+  level. It drafts nothing when the level is already medium or lower.
 - **The effort check follows the effort card.** Ignoring the card removes
   the check's main-session change. While CLAUDE_CODE_EFFORT_LEVEL is set
   or a project effort card is open, the check offers no user-level effort

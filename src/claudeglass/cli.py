@@ -2029,6 +2029,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
             claude_root=claude_root,
             projects_roots=tuple(roots),
             model_env_set=snapshots.env_var_set(snapshot, snapshots.MODEL_ENV),
+            effort_level_env_set=snapshots.effort_level_env_set(snapshot),
+            effective_provenance=snapshots.effective_provenance(snapshot) if snapshot is not None else {},
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))

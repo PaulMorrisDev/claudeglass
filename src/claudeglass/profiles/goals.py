@@ -15,6 +15,7 @@ cheapest setup that went about as well as your usual one.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .. import habits, model_gate, model_swap, whatif
@@ -22,7 +23,7 @@ from ..capture_catalogue import TASK_LABELS, task_words
 from ..compaction_sim import CompactionSimThresholds
 from ..fixes import LEVER_LABELS, SETTING_TEXT, already_set
 from ..recommend import _NOT_OVERRIDABLE, _SKIPS_CLAUDE_MD
-from ..snapshots import AUTO_COMPACT_WINDOW_ENV
+from ..snapshots import AUTO_COMPACT_WINDOW_ENV, SETTINGS_LAYER_NAMES
 from ..units import Units
 from . import catalogue
 from .diff import _EFFECTIVE_AGENT_FIELD
@@ -116,6 +117,9 @@ class _Draft:
     model_env_set: bool = False
     #: Agents left out because the agent-name rule refuses their names.
     left_out_names: set = field(default_factory=set)
+    #: N2: each effective key's settings layer (``snapshots.effective_provenance``),
+    #: so the effort level in force can be read (:func:`main_effort_reading`).
+    provenance: dict = field(default_factory=dict)
 
     def now(self, key: str, agent: str | None):
         if agent is None:
@@ -414,13 +418,19 @@ def _thinking(draft: _Draft, tables, *, subagents_only: bool) -> None:
         # a gateway's own, gets the flat effortLevel, as with no model.
         observed = _main_model_id(observed_models.get(agent)) if is_top else None
         model_id = _canonical_model(observed)
-        if model_id and not draft.effort_level_env_set:
-            entry = _model_with_own_effort(draft, model_id) or model_id
-            draft.add(
-                "modelSettings", None, {entry: {"effortLevel": "medium"}}, ticked=False,
-                evidence=evidence + f" It is set for {model_id}, the model this ran on, the way /effort saves it.",
-            )
-            continue
+        if is_top and not draft.effort_level_env_set:
+            level, layer, decided_by = main_effort_reading(draft.effective, draft.provenance, observed)
+            # N2: already medium or lower for this model (what the effort card
+            # asks for), or set where no profile can win (managed settings).
+            if level in EFFORT_DONE or layer == "managed":
+                continue
+            if model_id:
+                entry = _model_with_own_effort(draft, model_id) or model_id
+                draft.add(
+                    "modelSettings", None, {entry: {"effortLevel": "medium"}}, ticked=False,
+                    evidence=evidence + f" It is set for {model_id}, the model this ran on, the way /effort saves it.",
+                )
+                continue
         draft.add(
             "effortLevel" if is_top else "effort",
             None if is_top else agent,
@@ -448,6 +458,69 @@ def _canonical_model(model: str | None) -> str | None:
 
     name = model_family(_strip_cloud_provider(model_family(model)))
     return name if name.startswith("claude-") and _MODEL_ID_RE.match(name) else None
+
+
+#: N2: the effort levels the effort card and the thinking goal count as done.
+EFFORT_DONE = ("low", "medium")
+
+#: model-config docs: a top-level effortLevel in your user settings "keeps
+#: applying ... on Opus 5, Fable 5.1, and earlier models"; Opus 5.5 and
+#: models released after it ignore it there.
+_USER_EFFORT_MODELS = ("claude-opus-5", "claude-fable-5-1", "claude-fable-5")
+_MAJOR_RE = re.compile(r"claude-(?:[a-z]+-)?(\d+)")
+
+
+def _reads_user_effort(model_id: str | None) -> bool:
+    """Whether a top-level effortLevel in user settings applies to the
+    canonical ``model_id``: Opus 5, Fable 5.1, Fable 5 and any model of an
+    earlier major version. ``False`` for any other or an unknown model."""
+    if not model_id:
+        return False
+    if model_id in _USER_EFFORT_MODELS:
+        return True
+    match = _MAJOR_RE.match(model_id)
+    return bool(match) and int(match.group(1)) < 5
+
+
+def main_effort_reading(
+    effective: dict, provenance: dict, observed: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """The effort level the settings give the main session on ``observed``
+    (a model_swap cell or model id), lower case, the layer it comes from and
+    the key that gives it (``"modelSettings"`` or ``"effortLevel"``); all
+    ``None`` when none does and the model starts at its own default. Claude
+    Code's rule (model-config docs): within one file a model's own
+    ``modelSettings`` level beats the file's flat ``effortLevel``; across
+    files the higher file that sets either decides; a flat ``effortLevel``
+    in user settings counts only for :func:`_reads_user_effort` models, and
+    one in a project, local or managed file for every model. The entry is
+    found by canonical id (:func:`_same_model`). ``CLAUDE_CODE_EFFORT_LEVEL``
+    beats all of it; the caller checks that."""
+    model_id = _canonical_model(_main_model_id(observed))
+    flat = effective.get("effortLevel") if isinstance(effective.get("effortLevel"), str) else None
+    own = None
+    entries = effective.get("modelSettings")
+    if model_id and isinstance(entries, dict):
+        own = next(
+            (
+                entry["effortLevel"] for key, entry in entries.items()
+                if isinstance(entry, dict) and isinstance(entry.get("effortLevel"), str) and _same_model(str(key), model_id)
+            ),
+            None,
+        )
+    rank = {name: i for i, name in enumerate(SETTINGS_LAYER_NAMES)}
+    flat_layer = provenance.get("effortLevel") or "user"
+    own_layer = provenance.get("modelSettings") or "user"
+    if own is not None and not (flat is not None and rank.get(flat_layer, 9) < rank.get(own_layer, 9)):
+        return own.strip().lower(), own_layer, "modelSettings"
+    if flat is not None and (flat_layer != "user" or _reads_user_effort(model_id)):
+        return flat.strip().lower(), flat_layer, "effortLevel"
+    return None, None, None
+
+
+def main_effort_in_force(effective: dict, provenance: dict, observed: str | None) -> str | None:
+    """:func:`main_effort_reading`'s level alone."""
+    return main_effort_reading(effective, provenance, observed)[0]
 
 
 def _omit_claude_md(draft: _Draft, tables) -> None:
@@ -809,6 +882,7 @@ def draft(
     effort_level_env_set: bool = False,
     skip_keys: frozenset[str] = frozenset(),
     model_env_set: bool = False,
+    provenance: dict | None = None,
 ) -> dict:
     """The candidate changes for ``goal_id``, each with its what-if row.
     Raises ``KeyError`` for an unknown goal. ``task``: for the ``tasks``
@@ -816,12 +890,13 @@ def draft(
     when it's missing or not in the data). ``effort_level_env_set``:
     PROF-03, see ``_Draft``. ``skip_keys``: the keys of recommendations
     ignored on the dashboard (``ignores.skip_keys``), whose changes are
-    left out. ``model_env_set``: see ``_Draft``."""
+    left out. ``model_env_set``, ``provenance``: see ``_Draft``."""
     goal = next(g for g in GOALS if g.id == goal_id) if goal_id in GOAL_IDS else None
     if goal is None:
         raise KeyError(goal_id)
     tables = whatif._Tables(model)
     d = _Draft(goal, dict(effective or {}), dict(effective_agents or {}), [], effort_level_env_set, model_env_set)
+    d.provenance = dict(provenance or {})
     reading = model_swap.main_setting(model)
     if reading is not None:
         # The main session's model setting as the saving reads it, so a

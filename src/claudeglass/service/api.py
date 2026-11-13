@@ -3394,17 +3394,17 @@ def make_handler(
 
         return claude_md_review.folders_for_slugs(_projects_roots(), project) if project else None
 
-    def _current_settings(project=None) -> tuple[dict, dict, bool, bool]:
+    def _current_settings(project=None) -> tuple[dict, dict, bool, bool, dict]:
         """The latest snapshot's effective settings as in force, every project's agent
         fields, and (PROF-03) whether ``CLAUDE_CODE_EFFORT_LEVEL`` is set
         -- content_layers' own flag, never a value that could be
-        anything else -- and whether ``ANTHROPIC_MODEL`` is set (by name
-        only), or empty/``False`` when no snapshot is recorded
+        anything else -- whether ``ANTHROPIC_MODEL`` is set (by name
+        only), and each key's layer (N2), or empty/``False`` when no snapshot is recorded
         yet. With a ``project`` filter, that project's own settings and
         agents (:func:`_config_snapshot_with_every_project_agents`)."""
         snapshot = _config_snapshot_with_every_project_agents(project)
         if snapshot is None:
-            return {}, {}, False, False
+            return {}, {}, False, False, {}
         agents = snapshot.data.get("effective_agents")
         env_set = snapshots_mod.effort_level_env_set(snapshot)
         model_env_set = snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV)
@@ -3415,6 +3415,7 @@ def make_handler(
             agents if isinstance(agents, dict) else {},
             env_set,
             model_env_set,
+            snapshots_mod.effective_provenance(snapshot),
         )
 
     def route_profile_goals(store, query, body):
@@ -3440,7 +3441,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, effective_agents, effort_level_env_set, model_env_set = _current_settings(project)
+        effective, effective_agents, effort_level_env_set, model_env_set, provenance = _current_settings(project)
         return _ok(
             goals.draft(
                 goal,
@@ -3452,6 +3453,7 @@ def make_handler(
                 task=task,
                 effort_level_env_set=effort_level_env_set,
                 model_env_set=model_env_set,
+                provenance=provenance,
                 skip_keys=_ignored_keys(model, query),
             )
         )
@@ -3509,7 +3511,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, _agents, _env_set, _model_env_set = _current_settings(project)
+        effective, _agents, _env_set, _model_env_set, _provenance = _current_settings(project)
         units = _report_units(model)
         period = _period_text(*window, name=query.get("window"))
         result = whatif.estimate(
@@ -3584,6 +3586,8 @@ def make_handler(
             until_ts=until_dt.timestamp() if until_dt else None,
             projects_roots=tuple(_projects_roots()),
             model_env_set=snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV),
+            effort_level_env_set=snapshots_mod.effort_level_env_set(snapshot),
+            effective_provenance=snapshots_mod.effective_provenance(snapshot) if snapshot is not None else {},
         )
 
     def route_quick_actions(store, query, body):
