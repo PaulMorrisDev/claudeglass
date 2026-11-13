@@ -513,16 +513,33 @@ def test_an_exact_fix_needs_five_units_after_pooled_over_projects(monkeypatch):
     assert reading.after_units == 6 and reading.projects == 1 and reading.verdict == "half_or_more"
 
 
-def test_an_exact_fix_with_no_row_for_its_key_is_too_little_data(monkeypatch):
-    # A lowered window, or no old value: the counterfactual has no row for the key.
+def test_an_exact_fix_with_no_row_for_its_key_is_not_measured(monkeypatch):
+    # A lowered window, or no old value: the counterfactual has no row for the key, on sessions enough to ask.
+    # Waiting does not change that, so it is not "too little data".
     monkeypatch.setattr(counterfactual, "without_change", lambda *a: None)
     prediction = outcomes.Prediction(6.0, 12.0)
     reading = _read(_point("effective.model"), None, "model", prediction, _exact_world())
-    assert reading.verdict == "too_little_data" and reading.measured_usd is None
+    assert reading.verdict == "not_measured" and reading.note == "no exact price for this change"
+    assert reading.measured_usd is None and reading.predicted_usd is None
+    assert (reading.before_units, reading.after_units, reading.projects) == (3, 6, 1)
     row = counterfactual.KeyResult("model", None, "approximate", 10.0, 25.0, "")
     only = counterfactual.Counterfactual(30.0, 45.0, "before", "", 6, [row])
     monkeypatch.setattr(counterfactual, "without_change", lambda *a: only)
-    assert _read(_point("effective.model"), None, "model", prediction, _exact_world()).verdict == "too_little_data"
+    again = _read(_point("effective.model"), None, "model", prediction, _exact_world())
+    assert again.verdict == "not_measured" and again.note == "no exact price for this change"
+
+
+def test_an_exact_agent_fix_in_too_few_sessions_is_still_too_little_data(monkeypatch):
+    # Six runs of the agent, but in two sessions: the counterfactual asks for three, and more may come.
+    monkeypatch.setattr(counterfactual, "without_change", lambda *a: None)
+    runs = [_agent_run(SONNET) for _ in range(3)]
+    sessions = []
+    for n in range(2):
+        spawn = impact._Transcript(cost=1.0, turns=1, model="x")
+        sessions.append(replace(_session(f"a{n}", 0.5 + n * 0.5), spawns=[("gp", spawn)] * 3))
+    bundles = {s.session_id: SimpleNamespace(top=None, subs=list(runs)) for s in sessions}
+    reading = _read(_point("agents.gp.model"), "gp", "model", outcomes.Prediction(6.0, 12.0), (sessions, bundles))
+    assert reading.verdict == "too_little_data" and reading.note == ""
 
 
 def _agent_model_card():

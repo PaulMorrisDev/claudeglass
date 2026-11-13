@@ -75,6 +75,8 @@ START_SENSITIVE = (
 START_FLOOR = 0.45
 #: Why a start-context reading under :data:`START_FLOOR` is not a verdict.
 NOTE_BASIS_TOO_SMALL = "the basis is too small a share of the start to tell from noise"
+#: Why an exact reading has no price once there are units and sessions enough to ask for one.
+NOTE_NO_EXACT_PRICE = "no exact price for this change"
 VERDICTS = ("half_or_more", "under_half", "too_little_data", "not_measured")
 GUARD_STATES = ("holds", "worse", "unclear", "too_little_data")
 METHODS = ("exact", "start_context", "none")
@@ -396,6 +398,7 @@ def _measure(
 
     measured = predicted = 0.0
     before_n = after_n = counted = floored = 0
+    unpriced = False
     if method == "start_context" and agent is not None:
         for before, after in sides:
             start = counterfactual.agent_start_reading(agent, before, after)
@@ -457,8 +460,16 @@ def _measure(
                 # after the change would have cost without it.
                 predicted = saving / basis * row.without_usd
                 before_n, after_n, counted = _units(before, agent, bundles), _units(after, agent, bundles), 1
+            elif len(after) >= impact.MIN_SESSIONS:
+                # Units and sessions enough to ask, and no price: the change itself decides that (a lowered
+                # or unset old value, a mixed change), so more sessions would not give one.
+                unpriced = True
+                before_n, after_n = _units(before, agent, bundles), _units(after, agent, bundles)
 
     reading.before_units, reading.after_units, reading.projects = before_n, after_n, counted
+    if unpriced:
+        reading.projects, reading.note = 1, NOTE_NO_EXACT_PRICE
+        return reading
     if counted == 0 and floored:
         # Every pair that could be read had a basis too small a share of its start: not a verdict.
         reading.note = NOTE_BASIS_TOO_SMALL

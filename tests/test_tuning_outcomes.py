@@ -439,6 +439,42 @@ def test_the_summary_says_what_landed_and_what_it_saved():
         assert len(line.split()) <= 25
 
 
+def test_the_summary_says_when_no_fix_can_be_measured():
+    lines = tuning._outcomes_lines(_block(landed=5, cards=[_row_of(landed=5)]))
+    assert lines[0] == "Fixes that landed: 5. None of them can be measured from your sessions."
+    for line in lines:
+        _plain(line)
+        assert len(line.split()) <= 25
+
+
+def test_the_summary_says_how_many_wait_and_how_many_cannot_be_measured():
+    lines = tuning._outcomes_lines(_block(landed=5, cards=[_row_of(landed=5, too_little_data=2)]))
+    assert lines[0] == "Fixes that landed: 5. None is measured yet: 2 fixes need more sessions, and 3 can't be measured."
+    one = tuning._outcomes_lines(_block(landed=5, cards=[_row_of(landed=5, too_little_data=1)]))
+    assert one[0] == "Fixes that landed: 5. None is measured yet: 1 fix needs more sessions, and 4 can't be measured."
+    # Nothing that cannot be measured: the line as before.
+    waiting = tuning._outcomes_lines(_block(landed=3, cards=[_row_of(landed=3, too_little_data=3)]))
+    assert waiting[0] == "Fixes that landed: 3. None has had enough sessions on both sides to measure yet."
+    for line in lines + one:
+        _plain(line)
+        assert len(line.split()) <= 25
+
+
+def test_the_summary_counts_the_fixes_the_rows_leave_out():
+    row = _row_of(landed=7, measured=4, half_or_more=3, too_little_data=2, guard_holds=4, guard_worse=1)
+    lines = tuning._outcomes_lines(_block(landed=9, cards=[row]))
+    assert lines[1] == "2 more fixes are not broken down in this file, so the counts below leave them out."
+    one = tuning._outcomes_lines(_block(landed=8, cards=[row]))
+    assert one[1] == "1 more fix is not broken down in this file, so the counts below leave it out."
+    assert not any("not broken down" in line for line in tuning._outcomes_lines(_block(landed=7, cards=[row])))
+    # After the short-export line, when there is one.
+    short = tuning._outcomes_lines(_block(landed=9, short_export=1, cards=[row]))
+    assert "landed too soon" in short[1] and "not broken down" in short[2]
+    for line in lines + one + short:
+        _plain(line)
+        assert len(line.split()) <= 25
+
+
 def test_the_summary_says_when_the_fixes_cost_more_and_names_the_fixes_that_landed_too_soon():
     losing = _block(
         landed=2, short_export=1,

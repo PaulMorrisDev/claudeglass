@@ -2926,17 +2926,29 @@ def _outcomes_lines(block: dict) -> list[str]:
         return sum(row.get(key, 0) for row in rows)
 
     measured, half = int(total("measured")), int(total("half_or_more"))
-    line = f"Fixes that landed: {landed:,}. " + (
-        f"Measured so far: {measured:,}, of which {half:,} saved at least half of what the card or profile estimated."
-        if measured
-        else "None has had enough sessions on both sides to measure yet."
-    )
-    lines = [line]
+    waiting = int(total("too_little_data"))
+    # The fixes the rows count that were neither measured nor waiting for sessions: not measurable here.
+    cannot = int(total("landed")) - measured - waiting
+    if measured:
+        tail = f"Measured so far: {measured:,}, of which {half:,} saved at least half of what the card or profile estimated."
+    elif not cannot:
+        tail = "None has had enough sessions on both sides to measure yet."
+    elif not waiting:
+        tail = "None of them can be measured from your sessions."
+    else:
+        tail = f"None is measured yet: {_n(waiting, 'fix needs', 'fixes need')} more sessions, and {cannot:,} can't be measured."
+    lines = [f"Fixes that landed: {landed:,}. {tail}"]
     short = block["short_export"]
     if short:
         lines.append(
             f"{_n(short, 'fix', 'fixes')} landed too soon after this window's start to measure. "
             f"Export more days to read {'it' if short == 1 else 'them'}."
+        )
+    left_out = landed - int(total("landed"))
+    if left_out > 0:
+        lines.append(
+            f"{_n(left_out, 'more fix is', 'more fixes are')} not broken down in this file, "
+            f"so the counts below leave {'it' if left_out == 1 else 'them'} out."
         )
     if measured:
         net, estimated = total("saved_usd") - total("lost_usd"), total("predicted_usd")
