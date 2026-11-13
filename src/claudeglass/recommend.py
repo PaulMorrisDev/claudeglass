@@ -956,6 +956,17 @@ def _rule_subagent_volume(report: ReportModel, th: RecommendThresholds, archetyp
     return out
 
 
+def _summary_loss_evidence(report: ReportModel) -> list[tuple]:
+    """The share of summaries Claude said left out something the work needed,
+    for the two cards that move the compact window. Only the Work habits table
+    that ``capture_checks.lost_check`` lets through has it, so without the table
+    there is nothing to cite."""
+    share = _cell(report, "habits", "habits_summary_losses", "yes", "share_pct")
+    if not isinstance(share, (int, float)):
+        return []
+    return [_evidence("Summaries Claude said lost something the work needed", share, "habits", "habits_summary_losses", "yes")]
+
+
 def _rule_compaction_churn(report: ReportModel, th: RecommendThresholds, snapshot: Snapshot | None) -> list[Recommendation]:
     mean_per_session = _cell(report, "compactions", "compactions_summary", "Compactions per session (mean)", "value")
     dropped_share_row_key = "Dropped tokens (share of new_tokens: input+cache_creation)"
@@ -976,6 +987,7 @@ def _rule_compaction_churn(report: ReportModel, th: RecommendThresholds, snapsho
         evidence.append(
             _evidence("Dropped-token share of new tokens", dropped_share_pct, "compactions", "compactions_summary", dropped_share_row_key)
         )
+    evidence.extend(_summary_loss_evidence(report))
     return [
         Recommendation(
             id="compaction-churn",
@@ -1012,6 +1024,7 @@ def _rule_long_context_share(report: ReportModel, th: RecommendThresholds, snaps
         evidence.append(_evidence("Cache-read volume share from huge-context turns", share_pct, "recache", "recache_huge_context", row_key))
     if fires_on_p90:
         evidence.append(_evidence("Context size 9 in 10 main-session replies stay under", p90_ctx, "scorecard", "dimensions", "context_hygiene"))
+    evidence.extend(_summary_loss_evidence(report))
     return [
         Recommendation(
             id="long-context-share",

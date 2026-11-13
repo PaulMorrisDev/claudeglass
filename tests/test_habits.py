@@ -17,7 +17,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-from claudeglass import capture as capture_mod, capture_catalogue as catalogue, habits, parse
+from claudeglass import capture as capture_mod, capture_catalogue as catalogue, habits, helptext, parse
+from claudeglass.capture_checks import SummaryAnswer
 from claudeglass.habits import AgentFact, CycleFact, Habits, Item, Piece
 from claudeglass.capture_tags import with_older_why
 from claudeglass.model import CaptureTag, Feedback, PlanStats, Recommendation, TranscriptMeta, WorkflowRun
@@ -914,6 +915,36 @@ def test_big_tool_output_is_counted_per_tool_with_what_carrying_it_cost():
         {"tool": "Read", "outputs": 1, "tokens": 30_000, "cost": 2.0},
         {"tool": "Bash", "outputs": 2, "tokens": 45_000, "cost": 0.75},
     ]
+
+
+def _summary_answers(yes: int, yes_evidence: int, no: int, no_evidence: int, unanswered: int = 5) -> list:
+    return (
+        [SummaryAnswer("yes", n < yes_evidence) for n in range(yes)]
+        + [SummaryAnswer("no", n < no_evidence) for n in range(no)]
+        + [SummaryAnswer(None, False)] * unanswered
+    )
+
+
+def test_the_summary_table_appears_only_when_the_lost_check_passes():
+    name = "habits_summary_losses"
+    for answers in (_summary_answers(10, 6, 10, 5), _summary_answers(9, 9, 20, 0), []):
+        section = habits.section_from(Habits(summary_answers=answers))
+        assert name not in [t.name for t in section.tables]
+    section = habits.section_from(Habits(summary_answers=_summary_answers(10, 6, 30, 3)))
+    table = _table(section, name)
+    assert table.title == "What summaries left out"
+    assert [(c.key, c.label) for c in table.columns] == [
+        ("answer", "Claude's answer"),
+        ("answers", "Answers"),
+        ("evidence_pct", "With a file read again or a correction"),
+        ("share_pct", "Share of answers"),
+    ]
+    # The share is out of the answers Claude gave, not the summaries it left unanswered.
+    assert _rows(table) == [
+        {"answer": "yes", "answers": 10, "evidence_pct": 60.0, "share_pct": 25.0},
+        {"answer": "no", "answers": 30, "evidence_pct": 10.0, "share_pct": 75.0},
+    ]
+    assert helptext.placement_for(name) == "advanced"
 
 
 def test_a_failing_command_is_no_longer_a_playbook_habit():

@@ -264,3 +264,27 @@ def test_lost_check_needs_ten_each_half_and_a_twenty_point_margin():
     assert lost_check(answers(10, 5, 10, 0)).passed is True
     assert lost_check([SummaryAnswer(None, True)] * 50) == LostCheck(0, 0, 0, 0, False)
     assert lost_check([]).passed is False
+
+
+def test_habits_collect_gathers_the_answers_of_every_main_session(tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+
+    from claudeglass import habits
+    from claudeglass.pricing import load_pricing
+
+    tag = "[cg: task=bugfix shift=new prior=needed lost={}]"
+    sessions = [
+        _Session("sess-x").typed("start").say("one").boundary().say("two", tag.format("yes")),
+        _Session("sess-y").typed("start").say("one").boundary().say("two", tag.format("no")),
+        _Session("sess-z").typed("start").say("one", tag.format("no")),
+    ]
+    bundles = [
+        NS(top=_parsed(tmp_path, s), subs=[], session_id=s.id, project_dir="p", slug="p", workflows=[])
+        for s in sessions
+    ]
+    pricing = load_pricing(path=Path(__file__).resolve().parent / "fixtures" / "pricing_min.toml")
+    h = habits.collect(NS(sessions=bundles), pricing)
+    assert [a.lost for a in h.summary_answers] == ["yes", "no"]
+    # Two answers are far short of what the check needs, so the dashboard has no table for them.
+    assert "habits_summary_losses" not in [t.name for t in habits.section_from(h).tables]

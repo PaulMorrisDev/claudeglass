@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
+from . import capture_checks
 from . import compaction as compaction_mod
 from . import classify
 from . import events as events_mod
@@ -78,7 +79,17 @@ from .capture_tags import with_older_why
 from .context_files import _parse_ts
 from .discovery import local_day, to_local
 from .handoff import MIN_FEEDBACK_ANSWERS, plan_carried, plan_groups, plan_shape, starting_context
-from .model import PROMPT_FLAGS, Column, EventKind, Feedback, Recommendation, Section, Table, Turn
+from .model import (
+    PROMPT_FLAGS,
+    Column,
+    EventKind,
+    Feedback,
+    Recommendation,
+    Section,
+    Table,
+    Turn,
+    scheduled_main_session,
+)
 from .pricing import Pricing, effective_rates, price_turn
 from .topology import LAUNCH_WORDS, _report_index, agent_key, launch_of, launches_by_tool_use
 
@@ -1023,6 +1034,10 @@ class Habits:
     plan_fixes: list[PlanFix] = field(default_factory=list)
     #: One per main session with a message of yours.
     shapes: list[SessionShape] = field(default_factory=list)
+    #: One per cycle that answers a summary (:class:`~claudeglass.capture_checks
+    #: .SummaryAnswer`), in the main sessions of the window: what
+    #: ``capture_checks.lost_check`` decides on.
+    summary_answers: list = field(default_factory=list)
     #: (session_id, day, project, start-up premium USD) of sessions that
     #: were one small ask; ``reported`` when a size tag said so.
     small_sessions: list = field(default_factory=list)
@@ -1170,6 +1185,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     out.saver_active = out.saver_calls > 0 and out.saver_calls >= known_savers.ADVICE_MIN_SHARE * out.tool_calls
     workflows = getattr(bundle, "workflows", ())
     cycles = capture_mod.prompt_cycles(top, bundle.subs, workflows)
+    if not scheduled_main_session(top):
+        out.summary_answers.extend(capture_checks.summary_answers(top, cycles))
     carry = _CarryCost(turns, rates)
     first_turn = turns[0]
     baseline = starting_context(turns)
@@ -4612,6 +4629,31 @@ def _tool_output_table(h: Habits) -> Table:
     )
 
 
+def _summary_table(h: Habits) -> Table | None:
+    """What Claude said summaries left out, with how often the transcript
+    backs each answer: only once ``capture_checks.lost_check`` has passed,
+    otherwise there is no table. The two window cards that move the
+    compact window cite its ``yes`` row (``recommend``)."""
+    check = capture_checks.lost_check(h.summary_answers)
+    if not check.passed:
+        return None
+    answered = check.yes + check.no
+    return Table(
+        name="habits_summary_losses",
+        title="What summaries left out",
+        columns=[
+            Column(key="answer", label="Claude's answer", kind="str"),
+            Column(key="answers", label="Answers", kind="int"),
+            Column(key="evidence_pct", label="With a file read again or a correction", kind="pct"),
+            Column(key="share_pct", label="Share of answers", kind="pct"),
+        ],
+        rows=[
+            ["yes", check.yes, _pct(check.yes_evidence, check.yes), _pct(check.yes, answered)],
+            ["no", check.no, _pct(check.no_evidence, check.no), _pct(check.no, answered)],
+        ],
+    )
+
+
 def build_section(
     corpus,
     pricing: Pricing | None,
@@ -4655,6 +4697,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             "No feedback yet: rate sessions on {{page:spend/sessions}} or run /cg-feedback to see cost per piece of "
             "work that met its goal."
         )
+    summary = _summary_table(h)
     return Section(
         key="habits",
         title="Work habits",
@@ -4676,6 +4719,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             _outcomes_table(h),
             _by_shape_table(h),
             _self_report_table(h),
+            *([summary] if summary is not None else []),
             _prompt_flags_table(h),
             _skills_table(h),
             _tool_output_table(h),

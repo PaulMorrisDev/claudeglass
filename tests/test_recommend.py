@@ -1065,6 +1065,61 @@ def test_long_context_share_does_not_fire_below_both():
     assert not any(rec.id == "long-context-share" for rec in recs)
 
 
+def test_the_window_cards_cite_the_summary_table_only_when_the_check_passed():
+    summary_losses = Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_summary_losses",
+                title="What summaries left out",
+                columns=[
+                    Column(key="answer", label="Claude's answer"),
+                    Column(key="answers", label="Answers"),
+                    Column(key="evidence_pct", label="With a file read again or a correction", kind="pct"),
+                    Column(key="share_pct", label="Share of answers", kind="pct"),
+                ],
+                rows=[["yes", 12, 66.7, 40.0], ["no", 18, 27.8, 60.0]],
+            )
+        ],
+    )
+    churn = Section(
+        key="compactions",
+        title="Compactions",
+        tables=[_compactions_summary_table({"Compactions per session (mean)": 3.0})],
+    )
+    huge = Section(
+        key="recache",
+        title="Recache",
+        tables=[
+            Table(
+                name="recache_huge_context",
+                title="Huge context",
+                columns=[
+                    Column(key="metric", label="Metric"),
+                    Column(key="count", label="Count"),
+                    Column(key="share_pct", label="Share", kind="pct"),
+                ],
+                rows=[["all", 3, 25.0]],
+            )
+        ],
+    )
+    cited = (
+        "Summaries Claude said lost something the work needed", 40.0, "habits.habits_summary_losses", "yes"
+    )
+    for card, section in (("compaction-churn", churn), ("long-context-share", huge)):
+        plain = recommend_fn(_add_section(_base_report(), section), config=_config(), archetype=None)
+        rec = next(rec for rec in plain if rec.id == card)
+        assert not any(row[2] == "habits.habits_summary_losses" for row in rec.evidence)
+        with_table = recommend_fn(
+            _add_section(_add_section(_base_report(), section), summary_losses), config=_config(), archetype=None
+        )
+        assert cited in next(rec for rec in with_table if rec.id == card).evidence
+    # A card that does not fire stays quiet, table or not.
+    quiet = _add_section(_base_report(), summary_losses)
+    assert not any(rec.id in ("compaction-churn", "long-context-share") for rec in recommend_fn(quiet, config=_config(), archetype=None))
+
+
 # -- baseline-bloat ---------------------------------------------------------
 
 

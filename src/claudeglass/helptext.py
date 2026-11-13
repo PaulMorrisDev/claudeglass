@@ -201,6 +201,7 @@ PLACEMENT: dict[str, str] = {
     "habits_prompt_flags": "advanced",
     "habits_skills": "advanced",
     "habits_tool_output": "advanced",
+    "habits_summary_losses": "advanced",
     "rework_headline": "keep",
     "rework_causes": "keep",
     "rework_admitted": "keep",
@@ -1857,6 +1858,26 @@ TABLE_COPY: dict[str, TableCopy] = {
             "outputs": ("Big outputs", "Replies that got 8,000 tokens or more back from it."),
             "tokens": ("Tokens", "Their size together."),
             "cost": ("Carrying them cost", "What keeping them in context cost."),
+        },
+    ),
+    "habits_summary_losses": TableCopy(
+        title="What summaries left out",
+        help=Help(
+            shows="Whether Claude said a conversation summary left out something the work needed, and how often the "
+            "transcript backs that up.",
+            read="Backed up means the work read or edited a file it had touched before the summary, or you "
+            "corrected it. This table appears only when the yes answers are backed up clearly more often than the "
+            "no answers.",
+            act="",
+        ),
+        columns={
+            "answer": ("Claude's answer", "Yes means Claude said the summary left out something the work needed."),
+            "answers": ("Answers", "Summaries Claude gave this answer to."),
+            "evidence_pct": (
+                "With a file read again or a correction",
+                "Answers where the work read or edited a file it touched before the summary, or you corrected it.",
+            ),
+            "share_pct": ("Share of answers", "Out of all the yes and no answers."),
         },
     ),
     "capture_usage": TableCopy(
