@@ -27,7 +27,7 @@ PROMPT = "Work through these fixes.\n\n## ~/.claude/settings.json\n\nSet the mod
 #: "throws" or "missing"; ``exec`` is true, false or "throws".
 _DOM = r"""
 var scenario = %(scenario)s;
-var log = { exec: [], toasts: [], removed: 0 };
+var log = { exec: [], toasts: [], removed: 0, marks: [] };
 function FakeNode(tag) {
   this.tagName = String(tag).toUpperCase();
   this.children = [];
@@ -52,6 +52,7 @@ FakeNode.prototype.removeChild = function (child) {
   return child;
 };
 FakeNode.prototype.setAttribute = function (key, value) { this.attrs[key] = value; };
+FakeNode.prototype.addEventListener = function (type, fn) { (this.listeners = this.listeners || {})[type] = fn; };
 FakeNode.prototype.closest = function (tag) {
   for (var node = this; node; node = node.parentNode) if (node.tagName === tag.toUpperCase()) return node;
   return null;
@@ -113,6 +114,12 @@ var buttons = [];
 function button(text, opts) { buttons.push(opts); return { opts: opts }; }
 function toast(message, opts) { log.toasts.push({ message: message, tone: opts.tone }); }
 function agentName(agent) { return String(agent); }
+function markCards(mark, keys) { log.marks.push({ mark: mark, keys: keys }); }
+var scopeNow = "30";
+function scopeKey() { return scopeNow; }
+// The copy button's 1.5 s reset would keep Node waiting; a timer of 0 ms is left alone.
+var realSetTimeout = globalThis.setTimeout;
+function setTimeout(fn, ms) { return ms >= 1000 ? 0 : realSetTimeout(fn, ms); }
 """
 
 _FUNCTIONS = [
@@ -120,6 +127,8 @@ _FUNCTIONS = [
     ("core.js", "clear"),
     ("ui.js", "copyToClipboard"),
     ("ui.js", "copyBySelection"),
+    ("ui.js", "codeBlockWithCopy"),
+    ("api.js", "markCardsShown"),
     ("page-actions.js", "bundleLine"),
     ("page-actions.js", "bundleBlock"),
     ("page-actions.js", "showBundlePrompt"),
@@ -135,6 +144,9 @@ def _run(scenario: dict, expression: str) -> dict:
         pytest.skip("Node isn't installed")
     script = _DOM % {"scenario": json.dumps(scenario)}
     script += _declaration_line("page-actions.js", "BUNDLE_COPY_REFUSED") + "\n"
+    script += _declaration_line("ui.js", "COPY_FAILED") + "\n"
+    for name in ("shownSent", "shownWaiting", "shownWatching"):
+        script += _declaration_line("api.js", name) + "\n"
     # A function the page doesn't have yet is left out, so a case about
     # another one fails on what the page does, not on the setup.
     script += "\n".join(
@@ -163,9 +175,11 @@ def _copy(scenario: dict) -> dict:
     )
 
 
-def _press(scenario: dict) -> dict:
+def _press(scenario: dict, keys: list[str] | None = None) -> dict:
     """Press the bundle's Copy prompt and report what the page then holds."""
     data = {"prompt": PROMPT, "files": [{"file": "~/.claude/settings.json", "fixes": 1}], "several": 0, "other": 0}
+    if keys is not None:
+        data["keys"] = keys
     expression = (
         "(function () {"
         " var block = bundleBlock(%s, 'proj');"
@@ -177,7 +191,7 @@ def _press(scenario: dict) -> dict:
         "   role: pre ? pre.attrs.role : null,"
         "   focused: !!pre && document.activeElement === pre,"
         "   selected: !!pre && !!selection.range && selection.range.node === pre,"
-        "   written: log.written, exec: log.exec, label: buttons[0].label }; });"
+        "   written: log.written, exec: log.exec, label: buttons[0].label, marks: log.marks }; });"
         " })()" % json.dumps(data)
     )
     return _run(scenario, expression)
@@ -322,3 +336,94 @@ def test_the_shown_prompt_keeps_no_padding_for_a_copy_button_it_does_not_have() 
     css = _static_text("app.css")
     rule = re.search(r"\.bundle-prompt \.code-block pre \{([^}]*)\}", css)
     assert rule and "padding-right: var(--space-5);" in rule.group(1)
+
+
+# -- a copy of a card's prompt is recorded, a refused one is not --------------
+
+
+def _card_press(scenario: dict, card: str | None) -> list:
+    """Press a card's per-agent Copy button and report the marks it sent."""
+    expression = (
+        "(function () {"
+        " copyPromptButton(%s, 'agent', null, null, null, %s);"
+        " buttons[0].action();"
+        " return new Promise(function (done) { setTimeout(done, 0); }).then(function () { return log.marks; });"
+        " })()" % (json.dumps(PROMPT), json.dumps(card))
+    )
+    return _run(scenario, expression)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "marks"),
+    [
+        ({"clipboard": "resolves", "exec": False}, [{"mark": "copied", "keys": ["spawn-tools-list:x"]}]),
+        ({"clipboard": "rejects", "exec": True}, [{"mark": "copied", "keys": ["spawn-tools-list:x"]}]),
+        ({"clipboard": "rejects", "exec": False}, []),
+        ({"clipboard": "missing", "exec": False}, []),
+    ],
+)
+def test_a_card_copy_that_worked_is_recorded_once_and_a_refused_one_is_not(scenario: dict, marks: list) -> None:
+    assert _card_press(scenario, "spawn-tools-list:x") == marks
+
+
+def test_a_copy_button_that_belongs_to_no_card_records_nothing() -> None:
+    assert _card_press({"clipboard": "resolves", "exec": False}, None) == []
+
+
+def test_a_bundle_copy_that_worked_records_its_cards_and_a_refused_one_records_none() -> None:
+    worked = _press({"clipboard": "resolves", "exec": False}, ["a", "b"])
+    assert worked["marks"] == [{"mark": "bundle", "keys": ["a", "b"]}]
+    refused = _press({"clipboard": "rejects", "exec": False}, ["a", "b"])
+    assert refused["marks"] == []
+    # A bundle that names no card (or one from an older service) sends the empty
+    # list, which markCards drops before it reaches the service.
+    assert _press({"clipboard": "resolves", "exec": False})["marks"] == [{"mark": "bundle", "keys": []}]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "calls", "label"),
+    [
+        ({"clipboard": "resolves", "exec": False}, 1, "Copied"),
+        ({"clipboard": "rejects", "exec": True}, 1, "Copied"),
+        ({"clipboard": "rejects", "exec": False}, 0, "Couldn't copy"),
+    ],
+)
+def test_a_code_block_copy_calls_back_only_when_the_copy_worked(scenario: dict, calls: int, label: str) -> None:
+    """The hook the card copies rely on (R6): ``codeBlockWithCopy`` runs its
+    ``onCopy`` only after a copy that worked."""
+    expression = (
+        "(function () {"
+        " var calls = 0;"
+        " var block = codeBlockWithCopy('text', 'Prompt', 'x', function () { calls += 1; });"
+        " var press = block.children[1];"
+        " press.listeners.click();"
+        " return new Promise(function (done) { setTimeout(done, 0); }).then(function () {"
+        "  return { calls: calls, label: press.textContent }; });"
+        " })()"
+    )
+    assert _run(scenario, expression) == {"calls": calls, "label": label}
+
+
+def test_cards_shown_are_sent_once_per_scope_and_only_while_the_tab_is_visible() -> None:
+    expression = (
+        "(function () {"
+        " var sent = function () { return log.marks.map(function (m) { return m.mark + ':' + m.keys.join(','); }); };"
+        " var fire = null;"
+        " document.addEventListener = function (type, fn) { fire = fn; };"
+        " document.visibilityState = 'hidden';"
+        " markCardsShown(['a', 'b']);"
+        " var hidden = sent();"
+        " document.visibilityState = 'visible';"
+        " fire();"
+        " var back = sent();"
+        " markCardsShown(['a', 'b', 'c']);"  # only c is new
+        " markCardsShown(['a']);"  # nothing new
+        " markCardsShown([]);"  # this scope has been told already
+        " scopeNow = '7';"
+        " markCardsShown([]);"  # a new scope with an empty list says so, once
+        " markCardsShown([]);"
+        " return { hidden: hidden, back: back, all: sent() };"
+        " })()"
+    )
+    got = _run({"clipboard": "missing", "exec": False}, expression)
+    assert got == {"hidden": [], "back": ["shown:a,b"], "all": ["shown:a,b", "shown:c", "shown:"]}

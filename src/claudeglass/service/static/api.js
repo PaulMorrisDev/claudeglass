@@ -461,3 +461,53 @@ export function postJson(url, body) {
     body: JSON.stringify(body),
   });
 }
+
+// What the page did with recommendation cards, kept on this machine
+// (POST /api/recommendations/marks): mark is "shown" (a card's title was
+// drawn), "copied" (a button copied its prompt) or "bundle" (the project's
+// all-fixes prompt, which holds these cards, was copied). Nothing is said
+// on screen: a mark that fails is not worth an error.
+export function markCards(mark, keys) {
+  if (!keys || (!keys.length && mark !== "shown")) return;
+  postJson(withWindow("/api/recommendations/marks"), { mark: mark, keys: keys });
+}
+
+// The keys already sent as shown in this page load, by scope, and the
+// ones drawn while the tab was hidden, to send once it is seen again.
+var shownSent = {};
+var shownWaiting = {};
+var shownWatching = false;
+
+// Cards whose titles the page has just drawn. Each is sent once per scope
+// per page load, and only while the tab is visible: a tab in the
+// background shows nothing. A list with no card left to send still says so
+// once per scope, so the service can check which cards left the list.
+export function markCardsShown(keys) {
+  var scope = scopeKey();
+  var seen = shownSent[scope] || (shownSent[scope] = { keys: {}, sent: false });
+  var fresh = [];
+  (keys || []).forEach(function (key) {
+    if (!seen.keys[key] && fresh.indexOf(key) === -1) fresh.push(key);
+  });
+  if (!fresh.length && ((keys && keys.length) || seen.sent)) return;
+  if (document.visibilityState === "visible") {
+    fresh.forEach(function (key) {
+      seen.keys[key] = true;
+    });
+    seen.sent = true;
+    markCards("shown", fresh);
+    return;
+  }
+  var waiting = shownWaiting[scope] || (shownWaiting[scope] = []);
+  fresh.forEach(function (key) {
+    if (waiting.indexOf(key) === -1) waiting.push(key);
+  });
+  if (shownWatching) return;
+  shownWatching = true;
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState !== "visible") return;
+    var kept = shownWaiting[scopeKey()];
+    shownWaiting = {};
+    if (kept) markCardsShown(kept);
+  });
+}

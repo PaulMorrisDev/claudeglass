@@ -10,7 +10,7 @@
 
 import { clear, el, goTo, state, WINDOW_OPTIONS } from "./core.js";
 import { fraction, money, moneyParts, moneyText, projectName, shortTs, thousands, windowWhen } from "./format.js";
-import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, prefetchActions, withWindow } from "./api.js";
+import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, markCards, markCardsShown, prefetchActions, withWindow } from "./api.js";
 import {
   button,
   copyToClipboard,
@@ -425,11 +425,13 @@ function addSpendTrend(spendTile, rows) {
 
 // about: the action it copies for. The button shows "Copy prompt" and is
 // named "Copy prompt for <action>", as codeBlockWithCopy names its
-// buttons, so several of them read as several different things.
-function copyPromptButton(prompt, about) {
+// buttons, so several of them read as several different things. card: the
+// key of the recommendation whose prompt it is, recorded when the copy worked.
+function copyPromptButton(prompt, about, card) {
   var node = button("Copy prompt", { variant: "quiet", icon: "prompt", class: "action-copy", label: "Copy prompt" + (about ? " for " + about : "") });
   node.addEventListener("click", function () {
     copyToClipboard(prompt).then(function (ok) {
+      if (ok && card) markCards("copied", [card]);
       toast(ok ? "Prompt copied. Paste it into Claude Code." : "Couldn't copy. Open the action and copy the prompt from there.", {
         tone: ok ? "success" : "warning",
       });
@@ -565,7 +567,7 @@ function checklistRow(row) {
   }
   var action = el("div", { class: "check-row-action" });
   var fix = lead && lead.members.length === 1 ? (lead.members[0].fixes || [])[0] : null;
-  if (fix && fix.prompt) action.appendChild(copyPromptButton(fix.prompt, groupTitle(lead)));
+  if (fix && fix.prompt) action.appendChild(copyPromptButton(fix.prompt, groupTitle(lead), lead.members[0].key));
   if (check && check.item && (row.state === "look" || row.state === "fix")) {
     action.appendChild(habitLink(check.item, check.item === REWORK_ITEM ? "See the rework" : "See the habit"));
   }
@@ -623,6 +625,16 @@ function renderChecklist(container, head, rows) {
   } else {
     container.appendChild(el("ul", { class: "check-rows" }, problems.map(checklistRow)));
   }
+  // The cards whose titles the problem rows lead with are the ones this page
+  // showed (a row with a check's own headline shows no card's title).
+  var led = [];
+  problems.forEach(function (row) {
+    if ((row.check && row.check.headline) || !row.groups[0]) return;
+    row.groups[0].members.forEach(function (rec) {
+      led.push(rec.key || rec.id);
+    });
+  });
+  markCardsShown(led);
   if (by.fine.length) container.appendChild(quietRows(by.fine, countWord(by.fine.length, "check found nothing to fix", "checks found nothing to fix")));
   if (by.unknown.length) container.appendChild(quietRows(by.unknown, countWord(by.unknown.length, "check had too little data to answer", "checks had too little data to answer")));
 }
