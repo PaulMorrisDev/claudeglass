@@ -201,6 +201,7 @@ PLACEMENT: dict[str, str] = {
     "habits_prompt_flags": "advanced",
     "habits_skills": "advanced",
     "habits_tool_output": "advanced",
+    "habits_summary_losses": "advanced",
     "rework_headline": "keep",
     "rework_causes": "keep",
     "rework_admitted": "keep",
@@ -1576,6 +1577,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "redo_pct": ("Redone", "Messages whose work was redone, fixed or corrected next."),
             "met_pct": ("Met the goal", "From your feedback."),
             "saving": ("Lower effort would save, about", "Half the thinking on easy work at high effort or above."),
+            "newest_tag": (
+                "Newest tag",
+                "The date of Claude's newest tag in this row, when it is a week or more older than your newest message.",
+            ),
         },
         value_labels={
             f"{level}:{effort}": f"{level.capitalize()} work, {effort_label}"
@@ -1589,6 +1594,8 @@ TABLE_COPY: dict[str, TableCopy] = {
                 ("default", "default effort"),
             )
         },
+        # The date of the newest tag is for the row's detail, not the grid: the grid stays as it was.
+        lead_columns=["setup", "cycles", "avg_cost", "thinking_pct", "redo_pct", "met_pct", "saving"],
     ),
     "habits_setups": TableCopy(
         title="Best setup for each kind of task",
@@ -1851,6 +1858,26 @@ TABLE_COPY: dict[str, TableCopy] = {
             "outputs": ("Big outputs", "Replies that got 8,000 tokens or more back from it."),
             "tokens": ("Tokens", "Their size together."),
             "cost": ("Carrying them cost", "What keeping them in context cost."),
+        },
+    ),
+    "habits_summary_losses": TableCopy(
+        title="What summaries left out",
+        help=Help(
+            shows="Whether Claude said a conversation summary left out something the work needed, and how often the "
+            "transcript backs that up.",
+            read="Backed up means the work read or edited a file it had touched before the summary, or you "
+            "corrected it. This table appears only when the yes answers are backed up clearly more often than the "
+            "no answers.",
+            act="",
+        ),
+        columns={
+            "answer": ("Claude's answer", "Yes means Claude said the summary left out something the work needed."),
+            "answers": ("Answers", "Summaries Claude gave this answer to."),
+            "evidence_pct": (
+                "With a file read again or a correction",
+                "Answers where the work read or edited a file it touched before the summary, or you corrected it.",
+            ),
+            "share_pct": ("Share of answers", "Out of all the yes and no answers."),
         },
     ),
     "capture_usage": TableCopy(
@@ -4704,13 +4731,17 @@ TABLE_COPY: dict[str, TableCopy] = {
             "repriced at every known model, and the saving one tier down.",
             read="Only real cost is measured. The saving is the most you could save at today's usage, and it "
             "appears only when a cheaper tier exists. A subagent's saving counts only the runs its agent file "
-            "decides.",
+            "decides. The main session's leaves out sessions already on Sonnet or smaller, and those from before "
+            "their project moved there.",
             act="A saving above 10% and above $1.00 at list price, on at least 5 runs or 200 replies, becomes "
             "a recommendation.",
         ),
         columns={
             "agent_type": ("", "The main session or the subagent type."),
-            "spawns": ("Runs", "Main session: how many sessions. Subagents: how many times that type started."),
+            "spawns": (
+                "Runs",
+                "Main session: how many sessions had a priced reply. Subagents: how many times that type started.",
+            ),
             "priced_turns": ("Replies", "Model replies counted, including any with an unknown model."),
             "unpriced_turns": (
                 "Replies with an unknown model",
@@ -4731,8 +4762,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "lever": ("Where to change it", "The file and field that set this agent type's model."),
             "lever_runs": (
                 "Runs it decides",
-                "Main session: every session. Subagents: runs started without a model of their own, which follow "
-                "the agent file.",
+                "Main session: its sessions not already on Sonnet or smaller, and not from before their project "
+                "moved there. Subagents: runs started without a model of their own, which follow the agent file.",
             ),
             "lever_priced_turns": ("Replies on those runs", "Model replies on the runs that setting decides."),
             "lever_model": ("Model on those runs", "The model most of those replies used."),
@@ -4744,6 +4775,26 @@ TABLE_COPY: dict[str, TableCopy] = {
             "spawn_model_runs": (
                 "Model named at start",
                 "Runs given a model when they started. That model wins over the agent file.",
+            ),
+            "before_change_runs": (
+                "From before a move to Sonnet",
+                "Main session: sessions that started before their project's model moved to Sonnet or smaller. The "
+                "saving leaves them out.",
+            ),
+            "settled_runs": (
+                "Already on Sonnet",
+                "Main session: sessions that ran on Sonnet or smaller. The main session is never moved below "
+                "Sonnet, so the saving leaves them out.",
+            ),
+            "picked_runs": (
+                "Picked against the setting",
+                "Main session: sessions that ran on a larger model though their project's setting said Sonnet or "
+                "smaller. A settings change can't reach them, so the saving leaves them out.",
+            ),
+            "own_model_runs": (
+                "In a project with its own model",
+                "Main session: sessions of projects that set their own model, in a view of several projects. A "
+                "change to your user settings can't reach them, so the saving leaves them out.",
             ),
         },
         value_labels={
@@ -4781,21 +4832,25 @@ TABLE_COPY: dict[str, TableCopy] = {
         lead_columns=["saving_usd", "saving_pct", "observed_cost_usd", "agent_types"],
     ),
     "model_swap_agent_file_runs": TableCopy(
-        title="Runs each agent file's model decides, on other models",
+        title="Runs each model setting decides, on other models",
         help=Help(
-            shows="Per subagent type, only its runs started without a model of their own, repriced at every "
-            "known model.",
-            read="These are the runs a model line in the agent file would change. A what-if for that line "
-            "prices these runs.",
+            shows="For the main session, the sessions it counts. Per subagent type, its runs started without a "
+            "model of their own. Each is repriced at every known model.",
+            read="These are the runs a model setting would change. A what-if for that setting prices these runs. "
+            "For the main session, only a what-if for Sonnet does.",
             act="",
         ),
         columns={
-            "agent_type": ("", "The subagent type."),
-            "runs": ("Runs", "Runs started without a model of their own."),
+            "agent_type": ("", "The main session or the subagent type."),
+            "runs": (
+                "Runs",
+                "Main session: the sessions it counts. Subagents: runs started without a model of their own.",
+            ),
             "priced_turns": ("Replies", "Model replies on those runs."),
             "observed_model": ("Model used", "The model most of those replies used."),
             "observed_cost": ("Real cost", "Measured cost of those runs, at list price."),
         },
+        value_labels={"top-level": "Main session"},
     ),
     "model_swap_agent_models": TableCopy(
         title="Agents that ran on a larger model than their work needed",

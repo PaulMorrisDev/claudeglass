@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from claudeglass.fixes import SETTING_TEXT
 from claudeglass.profiles import goals
 from claudeglass.units import Units
 
@@ -62,6 +63,30 @@ def test_models_goal_reads_the_cheapest_alternative_per_agent():
     assert explore["evidence"] == "Explore's replies in this window would have cost 80% less on claude-haiku-4-5-20251001."
 
 
+def test_models_goal_never_offers_to_raise_a_main_setting_at_sonnet_or_smaller():
+    model = _report()
+    [table] = model.sections[0].tables
+    table.columns.append(NS(key="best_cheaper_alternative_model"))
+    table.columns.append(NS(key="saving_pct"))
+    table.rows[0] += ["claude-sonnet-4-5", 40.0]
+    table.rows[1] += ["claude-haiku-4-5-20251001", 80.0]
+
+    def main_models(now):
+        out = goals.draft("models", model, UNITS, effective={"model": now})
+        return [c["value"] for c in out["candidates"] if c["key"] == "model" and c["agent"] is None]
+
+    for now in ("haiku", "claude-haiku-4-5-20251001", "sonnet"):
+        assert main_models(now) == [], now
+    assert main_models("opus") == ["sonnet"]
+    # The setting the saving reads wins over the view's own (ReportMeta.main_model_setting).
+    model.meta = NS(main_model_setting={"value": "opus", "scope": "user"})
+    assert main_models("sonnet") == ["sonnet"]
+    out = goals.draft("models", model, UNITS, effective={"model": "sonnet"})
+    assert [c["now"] for c in out["candidates"] if c["key"] == "model" and c["agent"] is None] == ["opus"]
+    model.meta = NS(main_model_setting={"value": "sonnet", "scope": "user"})
+    assert main_models("opus") == []
+
+
 def test_models_goal_evidence_names_the_runs_the_agent_file_decides():
     model = _report()
     [table] = model.sections[0].tables
@@ -75,6 +100,24 @@ def test_models_goal_evidence_names_the_runs_the_agent_file_decides():
         "The replies of Explore's runs started without a model of their own would have cost 80% less on "
         "claude-haiku-4-5-20251001 in this window."
     )
+
+
+def test_the_main_session_evidence_says_how_many_sessions_its_share_is_of():
+    def main_evidence(lever_runs: int) -> str:
+        model = _report()
+        [table] = model.sections[0].tables
+        for key in ("best_cheaper_alternative_model", "saving_pct", "lever_runs", "spawns"):
+            table.columns.append(NS(key=key))
+        table.rows[0] += ["claude-sonnet-4-5", 40.0, lever_runs, 29]
+        table.rows[1] += ["claude-haiku-4-5-20251001", 80.0, 10, 10]
+        out = goals.draft("models", model, UNITS)
+        return next(c for c in out["candidates"] if c["agent"] is None)["evidence"]
+
+    assert main_evidence(24) == (
+        "The replies of 24 of the main session's 29 sessions in this window would have cost 40% less on "
+        "claude-sonnet-4-5."
+    )
+    assert main_evidence(29) == "the main session's replies in this window would have cost 40% less on claude-sonnet-4-5."
 
 
 def _with_plans(observed="claude-opus-5-5", build=100.0, sonnet=60.0):
@@ -378,17 +421,74 @@ def test_an_env_set_effort_level_warns_the_candidate_wont_apply():
     assert (by_key["effortLevel"]["value"], by_key["effortLevel"]["ticked"]) == ("medium", True)
 
 
-def test_a_models_own_effort_override_warns_the_candidate_wont_apply():
+def test_tasks_goal_offers_the_per_model_effort_when_the_model_has_its_own():
+    # PF1 part 3: the flat effortLevel would lose to the model's own entry, so the draft offers that
+    # entry instead of a candidate that "won't apply"; ticked by the same rule as the flat one.
     out = goals.draft(
         "tasks", _with_setups(*_SETUPS), UNITS,
         effective={
             "model": "opus", "effortLevel": "high",
-            "modelSettings": {"claude-sonnet-5": {"effortLevel": "low"}},
+            "modelSettings": {
+                "claude-sonnet-5": {"effortLevel": "low"},
+                "claude-opus-5-5": {"effortLevel": "xhigh"},
+            },
         },
     )
     by_key = {c["key"]: c for c in out["candidates"]}
-    assert "Won't apply to sonnet: it already has its own effort level set; use --effort instead." \
+    assert "effortLevel" not in by_key
+    assert "Won't apply" not in " ".join(c["evidence"] for c in out["candidates"])
+    candidate = by_key["modelSettings"]
+    # the model's key as written in the settings file, and only the model the cheaper setup ran on
+    assert candidate["value"] == {"claude-sonnet-5": {"effortLevel": "medium"}}
+    assert candidate["now"] == {"claude-sonnet-5": {"effortLevel": "low"}}
+    assert candidate["ticked"] is True and candidate["agent"] is None
+    assert candidate["label"] == "Per-model settings"
+    # it carries the flat effort level's trade-off, as the candidate it replaces did
+    assert candidate["tradeoff"] == SETTING_TEXT["effortLevel"][1] != ""
+    assert candidate["evidence"].startswith("For bug fix work, sonnet at medium effort cost")
+    # it is not simulated, and it reaches the profile under its model
+    assert candidate["estimate"]["fidelity"] == "none"
+    assert out["profile"]["settings"]["modelSettings"] == {"claude-sonnet-5": {"effortLevel": "medium"}}
+    assert "effortLevel" not in out["profile"]["settings"]
+    # with too few messages behind the cheaper setup it is offered but not ticked, as the flat one is
+    few = (_SETUPS[0], _SETUPS[1], ("bugfix", "all", "sonnet", "medium", 8, 0.5, 83.0, 1, "cheaper", 75.0))
+    out = goals.draft(
+        "tasks", _with_setups(*few), UNITS,
+        effective={"modelSettings": {"claude-sonnet-5": {"effortLevel": "low"}}},
+    )
+    assert [c["ticked"] for c in out["candidates"] if c["key"] == "modelSettings"] == [False]
+    # a model whose own effort already is the cheaper one has nothing to offer
+    out = goals.draft(
+        "tasks", _with_setups(*_SETUPS), UNITS,
+        effective={"modelSettings": {"claude-sonnet-5": {"effortLevel": "medium"}}},
+    )
+    assert not [c for c in out["candidates"] if c["key"] in ("modelSettings", "effortLevel")]
+    # the environment variable beats every model's entry: that note stays, on the flat key
+    out = goals.draft(
+        "tasks", _with_setups(*_SETUPS), UNITS, effort_level_env_set=True,
+        effective={"modelSettings": {"claude-sonnet-5": {"effortLevel": "low"}}},
+    )
+    by_key = {c["key"]: c for c in out["candidates"]}
+    assert "modelSettings" not in by_key
+    assert "Won't apply to sonnet: CLAUDE_CODE_EFFORT_LEVEL is set for this session; use --effort instead." \
         in by_key["effortLevel"]["evidence"]
+
+
+def test_as_profile_merges_model_settings_candidates_per_model():
+    candidates = [
+        {"key": "modelSettings", "agent": None, "value": {"a": {"effortLevel": "low"}}},
+        {"key": "modelSettings", "agent": None, "value": {"a": {"autoCompactWindow": 300000}, "b": {"effortLevel": "high"}}},
+        {"key": "effortLevel", "agent": None, "value": "medium"},
+        {"key": "effort", "agent": "reviewer", "value": "low"},
+    ]
+    settings, agents = goals._as_profile(candidates)
+    assert settings == {
+        "modelSettings": {"a": {"effortLevel": "low", "autoCompactWindow": 300000}, "b": {"effortLevel": "high"}},
+        "effortLevel": "medium",
+    }
+    assert agents == {"reviewer": {"effort": "low"}}
+    # the candidates themselves are left as they were
+    assert candidates[0]["value"] == {"a": {"effortLevel": "low"}}
 
 
 def test_an_effort_level_candidate_carries_no_warning_when_neither_applies():
@@ -595,3 +695,16 @@ def test_managed_claude_md_is_excluded_and_cited_separately():
 def test_omit_claude_md_not_offered_when_only_managed_claude_md_is_seen():
     out = goals.draft("subagents", _with_agent_reports(1, 3, claude_md=1500, claude_md_managed=1500), UNITS)
     assert not [c for c in out["candidates"] if c["key"] == "omitClaudeMd"]
+
+
+def test_opusplan_is_not_offered_when_no_main_session_is_counted():
+    def candidates(lever_runs):
+        model = _with_plans()
+        table = model.sections[0].tables[0]
+        table.columns += [NS(key="lever_runs"), NS(key="spawns")]
+        table.rows[0] += [lever_runs, 20]
+        table.rows[1] += [10, 10]
+        return goals.draft("models", model, UNITS, effective={"model": "opus"})["candidates"]
+
+    assert all(c["value"] != "opusplan" for c in candidates(0))
+    assert any(c["value"] == "opusplan" for c in candidates(5))

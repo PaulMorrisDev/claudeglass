@@ -7,7 +7,7 @@ headline and the cards under it. A test per defect catches that case. These
 checks catch the next one. Each is a plain function of what the product
 already builds for one project and window (an :class:`Inputs`), and returns
 a list of sentences, one per disagreement; an empty list means the two sides
-agree. ``tests/test_agreement.py`` runs all seven over six synthetic
+agree. ``tests/test_agreement.py`` runs all seven over eight synthetic
 profiles (``agreement_profiles.py``); a runner outside the repo runs the same
 functions over a real corpus.
 
@@ -90,6 +90,8 @@ class Inputs:
     config_dir: Path
     #: The folders (as ``~/.claude/projects`` names them) the report read.
     projects: tuple[str, ...] = ()
+    #: Read in the all-projects view (``load_inputs`` with no project).
+    all_projects: bool = False
     _results: dict = field(default_factory=dict)
 
     @property
@@ -113,13 +115,14 @@ class Inputs:
     def with_skip(self, keys) -> "Inputs":
         """The same report with ``keys`` the ignored cards (not written anywhere)."""
         ctx = dataclasses.replace(self.ctx, skip_keys=frozenset(keys))
-        return Inputs(model=self.model, ctx=ctx, config_dir=self.config_dir, projects=self.projects)
+        return Inputs(model=self.model, ctx=ctx, config_dir=self.config_dir, projects=self.projects,
+                      all_projects=self.all_projects)
 
     def with_recommendations(self, recs) -> "Inputs":
         model = _copy_model(self.model)
         model.recommendations = list(recs)
         return Inputs(model=model, ctx=dataclasses.replace(self.ctx, model=model), config_dir=self.config_dir,
-                      projects=self.projects)
+                      projects=self.projects, all_projects=self.all_projects)
 
 
 def _copy_model(model):
@@ -183,7 +186,7 @@ def load_inputs(
         claude_root=read_claude_root,
         projects_roots=tuple(read_roots),
     )
-    return Inputs(model=model, ctx=ctx, config_dir=config_dir, projects=box["projects"])
+    return Inputs(model=model, ctx=ctx, config_dir=config_dir, projects=box["projects"], all_projects=project is None)
 
 
 def tables_of(model) -> dict[str, list[dict]]:
@@ -695,7 +698,10 @@ def check_same_setting(inp: Inputs) -> list[str]:
     setting for the same agent, they set it to the same value, and a check
     that says nothing needs changing is not set against an open card for one
     of its rules that changes a setting. (b) A card's current value for a
-    setting is the one the Changes page last shows it moved to."""
+    setting is the one the Changes page last shows it moved to: in one
+    project's view, by a change there or for every project; in the
+    all-projects view, a main-session setting by a change for every project
+    only (a project's own files set it there alone) and an agent's by either."""
     problems: list[str] = []
     open_cards = [rec for rec in inp.recs if _open(rec, inp.skip) and rec.changes]
     card_values: dict[tuple, dict[str, str]] = {}
@@ -724,6 +730,9 @@ def check_same_setting(inp: Inputs) -> list[str]:
                         f"{', '.join(c.key for c in rec.changes)}"
                     )
     keys = {key for slug in inp.projects for key in snapshots.snapshot_project_keys(slug)}
+    # In the all-projects view a main-session setting one project's own files changed holds there alone
+    # (``snapshots.with_every_project_agents`` reads your user settings); agent files are merged per
+    # project, so their changes still count.
     points = [p for p in change_points.change_points(inp.config_dir) if not p.project or p.project in keys]
     for rec in open_cards:
         for change in rec.changes:
@@ -732,7 +741,7 @@ def check_same_setting(inp: Inputs) -> list[str]:
                 for p in points
                 for entry in p.changes
                 if entry.get("key") == change.key and (entry.get("agent") or None) == (change.agent or None)
-                and "new" in entry
+                and "new" in entry and not (inp.all_projects and p.project and not entry.get("agent"))
             ]
             if moved:
                 latest = max(moved, key=lambda item: item[0])[1]

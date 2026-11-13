@@ -392,6 +392,166 @@ def test_models_check_is_ok_when_the_ignored_card_was_its_only_change(tmp_path):
     assert result["summary"] == IGNORED_ONLY
 
 
+def _with_session_counts(model, main, other=(10, 10, 0, 0)):
+    """``_full_model`` with the swap table's ``spawns``, ``lever_runs``,
+    ``before_change_runs`` and ``settled_runs`` columns, the main session's
+    row (0) and the other row (1) holding the given counts."""
+    swap = model.sections[0].tables[0]
+    swap.columns += [NS(key="spawns"), NS(key="lever_runs"), NS(key="before_change_runs"), NS(key="settled_runs")]
+    swap.rows[0] += list(main)
+    swap.rows[1] += list(other)
+    return model
+
+
+def _models_cells(result):
+    keys = [c["key"] for c in result["table"]["columns"]]
+    return {row[0]: dict(zip(keys, row)) for row in result["table"]["rows"]}
+
+
+def test_models_check_says_on_how_many_sessions_the_main_saving_is(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_with_session_counts(_full_model(), (29, 24, 0, 5)),
+                                   effective_agents={"Explore": {}}))
+    cells = _models_cells(result)
+    assert cells["Main session"]["saving"] == "40.00 USD on 24 of 29 sessions"
+    assert cells["Explore"]["saving"].endswith("80% less")
+    (tip,) = [t for t in result["tips"] if t["title"] == "Some main sessions aren't counted"]
+    assert tip["text"] == "5 main sessions already ran on Sonnet or smaller. The saving counts the other 24."
+    before = qa.run("models", _ctx(tmp_path, model=_with_session_counts(_full_model(), (29, 7, 22, 0)),
+                                   effective_agents={"Explore": {}}))
+    (tip,) = [t for t in before["tips"] if t["title"] == "Some main sessions aren't counted"]
+    assert tip["text"] == (
+        "22 main sessions started before their project moved to Sonnet or smaller. The saving counts the other 7."
+    )
+
+
+def test_models_check_never_says_none_cheaper_for_a_main_session_it_did_not_count(tmp_path):
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+    _with_session_counts(model, (10, 0, 10, 0))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}}))
+    assert _models_cells(result)["Main session"]["cheaper"] == "none counted"
+    (tip,) = [t for t in result["tips"] if t["title"] == "No main session is counted"]
+    assert tip["text"] == (
+        "10 main sessions started before their project moved to Sonnet or smaller. Nothing is left to price."
+    )
+    counted = _full_model()
+    counted.sections[0].tables[0].rows[0][-3] = None
+    _with_session_counts(counted, (10, 10, 0, 0))
+    result = qa.run("models", _ctx(tmp_path, model=counted, effective_agents={"Explore": {}}))
+    assert _models_cells(result)["Main session"]["cheaper"] == "none cheaper"
+
+
+def test_models_check_offers_no_opusplan_beside_no_main_session_counted(tmp_path):
+    def check(main):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+        _with_session_counts(model, main)
+        model.sections.append(NS(key="plan_handoff", tables=[_table("plan_handoff_summary", [
+            {"scope": "main sessions", "build_usd": 100.0, "build_usd_sonnet": 60.0},
+        ])]))
+        return qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}}))
+
+    none = check((20, 0, 16, 4))
+    assert "opusplan" not in none["summary"]
+    assert all("opusplan" not in fix["title"] for fix in none["fixes"])
+    assert [t["title"] for t in none["tips"] if t["title"] == "No main session is counted"]
+    assert "Main session on opusplan" in check((20, 5, 15, 0))["summary"]
+
+
+def _with_reasons(model, main, other=(10, 10, 0, 0, 0, 0)):
+    """``_full_model`` with the swap table's session counts: ``spawns``,
+    ``lever_runs``, ``before_change_runs``, ``settled_runs``,
+    ``picked_runs`` and ``own_model_runs``, for the main row (0) and the
+    other row (1)."""
+    swap = model.sections[0].tables[0]
+    swap.columns += [NS(key=k) for k in ("spawns", "lever_runs", "before_change_runs", "settled_runs", "picked_runs",
+                                         "own_model_runs")]
+    swap.rows[0] += list(main)
+    swap.rows[1] += list(other)
+    return model
+
+
+def test_models_check_says_what_ran_when_the_setting_already_has_the_cheaper_model(tmp_path):
+    """Above the Sonnet line only (Fable sessions, the setting on Opus). A
+    setting at Sonnet or smaller never meets a priced session (the saving
+    reads the same setting), so nothing says "already says" of it."""
+    def run(main, now, best="claude-opus-4-7"):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[0][-4], swap.rows[0][-3] = "claude-fable-5-1", best
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+        _with_session_counts(model, main, (10, 10, 0, 0))
+        return qa.run("models", _ctx(tmp_path, model=model, effective={"model": now}))
+
+    assert run((29, 24, 0, 5), "opus")["summary"] == (
+        "Your model setting already says opus. 24 main sessions in this window still ran on a larger model."
+    )
+    assert run((2, 1, 0, 1), "opus")["summary"] == (
+        "Your model setting already says opus. 1 main session in this window still ran on a larger model."
+    )
+    for now in ("sonnet", "haiku"):
+        result = run((29, 24, 0, 5), now, best="claude-sonnet-4-5")
+        assert "already says" not in result["summary"], now
+        assert all("Main session" not in fix["title"] for fix in result["fixes"]), now
+
+
+def test_models_check_says_the_picks_and_the_projects_with_their_own_model(tmp_path):
+    def run(main, **ctx):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+        if not main[1]:
+            swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+        _with_reasons(model, main)
+        return qa.run("models", _ctx(tmp_path, model=model, **ctx))
+
+    picks = "{} in this window ran on a larger model though their project's setting said Sonnet or smaller when they started."
+    # Nothing left to price: the check is ok and says what ran.
+    result = run((10, 0, 0, 0, 10, 0))
+    assert (result["status"], result["summary"]) == ("ok", picks.format("10 main sessions"))
+    assert run((1, 0, 0, 0, 1, 0))["summary"] == (
+        "1 main session in this window ran on a larger model though its project's setting said Sonnet or smaller "
+        "when it started."
+    )
+    assert run((5, 0, 0, 0, 0, 5))["summary"] == (
+        "5 main sessions ran in projects that set their own model. Pick one of those projects to see them."
+    )
+    assert run((1, 0, 0, 0, 0, 1))["summary"] == (
+        "1 main session ran in a project that sets its own model. Pick that project to see it."
+    )
+    # Some left to price: the change is offered for those, and the picks are still said.
+    result = run((12, 2, 0, 0, 10, 0))
+    assert result["status"] == "act" and result["summary"].endswith(picks.format("10 main sessions"))
+    assert [fix["title"] for fix in result["fixes"] if "Main session" in fix["title"]]
+    assert "already says" not in result["summary"]
+
+
+def test_models_check_tip_gives_every_reason_and_counts_only_a_priced_saving(tmp_path):
+    def tip(main, saving=40.0):
+        model = _full_model()
+        model.sections[0].tables[0].rows[0][-2] = saving
+        result = qa.run("models", _ctx(tmp_path, model=_with_reasons(model, main), effective_agents={"Explore": {}}))
+        return [t for t in result["tips"] if "main session" in t["title"].lower()]
+
+    (one,) = tip((20, 4, 3, 5, 6, 2))
+    assert one == {"title": "Some main sessions aren't counted", "text": (
+        "5 main sessions already ran on Sonnet or smaller. 3 main sessions started before their project moved to "
+        "Sonnet or smaller. 6 main sessions ran on a larger model under a Sonnet setting. 2 main sessions ran in "
+        "projects that set their own model. The saving counts the other 4.")}
+    (one,) = tip((3, 0, 0, 0, 1, 1))
+    assert one == {"title": "No main session is counted", "text": (
+        "1 main session ran on a larger model under a Sonnet setting. 1 main session ran in a project that sets its "
+        "own model. Nothing is left to price.")}
+    # Sessions counted but no saving (their model has no price to compare): no count of them.
+    (one,) = tip((13, 3, 0, 5, 5, 0), saving=0.0)
+    assert one["text"] == (
+        "5 main sessions already ran on Sonnet or smaller. 5 main sessions ran on a larger model under a Sonnet "
+        "setting.")
+    assert tip((10, 10, 0, 0, 0, 0)) == []
+
+
 def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
     """The ignore holds for the value that was ignored; a different value for
     the same setting is a new finding (``ignores.fingerprint``)."""
@@ -2733,3 +2893,22 @@ def test_a_checks_fix_from_a_card_names_the_card():
     assert fix["card"] == "spawn-tools-list:x" and fix["title"] == "A card"
     # The fix the card holds is copied, not changed.
     assert "card" not in prompt
+
+
+def test_models_check_reads_the_main_setting_the_saving_reads(tmp_path):
+    """In a view of one project the main fix's current value, and where it
+    goes, are the lever's reading (ReportMeta.main_model_setting), not the
+    view's snapshot."""
+    def main_fixes(reading, now):
+        model = _full_model()
+        model.meta = NS(main_model_setting=reading)
+        result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": now}))
+        return [fix for fix in result["fixes"] if fix["title"].startswith("Main session")]
+
+    (fix,) = main_fixes({"value": "opus", "scope": "project-local"}, "sonnet")
+    assert fix["command"].startswith("claudeglass apply --set model=sonnet --scope project-local")
+    assert ["Now and after", "Now: opus. After: sonnet."] in fix["explainer"]
+    (fix,) = main_fixes({"value": "opus", "scope": "user"}, "sonnet")
+    assert "--scope project-local" not in fix["command"]
+    assert main_fixes({"value": "sonnet", "scope": "user"}, "opus") == []
+    assert main_fixes({}, "sonnet") == []

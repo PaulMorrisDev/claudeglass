@@ -1,4 +1,4 @@
-"""The seven synthetic profiles (``agreement_profiles.py``) each produce the
+"""The eight synthetic profiles (``agreement_profiles.py``) each produce the
 cards the agreement checks read.
 
 A check over a profile with no tools card, no info card with a saving and no
@@ -10,13 +10,17 @@ name, instead of letting every check pass over nothing.
 from __future__ import annotations
 
 import re
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 import agreement
 import agreement_profiles as ap
-from claudeglass import change_points, fixes, recommend
+from claudeglass import change_points, corpus, fixes, model_swap, recommend, snapshots
+from claudeglass.model import Recommendation, SettingChange
+from claudeglass.pricing import load_pricing
 
 NAMES = list(ap.SPECS)
 CUSTOM = [name for name in NAMES if ap.SPECS[name].custom_agents]
@@ -31,14 +35,15 @@ def _cards(inp, rec_id):
     return [rec for rec in inp.recs if rec.id == rec_id]
 
 
-def test_there_are_seven_profiles_of_the_kinds_the_plan_names():
-    assert NAMES == ["api", "cli_status", "bare", "old_version", "capture_on", "capture_off", "denied"]
-    api, cli, bare, old, on, off, denied = (ap.SPECS[n] for n in NAMES)
+def test_there_are_eight_profiles_of_the_kinds_the_plan_names():
+    assert NAMES == ["api", "cli_status", "bare", "old_version", "capture_on", "capture_off", "two_projects", "denied"]
+    api, cli, bare, old, on, off, two, denied = (ap.SPECS[n] for n in NAMES)
     assert api.billing == "api" and cli.billing == "subscription"
     assert cli.entrypoint == "cli" and cli.statusline and not api.statusline
     assert not bare.custom_agents and not bare.workflows
     assert old.version == "2.1.300" and not old.request_lines
     assert on.capture and not off.capture
+    assert two.second_project and not two.custom_agents
     assert denied.denies and not any(ap.SPECS[n].denies for n in NAMES if n != "denied")
 
 
@@ -50,9 +55,14 @@ def test_every_profile_has_the_cards_every_check_reads(built, name):
     assert _cards(inp, "hook-block-resent"), name
     # An info card with a saving: it must add nothing to a total (check 3).
     assert [r for r in recs if r.severity == "info" and (r.saving_usd or 0) > 0], name
-    # A main-session model card that changes a setting (check 7).
+    # A main-session model card that changes a setting (check 7). The api
+    # profile's setting said Sonnet when its first Opus sessions ran: they are
+    # picks, and the three left are too few for a card.
     model = _cards(inp, "model-tier-main")
-    assert model and model[0].changes and model[0].changes[0].key == "model", name
+    if name == "api":
+        assert not model and _main_row(inp)["picked_runs"] == 3, name
+    else:
+        assert model and model[0].changes and model[0].changes[0].key == "model", name
     # A standing-rule card, which the bundle puts under a rule, not a file (check 5).
     rules = [
         r for r in recs if r.severity in agreement.COUNTING
@@ -143,6 +153,107 @@ def test_claude_code_before_2_1_308_writes_no_request_shape_lines(built):
         assert transcripts
         has = any("api-request-shape" in path.read_text(encoding="utf-8") for path in transcripts)
         assert has == (name != "old_version"), name
+
+
+# -- the main model's card counts what the setting still decides (R11) -------------
+
+
+def _main_row(inp) -> dict:
+    return next(r for r in agreement.tables_of(inp.model)["model_swap_by_agent_type"] if r["agent_type"] == "top-level")
+
+
+def test_the_two_project_profile_prices_only_the_project_still_on_opus(built):
+    """The first project moved to Sonnet part-way, in its own file, and runs
+    Sonnet from then: its Sonnet sessions are already there, and in the
+    all-projects view its earlier Opus ones are in a project that sets its
+    own model. The all-projects card prices the second project's Opus
+    sessions, as that project's own view does."""
+    profile, inp = built("two_projects")
+    row = _main_row(inp)
+    assert row["lever_runs"] == 6
+    alone = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG_B)
+    (alone_card,) = _cards(alone, "model-tier-main")
+    (card,) = _cards(inp, "model-tier-main")
+    assert card.saving_usd == pytest.approx(alone_card.saving_usd, rel=1e-9)
+    assert (row["spawns"], row["before_change_runs"], row["settled_runs"], row["own_model_runs"]) == (16, 0, 7, 3)
+    assert card.changes[0].current == "opus"
+    assert (
+        "It leaves out 10 main sessions: 7 already on Sonnet or smaller, and 3 in projects that set their own model."
+        in card.why
+    )
+    assert agreement.check_same_setting(inp) == []
+    first = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG)
+    assert not _cards(first, "model-tier-main")
+
+
+def _on_opus(bundle) -> bool:
+    """Whether most of a main session's priced replies ran on Opus."""
+    models = Counter(t.model for t in bundle.top.turns if t.turn_index > 0 and t.model)
+    return models.most_common(1)[0][0] == ap.OPUS
+
+
+def test_a_project_that_moved_its_model_and_back_counts_the_opus_sessions_from_its_move_on(tmp_path):
+    spec = ap.Spec("and_back", custom_agents=False, workflows=False, second_project=True, model_back=True)
+    profile = ap.build(spec, tmp_path / "p")
+    inp = agreement.load_inputs(profile.projects_root, profile.config_dir, None)
+    row = _main_row(inp)
+    # The transcripts alone decide once the setting is above the line (H8):
+    # the first project's run of Sonnet stands, as its return to Opus is two
+    # sessions, so its two Opus sessions before it are from before the move.
+    assert row["lever_runs"] == 8
+    assert (row["spawns"], row["before_change_runs"], row["settled_runs"]) == (16, 2, 6)
+    folders = [profile.projects_root / ap.SLUG, profile.projects_root / ap.SLUG_B]
+    loaded = corpus.load_corpus(folders, since="2000-01-01")
+    first_two = sorted((b for b in loaded.sessions if b.slug == ap.SLUG), key=change_points.session_start)[:2]
+    counted = [b.top for b in loaded.sessions if b.top is not None and _on_opus(b) and b not in first_two]
+    assert len(counted) == 8
+    expected = model_swap.compute_model_swap(counted, load_pricing()).by_key["top-level"].tier_verdict.saving_usd
+    assert row["saving_usd"] == pytest.approx(expected, rel=1e-9)
+    (card,) = _cards(inp, "model-tier-main")
+    assert card.saving_usd == pytest.approx(expected, rel=1e-9)
+    assert agreement.check_same_setting(inp) == []
+    # The first project alone: four Opus sessions (about 184 replies) are under the bar.
+    first = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG)
+    first_row = _main_row(first)
+    assert (first_row["lever_runs"], first_row["before_change_runs"]) == (2, 2)
+    assert not _cards(first, "model-tier-main")
+
+
+def test_the_card_stays_when_the_newest_snapshot_is_the_project_already_on_sonnet(tmp_path):
+    spec = ap.Spec("a_newest", custom_agents=False, workflows=False, second_project=True, a_newest=True)
+    profile = ap.build(spec, tmp_path / "p")
+    inp = agreement.load_inputs(profile.projects_root, profile.config_dir, None)
+    (card,) = _cards(inp, "model-tier-main")
+    assert card.changes[0].current == "opus"
+    alone = agreement.load_inputs(profile.projects_root, profile.config_dir, ap.SLUG_B)
+    (alone_card,) = _cards(alone, "model-tier-main")
+    assert card.saving_usd == pytest.approx(alone_card.saving_usd, rel=1e-9)
+
+
+def test_check_7_in_the_all_projects_view_still_reads_a_projects_own_agent_change(built, monkeypatch):
+    """A project's own change to the main model holds there alone, but agent
+    files are merged per project, so a change to an agent's model still counts."""
+    profile, inp = built("two_projects")
+    real = change_points.change_points
+    own = snapshots.snapshot_project_key(ap.SLUG)
+
+    def point(keys, change):
+        return change_points.ChangePoint(
+            ts=datetime(2026, 11, 2, tzinfo=timezone.utc), source="config", label="Your settings changed", keys=keys,
+            changes=[change], project=own,
+        )
+
+    agent_point = point(["agents.reviewer.model"], {"key": "model", "agent": "reviewer", "old": "haiku", "new": "sonnet"})
+    main_point = point(["effective.model"], {"key": "model", "agent": None, "old": "opus", "new": "haiku"})
+    fake = Recommendation(
+        id="model-tier", title="y", severity="advice", saving_usd=5.0,
+        changes=[SettingChange(target="agent", key="model", agent="reviewer", value="haiku", current="haiku")],
+    )
+    monkeypatch.setattr(agreement.change_points, "change_points", lambda *a, **k: [*real(*a, **k), agent_point])
+    (problem,) = agreement.check_same_setting(inp.with_recommendations([*inp.recs, fake]))
+    assert "reviewer" in problem and "'sonnet'" in problem
+    monkeypatch.setattr(agreement.change_points, "change_points", lambda *a, **k: [*real(*a, **k), main_point])
+    assert agreement.check_same_setting(inp) == []
 
 
 def test_the_denied_profile_has_an_agent_whose_file_withholds_a_tool_its_spawns_called(built):

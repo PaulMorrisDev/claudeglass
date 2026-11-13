@@ -1137,6 +1137,10 @@ class CaptureTag:
     fit: str | None = None
     rules: str | None = None
     prior: str | None = None
+    #: Whether the summary just made left out something the work needed
+    #: (``yes|no``): asked once, in the reply after a summary, and read only
+    #: from the first reply after one (``capture_checks.summary_answers``).
+    lost: str | None = None
     detour: str | None = None
     check: str | None = None
     out: str | None = None
@@ -2140,6 +2144,14 @@ class ReportMeta:
     #: missing, with no store, and always on the dashboard, which reads the
     #: store.
     sessions_left_out: int = 0
+    #: R11: in a view of one project, the main session's ``model`` setting
+    #: its model card, the Models check's fix and the models goal would
+    #: change, read as the main-model lever reads it, as ``{"value": ...,
+    #: "scope": ...}`` (``scope`` a ``fixes.py`` scope: where the change
+    #: goes). Empty in a view of several projects, where the view's own
+    #: setting (your user settings) holds, and with no snapshot. Read it
+    #: with ``model_swap.main_setting``.
+    main_model_setting: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)

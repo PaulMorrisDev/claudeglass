@@ -961,9 +961,9 @@ ones the code enforces, not promises about intent:
   `Users\`, a Git Bash `/c/` path, an `@`, `://` or `www.`. At read, the scan
   also covers the file's own text, and a key repeated in one object is
   refused, so nothing can hide in a value the parser would drop.
-- **A size limit.** The document is 256 KB or less. The fullest one the
-  description allows is about 248 KB, so a valid document always fits, and
-  a real one is about 35 KB.
+- **A size limit.** The document is 320 KB or less. The fullest one the
+  description allows, with every number as wide as it can print, is about
+  306 KB, so a valid document always fits, and a real one is about 35 KB.
 - **Fail closed, at write and at read.** `tuning.build` validates what it
   built and `tuning.dumps` validates again before it returns text, so a
   document that fails produces no file and no JSON on stdout: `tuning

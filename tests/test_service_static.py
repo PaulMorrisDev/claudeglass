@@ -624,6 +624,29 @@ def test_profile_copy_names_a_section_not_a_direction() -> None:
     assert '"Your profiles and the built-in ones"' in _function_source(source, "renderProfiles")
 
 
+def test_profiles_list_and_drawer_follow_the_window_and_project() -> None:
+    """PF1 part 2: the list draws at once, with no window (it needs no report). The suggestion is
+    fetched after it, for the picked window and project, and adds the chip and the reason line; each
+    profile's drawer asks for the picked project; a row's "Set in" cell adds what wins over the change."""
+    source = _app_js()
+    profiles = _function_source(source, "renderProfiles")
+    assert 'loadInto(listContainer, "/api/profiles", ' in profiles and 'withWindow("/api/profiles")' not in profiles
+    assert 'withWindow("/api/profile-suggestion")' in profiles
+    detail = _function_source(source, "renderProfileDetail")
+    squeezed = re.sub(r"\s+", "", detail)
+    assert re.sub(
+        r"\s+", "", 'withWindow("/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value))'
+    ) in squeezed
+    listing = _function_source(source, "renderProfilesList")
+    assert "suggest" not in listing and "Suggested for you" not in listing
+    applied = _function_source(source, "applySuggestion")
+    assert '"Suggested for you: " + suggestion.suggested_reason' in applied
+    assert 'chip("Suggested for you"' in applied
+    assert "the profile your latest baseline matches best" not in source
+    table = _function_source(source, "renderDiffRowsTable")
+    assert 'row.overridden_by ? where + ". " + row.overridden_by : where' in table
+
+
 def test_kind_of_task_reads_by_its_plain_name() -> None:
     """Phase 10 review: the Kind of task picker showed "bugfix" and named
     the profile "bugfix tasks". The draft carries each task's plain name
@@ -927,6 +950,45 @@ def test_a_profile_estimate_scales_by_its_normalised_tasks() -> None:
     app_js = _app_js()
     body = _function_source(app_js, "renderProfileEstimate")
     assert "p.tasks" in body and "p.for" not in body
+
+
+def test_saving_current_settings_names_the_project_agents_it_left_out() -> None:
+    """PF1 part 5: the status line after "Save my current settings as a profile" adds, when the save
+    left project agents out (their file is in one project, not the user's folder), their names."""
+    source = _app_js()
+    profiles = _function_source(source, "renderProfiles")
+    squeezed = re.sub(r"\s+", " ", profiles)
+    assert 'var projectAgents = body.data.skipped_project_agents || [];' in squeezed
+    assert (
+        '(projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "")'
+        in squeezed
+    )
+    # after the managed sentence, so the existing text reads as before
+    assert squeezed.index("your organisation's policy sets them") < squeezed.index("belong to one project")
+
+
+def test_a_per_model_row_names_its_model_and_says_when_its_value_is_not_recorded() -> None:
+    """PF1 part 3: a diff row for one model's setting says whose in its label, and its "Now" says
+    "not recorded" when the snapshot does not keep that value (an unset one would be a guess). The
+    card summary and the estimate name modelSettings as one settings key, "Per-model settings"; the
+    profile form leaves it to the profile it starts from instead of offering a text box for a table."""
+    source = _app_js()
+    table = _function_source(source, "renderDiffRowsTable")
+    assert 'if (row.model) label += " (" + row.model + ")";' in table
+    assert 'if (row.recorded === false) return "not recorded";' in table
+    assert '"Per-model settings"' in _function_source(source, "profileLeverLabels")
+    assert "profileLeverLabels(results[1])" in _function_source(source, "renderProfilesList")
+    assert "profileLeverLabels(results[1])" in _function_source(source, "renderProfileEstimate")
+    # a table of names reads as "model (key: value)", not "[object Object]"
+    assert 'key + " (" + _diffRowValue(inner) + ")"' in _function_source(source, "_diffRowValue")
+    # a value that is not recorded is never "the same" as the proposed one
+    assert "row.recorded === false" in _function_source(source, "diffRowSame")
+    editor = _function_source(source, "buildProfileEditor")
+    assert 'lever.kind !== "map[str,model]"' in editor
+    # what the form carries through is shown, read-only, in one line under the existing label
+    assert 'profileLeverLabels(schema).modelSettings + ": " + _diffRowValue(carriedModelSettings)' in editor
+    assert editor.count("showCarriedModelSettings()") == 3  # the function and its two calls
+    assert "doc.settings.modelSettings = carriedModelSettings" in editor
 
 
 @pytest.mark.parametrize("name", FIRST_PARTY_FILES)
@@ -1381,6 +1443,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
         model=report, units=units, period=period, config_dir=config_dir, effective={}, effective_agents={}
     )
     canned["/api/quick-actions"] = {"period": period, "checks": quick_actions.run_all(ctx)}
+    canned["/api/profile-suggestion"] = {"suggested_profile_id": None, "suggested_reason": None}
     canned["/api/profile-goals"] = {"goals": goals.goals_list()}
     canned["/api/skills"] = skills_review.review(config_dir, report.context_files or {}, units, period, projects=[])
     canned["/api/claude-md"] = {"period": period, "transcripts": 0, "files": []}
@@ -2744,7 +2807,7 @@ def test_the_project_picker_says_what_follows_it_and_what_covers_every_project()
     project. The baseline, the estimates and the hook and statusline rows
     still cover every project, each with its own chip or row group: the
     picker's note names both, never the old "Settings always cover every
-    project". Profiles reads the newest settings from any project, and the
+    project". Profiles follows the pick (its suggestion and its drawer), and the
     note says so."""
     picker = _function_source(_app_js(), "initProjectPicker")
     assert "Your changes, settings and CLAUDE.md files follow the pick too." in picker
@@ -2752,7 +2815,8 @@ def test_the_project_picker_says_what_follows_it_and_what_covers_every_project()
         "The latest baseline, whether your estimates came true, and the hook and statusline checks always cover "
         "every project." in picker
     )
-    assert "Profiles uses your newest settings from any project." in picker
+    assert "Profiles follows the project you pick." in picker
+    assert "Profiles uses your newest settings from any project." not in picker
     assert "Settings and Data quality always cover every project" not in picker
     # Each part named as covering every project says so where it shows.
     setup = _static_text("page-setup.js")
@@ -4094,6 +4158,50 @@ def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one()
     assert "overheadAmount(overhead.capture)" in line and "overheadAmount(overhead.coaching)" in line
     assert 'return billed(amount, "", "about ");' in _function_source(capture_js, "overheadAmount")
     assert "if (overhead.capture && overhead.coaching)" in line
+
+
+def test_capture_page_offers_when_it_ends() -> None:
+    """The choice of what happens at the end sits under the end's select, shows only when an end is set, and
+    posts ``after`` (``capture on --after`` is the same choice)."""
+    controls = _function_source(_static_text("page-capture.js"), "renderCaptureControls")
+    assert 'var afterId = "capture-after";' in controls
+    assert 'el("label", { for: afterId, text: "When it ends" })' in controls
+    assert 'text: "Stop capturing"' in controls and 'text: "Keep a light sample"' in controls
+    assert 'value: "stop"' in controls and 'value: "light"' in controls
+    assert "if (config.until) {" in controls
+    assert "postCapture({ after: value }, container," in controls
+    assert '"Saved: capture stops at the end."' in controls
+    assert '"Saved: a light sample goes on after the end."' in controls
+    assert (
+        "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in "
+        in controls
+    )
+    # The note says the share the hook runs, which the server works out from the chosen sample.
+    assert 'in 1 session in " + Math.round(100 / config.light_share) + "."' in controls
+    assert "in 1 session in 5." not in controls
+    assert (
+        "At the end, capture stops or keeps its light sample, and the banner says so. Your level stays set, "
+        "so picking a new end starts it again." in controls
+    )
+    assert (
+        "When you switch capture on, it ends by itself after \" + config.timebox_days + \" days. Once it's on, "
+        "you can pick another end here, or none, and whether a light sample goes on after it." in controls
+    )
+    # The old wording is gone.
+    assert "At the end, capture stops by itself" not in controls
+
+
+def test_the_capture_page_does_not_say_nothing_is_captured_during_a_light_sample() -> None:
+    """``config.expired`` stays true while a light sample runs; the sentence about an ended capture is for the
+    capture that stopped."""
+    render = _function_source(_static_text("page-capture.js"), "renderCaptureData")
+    assert "if (config.expired && !config.light) now.push(" in render
+    assert "Its end time has passed, so nothing is captured now. " in render
+
+
+def test_the_sidebar_status_names_a_light_sample_instead_of_an_ended_capture() -> None:
+    text = _function_source(_static_text("shell.js"), "captureStatusText")
+    assert text.index('if (block.light) return "Capture: light sample";') < text.index("if (block.expired)")
 
 
 def test_capture_overhead_line_is_worded_as_capture_status_words_it() -> None:

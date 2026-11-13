@@ -10,10 +10,9 @@ this package's suggest() can currently detect on its own; see \
 catalogue.py's module docstring for why suggest() cannot reach this \
 entry deterministically yet). An unattended run's own gaps are exactly \
 the long, human-absent stretches ttl.ttl_by_agent_type's \
-gaps_over_1h/gap_p90_s columns measure, so long-running verification-style \
-agents are pinned to a 1h "experimental.cacheTtl" and \
-subagentPromptCacheTtl defaults the same way for every other spawned \
-type -- the plan's per-subagent-TTL owner note again, but this time the \
+gaps_over_1h/gap_p90_s columns measure, so \
+subagentPromptCacheTtl is set to 1h for every spawned agent type -- the \
+plan's per-subagent-TTL owner note again, but this time the \
 *fallback* itself is 1h because an overnight corpus's typical gap \
 profile is the one case where that default direction is right, not 5m. \
 autoCompactWindow is raised toward the settings allowlist's own maximum \
@@ -29,6 +28,3 @@ for the next day's report to see them.
 subagentPromptCacheTtl = "1h"
 autoCompactWindow = 300000
 cleanupPeriodDays = 30
-
-[agents.verification-runner]
-"experimental.cacheTtl" = "1h"

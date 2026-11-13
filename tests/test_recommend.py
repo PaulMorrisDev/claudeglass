@@ -1065,6 +1065,61 @@ def test_long_context_share_does_not_fire_below_both():
     assert not any(rec.id == "long-context-share" for rec in recs)
 
 
+def test_the_window_cards_cite_the_summary_table_only_when_the_check_passed():
+    summary_losses = Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_summary_losses",
+                title="What summaries left out",
+                columns=[
+                    Column(key="answer", label="Claude's answer"),
+                    Column(key="answers", label="Answers"),
+                    Column(key="evidence_pct", label="With a file read again or a correction", kind="pct"),
+                    Column(key="share_pct", label="Share of answers", kind="pct"),
+                ],
+                rows=[["yes", 12, 66.7, 40.0], ["no", 18, 27.8, 60.0]],
+            )
+        ],
+    )
+    churn = Section(
+        key="compactions",
+        title="Compactions",
+        tables=[_compactions_summary_table({"Compactions per session (mean)": 3.0})],
+    )
+    huge = Section(
+        key="recache",
+        title="Recache",
+        tables=[
+            Table(
+                name="recache_huge_context",
+                title="Huge context",
+                columns=[
+                    Column(key="metric", label="Metric"),
+                    Column(key="count", label="Count"),
+                    Column(key="share_pct", label="Share", kind="pct"),
+                ],
+                rows=[["all", 3, 25.0]],
+            )
+        ],
+    )
+    cited = (
+        "Summaries Claude said lost something the work needed", 40.0, "habits.habits_summary_losses", "yes"
+    )
+    for card, section in (("compaction-churn", churn), ("long-context-share", huge)):
+        plain = recommend_fn(_add_section(_base_report(), section), config=_config(), archetype=None)
+        rec = next(rec for rec in plain if rec.id == card)
+        assert not any(row[2] == "habits.habits_summary_losses" for row in rec.evidence)
+        with_table = recommend_fn(
+            _add_section(_add_section(_base_report(), section), summary_losses), config=_config(), archetype=None
+        )
+        assert cited in next(rec for rec in with_table if rec.id == card).evidence
+    # A card that does not fire stays quiet, table or not.
+    quiet = _add_section(_base_report(), summary_losses)
+    assert not any(rec.id in ("compaction-churn", "long-context-share") for rec in recommend_fn(quiet, config=_config(), archetype=None))
+
+
 # -- baseline-bloat ---------------------------------------------------------
 
 
@@ -3311,6 +3366,74 @@ def test_effort_mismatch_reads_easy_work_at_high_effort_directly():
     # Half the thinking on each easy message.
     assert rec.saving_usd == pytest.approx(5 * 0.3)
     assert rec.title == "High effort is being spent on easy work"
+
+
+def _easy_cycles_on(day: str, n: int, effort: str = "high"):
+    from datetime import datetime, timezone
+
+    from claudeglass.habits import CycleFact
+    from claudeglass.model import CaptureTag
+
+    return [
+        CycleFact(session_id="s", ts=datetime.fromisoformat(day).replace(tzinfo=timezone.utc), week="", cost=1.0,
+                  turns=1, tag=CaptureTag(level="easy"), effort=effort, output_cost=1.0, thinking_cost=0.6)
+        for _ in range(n)
+    ]
+
+
+def test_effort_mismatch_cites_the_newest_tag_when_old():
+    from datetime import datetime, timezone
+
+    from claudeglass import habits
+    from claudeglass.habits import CycleFact, Habits
+
+    def section(newest_message: str):
+        cycles = _easy_cycles_on("2026-10-23", 5) + _easy_cycles_on("2026-10-22", 5, effort="xhigh")
+        cycles.append(CycleFact(session_id="s", ts=datetime.fromisoformat(newest_message).replace(tzinfo=timezone.utc),
+                                week="", cost=1.0, turns=1))
+        return habits.section_from(Habits(cycles=cycles, tz="UTC"))
+
+    table = next(t for t in section("2026-11-08").tables if t.name == "habits_effort_fit")
+    assert table.columns[-1].key == "newest_tag" and table.columns[-1].label == "Newest tag"
+    assert {row[0]: row[-1] for row in table.rows} == {"easy:high": "2026-10-23", "easy:xhigh": "2026-10-22"}
+
+    r = _add_section(_base_report(), section("2026-11-08"))
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    # Once, for the first cited row, however many rows are cited.
+    assert [e for e in rec.evidence if e[0] == "Newest tag behind this"] == [
+        ("Newest tag behind this", "2026-10-23", "habits.habits_effort_fit", "easy:high"),
+    ]
+    assert len(rec.evidence) == 5
+
+    # While the tags are fresh the cells are empty and there is no row.
+    fresh = next(t for t in section("2026-10-25").tables if t.name == "habits_effort_fit")
+    assert {row[-1] for row in fresh.rows} == {""}
+    r = _add_section(_base_report(), section("2026-10-25"))
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    assert not any(e[0] == "Newest tag behind this" for e in rec.evidence)
+
+
+def test_effort_mismatch_names_no_old_date_when_a_cited_row_is_fresh():
+    from datetime import datetime, timezone
+
+    from claudeglass import habits
+    from claudeglass.habits import CycleFact, Habits
+
+    def card(second_row_day: str):
+        cycles = _easy_cycles_on("2026-10-23", 5) + _easy_cycles_on(second_row_day, 5, effort="xhigh")
+        cycles.append(CycleFact(session_id="s", ts=datetime(2026, 11, 8, tzinfo=timezone.utc), week="", cost=1.0, turns=1))
+        r = _add_section(_base_report(), habits.section_from(Habits(cycles=cycles, tz="UTC")))
+        return next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+
+    # Both rows are cited, and half the evidence was tagged the day before the newest message.
+    fresh = card("2026-11-07")
+    assert {e[3] for e in fresh.evidence} == {"easy:high", "easy:xhigh"}
+    assert not any(e[0] == "Newest tag behind this" for e in fresh.evidence)
+    # When every cited row is old the row cites the latest of their dates.
+    old = card("2026-10-25")
+    assert [e for e in old.evidence if e[0] == "Newest tag behind this"] == [
+        ("Newest tag behind this", "2026-10-25", "habits.habits_effort_fit", "easy:xhigh"),
+    ]
 
 
 @pytest.mark.parametrize("cycles", [

@@ -327,6 +327,168 @@ def test_suggested_profile_empty_mode_mix_never_overrides():
 
 
 # --------------------------------------------------------------------
+# suggest_for_model: the live suggestion for the window and project
+# --------------------------------------------------------------------
+
+
+def _suggest_model(
+    modes: dict[str, int],
+    purposes: list[tuple[str, int]] | None = None,
+    tasks: list[str] | None = None,
+    archetype: str | None = None,
+    plan_build: tuple[int, int] | None = None,
+) -> ReportModel:
+    """A report model holding just the five tables ``suggest_for_model`` reads."""
+    sessions_tables = [
+        Table(
+            name="sessions_by_mode",
+            columns=[Column(key="value"), Column(key="sessions", kind="int")],
+            rows=[[mode, count] for mode, count in modes.items()],
+        )
+    ]
+    if purposes is not None:
+        sessions_tables.append(
+            Table(
+                name="sessions_by_purpose",
+                columns=[Column(key="value"), Column(key="sessions", kind="int")],
+                rows=[[purpose, count] for purpose, count in purposes],
+            )
+        )
+    sections = [Section(key="sessions", tables=sessions_tables)]
+    habits_tables = []
+    if tasks is not None:
+        habits_tables.append(
+            Table(
+                name="habits_by_task",
+                columns=[Column(key="task"), Column(key="cycles", kind="int")],
+                rows=[["all", 99], *[[task, 9] for task in tasks]],
+            )
+        )
+    if plan_build is not None:
+        habits_tables.extend(_shape_model(*plan_build).sections[0].tables)
+    if habits_tables:
+        sections.append(Section(key="habits", tables=habits_tables))
+    if archetype is not None:
+        sections.append(
+            Section(
+                key="workstyle",
+                tables=[
+                    Table(
+                        name="workstyle_archetypes",
+                        columns=[Column(key="archetype"), Column(key="sessions", kind="int")],
+                        rows=[[archetype, 9]],
+                    )
+                ],
+            )
+        )
+    return ReportModel(sections=sections)
+
+
+def test_suggest_for_model_gives_the_id_and_a_plain_reason_for_each_branch():
+    # Overnight runs: at least half the sessions.
+    assert baseline.suggest_for_model(_suggest_model({"overnight": 6, "mixed": 4})) == (
+        "overnight-batch",
+        "6 of 10 sessions in this window were overnight runs, where Claude worked alone at night.",
+    )
+    # A structural purpose wins once Claude reported a task: it names its own count.
+    assert baseline.suggest_for_model(
+        _suggest_model(
+            {"mixed": 78},
+            purposes=[("general-dev", 41), ("workflow-run", 19), ("test-triage", 6)],
+            tasks=["ops", "feature"],
+        )
+    ) == ("workflow-ultracode", "19 of 78 sessions in this window ran a workflow script.")
+    assert baseline.suggest_for_model(
+        _suggest_model({"mixed": 20}, purposes=[("agent-fanout", 7)], tasks=["feature"])
+    ) == ("overseer-fanout", "7 of 20 sessions in this window handed work to several agents at once.")
+    assert baseline.suggest_for_model(
+        _suggest_model({"mixed": 12}, purposes=[("local-llm-pipeline", 5)], tasks=["feature"])
+    ) == ("discovery-scrape", "5 of 12 sessions in this window ran a local model pipeline.")
+    # Without tasks the same purpose still decides, and is worded the same way.
+    assert baseline.suggest_for_model(_suggest_model({"mixed": 8}, purposes=[("workflow-run", 3)])) == (
+        "workflow-ultracode",
+        "3 of 8 sessions in this window ran a workflow script.",
+    )
+    # A way of working: plan-then-build counts main sessions from its own table.
+    assert baseline.suggest_for_model(
+        _suggest_model({"mixed": 10}, purposes=[("general-dev", 10)], tasks=["feature"], plan_build=(6, 4))
+    ) == (
+        "plan-then-build",
+        "6 of 10 main sessions in this window approved a plan and built it in the same session.",
+    )
+    # A reported task, in its plain words.
+    assert baseline.suggest_for_model(
+        _suggest_model({"mixed": 9}, purposes=[("general-dev", 9)], tasks=["research", "bugfix"])
+    ) == ("discovery-scrape", "Claude tagged most of the work in this window as research.")
+    assert baseline.suggest_for_model(
+        _suggest_model({"mixed": 9}, purposes=[("general-dev", 9)], tasks=["bugfix"])
+    ) == ("implementation-heavy", "Claude tagged most of the work in this window as bug fix.")
+    # A purpose, in its plain words.
+    assert baseline.suggest_for_model(_suggest_model({"mixed": 8}, purposes=[("general-dev", 8)])) == (
+        "planning-requirements",
+        "Most sessions in this window looked like general coding.",
+    )
+    # Nothing else decides: the archetype.
+    assert baseline.suggest_for_model(_suggest_model({"mixed": 8}, purposes=[], archetype="chat-only")) == (
+        "interactive-chat",
+        "It matches how your sessions in this window were run.",
+    )
+
+
+def test_suggest_for_model_words_every_purpose_it_can_decide_on():
+    from claudeglass.profiles import catalogue
+
+    assert baseline.PURPOSE_WORDS == {
+        "general-dev": "general coding",
+        "refactor": "refactoring",
+        "test-triage": "fixing failing tests",
+        "review": "code review",
+        "planning": "planning",
+        "docs-or-light-edit": "docs and light edits",
+    }
+    for purpose, words in baseline.PURPOSE_WORDS.items():
+        profile_id, reason = baseline.suggest_for_model(_suggest_model({"mixed": 8}, purposes=[(purpose, 8)]))
+        assert profile_id == catalogue.suggest(None, [purpose])
+        assert reason == f"Most sessions in this window looked like {words}."
+
+
+def test_suggest_for_model_agrees_with_the_stored_rule_on_the_id():
+    model = _suggest_model(
+        {"mixed": 9, "overnight": 1},
+        purposes=[("general-dev", 6), ("workflow-run", 3)],
+        tasks=["feature", "chat"],
+        archetype="plan-high-implement-low",
+        plan_build=(2, 8),
+    )
+    stored_id, _ = baseline._suggested_profile(
+        baseline._mode_mix(model),
+        baseline._corpus_archetype(model),
+        baseline._dominant_purposes(model),
+        baseline._dominant_tasks(model),
+        baseline._plan_build(model),
+    )
+    assert baseline.suggest_for_model(model)[0] == stored_id
+
+
+def test_suggest_for_model_is_none_without_sessions():
+    assert baseline.suggest_for_model(_model_with_sections()) is None
+    assert baseline.suggest_for_model(_suggest_model({})) is None
+
+
+def test_suggest_for_model_needs_at_least_the_floor_of_sessions():
+    assert baseline.SUGGEST_MIN_SESSIONS == 5
+    four = _suggest_model({"mixed": 4}, purposes=[("general-dev", 4)])
+    five = _suggest_model({"mixed": 5}, purposes=[("general-dev", 5)])
+    assert baseline.suggest_for_model(four) is None
+    assert baseline.suggest_for_model(five) == (
+        "planning-requirements",
+        "Most sessions in this window looked like general coding.",
+    )
+    # Four overnight sessions out of four is still too few to say anything.
+    assert baseline.suggest_for_model(_suggest_model({"overnight": 4})) is None
+
+
+# --------------------------------------------------------------------
 # _billing_mismatch_warning
 # --------------------------------------------------------------------
 

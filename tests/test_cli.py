@@ -255,6 +255,75 @@ def test_cmd_apply_user_scope_agent_patch_finds_claude_root_agents_file(tmp_path
     assert "model: sonnet" in (agents_dir / "reviewer.md").read_text(encoding="utf-8")
 
 
+def test_cmd_apply_prints_the_no_writer_note_and_exits_0_on_dry_run(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    for name in ("researcher", "reviewer"):
+        (agents_dir / f"{name}.md").write_text(f"---\nname: {name}\ntools: Read, Grep\n---\n\nBody.\n", encoding="utf-8")
+    note = (
+        "No agent in agents is named like implementer, fixer or builder and can edit files. "
+        "The changes for the agent that writes code are left out."
+    )
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--dry-run"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    assert "would be refused" not in captured.err
+    # the note follows the change explanations and comes before the diff
+    assert captured.out.index("Change: effortLevel") < captured.out.index(note) < captured.out.index("+++")
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    written = json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))
+    assert written["effortLevel"] == "medium"
+
+
+def test_cmd_apply_of_a_profile_naming_an_agent_kept_in_a_subfolder_leaves_it_and_exits_0(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    (claude_root / "agents" / "team").mkdir(parents=True)
+    (claude_root / "agents" / "team" / "nested.md").write_text(
+        "---\nname: nested\nmodel: opus\n---\n\nBody.\n", encoding="utf-8"
+    )
+    profile_path = tmp_path / "sample.toml"
+    _write_profile_toml(profile_path, settings={"effortLevel": "low"}, agents={"nested": {"model": "sonnet"}})
+    note = "Left as it is, because the file is in a subfolder or not named after the agent: nested."
+
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--dry-run"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines() and "would be refused" not in captured.err
+
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    assert json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))["effortLevel"] == "low"
+    assert "model: opus" in (claude_root / "agents" / "team" / "nested.md").read_text(encoding="utf-8")
+    assert not (claude_root / "agents" / "nested.md").exists()
+
+
+def test_cmd_apply_of_a_role_profile_patches_the_users_writer_and_prints_no_note(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "implementer.md").write_text(
+        "---\nname: implementer\ntools: Read, Edit\nmodel: opus\n---\n\nBody.\n", encoding="utf-8"
+    )
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert "named like" not in captured.out
+    assert "model: sonnet" in (agents_dir / "implementer.md").read_text(encoding="utf-8")
+
+
 def test_cmd_apply_claude_root_flag_overrides_default(tmp_path):
     explicit_root = tmp_path / "explicit-claude-root"
     config_dir = tmp_path / "claudeglass"
@@ -2264,6 +2333,72 @@ def test_cmd_apply_set_merges_a_skill_override_by_name(tmp_path, capsys):
     }
     assert cli.main(["apply", "--set", "skillOverrides=pdf:sometimes", "--config-dir", str(config_dir),
                      "--claude-root", str(claude_root), "--dry-run"]) == 2
+
+
+def test_set_builds_a_per_model_entry(tmp_path, capsys):
+    profile, err = cli._one_off_profile(
+        [
+            "modelSettings.claude-opus-5-5.effortLevel=medium",
+            "modelSettings.claude-opus-5-5.autoCompactWindow=300000",
+            "modelSettings.claude-sonnet-4-6[1m].autoCompactWindow=auto",
+            "effortLevel=high",
+        ],
+        None,
+    )
+    assert err is None
+    # "auto" stays a string, digits become an int, two keys of one model share its entry, and the
+    # flat setting beside them is untouched
+    assert profile.settings == {
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300000},
+            "claude-sonnet-4-6[1m]": {"autoCompactWindow": "auto"},
+        },
+        "effortLevel": "high",
+    }
+    # what the allowlist rejects is said the usual way
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.effortLevel=max"], None)
+    assert err == "settings.modelSettings.claude-opus-5-5.effortLevel: expected one of low, medium, high, xhigh"
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.autoCompactWindow=99999"], None)
+    assert "autoCompactWindow: expected 'auto' or an int between 100000 and 1000000" in err
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.nonsense=1"], None)
+    assert err == "settings.modelSettings.claude-opus-5-5.nonsense: unknown key"
+    # a name with no key after it, a bare modelSettings, a per-agent use
+    assert cli._one_off_profile(["modelSettings.claude-opus-5-5=medium"], None)[0] is None
+    assert cli._one_off_profile(["modelSettings=medium"], None)[0] is None
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.effortLevel=low"], "reviewer")
+    assert "unknown key" in err
+
+    # end to end, into a settings file that already holds that model's window and another model
+    claude_root = tmp_path / "claude"
+    config_dir = tmp_path / "tl"
+    claude_root.mkdir()
+    settings = claude_root / "settings.json"
+    settings.write_text(
+        json.dumps({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}, "other": {"effortLevel": "low"}}}),
+        encoding="utf-8",
+    )
+    command = [
+        "apply", "--set", "modelSettings.claude-opus-5-5.effortLevel=medium", "--set", "effortLevel=high",
+        "--config-dir", str(config_dir), "--claude-root", str(claude_root),
+    ]
+    assert cli.main([*command, "--dry-run"]) == 0
+    assert "Change: modelSettings" in capsys.readouterr().out
+    assert cli.main([*command, "--yes"]) == 0
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "modelSettings": {
+            "claude-opus-5-5": {"autoCompactWindow": 300000, "effortLevel": "medium"},
+            "other": {"effortLevel": "low"},
+        },
+        "effortLevel": "high",
+    }
+    assert cli.main(["apply", "--set", "modelSettings.claude-opus-5-5.effortLevel=max", "--config-dir",
+                     str(config_dir), "--claude-root", str(claude_root), "--dry-run"]) == 2
+
+
+def test_set_with_a_dot_in_the_model_id_reaches_the_schemas_message_about_the_id():
+    # the key is the last part, so a cloud-provider style id with a dot is read whole
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-4.5.effortLevel=low"], None)
+    assert err == "settings.modelSettings: model id 'claude-opus-4.5' must be letters, digits, '-', '_' or brackets"
 
 
 def test_cmd_apply_set_env_writes_the_settings_env_block(tmp_path, capsys):

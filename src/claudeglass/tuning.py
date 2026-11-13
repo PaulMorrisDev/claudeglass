@@ -33,7 +33,8 @@ cards the dashboard showed) are such blocks, and the keys Phase 8 added
 inside older blocks (``agents.probes``, ``agents.report_turns``,
 ``agents.launches``, ``agents.model_choice``,
 ``prompting.plans.builds`` and ``prompting.plans.asks``) are optional the
-same way. So is ``hint_occasions``, which is there while coaching notes are on.
+same way. So is ``hint_occasions``, which is there while coaching notes are on,
+and ``capture_checks``, which is there when the capture questions and tags left something to count.
 Money keys end in ``_usd`` and hold list-price amounts.
 
 Window: the corpus the caller passes is the window (the callers load it with
@@ -69,6 +70,7 @@ from . import PARSER_VERSION, __version__
 from . import backtest as backtest_mod
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
+from . import capture_checks as capture_checks_mod
 from . import change_points as change_points_mod
 from . import claude_md_review, classify
 from . import compaction as compaction_mod
@@ -104,8 +106,10 @@ from .topology import LAUNCH_WORDS
 KIND = "claudeglass-tuning"
 FORMAT = 1
 #: The most a document may be, serialised (:func:`dumps`) as UTF-8. The
-#: real ones are a few tens of kilobytes.
-MAX_BYTES = 256 * 1024
+#: real ones are a few tens of kilobytes; the fullest one the description
+#: allows, with every count and amount as wide as it can print, is about
+#: 306 KB.
+MAX_BYTES = 320 * 1024
 
 #: No count or amount is anywhere near this; a bigger one is a mistake or
 #: a forgery.
@@ -136,6 +140,9 @@ class TuningError(ValueError):
 #: Who wrote a tag: Claude in its reply, or Haiku (the tagger, or the
 #: fallback for a reply Claude left without one).
 WRITERS = ("claude", *catalogue.JUDGE_WRITERS)
+#: The tag keys ``tags.words`` counts, with their words: every key but ``lost``. Claude may write ``lost`` on any
+#: reply, but only the one that answers a summary is read, and ``capture_checks.lost`` is where it is counted.
+WORD_VOCAB = {key: words for key, words in catalogue.TAG_VOCAB.items() if key != "lost"}
 LEVELS = (*catalogue.LEVELS, catalogue.CUSTOM_LEVEL)
 #: The tips Claude is asked to relay.
 HINTS = tuple(prompting_mod.TIP_HINTS)
@@ -1148,7 +1155,7 @@ _SHIFT_COUNTS = ("cycles", "corrections", "adjustments", "rework")
             "words": Obj(
                 {
                     key: Obj({writer: _count_map(words) for writer in WRITERS})
-                    for key, words in catalogue.TAG_VOCAB.items()
+                    for key, words in WORD_VOCAB.items()
                 }
             ),
             "grounding": Map(Changes(), Count(), limit=_MAX_CHANGES),
@@ -1182,7 +1189,7 @@ def _tags(ctx: _Ctx) -> dict:
     mistakes Claude admitted by kind, who caught them and who wrote the
     tag. ``feedback`` counts your /cg-feedback answers."""
     tagged: Counter = Counter()
-    words: dict[str, dict[str, Counter]] = {key: {w: Counter() for w in WRITERS} for key in catalogue.TAG_VOCAB}
+    words: dict[str, dict[str, Counter]] = {key: {w: Counter() for w in WRITERS} for key in WORD_VOCAB}
     grounding: Counter = Counter()
     for s in ctx.sessions:
         for turn in s.replies:
@@ -1191,7 +1198,7 @@ def _tags(ctx: _Ctx) -> dict:
                 continue
             writer = ctx.writer_of(turn)
             tagged[writer] += 1
-            for key, vocab in catalogue.TAG_VOCAB.items():
+            for key, vocab in WORD_VOCAB.items():
                 for word in _words_of(getattr(cap, key, None)):
                     if word in vocab:
                         words[key][writer][word] += 1
@@ -1231,7 +1238,7 @@ def _tags(ctx: _Ctx) -> dict:
                         answers[key][word] += 1
             from_text.update(key for key in fb.from_text if key in catalogue.FEEDBACK_ANSWER_KEYS)
     by_key = {}
-    for key, vocab in catalogue.TAG_VOCAB.items():
+    for key, vocab in WORD_VOCAB.items():
         by_writer = {writer: _tally(words[key][writer], vocab) for writer in WRITERS}
         by_key[key] = {writer: counted for writer, counted in by_writer.items() if counted}
     return {
@@ -2949,6 +2956,116 @@ def _outcomes_lines(block: dict) -> list[str]:
     return lines
 
 
+# -- capture checks (Q1 part G) ---------------------------------------------------------------
+
+_MOMENT_SIDE = _counts("answers", "evidence")
+_PIECE_SETUP = _counts("pieces", "reworked")
+_CAPTURE_CHECKS = Obj(
+    {
+        "lost": Obj(
+            {"cycles": Count(), "evidence": Count(), "yes": _MOMENT_SIDE, "no": _MOMENT_SIDE},
+            required=("cycles", "evidence", "yes", "no"),
+        ),
+        "breaks": Obj(
+            {
+                "cycles": Count(),
+                "reused": Count(),
+                "prior": Map(catalogue.TAG_VOCAB["prior"], _counts("answers", "reused")),
+            },
+            required=("cycles", "reused"),
+        ),
+        "check": Map(catalogue.TAG_VOCAB["check"], _counts("cycles", "redone")),
+        "level": Map(catalogue.TAG_VOCAB["level"], _counts("pieces", "reworked", "admitted")),
+        "level_effort": Map(catalogue.TAG_VOCAB["level"], Map(capture_checks_mod.EFFORTS, _PIECE_SETUP)),
+        "level_family": Map(catalogue.TAG_VOCAB["level"], Map(capture_checks_mod.FAMILIES, _PIECE_SETUP)),
+    }
+)
+
+
+@_block("capture_checks", _CAPTURE_CHECKS, required=False)
+def _capture_checks(ctx: _Ctx) -> dict | None:
+    """What the questions capture asks at a moment, and what Claude's words
+    were worth, as counts (Q1 part G). ``lost``: the cycles that answer a
+    summary, those with a file read again or a correction (the evidence of
+    ``capture_checks.lost_check``), and the same for each answer Claude gave.
+    ``breaks``: the messages that came back after an hour on 20,000 tokens,
+    those that read or edited a file touched before it, and each ``prior``
+    word given with its own reused count. ``check``: the messages that
+    changed something, by the check Claude said it ran, and how many were
+    redone. ``level``: the pieces of work by the hardest level Claude tagged,
+    with those reworked and those with an admitted mistake; ``level_effort``
+    and ``level_family`` split them by the effort and the model family most
+    of their turns had. Nothing here is a verdict: no group is big enough to
+    build a tip on. Left out when there is nothing to count; an empty map is
+    left out."""
+    h = ctx.habits
+    block: dict = {}
+    answers = h.summary_answers
+    if answers:
+        lost = capture_checks_mod.lost_check(answers)
+        block["lost"] = {
+            "cycles": len(answers),
+            "evidence": sum(answer.evidence for answer in answers),
+            "yes": {"answers": lost.yes, "evidence": lost.yes_evidence},
+            "no": {"answers": lost.no, "evidence": lost.no_evidence},
+        }
+    breaks = _break_answers(ctx)
+    if breaks:
+        by_prior: dict[str, dict[str, int]] = {}
+        for answer in breaks:
+            if answer.prior in catalogue.TAG_VOCAB["prior"]:
+                row = by_prior.setdefault(answer.prior, {"answers": 0, "reused": 0})
+                row["answers"] += 1
+                row["reused"] += int(answer.reused)
+        block["breaks"] = {"cycles": len(breaks), "reused": sum(answer.reused for answer in breaks)}
+        if by_prior:
+            block["breaks"]["prior"] = by_prior
+    levels = catalogue.TAG_VOCAB["level"]
+    parts = {
+        "check": _in_order(capture_checks_mod.redone_by_check(h.cycles), catalogue.TAG_VOCAB["check"]),
+        "level": _in_order(capture_checks_mod.pieces_by_level(h.work_pieces), levels),
+        "level_effort": _in_order(
+            capture_checks_mod.level_by_effort(h.work_pieces, ctx.cycles_by_id),
+            levels,
+            lambda row: _in_order(row, capture_checks_mod.EFFORTS),
+        ),
+        "level_family": _in_order(
+            capture_checks_mod.level_by_family(h.work_pieces, ctx.cycles_by_id),
+            levels,
+            lambda row: _in_order(row, capture_checks_mod.FAMILIES),
+        ),
+    }
+    block.update({name: part for name, part in parts.items() if part})
+    return block or None
+
+
+def _in_order(found: dict, words: tuple[str, ...], inner: Callable[[dict], dict] = lambda row: row) -> dict:
+    """``found`` in the order of ``words``, each row put through ``inner``, so a file reads the same way twice."""
+    return {word: inner(found[word]) for word in words if word in found}
+
+
+def _break_answers(ctx: _Ctx) -> list:
+    """The break answers of every main session that is not a scheduled run."""
+    return [
+        answer
+        for s in ctx.sessions
+        if not scheduled_main_session(s.top)
+        for answer in capture_checks_mod.break_answers(s.top, s.cycles)
+    ]
+
+
+def _capture_checks_lines(block: dict) -> list[str]:
+    lost = block.get("lost") or {}
+    yes, no = lost.get("yes") or {}, lost.get("no") or {}
+    answered = yes.get("answers", 0) + no.get("answers", 0)
+    if not answered:
+        return []
+    return [
+        f"Claude answered the summary question {_n(answered, 'time')}: yes {yes['answers']:,} "
+        f"({yes['evidence']:,} with a file read again or a correction), no {no['answers']:,} ({no['evidence']:,})."
+    ]
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -3036,6 +3153,7 @@ def summary_text(doc) -> str:
         (_hint_occasions_lines, "hint_occasions"),
         (_figures_lines, "figures"),
         (_outcomes_lines, "outcomes"),
+        (_capture_checks_lines, "capture_checks"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])

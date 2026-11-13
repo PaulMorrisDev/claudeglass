@@ -122,7 +122,7 @@ def test_the_sample_document_is_valid_and_holds_every_block():
     assert set(doc) == set(spec.fields) == {*tuning._HEADER, *tuning._BLOCKS}
     assert [name for name in doc if name in tuning._BLOCKS] == list(tuning._BLOCKS)
     assert (doc["kind"], doc["format"]) == (tuning.KIND, tuning.FORMAT) == ("claudeglass-tuning", 1)
-    assert tuning.MAX_BYTES == 256 * 1024
+    assert tuning.MAX_BYTES == 320 * 1024
     # What a person is shown to check is what a machine reads back.
     assert tuning.loads(tuning.dumps(doc)) == doc
 
@@ -196,6 +196,7 @@ def test_the_sample_document_is_valid_and_holds_every_block():
         ("tags.grounding", {"task:chat": 1}, "tags.grounding: has a key that is not in the spec", ""),
         ("tags.settling", {"plan:following>made extra": 1}, "tags.settling: has a key", "extra"),
         ("tags.words", {"mood": {}}, "tags.words: has a key that is not in the spec", "mood"),
+        ("tags.words", {"lost": {"claude": {"yes": 1}}}, "tags.words: has a key that is not in the spec", "lost"),
         ("tags.words", {"task": {"someone": {"feature": 1}}}, "tags.words.task: has a key", "someone"),
         ("tags.words", {"task": {"claude": {"poetry": 1}}}, "tags.words.task.claude: has a key", "poetry"),
         ("tags.words", {"task": {"claude": [1]}}, "tags.words.task.claude: must be an object", ""),
@@ -399,15 +400,20 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
     def weeks(n: int) -> list[str]:
         return [f"{2020 + i // 52}-W{i % 52 + 1:02d}" for i in range(n)]
 
+    def widest(words) -> list[str]:
+        return sorted(words, key=lambda word: (-len(word), word))
+
+    # Every value as wide as the description lets it print: the largest count, a float with all
+    # 17 digits and a three-digit exponent (23 characters), the longest word and the longest keys.
     def fill(node):
         if isinstance(node, tuning.Count):
-            return 123456
+            return tuning._MAX_NUMBER
         if isinstance(node, tuning.Num):
-            return 123456.789012
+            return 1.2345678901234567e-100
         if isinstance(node, tuning.Const):
             return node.expected
         if isinstance(node, tuning.Word):
-            return sorted(node.words)[0]
+            return widest(node.words)[0]
         if isinstance(node, tuning.Pattern):
             return examples[node.regex]
         if isinstance(node, tuning.Obj):
@@ -416,17 +422,20 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
             return [fill(node.item)] * node.limit
         keys = node.keys
         names = (
-            sorted(keys.words)[: node.limit]
+            widest(keys.words)[: node.limit]
             if isinstance(keys, tuning.Closed)
             else weeks(node.limit)
             if isinstance(keys, tuning.Weeks)
-            else changes()[: node.limit]
+            else widest(changes())[: node.limit]
         )
         return {key: fill(node.item) for key in names}
 
     doc = fill(tuning.spec())
     assert tuning.validate(doc) == []
-    assert len(tuning.dumps(doc).encode("utf-8")) < tuning.MAX_BYTES
+    size = len(tuning.dumps(doc).encode("utf-8"))
+    assert size < tuning.MAX_BYTES
+    # SECURITY.md and the comment on MAX_BYTES give this figure as about 306 KB.
+    assert 300 * 1024 < size < 312 * 1024, size
     # Every change grounding can make has a place.
     assert len(changes()) <= tuning._MAX_CHANGES
     assert all(tuning.Changes().accepts(change) for change in changes())
@@ -1166,7 +1175,7 @@ def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert tuning.validate(doc) == []
     assert list(doc) == [
         *tuning._HEADER,
-        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions", "figures"),
+        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions", "figures", "capture_checks"),
     ]
     assert doc["kind"] == "claudeglass-tuning" and doc["format"] == 1
     assert doc["tool_version"] == re.match(r"\d+(?:\.\d+)+", __version__).group(0)
@@ -2225,7 +2234,7 @@ def test_the_compactions_block_is_counts_alone_without_a_rate_card(tmp_path):
 def test_the_built_document_has_a_compactions_block_and_the_model_choice_and_nothing_that_names_anything(tmp_path):
     w = _mini_world(tmp_path)
     doc = tuning.build(w.corpus, w.config, w.pricing, config_dir=w.config_dir, days=DAYS, today=TODAY, claude_root=w.claude_root)
-    assert list(doc)[-1] == "figures" and doc["compactions"]["summaries"] == 3
+    assert list(doc)[-2:] == ["figures", "capture_checks"] and doc["compactions"]["summaries"] == 3
     assert len(doc["agents"]["model_choice"]) == 4 and doc["agents"]["launches"]["foreground"]["agents"] == 3
     assert_privacy_deep(doc)
     text = tuning.dumps(doc)

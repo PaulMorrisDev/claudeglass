@@ -107,15 +107,23 @@ or the generic marker:
 - `modelSettings` (**PROF-03**) → `{model_id: {"effortLevel":
   str|None}}` — per-model effort overrides (`docs/en/settings-reference.md`):
   for each model id the layer names, only its own `effortLevel`, never
-  any other sub-key a future Claude Code version might add per model.
+  any other sub-key (so a model's `autoCompactWindow`, which a profile
+  may set, is not recorded; the profile diff says "not recorded" for it).
   Model ids run through the same `_clip_name` every other name in this
   schema gets. A per-model `effortLevel` here, or `CLAUDE_CODE_EFFORT_LEVEL`
   being set at all (`content_layers.effort_level_env_set` above), both
-  beat the top-level `effortLevel` scalar for that model — so a profile
-  goal drafting an `effortLevel` change checks both and, when either
-  applies, appends "Won't apply to `<model>`: … use `--effort` instead"
-  to the candidate's evidence rather than silently implying the profile
-  alone would move it (`profiles/goals.py`'s `_effort_override_note`).
+  beat the top-level `effortLevel` scalar for that model, and a profile
+  goal drafting an `effortLevel` change checks both. When
+  `CLAUDE_CODE_EFFORT_LEVEL` is set it appends "Won't apply to `<model>`: …
+  use `--effort` instead" to the candidate's evidence rather than silently
+  implying the profile alone would move it (`profiles/goals.py`'s
+  `_effort_override_note`); the variable beats a model's own entry too, so a
+  change to that entry would not take effect either. Otherwise, when the
+  model the cheaper setup ran on has its own `effortLevel` here (matched by
+  its family, so `claude-sonnet-5` is "sonnet"), the `tasks` goal drafts a
+  change to that model's entry — a `modelSettings` candidate, `{<model id as
+  written>: {"effortLevel": …}}` — in place of the flat `effortLevel`, which
+  the entry would beat (`_model_with_own_effort`).
 
 `effective`/`effective_provenance` merge exactly this same key set
 (`SETTINGS_SUMMARY_KEYS`) across the four layers — a value there has

@@ -307,6 +307,7 @@ and what it refuses to do.
 
 ```powershell
 python -m claudeglass apply --set effortLevel=medium --scope user --dry-run
+python -m claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --dry-run
 python -m claudeglass apply interactive-chat --dry-run
 python -m claudeglass apply --revert 20260919T100252Z
 ```
@@ -315,6 +316,7 @@ python -m claudeglass apply --revert 20260919T100252Z
 |---|---|
 | `PROFILE` | A catalogue profile id, or the path to your own profile TOML file |
 | `--set KEY=VALUE` | Change one allowlisted setting instead of applying a profile. Repeatable. Lists are comma-separated (`tools=Read,Grep`); booleans are `true` or `false` |
+| `--set modelSettings.MODEL.KEY=VALUE` | Change one key of one model's own settings: `effortLevel` (`low`, `medium`, `high` or `xhigh`) or `autoCompactWindow` (`auto`, or a number of tokens from 100,000 to 1,000,000). `auto` stays text and digits become a number. Keys of one model share its entry, and its other keys and every other model stay as they are. Without a model or a key it stops, exit 2, with `claudeglass apply: --set 'modelSettings.MODEL=...': expected modelSettings.<model>.<key>=VALUE`, and an unknown key or a value out of range is refused the way any `--set` is |
 | `--agent NAME` | With `--set`: change `.claude/agents/NAME.md` instead of `settings.json` |
 | `--scope {user,project-local,repo}` | Which settings file is written. Default `user`, or `project-local` once `--project-dir` is given |
 | `--project-dir PATH` | The project, for `project-local` or `repo` scope |
@@ -366,6 +368,7 @@ python -m claudeglass capture on --level essentials --for 7d
 | `--until DATE` | Switch it off at this date or time instead |
 | `--no-limit` | Run until you switch it off, instead of the default 14 days |
 | `--sample {100,50,25,10}` | Capture this percentage of sessions, picked at random per session |
+| `--after {stop,light}` | What happens when the end passes: `stop` (the default), or keep a light sample: the kind, difficulty and size of the work, and task changes, in 1 session in 5. See [`capture.md`](capture.md#turning-it-on-off-or-removing-it) |
 | `--yes` | Make the changes without asking. They're still printed |
 | `--dry-run` | Show what would change, without changing it |
 | `--claude-root PATH` | As for `init` |
@@ -431,7 +434,7 @@ python -m claudeglass tuning summary my-figures.json
 | Action or flag | What it does |
 |---|---|
 | `export` | Build the figures from your sessions and your dashboard ratings, and check them. Exit 2, with the problems on stderr and nothing written, if they fail |
-| `summary FILE` | Check the file, then print a few lines for each block. Exit 2 and no figures if it fails the checks, is not JSON or is over 256 KB |
+| `summary FILE` | Check the file, then print a few lines for each block. Exit 2 and no figures if it fails the checks, is not JSON or is over 320 KB |
 | `--out PATH` | With `export`: write the file to `PATH`, whole or not at all. Without it the JSON goes to the terminal |
 | `--days N` | With `export`: the last `N` local days. Default 30, from 1 to 365. `--since`, `--until` and `--limit` are refused |
 | `--project`, `--project-family` | With `export`: narrow the projects. Without either, every project is included |

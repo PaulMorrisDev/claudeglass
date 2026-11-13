@@ -21,11 +21,189 @@ def test_profile_prompt_lists_changed_unmanaged_keys_with_their_files():
     assert 'set experimental.cacheTtl in the frontmatter to "1h"' in text
 
 
+def test_prompt_names_the_model_for_a_per_model_row():
+    from claudeglass.fixes import profile_prompt
+
+    rows = [
+        {
+            "key": "settings.modelSettings.claude-opus-5-5.effortLevel",
+            "current_value": "high",
+            "proposed_value": "medium",
+        },
+        {
+            "key": "settings.modelSettings.claude-sonnet-4-6[1m].autoCompactWindow",
+            "current_value": None,
+            "proposed_value": 300000,
+        },
+        {
+            "key": "settings.modelSettings.claude-haiku-4-5.effortLevel",
+            "current_value": "low",
+            "proposed_value": "low",
+        },
+    ]
+    text = profile_prompt("Lean", rows, "user")
+    assert (
+        '- In ~/.claude/settings.json, set effortLevel for the model claude-opus-5-5 (under "modelSettings") '
+        'to "medium" (now: high).'
+    ) in text
+    assert (
+        '- In ~/.claude/settings.json, set autoCompactWindow for the model claude-sonnet-4-6[1m] '
+        '(under "modelSettings") to 300000 (now: not set).'
+    ) in text
+    # an unchanged row is left out, as for any key
+    assert "claude-haiku-4-5" not in text
+    # the same rows at a project scope name that scope's file
+    assert "In .claude/settings.local.json, set effortLevel for the model claude-opus-5-5" in profile_prompt(
+        "Lean", rows, "project-local"
+    )
+
+
+def test_prompt_says_not_recorded_for_a_value_the_snapshot_does_not_keep():
+    from claudeglass.fixes import profile_prompt
+
+    rows = [
+        {
+            "key": "settings.modelSettings.claude-opus-5-5.autoCompactWindow",
+            "current_value": None,
+            "proposed_value": 400000,
+            "recorded": False,
+        },
+        {
+            "key": "settings.modelSettings.claude-opus-5-5.effortLevel",
+            "current_value": None,
+            "proposed_value": "low",
+            "recorded": True,
+        },
+    ]
+    text = profile_prompt("Lean", rows, "user")
+    assert 'to 400000 (now: not recorded).' in text
+    assert '"low" (now: not set).' in text
+
+
+def test_the_flat_effort_level_says_claude_code_keeps_no_max_in_settings():
+    from claudeglass.fixes import LEVER_LABELS, SETTING_TEXT
+
+    sentence = "Claude Code doesn't keep max in settings; use /effort max for a session."
+    assert SETTING_TEXT["effortLevel"][1].endswith(sentence)
+    # the old text is still there, ahead of it
+    assert SETTING_TEXT["effortLevel"][1].startswith("Lower effort can miss things on hard problems.")
+    # the per-model keys read as their flat keys do, and are labelled for one model
+    assert LEVER_LABELS["modelSettings.effortLevel"] == "Effort level for one model"
+    assert LEVER_LABELS["modelSettings.autoCompactWindow"] == "Summarise the conversation at (tokens), for one model"
+    assert LEVER_LABELS["modelSettings"] == "Per-model settings"
+    effort = SETTING_TEXT["modelSettings.effortLevel"]
+    assert effort[0] == (
+        "How hard Claude thinks, for this model only. It replaces the effort level in the same settings file."
+    )
+    assert effort[1] == SETTING_TEXT["effortLevel"][1]
+    window = SETTING_TEXT["modelSettings.autoCompactWindow"]
+    assert window[0] == (
+        "When Claude Code summarises the conversation, for this model only. "
+        "It replaces the window in the same settings file."
+    )
+    assert window[1] == SETTING_TEXT["autoCompactWindow"][1]
+    assert SETTING_TEXT["modelSettings"][0]
+
+
 def test_profile_prompt_says_so_when_nothing_changes():
     from claudeglass.fixes import profile_prompt
 
     text = profile_prompt("Same", [{"key": "settings.model", "current_value": "x", "proposed_value": "x"}], "user")
     assert "nothing to change" in text
+
+
+def test_profile_overridden_by_says_the_effort_variable_wins_over_a_models_own_effort_row_too():
+    from claudeglass.fixes import profile_overridden_by
+
+    sentence = "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+    row = "settings.modelSettings.claude-opus-5-5.effortLevel"
+    assert profile_overridden_by(row, "user", {}, (), True, None, True) == sentence
+    assert profile_overridden_by(row, "user", {}, (), True, None, False) == sentence
+    assert profile_overridden_by(row, "user", {}, (), False, None, True) is None
+    # only an effort row: the window is not an effort setting
+    window = "settings.modelSettings.claude-opus-5-5.autoCompactWindow"
+    assert profile_overridden_by(window, "user", {}, (), True, None, True) is None
+
+
+def test_profile_overridden_by_names_each_case():
+    from claudeglass.fixes import profile_overridden_by
+
+    def by(row_key, scope="user", provenance=None, env_names=(), effort_env_set=False, model_settings=None,
+           project_picked=True):
+        return profile_overridden_by(
+            row_key, scope, provenance or {}, env_names, effort_env_set, model_settings, project_picked
+        )
+
+    # A project file that sets the key too, and ranks above the target file.
+    shared = "This project's .claude/settings.json sets it too and wins."
+    local = "This project's .claude/settings.local.json sets it too and wins."
+    assert by("settings.model", provenance={"model": "project_shared"}) == shared
+    assert by("settings.model", provenance={"model": "project_local"}) == local
+    assert by("settings.model", "repo", {"model": "project_local"}) == local
+    # Not above the target file: the same file, a lower one, or the managed layer.
+    assert by("settings.model", "repo", {"model": "project_shared"}) is None
+    assert by("settings.model", "repo", {"model": "user"}) is None
+    assert by("settings.model", "project-local", {"model": "project_shared"}) is None
+    assert by("settings.model", "project-local", {"model": "project_local"}) is None
+    assert by("settings.model", provenance={"model": "managed"}) is None
+    assert by("settings.model", provenance={"model": "user"}) is None
+    assert by("settings.model", provenance={"other": "project_shared"}) is None
+    # Agent and env rows are not settings keys.
+    assert by("agents.builder.model", provenance={"model": "project_shared"}) is None
+    assert by("env.MAX_THINKING_TOKENS", provenance={"MAX_THINKING_TOKENS": "project_shared"}) is None
+
+    # The two environment variables.
+    window = "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
+    assert by("settings.autoCompactWindow", env_names=["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]) == window
+    assert by("settings.autoCompactWindow", env_names=["OTHER"]) is None
+    assert by("settings.model", env_names=["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]) is None
+    effort = "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+    assert by("settings.effortLevel", effort_env_set=True) == effort
+    assert by("settings.model", effort_env_set=True) is None
+    assert by("settings.effortLevel") is None
+
+    # A model's own effort level wins for that model.
+    assert by("settings.effortLevel", model_settings={"claude-opus-5-5": {"effortLevel": "high"}}) == (
+        "claude-opus-5-5 has its own effort level, which wins for it."
+    )
+    assert by(
+        "settings.effortLevel",
+        model_settings={"b": {"effortLevel": "low"}, "a": {"effortLevel": "high"}, "c": {"autoCompactWindow": 200000}},
+    ) == "a and b have their own effort level, which wins for them."
+    assert by(
+        "settings.effortLevel",
+        model_settings={"a": {"effortLevel": "low"}, "b": {"effortLevel": "high"}, "c": {"effortLevel": "medium"}},
+    ) == "a, b and c have their own effort level, which wins for them."
+    assert by("settings.effortLevel", model_settings={"c": {"autoCompactWindow": 200000}}) is None
+    assert by("settings.model", model_settings={"a": {"effortLevel": "low"}}) is None
+
+    # Nothing set anywhere.
+    assert by("settings.effortLevel", provenance={}, env_names=[], effort_env_set=False, model_settings={}) is None
+    assert by("settings.effortLevel", model_settings=None) is None
+    # The first that applies: a project file's sentence comes before the rest.
+    assert by(
+        "settings.effortLevel",
+        provenance={"effortLevel": "project_local"},
+        effort_env_set=True,
+        model_settings={"a": {"effortLevel": "low"}},
+    ) == local
+
+
+def test_profile_overridden_by_names_a_project_file_only_when_a_project_is_picked():
+    from claudeglass.fixes import profile_overridden_by
+
+    args = ("settings.model", "user", {"model": "project_shared"}, (), False, None)
+    assert profile_overridden_by(*args, True) == "This project's .claude/settings.json sets it too and wins."
+    # Without a project picked the snapshot is whichever project's took it, so the sentence would name
+    # a project the reader did not choose.
+    assert profile_overridden_by(*args, False) is None
+    # The environment and per-model sentences do not depend on the pick.
+    env = ("settings.effortLevel", "user", {"effortLevel": "project_shared"}, ("CLAUDE_CODE_AUTO_COMPACT_WINDOW",), True, {})
+    assert profile_overridden_by(*env, False) == "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+    window = ("settings.autoCompactWindow", "user", {}, ("CLAUDE_CODE_AUTO_COMPACT_WINDOW",), False, None)
+    assert profile_overridden_by(*window, False) == "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
+    own = ("settings.effortLevel", "user", {}, (), False, {"m": {"effortLevel": "low"}})
+    assert profile_overridden_by(*own, False) == "m has its own effort level, which wins for it."
 
 
 def test_build_fixes_gives_an_actionable_workflow_rule_a_where_trade_off_undo_explainer_and_a_prompt():

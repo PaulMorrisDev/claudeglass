@@ -745,6 +745,48 @@ def test_with_every_project_agents_for_a_picked_project_uses_that_projects_snaps
     assert set(everyone.data["agents"]) == {"implementer", "reviewer"}
 
 
+def test_with_every_project_agents_reads_a_projects_own_setting_as_your_user_settings_across_projects():
+    """Across projects, a setting the newest snapshot's own project files set
+    holds in that project alone: the view reads it as your user settings set it."""
+    other = _schema2_snapshot(
+        "b", ts="20260920T000000Z", effective={"model": "opus"}, effective_provenance={"model": "user"},
+        user_settings={"model": "opus"},
+    )
+    newest = _schema2_snapshot(
+        "a", ts="20260923T000000Z", effective={"model": "sonnet", "effortLevel": "high"},
+        effective_provenance={"model": "project_local", "effortLevel": "user"},
+        user_settings={"model": "opus", "effortLevel": "high"},
+    )
+
+    view = snap_mod.with_every_project_agents([other, newest])
+
+    assert snap_mod.effective_config(view) == {"model": "opus", "effortLevel": "high"}
+    assert snap_mod.effective_provenance(view) == {"model": "user", "effortLevel": "user"}
+    assert newest.data["effective"]["model"] == "sonnet"
+    # One project's own view keeps its own setting.
+    assert snap_mod.effective_config(snap_mod.with_every_project_agents([newest]))["model"] == "sonnet"
+    # With no user setting to fall back on, the setting is unset.
+    bare = _schema2_snapshot(
+        "a", ts="20260923T000000Z", effective={"model": "sonnet"}, effective_provenance={"model": "project_local"},
+        user_settings={},
+    )
+    view = snap_mod.with_every_project_agents([other, bare])
+    assert "model" not in snap_mod.effective_config(view)
+    assert "model" not in snap_mod.effective_provenance(view)
+
+
+def test_spans_projects_counts_projects_not_rows():
+    assert not snap_mod.spans_projects([_schema2_snapshot("a"), _schema2_snapshot("a", ts="20260902T000000Z")])
+    assert snap_mod.spans_projects([_schema2_snapshot("a"), _schema2_snapshot("b")])
+    schema1 = snap_mod.Snapshot(path=Path("x"), ts="20260902T000000Z", data={"schema": 1, "agents": {}})
+    assert not snap_mod.spans_projects([_schema2_snapshot("a"), schema1])
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    canonical = snap_mod.canonical_project_keys(["C--Dev-x"])
+    assert not snap_mod.spans_projects(
+        [_schema2_snapshot(lower), _schema2_snapshot(upper, ts="20260902T000000Z")], canonical
+    )
+
+
 def test_with_every_project_agents_folds_a_projects_drive_letter_keys():
     upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
     canonical = snap_mod.canonical_project_keys(["C--Dev-x"])

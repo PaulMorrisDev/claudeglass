@@ -31,7 +31,10 @@ change, in one place, so every card reads the same way:
 - **Already applied.** The rules measure the whole period, so a change
   made part-way through it would still be offered at its full saving. A
   change the current config already makes is left out, and a card with
-  nothing left to change is dropped.
+  nothing left to change is dropped. The main session's model is priced
+  only on the sessions it still decides (``model_swap``): a session already
+  on Sonnet or smaller, or from before its project moved there, is left out,
+  and its card says how many.
 - **Amounts** follow the billing mode (:class:`~claudeglass.units.Units`).
 
 Titles and actions are rewritten here, not in the rules, so the rules'
@@ -238,6 +241,11 @@ def _left_out_note(left_out: list[tuple[str, str]]) -> str:
 # -- consolidation -------------------------------------------------------------
 
 
+def _several_projects(ctx: _Context) -> bool:
+    """Whether the report covers more than one project."""
+    return len(getattr(getattr(ctx.report, "meta", None), "projects", ()) or ()) > 1
+
+
 def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recommendation]:
     tier = [r for r in recs if r.id == "model-tier"]
     if not tier:
@@ -266,9 +274,16 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         )
         if not alt:
             continue
-        now = ctx.setting_now("model") if agent == "top-level" else ctx.agent_now(agent, "model")
-        if already_set("model", _family_alias(alt), now):
-            # Already on the cheaper model; the saving is from before the change.
+        now = _main_setting(ctx)[0] if agent == "top-level" else ctx.agent_now(agent, "model")
+        # A main-session setting at Sonnet or smaller is never raised (G3).
+        # The saving reads the same setting, so it prices nothing then.
+        main_there = agent == "top-level" and model_swap.at_main_floor(now)
+        if main_there or already_set("model", _family_alias(alt), now) and not (
+            agent == "top-level" and _several_projects(ctx)
+        ):
+            # Already on the cheaper model. In a view of several projects one
+            # setting can't say what every project ran, so the main card
+            # stays while its saving counts.
             continue
         family = _family_alias(alt)
         main = agent == "top-level"
@@ -318,20 +333,87 @@ def _tier_priced_on(ctx: _Context, agent: str) -> float | None:
     return None
 
 
+def _main_setting(ctx: _Context) -> tuple:
+    """The main session's model setting now and the ``fixes.py`` scope a
+    change to it goes to, as the saving reads it (``model_swap.main_setting``);
+    in a view of several projects, or with no reading, the view's own
+    setting and ``None``."""
+    reading = model_swap.main_setting(ctx.report)
+    return reading if reading is not None else (ctx.setting_now("model"), None)
+
+
+#: The parts of the main card's "It leaves out" sentence: the evidence
+#: label each count is read by, and how one and several read alone.
+_LEFT_OUT_PARTS = (
+    ("already on Sonnet or smaller", "already on Sonnet or smaller", "already on Sonnet or smaller"),
+    ("from before their project moved", "from before its project moved to Sonnet or smaller",
+     "from before their project moved to Sonnet or smaller"),
+    ("picked against a Sonnet setting", "picked against a Sonnet setting", "picked against a Sonnet setting"),
+    ("in projects that set their own model", "in a project that sets its own model",
+     "in projects that set their own model"),
+)
+
+
+def _left_out_sentence(rec: Recommendation) -> str:
+    """The main card's "It leaves out" sentence, or ``""``: one part names
+    its sessions, two are joined after their total, the last with "and".
+    Three or four reasons are not listed (the evidence lines and the Models
+    check's tip carry each count): the sentence gives the total and says
+    which kind of reason it is."""
+    counts = [(_int(_evidence_value(rec, label)), one, many) for label, one, many in _LEFT_OUT_PARTS]
+    parts = [(n, one, many) for n, one, many in counts if n]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        ((n, one, many),) = parts
+        return f" It leaves out the {n:,} main session{'s' if n != 1 else ''} {one if n == 1 else many}."
+    already = bool(counts[0][0])
+    if len(parts) >= 3:
+        total = sum(n for n, _one, _many in parts)
+        reached = (
+            "that already ran on Sonnet or smaller or that a settings change would not reach"
+            if already
+            else "that a settings change would not reach"
+        )
+        return f" It leaves out {total:,} main sessions {reached}."
+    words = []
+    for n, one, many in parts:
+        if many.startswith("from before") and already:
+            many = "from before their project moved there"
+        words.append(f"{n:,} {one if n == 1 and not many.startswith('from before') else many}")
+    listed = ", ".join(words[:-1]) + f", and {words[-1]}"
+    return f" It leaves out {sum(n for n, _one, _many in parts):,} main sessions: {listed}."
+
+
 def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) -> Recommendation:
     """The main session's model, one tier down. ``model_swap`` never
     suggests Haiku here (its ``main_floor`` verdict), so this is only ever
     Opus to Sonnet or Fable to Opus."""
     rec, _agent, alt, saving, observed = row
     family = _family_alias(alt).capitalize()
-    current = ctx.setting_now("model")
+    current, where = _main_setting(ctx)
+    since = _left_out_sentence(rec)
+    # In a view of several projects the setting may already say the cheaper
+    # model, above the Sonnet line (Opus, for sessions on Fable), because one
+    # project's sessions ran on a larger one anyway. A setting at Sonnet or
+    # smaller never gets here (_merge_model_tier).
+    set_already = already_set("model", _family_alias(alt), current)
+    if set_already:
+        since += f" Your model setting already says {family}, and the sessions it counts still ran on a larger model."
+    scope = "managed" if rec.scope == "managed" else (
+        where or _advice_scope(rec.scope)
+    )
     change = SettingChange(
         target="settings",
         key="model",
         value=_family_alias(alt),
         current=current if current not in (None, _UNKNOWN) else f"not set (used {observed or 'unknown'})",
-        note="This changes the model for your main session in every project.",
-        scope=_advice_scope(rec.scope),
+        note=(
+            "This changes the model for your main session in this project only."
+            if scope in ("project-local", "repo")
+            else "This changes the model for your main session in every project."
+        ),
+        scope=scope,
         saving=ctx.money(saving, prefix="At most "),
     )
     return Recommendation(
@@ -341,18 +423,20 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         title=f"Your main session could run on {family}",
         why=(
             f"Your main session ran on {_model_prose(observed) if observed else 'a larger model'}, and the same "
-            f"work priced at {family} would cost {_percent(saving, rec)}. It's a quality trade, so it's yours "
-            "to make."
+            f"work priced at {family} would cost {_percent(saving, rec)}.{since} It's a quality trade, so it's "
+            "yours to make."
         )
         + _left_out_note(left_out),
         action=(
-            f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare the "
-            "results before making it your default."
+            "Keep routine work on your setting. Pick a larger model only for work that needs it."
+            if set_already
+            else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
+            "the results before making it your default."
         ),
         lever="model",
         scope=rec.scope,
         evidence=list(rec.evidence),
-        changes=[change],
+        changes=[] if set_already else [change],
         estimated_saving=ctx.money(saving, prefix="At most "),
         saving_basis=ctx.basis(_TIER_BASIS),
         saving_usd=saving,

@@ -59,8 +59,10 @@ __all__ = [
     "Profile",
     "ProfileError",
     "SETTINGS_ALLOWLIST",
+    "MODEL_SETTINGS_ALLOWLIST",
     "AGENT_ALLOWLIST",
     "ENV_ALLOWLIST",
+    "ROLES",
     "ARCHETYPES",
     "RECOMMEND_LEVER_MAP",
     "validate",
@@ -102,7 +104,7 @@ class LeverSpec:
       only here; values supplied at apply time" A7 comment).
     """
 
-    kind: str  # "str" | "enum" | "int" | "bool" | "list[str]" | "map[str,bool]" | "map[str,enum]"
+    kind: str  # "str" | "enum" | "int" | "int|auto" | "bool" | "list[str]" | "map[str,bool]" | "map[str,enum]" | "map[str,model]"
     scope_kind: str  # "settings" | "agent frontmatter" | "env"
     values: tuple[str, ...] | None = None
     min: int | None = None
@@ -189,6 +191,28 @@ SETTINGS_ALLOWLIST: dict[str, LeverSpec] = {
         "bool", "settings",
         doc_ref="docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike",
     ),
+    # PF1: per-model settings, keyed by model id. apply merges one model's
+    # entry key by key (see ``apply.plan_apply``); the sub-keys are
+    # :data:`MODEL_SETTINGS_ALLOWLIST`.
+    "modelSettings": LeverSpec(
+        "map[str,model]", "settings",
+        doc_ref="docs/profiles.md#settings-top-level-settingsjson-overlay-keys",
+    ),
+}
+
+#: ``modelSettings.<id>`` sub-keys a profile may set, both confirmed in
+#: Claude Code's own settings schema. ``effortLevel`` has no ``max`` there
+#: (Claude Code does not keep it per model); ``autoCompactWindow`` is
+#: ``"auto"`` or a token count from 100,000 to 1,000,000.
+MODEL_SETTINGS_ALLOWLIST: dict[str, LeverSpec] = {
+    "effortLevel": LeverSpec(
+        "enum", "settings", values=("low", "medium", "high", "xhigh"),
+        doc_ref="docs/profiles.md#settings-top-level-settingsjson-overlay-keys",
+    ),
+    "autoCompactWindow": LeverSpec(
+        "int|auto", "settings", values=("auto",), min=100_000, max=1_000_000,
+        doc_ref="docs/profiles.md#settings-top-level-settingsjson-overlay-keys",
+    ),
 }
 
 #: ``agents.<name>`` frontmatter patch keys a profile may set. The dotted
@@ -215,6 +239,11 @@ AGENT_ALLOWLIST: dict[str, LeverSpec] = {
         doc_ref="docs/config-layers.md#effective_agents",
     ),
 }
+
+#: The roles a profile may name in place of an agent (``[roles.<name>]``).
+#: A role holds the same keys as an agent (:data:`AGENT_ALLOWLIST`);
+#: ``profiles/roles.py`` says which of the user's own agents it goes to.
+ROLES: tuple[str, ...] = ("writer",)
 
 #: Environment variable *names* a profile may mention (the value is
 #: always a free-form string supplied at apply time -- see
@@ -264,9 +293,12 @@ ARCHETYPES: tuple[str, ...] = (
 )
 
 _ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+#: A ``modelSettings`` model id. No dot, so a diff row's dotted key
+#: (``settings.modelSettings.<id>.<sub-key>``) splits cleanly.
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_\-\[\]]{1,64}$")
 _BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-_TOP_LEVEL_KEYS = {"id", "name", "for", "archetype", "settings", "agents", "env", "notes"}
+_TOP_LEVEL_KEYS = {"id", "name", "for", "archetype", "settings", "agents", "roles", "env", "notes"}
 
 
 # -- Profile dataclass -------------------------------------------------
@@ -287,6 +319,9 @@ class Profile:
     #: agent name -> {allowlisted key: value}, keys already normalised to
     #: the dotted ``"experimental.cacheTtl"`` form.
     agents: dict = field(default_factory=dict)
+    #: role name -> {allowlisted key: value}, normalised like ``agents``;
+    #: ``profiles/roles.py`` folds it into the user's own agents.
+    roles: dict = field(default_factory=dict)
     env: dict = field(default_factory=dict)
     notes: str = ""
     #: Where this profile was loaded from, if it was loaded from a file
@@ -313,10 +348,16 @@ def _type_ok(value, spec: LeverSpec) -> bool:
         if spec.max is not None and value > spec.max:
             return False
         return True
+    if spec.kind == "int|auto":
+        if isinstance(value, str):
+            return value in (spec.values or ())
+        return _type_ok(value, LeverSpec("int", spec.scope_kind, min=spec.min, max=spec.max))
     if spec.kind == "bool":
         return isinstance(value, bool)
     if spec.kind == "list[str]":
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if spec.kind == "map[str,model]":
+        return not _model_settings_problems(value)
     if spec.kind == "map[str,bool]":
         return isinstance(value, dict) and all(
             isinstance(k, str) and isinstance(v, bool) for k, v in value.items()
@@ -336,10 +377,15 @@ def _describe_expected(spec: LeverSpec) -> str:
         if spec.min is not None or spec.max is not None:
             bounds = f" between {spec.min if spec.min is not None else '-inf'} and {spec.max if spec.max is not None else 'inf'}"
         return f"an int{bounds}"
+    if spec.kind == "int|auto":
+        quoted = " or ".join(repr(v) for v in spec.values or ())
+        return f"{quoted} or an int between {spec.min} and {spec.max}"
     if spec.kind == "bool":
         return "a bool"
     if spec.kind == "list[str]":
         return "a list of strings"
+    if spec.kind == "map[str,model]":
+        return "a table of model ids to their own settings"
     if spec.kind == "map[str,bool]":
         return "a table of names to true or false"
     if spec.kind == "map[str,enum]":
@@ -347,7 +393,32 @@ def _describe_expected(spec: LeverSpec) -> str:
     return "a string"
 
 
-def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str]) -> dict:
+def _model_settings_problems(value) -> list[str]:
+    """Every problem with a ``modelSettings`` value (``{model id: {sub-key:
+    value}}``): a bad id, an entry that is not a table, an unknown sub-key
+    or a value out of range. Messages are prefixed ``settings.modelSettings``."""
+    if not isinstance(value, dict):
+        return ["settings.modelSettings: expected a table of model ids to tables"]
+    problems: list[str] = []
+    for model_id, entry in value.items():
+        if not isinstance(model_id, str) or not _MODEL_ID_RE.match(model_id):
+            problems.append(
+                f"settings.modelSettings: model id {model_id!r} must be letters, digits, '-', '_' or brackets"
+            )
+            continue
+        if not isinstance(entry, dict):
+            problems.append(f"settings.modelSettings.{model_id}: expected a table")
+            continue
+        for key, sub_value in entry.items():
+            spec = MODEL_SETTINGS_ALLOWLIST.get(key)
+            if spec is None:
+                problems.append(f"settings.modelSettings.{model_id}.{key}: unknown key")
+            elif not _type_ok(sub_value, spec):
+                problems.append(f"settings.modelSettings.{model_id}.{key}: expected {_describe_expected(spec)}")
+    return problems
+
+
+def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str], table: str = "agents") -> dict:
     """Returns ``raw`` with a nested ``experimental = {cacheTtl = ...}``
     table folded into the dotted ``"experimental.cacheTtl"`` key (plan:
     "accept both the dotted key and a nested ``experimental = { cacheTtl
@@ -359,12 +430,12 @@ def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str]) -> di
     if nested is None:
         return out
     if not isinstance(nested, dict):
-        problems.append(f"agents.{agent_name}.experimental: must be a table, got {type(nested).__name__}")
+        problems.append(f"{table}.{agent_name}.experimental: must be a table, got {type(nested).__name__}")
         return out
     extra_keys = set(nested) - {"cacheTtl"}
     if extra_keys:
         problems.append(
-            f"agents.{agent_name}.experimental: unknown key(s) {sorted(extra_keys)} "
+            f"{table}.{agent_name}.experimental: unknown key(s) {sorted(extra_keys)} "
             "(only 'cacheTtl' is allowlisted under a nested experimental table)"
         )
     if "cacheTtl" not in nested:
@@ -373,7 +444,7 @@ def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str]) -> di
     nested_value = nested["cacheTtl"]
     if "experimental.cacheTtl" in out and dotted_value != nested_value:
         problems.append(
-            f"agents.{agent_name}: both 'experimental.cacheTtl' ({dotted_value!r}) and a nested "
+            f"{table}.{agent_name}: both 'experimental.cacheTtl' ({dotted_value!r}) and a nested "
             f"experimental.cacheTtl ({nested_value!r}) were given with different values"
         )
     else:
@@ -430,7 +501,9 @@ def validate(d: dict) -> list[str]:
             if spec is None:
                 problems.append(f"settings.{key}: unknown key")
                 continue
-            if not _type_ok(value, spec):
+            if spec.kind == "map[str,model]":
+                problems.extend(_model_settings_problems(value))
+            elif not _type_ok(value, spec):
                 problems.append(f"settings.{key}: must be {_describe_expected(spec)}, got {value!r}")
 
     agents = d.get("agents", {})
@@ -449,6 +522,26 @@ def validate(d: dict) -> list[str]:
                     continue
                 if not _type_ok(value, spec):
                     problems.append(f"agents.{agent_name}.{key}: must be {_describe_expected(spec)}, got {value!r}")
+
+    roles = d.get("roles", {})
+    if not isinstance(roles, dict):
+        problems.append(f"roles: must be a table/object, got {type(roles).__name__}")
+    else:
+        for role_name, role_dict in roles.items():
+            if role_name not in ROLES:
+                problems.append(f"roles.{role_name}: unknown role (expected one of {', '.join(ROLES)})")
+                continue
+            if not isinstance(role_dict, dict):
+                problems.append(f"roles.{role_name}: must be a table/object, got {type(role_dict).__name__}")
+                continue
+            normalised = _normalise_agent_dict(role_name, role_dict, problems, "roles")
+            for key, value in normalised.items():
+                spec = AGENT_ALLOWLIST.get(key)
+                if spec is None:
+                    problems.append(f"roles.{role_name}.{key}: unknown key")
+                    continue
+                if not _type_ok(value, spec):
+                    problems.append(f"roles.{role_name}.{key}: must be {_describe_expected(spec)}, got {value!r}")
 
     env = d.get("env", {})
     if not isinstance(env, dict):
@@ -488,6 +581,13 @@ def load_dict(d: dict, *, source_path: str | None = None) -> Profile:
         # drift is caught immediately instead of shipping a bad Profile.
         assert not normalised_problems, normalised_problems
 
+    roles_raw = d.get("roles", {}) or {}
+    roles: dict = {}
+    for role_name, role_dict in roles_raw.items():
+        role_problems: list[str] = []
+        roles[role_name] = _normalise_agent_dict(role_name, role_dict, role_problems, "roles")
+        assert not role_problems, role_problems
+
     return Profile(
         id=d["id"],
         name=d.get("name", ""),
@@ -495,6 +595,7 @@ def load_dict(d: dict, *, source_path: str | None = None) -> Profile:
         archetype=d.get("archetype"),
         settings=dict(d.get("settings", {}) or {}),
         agents=agents,
+        roles=roles,
         env=dict(d.get("env", {}) or {}),
         notes=d.get("notes", ""),
         source_path=source_path,
@@ -607,6 +708,16 @@ def dump_profile(profile: Profile) -> str:
         for key in AGENT_ALLOWLIST:
             if key in agent_dict:
                 lines.append(f"{_toml_key(key)} = {_toml_value(agent_dict[key])}")
+
+    for role_name in ROLES:
+        role_dict = profile.roles.get(role_name)
+        if not role_dict:
+            continue
+        lines.append("")
+        lines.append(f"[roles.{_toml_key(role_name)}]")
+        for key in AGENT_ALLOWLIST:
+            if key in role_dict:
+                lines.append(f"{_toml_key(key)} = {_toml_value(role_dict[key])}")
 
     if profile.env:
         lines.append("")

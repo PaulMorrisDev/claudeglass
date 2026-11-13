@@ -520,6 +520,26 @@ def test_why_and_admit_land_on_the_turn_and_survive_the_digest_cache(tmp_path):
     assert_privacy(result)
 
 
+def test_lost_is_read_from_the_tag(tmp_path):
+    # The summary question: a compaction note lists prior, so the lost word is kept. A word outside
+    # yes|no is dropped, and so is one in a transcript whose notes never asked prior.
+    def parsed(note, tag):
+        return _parse(tmp_path, [
+            _note(note),
+            user_str_line("carry on", origin={"kind": "human"}),
+            _reply(f"Done.\n{tag}"),
+        ]).turns[0].cap
+
+    asked = "ClaudeGlass metrics capture (cg-cap v1 task,prior): ..."
+    assert parsed(asked, "[cg: task=bugfix prior=needed lost=yes]").lost == "yes"
+    assert parsed(asked, "[cg: task=bugfix prior=needed lost=no]").lost == "no"
+    assert parsed(asked, "[cg: task=bugfix prior=needed lost=maybe]").lost is None
+    assert parsed(asked, "[cg: task=bugfix prior=needed]").lost is None
+    assert parsed("ClaudeGlass metrics capture (cg-cap v1 task): ...", "[cg: task=bugfix lost=yes]").lost is None
+    assert capture_tags.MAIN_TAG_FIELDS["lost"] == "prior"
+    assert CaptureTag().lost is None
+
+
 # -- messages typed while Claude works (PARSER_VERSION 37) ---------------------------
 
 

@@ -22,7 +22,7 @@ from typing import Callable
 
 from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
-from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, build_fix, build_fixes, fix_note
+from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
@@ -204,8 +204,10 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
         value=candidate["value"],
         current=candidate["now"],
         new_agent_file=bool(agent) and agent in _BUILTIN_AGENT_TYPES and agent not in ctx.effective_agents,
-        # A project's own agent file, not one in ~/.claude/agents.
-        scope="repo" if isinstance(fields, dict) and fields.get("source") == "project" else "",
+        # A project's own agent file, not one in ~/.claude/agents; the main
+        # model's change goes where the setting the saving reads lives.
+        scope="repo" if isinstance(fields, dict) and fields.get("source") == "project"
+        else _main_scope(ctx) if not agent and candidate["key"] == "model" else "",
     )
     effect = estimate.get("effect_text") or ""
     rec = Recommendation(
@@ -284,16 +286,15 @@ def _models(ctx: Context) -> dict:
          ("cheaper", "Cheapest alternative"), ("saving", "Would save")],
         [
             [_who(r.get("agent_type")), r.get("observed_model") or "", _cell(ctx, r.get("observed_cost")),
-             _model_set_by(r), r.get("best_cheaper_alternative_model") or "none cheaper",
-             f"{_cell(ctx, r.get('saving_usd'))}, {_pct(r.get('saving_pct'))} less" if whatif._num(r.get("saving_usd"))
-             else ""]
+             _model_set_by(r), r.get("best_cheaper_alternative_model") or _no_cheaper(r), _models_saving(ctx, r)]
             for r in rows
         ],
     )
     draft = _goal(ctx, "models")
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
-    tips = left_out + _models_set_elsewhere(rows)
+    tips = left_out + _models_main_left_out(rows) + _models_set_elsewhere(rows)
+    picked = " ".join(text for text in (_models_main_picked(ctx, rows), _models_main_said(rows)) if text)
     # The agent-model cards (agents that ran on a larger model than their
     # work needed): an advice-level one makes the check "act". Each one's
     # own fix is offered either way; an info-level one with no prompt in
@@ -309,7 +310,8 @@ def _models(ctx: Context) -> dict:
             "ok",
             _IGNORED_ONLY
             if draft["removed"]
-            else "Every agent is already on the cheapest model that priced lower by a useful margin"
+            else picked
+            or "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
             fixes=agent_fixes,
@@ -319,9 +321,12 @@ def _models(ctx: Context) -> dict:
     if not fixes:
         return _result(
             "act",
-            f"{flagged_text} The only other change this check would suggest is on a card you ignored."
-            if draft["removed"]
-            else f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount.",
+            (
+                f"{flagged_text} The only other change this check would suggest is on a card you ignored."
+                if draft["removed"]
+                else f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount."
+            )
+            + (f" {picked}" if picked else ""),
             table=table,
             fixes=agent_fixes,
             tips=tips,
@@ -332,7 +337,8 @@ def _models(ctx: Context) -> dict:
         f"{len(fixes)} model change{'s' if len(fixes) != 1 else ''} would have cost less. The largest: {_who(top['agent'])} on "
         f"{top['value']}, {top['estimate']['effect_text'][:1].lower()}{top['estimate']['effect_text'][1:]}. A "
         "cheaper model may need more replies for hard work, so try it on one agent first."
-        + (f" {flagged_text}" if flagged_text else ""),
+        + (f" {flagged_text}" if flagged_text else "")
+        + (f" {picked}" if picked else ""),
         table=table,
         fixes=fixes + agent_fixes,
         tips=tips,
@@ -376,6 +382,136 @@ def _model_set_by(row: dict) -> str:
     if parts:
         return ", ".join(parts)
     return "Claude Code" if "lever_runs" in row else ""
+
+
+def _no_cheaper(row: dict) -> str:
+    """The "Cheapest alternative" cell when a row has none: ``none counted``
+    for a main session whose every session the saving leaves out (so "none
+    cheaper" would be untrue of it), ``none cheaper`` otherwise."""
+    if (row.get("agent_type") == "top-level" and "lever_runs" in row and not whatif._num(row.get("lever_runs"))
+            and whatif._num(row.get("spawns"))):
+        return "none counted"
+    return "none cheaper"
+
+
+def _models_saving(ctx: Context, row: dict) -> str:
+    """The "Would save" cell. The main session's, when the saving counts only
+    some of its sessions, says how many instead of a percent."""
+    if not whatif._num(row.get("saving_usd")):
+        return ""
+    counted, total = whatif._num(row.get("lever_runs")), whatif._num(row.get("spawns"))
+    if row.get("agent_type") == "top-level" and counted and total and counted < total:
+        return f"{_cell(ctx, row.get('saving_usd'))} on {int(counted):,} of {int(total):,} sessions"
+    return f"{_cell(ctx, row.get('saving_usd'))}, {_pct(row.get('saving_pct'))} less"
+
+
+def _sessions(count: int) -> str:
+    return f"{count:,} main session{'s' if count != 1 else ''}"
+
+
+def _main_setting(ctx: Context) -> tuple:
+    """The main session's model setting now and the scope a change to it
+    goes to (``""`` for your user settings), as the saving reads it
+    (``model_swap.main_setting``); in a view of several projects, or with
+    no reading, the view's own setting."""
+    reading = model_swap.main_setting(ctx.model)
+    if reading is None:
+        return ctx.effective.get("model"), ""
+    value, scope = reading
+    return value, "" if scope == "user" else scope
+
+
+def _main_scope(ctx: Context) -> str:
+    return _main_setting(ctx)[1]
+
+
+def _models_main_left_out(rows: list[dict]) -> list[dict]:
+    """One tip when the main session's saving leaves some of its sessions
+    out: those already on Sonnet or smaller, those from before their
+    project moved there, those picked on a larger model against a Sonnet
+    setting and those of projects that set their own model. It says how
+    many the saving counts only when there is a saving."""
+    main = next((r for r in rows if r.get("agent_type") == "top-level"), None)
+    if main is None:
+        return []
+    settled, before, picked, own, counted = (
+        _count(main.get(k)) for k in ("settled_runs", "before_change_runs", "picked_runs", "own_model_runs", "lever_runs")
+    )
+    if not (settled or before or picked or own):
+        return []
+    sentences = []
+    if settled:
+        sentences.append(f"{_sessions(settled)} already ran on Sonnet or smaller.")
+    if before:
+        sentences.append(
+            f"{before:,} main session{'s' if before != 1 else ''} started before "
+            f"{'its' if before == 1 else 'their'} project moved to Sonnet or smaller."
+        )
+    if picked:
+        sentences.append(f"{_sessions(picked)} ran on a larger model under a Sonnet setting.")
+    if own:
+        sentences.append(
+            f"{_sessions(own)} ran in {'a project that sets its' if own == 1 else 'projects that set their'} own model."
+        )
+    if not counted:
+        sentences.append("Nothing is left to price.")
+    elif round(whatif._num(main.get("saving_usd")) or 0.0, 2) > 0:
+        sentences.append(f"The saving counts the other {counted:,}.")
+    return [{
+        "title": "Some main sessions aren't counted" if counted else "No main session is counted",
+        "text": " ".join(sentences),
+    }]
+
+
+def _models_main_said(rows: list[dict]) -> str:
+    """What the main session's row leaves out that no settings change could
+    reach, in full: sessions picked on a larger model against a Sonnet
+    setting, and (in a view of several projects) sessions of projects that
+    set their own model. ``""`` with neither."""
+    main = next((r for r in rows if r.get("agent_type") == "top-level"), None)
+    if main is None:
+        return ""
+    picked, own = _count(main.get("picked_runs")), _count(main.get("own_model_runs"))
+    sentences = []
+    if picked == 1:
+        sentences.append(
+            "1 main session in this window ran on a larger model though its project's setting said Sonnet or "
+            "smaller when it started."
+        )
+    elif picked:
+        sentences.append(
+            f"{_sessions(picked)} in this window ran on a larger model though their project's setting said Sonnet "
+            "or smaller when they started."
+        )
+    if own == 1:
+        sentences.append("1 main session ran in a project that sets its own model. Pick that project to see it.")
+    elif own:
+        sentences.append(
+            f"{_sessions(own)} ran in projects that set their own model. Pick one of those projects to see them."
+        )
+    return " ".join(sentences)
+
+
+def _models_main_picked(ctx: Context, rows: list[dict]) -> str:
+    """Two sentences for the main session when the model setting already
+    says the cheaper model its row priced, above the Sonnet line (Opus, for
+    sessions on Fable), but its sessions ran on a larger one anyway; ``""``
+    otherwise. They say what ran, not why: /model, the model picker or a
+    project's own settings. The setting is read as the saving reads it, so
+    one at Sonnet or smaller never has a priced session to say this of; it
+    is never raised (G3), and this says nothing then."""
+    main = next((r for r in rows if r.get("agent_type") == "top-level"), None)
+    best = main.get("best_cheaper_alternative_model") if main else None
+    if not best or (whatif._num(main.get("saving_pct")) or 0.0) < goals.MIN_SHARE_PCT:
+        return ""
+    alias = goals._alias(best)
+    now = _main_setting(ctx)[0]
+    if model_swap.at_main_floor(now) or not already_set("model", alias, now):
+        return ""
+    if model_gate.build(whatif._Tables(ctx.model)).vetoed("top-level", alias):
+        return ""
+    count = _count(main.get("lever_runs")) or _count(main.get("spawns"))
+    return f"Your model setting already says {alias}. {_sessions(count)} in this window still ran on a larger model."
 
 
 def _models_set_elsewhere(rows: list[dict]) -> list[dict]:
