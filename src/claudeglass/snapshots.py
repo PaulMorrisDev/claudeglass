@@ -742,7 +742,9 @@ def latest_snapshot_per_project(
 
 
 #: The settings layers a project's own files hold (as ``change_points``' own).
-_PROJECT_LAYERS = ("project_local", "project_shared")
+#: The settings layers a project's own files are (``.claude/settings.json``
+#: and ``.claude/settings.local.json``).
+PROJECT_LAYERS = _PROJECT_LAYERS = ("project_local", "project_shared")
 
 
 def spans_projects(snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None) -> bool:
