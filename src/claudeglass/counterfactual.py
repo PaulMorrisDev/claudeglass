@@ -19,6 +19,11 @@ sessions after the change, in the most exact way that setting allows:
   (``context_files._Carry``). The size is the change's own CLAUDE.md
   sizes, or else the drop in context at session start from before the
   change to after it.
+  An agent's start-context settings (its tools, skills or MCP servers) are
+  read on that agent's own spawns: the drop in median context at the start
+  of a spawn, from before the change to after it, on the one model family
+  both sides ran on (:func:`agent_start_reading`), carried on every reply of
+  each spawn after the change.
 - **From before** (``"before"``): anything else. Each session after the
   change, at the cost per reply of the sessions before it that did the
   same kind of work, as hard and as big where capture says
@@ -26,7 +31,10 @@ sessions after the change, in the most exact way that setting allows:
 
 A change to several settings at once is headlined by the before method:
 their effects overlap, so the per-setting figures, still listed, don't
-add up. With fewer than ``impact.MIN_SESSIONS`` sessions after the
+add up. A change to an agent's start-context settings never is: it has a
+figure when it names nothing else and every agent it names has a reading
+(their savings add, as different agents' spawns don't overlap), and none
+otherwise. With fewer than ``impact.MIN_SESSIONS`` sessions after the
 change (or before it, for the before method) there is no figure.
 """
 
@@ -335,6 +343,18 @@ def carry_on(reading: AgentStart, tokens: float, bundles: dict, pricing: Pricing
     return total if tokens >= 0 else -total
 
 
+def _agent_start(agent: str, keys: list[str], before_facts, after_facts, bundles: dict, pricing: Pricing) -> KeyResult | None:
+    """One agent's start-context settings, however many ``keys`` the change
+    names, read as one drop in the context at the start of its spawns."""
+    reading = agent_start_reading(agent, before_facts, after_facts)
+    if reading is None:
+        return None
+    spawns = {s.session_id: s.spawns for s in after_facts}
+    paid = sum(spawns[session_id][index][1].cost for session_id, index in reading.after_spawns)
+    without = paid + carry_on(reading, reading.drop_tokens, bundles, pricing)
+    return KeyResult("tools" if "tools" in keys else keys[0], agent, "approximate", paid, without, "")
+
+
 def _from_before(before_facts, after_facts) -> tuple[float, float, str] | None:
     """(paid, without, basis): each session after the change at the cost
     per reply of the sessions before it that did the same kind of work."""
@@ -405,6 +425,23 @@ def without_change(
     before = [bundles[s.session_id] for s in before_facts if s.session_id in bundles]
     changes = {(c.get("agent"), c.get("key")): c for c in point.changes if isinstance(c, dict) and "old" in c}
     wanted = list(dict.fromkeys([_plain(label) for label in point.keys] + list(changes)))
+    starts = [(agent, key) for agent, key in wanted if agent and key in AGENT_START_KEYS]
+    if starts:
+        # Context an agent starts with is read on its own spawns, never from
+        # the cost of the sessions before, and not alongside other settings
+        # whose figures would overlap it.
+        if len(starts) < len(wanted):
+            return None
+        rows = [
+            _agent_start(agent, [key for a, key in starts if a == agent], before_facts, after_facts, bundles, pricing)
+            for agent in dict.fromkeys(agent for agent, _key in starts)
+        ]
+        if any(row is None for row in rows):
+            return None
+        paid = sum(s.cost for s in after_facts)
+        return Counterfactual(
+            paid, paid + sum(row.without_usd - row.paid_usd for row in rows), "approximate", "", len(after_facts), rows
+        )
     per_key: list[KeyResult] = []
     for agent, key in wanted:
         result = _key_result(key, changes.get((agent, key)), before_facts, after_facts, before, after, pricing)

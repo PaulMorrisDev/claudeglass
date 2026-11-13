@@ -368,6 +368,118 @@ def test_the_carry_is_negative_when_the_tokens_are_negative(stub_carry):
     assert counterfactual.carry_on(reading, 0, bundles, PRICING) == 0
 
 
+def _agent_point(*labels):
+    return ChangePoint(CHANGE, "config", "x", keys=list(labels))
+
+
+def test_an_agent_tools_change_is_priced_on_the_drop_in_its_start_context(stub_carry):
+    before, after, bundles = _spawn_world({"gp": (_same_family([60_000] * 6), _same_family([20_000] * 6))})
+    result = counterfactual.without_change(_agent_point("agents.gp.tools"), before, after, bundles, PRICING)
+    assert result.fidelity == "approximate"
+    assert result.basis == ""
+    assert result.sessions == 6
+    # 6 spawns, each carrying 40,000 tokens at 4 characters, at the stub's 1/1000.
+    assert result.saved_usd == pytest.approx(6 * 160.0)
+    assert result.paid_usd == pytest.approx(6 * 3.0)
+    [row] = result.per_key
+    assert (row.key, row.agent, row.fidelity, row.basis) == ("tools", "gp", "approximate", "")
+    assert row.paid_usd == pytest.approx(6.0)
+    assert row.without_usd - row.paid_usd == pytest.approx(960.0)
+    text = result.to_dict(UNITS)
+    assert text["fidelity_text"] == counterfactual.FIDELITY_TEXT["approximate"]
+    assert text["since_text"].startswith("the 6 sessions started since would have cost")
+
+
+def test_an_agent_tools_change_that_added_context_cost_more(stub_carry):
+    before, after, bundles = _spawn_world({"gp": (_same_family([20_000] * 6), _same_family([60_000] * 6))})
+    result = counterfactual.without_change(_agent_point("agents.gp.tools"), before, after, bundles, PRICING)
+    assert result.fidelity == "approximate"
+    assert result.saved_usd == pytest.approx(-6 * 160.0)
+
+
+def test_fewer_than_five_spawns_a_side_gives_no_figure(stub_carry):
+    before, after, bundles = _spawn_world({"gp": (_same_family([60_000] * 6), _same_family([20_000] * 4))})
+    assert counterfactual.without_change(_agent_point("agents.gp.tools"), before, after, bundles, PRICING) is None
+
+
+def test_no_shared_model_family_gives_no_figure(stub_carry):
+    before, after, bundles = _spawn_world(
+        {"gp": (_same_family([60_000] * 6, "haiku-4-5"), _same_family([20_000] * 6, "sonnet-5"))}
+    )
+    assert counterfactual.without_change(_agent_point("agents.gp.tools"), before, after, bundles, PRICING) is None
+
+
+def test_an_agent_start_key_with_any_other_key_gives_no_figure(stub_carry):
+    """The 2026-11-05 shape: one agent's tools with its model and description."""
+    before, after, bundles = _spawn_world({"gp": (_same_family([60_000] * 6), _same_family([20_000] * 6))})
+    point = _agent_point("agents.gp.tools", "agents.gp.model", "agents.gp.description")
+    assert counterfactual.without_change(point, before, after, bundles, PRICING) is None
+    # Nor with a main-session setting beside it.
+    mixed = _agent_point("agents.gp.tools", "effective.effortLevel")
+    assert counterfactual.without_change(mixed, before, after, bundles, PRICING) is None
+
+
+def test_an_agent_start_change_where_one_agent_has_no_reading_gives_no_figure(stub_carry):
+    before, after, bundles = _spawn_world(
+        {
+            "gp": (_same_family([60_000] * 6), _same_family([20_000] * 6)),
+            "thin": (_same_family([60_000] * 6), _same_family([20_000] * 4)),
+        }
+    )
+    point = _agent_point("agents.gp.tools", "agents.thin.tools")
+    assert counterfactual.without_change(point, before, after, bundles, PRICING) is None
+
+
+def test_two_start_keys_of_one_agent_are_one_reading(stub_carry):
+    before, after, bundles = _spawn_world({"gp": (_same_family([60_000] * 6), _same_family([20_000] * 6))})
+    for labels in (("agents.gp.tools", "agents.gp.disallowedTools"), ("agents.gp.disallowedTools", "agents.gp.tools")):
+        result = counterfactual.without_change(_agent_point(*labels), before, after, bundles, PRICING)
+        assert result.fidelity == "approximate"
+        assert [row.key for row in result.per_key] == ["tools"]
+        assert result.saved_usd == pytest.approx(6 * 160.0)
+    skills = counterfactual.without_change(_agent_point("agents.gp.skills"), before, after, bundles, PRICING)
+    assert [row.key for row in skills.per_key] == ["skills"]
+
+
+def test_two_agents_tools_lines_add_up(stub_carry):
+    before, after, bundles = _spawn_world(
+        {
+            "gp": (_same_family([60_000] * 6), _same_family([20_000] * 6)),
+            "other": (_same_family([30_000] * 6), _same_family([20_000] * 6)),
+        }
+    )
+    point = _agent_point("agents.gp.tools", "agents.other.tools")
+    result = counterfactual.without_change(point, before, after, bundles, PRICING)
+    assert result.fidelity == "approximate"
+    assert [(row.agent, row.key) for row in result.per_key] == [("gp", "tools"), ("other", "tools")]
+    assert [row.without_usd - row.paid_usd for row in result.per_key] == pytest.approx([6 * 160.0, 6 * 40.0])
+    assert result.saved_usd == pytest.approx(6 * 160.0 + 6 * 40.0)
+    assert result.paid_usd == pytest.approx(6 * 4.0)
+
+
+def test_a_main_session_change_still_uses_its_own_method(tmp_path):
+    """Every other kind of change keeps the method it had: this passes before
+    and after the agent start-context method."""
+    before, after, bundles = _setup(tmp_path)
+    effort = counterfactual.without_change(_point("effortLevel", "high", "medium"), before, after, bundles, PRICING)
+    assert effort.fidelity == "before" and effort.per_key == []
+    # An agent's setting that is not about its start is not read on its start.
+    other = counterfactual.without_change(_agent_point("agents.gp.effort"), before, after, bundles, PRICING)
+    assert other.fidelity == "before" and other.per_key == []
+    # Nor is a main-session key that happens to share an agent start key's name.
+    main_tools = counterfactual.without_change(_agent_point("effective.tools"), before, after, bundles, PRICING)
+    assert main_tools.fidelity == "before" and main_tools.per_key == []
+    # A model change is still repriced, with or without an agent beside it.
+    model = counterfactual.without_change(_point("model", "claude-opus-5-5", "claude-sonnet-5"), before, after, bundles, PRICING)
+    assert model.fidelity == "repriced"
+    (tmp_path / "start").mkdir()
+    start_before, start_after, start_bundles = _start_setup(
+        tmp_path / "start", [("claude-sonnet-5", 70_000)] * 3, [("claude-sonnet-5", 60_000)] * 3
+    )
+    carried = counterfactual.without_change(_PLUGINS, start_before, start_after, start_bundles, PRICING)
+    assert carried.fidelity == "approximate" and "About 10,000 tokens more carried" in carried.basis
+
+
 def test_several_settings_at_once_are_headlined_from_the_sessions_before(tmp_path):
     before, after, bundles = _setup(tmp_path)
     point = ChangePoint(
