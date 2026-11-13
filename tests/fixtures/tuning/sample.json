@@ -415,11 +415,11 @@
       }
     },
     "check": {
+      "targeted": {"cycles": 16, "redone": 0},
       "full": {"cycles": 13, "redone": 3},
-      "manual": {"cycles": 22, "redone": 2},
-      "none": {"cycles": 16, "redone": 1},
       "run": {"cycles": 23, "redone": 4},
-      "targeted": {"cycles": 16, "redone": 0}
+      "manual": {"cycles": 22, "redone": 2},
+      "none": {"cycles": 16, "redone": 1}
     },
     "level": {
       "easy": {"pieces": 4, "reworked": 0, "admitted": 0},
@@ -427,7 +427,7 @@
       "hard": {"pieces": 14, "reworked": 6, "admitted": 5}
     },
     "level_effort": {
-      "hard": {"xhigh": {"pieces": 12, "reworked": 6}, "high": {"pieces": 2, "reworked": 0}}
+      "hard": {"high": {"pieces": 2, "reworked": 0}, "xhigh": {"pieces": 12, "reworked": 6}}
     },
     "level_family": {
       "hard": {"opus": {"pieces": 13, "reworked": 6}, "fable": {"pieces": 1, "reworked": 0}}

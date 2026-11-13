@@ -284,6 +284,24 @@ def test_the_spec_takes_each_part_alone_and_refuses_a_name_or_a_wrong_kind():
         assert tuning.validate(_put(_sample(), "capture_checks", bad)), bad
 
 
+def test_the_sample_writes_each_map_in_the_order_the_code_does():
+    """JSON order means nothing to a reader, but the sample is read beside a real file, so it keeps the order of
+    the closed lists the code writes by."""
+    block = _sample()["capture_checks"]
+    from claudeglass.capture_checks import EFFORTS, FAMILIES
+
+    def ordered(found: dict, words) -> bool:
+        return list(found) == [word for word in words if word in found]
+
+    levels = catalogue.TAG_VOCAB["level"]
+    assert ordered(block["check"], catalogue.TAG_VOCAB["check"])
+    assert ordered(block["breaks"]["prior"], catalogue.TAG_VOCAB["prior"])
+    assert ordered(block["level"], levels)
+    for part, words in (("level_effort", EFFORTS), ("level_family", FAMILIES)):
+        assert ordered(block[part], levels)
+        assert all(ordered(row, words) for row in block[part].values()), part
+
+
 def test_the_summary_says_how_the_summary_question_was_answered_only_when_it_was():
     doc = _put(_sample(), "capture_checks", {"lost": _LOST})
     lines = tuning.summary_text(doc).splitlines()
