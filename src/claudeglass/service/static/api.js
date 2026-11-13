@@ -455,21 +455,39 @@ export function resetFiguresAsOf() {
 // A JSON POST to one of the service's write routes (docs/api.md),
 // through the same envelope handling as every GET.
 export function postJson(url, body) {
-  return fetchJson(url, {
+  return fetchJson(url, jsonPost(body));
+}
+
+function jsonPost(body) {
+  return {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  };
 }
 
 // What the page did with recommendation cards, kept on this machine
 // (POST /api/recommendations/marks): mark is "shown" (a card's title was
 // drawn), "copied" (a button copied its prompt) or "bundle" (the project's
 // all-fixes prompt, which holds these cards, was copied). Nothing is said
-// on screen: a mark that fails is not worth an error.
+// on screen: the request is the one postJson would send, but it does not go
+// through fetchJson, so a service that is down is not noted (the page is
+// not dimmed, no health poll starts, no "connected again" toast) and a mark
+// that fails is not worth an error. Resolves to whether the service took it.
 export function markCards(mark, keys) {
-  if (!keys || (!keys.length && mark !== "shown")) return;
-  postJson(withWindow("/api/recommendations/marks"), { mark: mark, keys: keys });
+  if (!keys || (!keys.length && mark !== "shown")) return Promise.resolve(false);
+  try {
+    return fetch(withWindow("/api/recommendations/marks"), jsonPost({ mark: mark, keys: keys })).then(
+      function (res) {
+        return res.ok;
+      },
+      function () {
+        return false;
+      }
+    );
+  } catch (err) {
+    return Promise.resolve(false);
+  }
 }
 
 // The keys already sent as shown in this page load, by scope, and the

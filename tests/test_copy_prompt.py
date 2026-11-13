@@ -427,3 +427,77 @@ def test_cards_shown_are_sent_once_per_scope_and_only_while_the_tab_is_visible()
     )
     got = _run({"clipboard": "missing", "exec": False}, expression)
     assert got == {"hidden": [], "back": ["shown:a,b"], "all": ["shown:a,b", "shown:c", "shown:"]}
+
+
+# -- a mark is sent without a word on screen ------------------------------------
+
+#: What markCards (api.js) touches, over a ``fetch`` that behaves as the case says
+#: ("rejects", "throws", or the HTTP status of a reply).
+_MARK_DOM = r"""
+var scenario = %(scenario)s;
+var log = { fetches: [], connection: [], figures: [] };
+function noteConnection(up) { log.connection.push(up); }
+function noteFiguresAsOf(asOf) { log.figures.push(asOf); }
+function readableAmounts(body) { return body; }
+function withWindow(url) { return url + "?window=30"; }
+var fetch = function (url, options) {
+  log.fetches.push({ url: url, options: options });
+  if (scenario.fetch === "throws") throw new Error("no network");
+  if (scenario.fetch === "rejects") return Promise.reject(new Error("Failed to fetch"));
+  return Promise.resolve({
+    status: scenario.fetch, ok: scenario.fetch >= 200 && scenario.fetch < 300,
+    headers: { get: function () { return null; } },
+    json: function () { return Promise.resolve({ ok: scenario.fetch < 300, data: {} }); },
+  });
+};
+"""
+
+
+def _run_marks(scenario: dict, expression: str):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node isn't installed")
+    script = _MARK_DOM % {"scenario": json.dumps(scenario)}
+    # A function the page doesn't have yet is left out, as in _run.
+    script += "\n".join(
+        _function_source(_static_text("api.js"), name)
+        for name in ("fetchJson", "jsonPost", "postJson", "markCards")
+        if re.search(r"function\s+" + name + r"\s*\(", _static_text("api.js"))
+    )
+    script += f"\nreturn Promise.resolve({expression});"
+    script = "(function () {\n" + script + "\n})().then(function (value) { process.stdout.write(JSON.stringify(value)); });"
+    done = subprocess.run([node, "-e", script], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=True)
+    return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize(
+    ("fetch", "worked"), [("rejects", False), ("throws", False), (400, False), (500, False), (200, True)]
+)
+def test_a_mark_that_fails_changes_nothing_on_screen(fetch, worked) -> None:
+    got = _run_marks(
+        {"fetch": fetch},
+        "Promise.resolve(markCards('copied', ['a'])).then(function (ok) {"
+        " return new Promise(function (done) { setTimeout(done, 5); }).then(function () {"
+        "  return { ok: ok === undefined ? null : ok, log: log }; }); })",
+    )
+    # No dimmed page, no health poll, no "Connected to the service again.": the connection
+    # note, which fetchJson makes on a network failure, is not touched.
+    assert got["log"]["connection"] == [] and got["log"]["figures"] == []
+    assert len(got["log"]["fetches"]) == 1
+    assert got["ok"] is worked
+
+
+def test_a_mark_is_the_request_post_json_would_build() -> None:
+    got = _run_marks(
+        {"fetch": 200},
+        "(function () {"
+        " return markCards('shown', ['a', 'b']).then(function () {"
+        "  var mark = log.fetches[0];"
+        "  return postJson('/api/recommendations/marks?window=30', { mark: 'shown', keys: ['a', 'b'] }).then(function () {"
+        "   return { mark: mark, post: log.fetches[1] }; }); }); })()",
+    )
+    assert got["mark"] == got["post"]
+    assert got["mark"]["options"]["method"] == "POST" and json.loads(got["mark"]["options"]["body"]) == {
+        "mark": "shown",
+        "keys": ["a", "b"],
+    }
