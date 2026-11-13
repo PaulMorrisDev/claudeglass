@@ -134,17 +134,21 @@ def test_the_main_model_card_says_which_sessions_it_leaves_out():
     assert "It leaves out the 4 main sessions picked against a Sonnet setting." in main_why(0, 0, 4)
     assert "It leaves out the 1 main session in a project that sets its own model." in main_why(0, 0, 0, 1)
     assert "It leaves out the 6 main sessions in projects that set their own model." in main_why(0, 0, 0, 6)
+    # Three or four reasons (H10): no list, the counts are in the evidence lines and the tip.
     assert (
-        "It leaves out 12 main sessions: 7 already on Sonnet or smaller, 3 from before their project moved there, "
-        "and 2 picked against a Sonnet setting." in main_why(7, 3, 2)
+        "It leaves out 12 main sessions that already ran on Sonnet or smaller or that a settings change would not "
+        "reach." in main_why(7, 3, 2)
+    )
+    assert (
+        "It leaves out 10 main sessions that a settings change would not reach." in main_why(0, 3, 2, 5)
     )
     assert (
         "It leaves out 8 main sessions: 3 from before their project moved to Sonnet or smaller, and 5 in projects "
         "that set their own model." in main_why(0, 3, 0, 5)
     )
     assert (
-        "It leaves out 4 main sessions: 1 already on Sonnet or smaller, 1 from before their project moved there, "
-        "1 picked against a Sonnet setting, and 1 in a project that sets its own model." in main_why(1, 1, 1, 1)
+        "It leaves out 4 main sessions that already ran on Sonnet or smaller or that a settings change would not "
+        "reach." in main_why(1, 1, 1, 1)
     )
     assert "already says" not in main_why(0, 0, 4)
 

@@ -345,8 +345,10 @@ _LEFT_OUT_PARTS = (
 
 def _left_out_sentence(rec: Recommendation) -> str:
     """The main card's "It leaves out" sentence, or ``""``: one part names
-    its sessions, several are joined after their total, the last with
-    "and"."""
+    its sessions, two are joined after their total, the last with "and".
+    Three or four reasons are not listed (the evidence lines and the Models
+    check's tip carry each count): the sentence gives the total and says
+    which kind of reason it is."""
     counts = [(_int(_evidence_value(rec, label)), one, many) for label, one, many in _LEFT_OUT_PARTS]
     parts = [(n, one, many) for n, one, many in counts if n]
     if not parts:
@@ -355,6 +357,14 @@ def _left_out_sentence(rec: Recommendation) -> str:
         ((n, one, many),) = parts
         return f" It leaves out the {n:,} main session{'s' if n != 1 else ''} {one if n == 1 else many}."
     already = bool(counts[0][0])
+    if len(parts) >= 3:
+        total = sum(n for n, _one, _many in parts)
+        reached = (
+            "that already ran on Sonnet or smaller or that a settings change would not reach"
+            if already
+            else "that a settings change would not reach"
+        )
+        return f" It leaves out {total:,} main sessions {reached}."
     words = []
     for n, one, many in parts:
         if many.startswith("from before") and already:
