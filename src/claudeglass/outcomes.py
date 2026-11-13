@@ -47,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from . import backtest, change_points, counterfactual, impact
+from . import backtest, change_points, counterfactual, impact, quality
 from .calibration import FALLBACK
 from .change_points import ChangePoint
 
@@ -71,6 +71,8 @@ START_SENSITIVE = (
 VERDICTS = ("half_or_more", "under_half", "too_little_data", "not_measured")
 GUARD_STATES = ("holds", "worse", "unclear", "too_little_data")
 METHODS = ("exact", "start_context", "none")
+#: The quality signals the guardrail reads: your messages that corrected Claude, and edits to files already changed.
+GUARD_SIGNALS = ("corrections", "rework")
 
 
 @dataclass(frozen=True)
@@ -275,6 +277,46 @@ def _usable(number: float | None) -> bool:
     return isinstance(number, (int, float)) and not isinstance(number, bool) and number > 0
 
 
+def _guard(
+    before: list[impact.SessionFacts], after: list[impact.SessionFacts], agent: str | None
+) -> tuple[str, dict]:
+    """The guardrail on two sides: the main session's corrections and rework,
+    in the sessions each side (for an agent, those that ran it), by
+    ``quality.compare_runs`` over those two signals (Holm-corrected, with its
+    own floors of runs and of messages and edits). ``worse`` when either
+    signal is, ``too_little_data`` when both are, ``unclear`` when either is
+    ``possibly_worse`` or one is ``too_little_data``, else ``holds``. With the
+    counts it read."""
+
+    def runs(side: list[impact.SessionFacts]) -> list[quality.Run]:
+        ran = side if agent is None else [s for s in side if any(name == agent for name, _facts in s.spawns)]
+        return [r for s in ran for r in s.runs if r.group == quality.MAIN and not r.scheduled]
+
+    old, new = runs(before), runs(after)
+    rows = quality.compare_runs(old, new, [quality.SIGNAL_BY_KEY[signal] for signal in GUARD_SIGNALS])
+    counts = {
+        "corrections": (
+            sum(r.corrections for r in old), sum(r.human_messages for r in old),
+            sum(r.corrections for r in new), sum(r.human_messages for r in new),
+        ),
+        "rework": (
+            sum(r.rework_edits for r in old), sum(r.edits for r in old),
+            sum(r.rework_edits for r in new), sum(r.edits for r in new),
+        ),
+        "runs": (len(old), len(new)),
+    }
+    labels = [row["label_key"] for row in rows]
+    if "worse" in labels:
+        state = "worse"
+    elif all(label == "too_little_data" for label in labels):
+        state = "too_little_data"
+    elif "possibly_worse" in labels or "too_little_data" in labels:
+        state = "unclear"
+    else:
+        state = "holds"
+    return state, counts
+
+
 def read_fix(
     point: ChangePoint,
     agent: str | None,
@@ -294,8 +336,41 @@ def read_fix(
     change point (to cut the sides); ``bundles`` maps a session id to its
     ``corpus.SessionBundle`` (a spawn's transcript is ``bundles[id].subs[i]``,
     ``i`` its index in the session's ``spawns``); ``now`` is when the sides
-    end at the latest; ``corpus_start`` is the corpus's first session."""
+    end at the latest; ``corpus_start`` is the corpus's first session.
+
+    The guardrail is read for every fix, measured or not. Its control is the
+    same reading a lookback earlier (the fortnight before the change against
+    the one before that), in the point's project or in every project: how
+    often it says ``worse`` where nothing was changed."""
     method = method_for(agent, key)
+    sides = _sides(point, agent, key, method, sessions, points, now)
+    reading = _measure(point, agent, key, method, prediction, sides, bundles, pricing, corpus_start)
+    reading.guard, reading.guard_counts = _guard(
+        [s for before, _after in sides for s in before], [s for _before, after in sides for s in after], agent
+    )
+    earlier = point.ts - LOOKBACK
+    mine = [s for s in sessions if not point.project or point.project in impact._session_keys(s)]
+    reading.control, _counts = _guard(
+        [s for s in mine if earlier - LOOKBACK <= s.start < earlier],
+        [s for s in mine if earlier <= s.start < point.ts],
+        agent,
+    )
+    return reading
+
+
+def _measure(
+    point: ChangePoint,
+    agent: str | None,
+    key: str,
+    method: str,
+    prediction: Prediction | None,
+    sides: list[tuple[list[impact.SessionFacts], list[impact.SessionFacts]]],
+    bundles: dict,
+    pricing,
+    corpus_start: datetime,
+) -> Reading:
+    """What ``read_fix`` says before the guardrail: the method, the units, the
+    figures and the verdict."""
     reading = Reading(method=method, verdict="not_measured")
     if method == "none":
         reading.note = "lever has no honest measure"
@@ -309,7 +384,6 @@ def read_fix(
         reading.note = "no saving to take a share of"
         return reading
 
-    sides = _sides(point, agent, key, method, sessions, points, now)
     measured = predicted = 0.0
     before_n = after_n = counted = 0
     if method == "start_context" and agent is not None:

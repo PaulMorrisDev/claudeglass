@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudeglass import counterfactual, impact, outcomes
+from claudeglass import counterfactual, impact, outcomes, quality
 from claudeglass.change_points import ChangePoint
 
 T = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
@@ -499,3 +499,126 @@ def test_levers_with_no_honest_measure_are_not_measured(stub_carry):
     # A card with no changes names no lever.
     agent, key = outcomes.lever_for([])
     assert _read(_point("agents.gp.tools"), agent, key, prediction, world).verdict == "not_measured"
+
+
+# -- the guardrail and its control ---------------------------------------------
+
+
+def _run(corrections=0, rework=0, *, messages=5, edits=5, scheduled=False):
+    return quality.Run(
+        group=quality.MAIN,
+        human_messages=messages,
+        corrections=corrections,
+        edits=edits,
+        rework_edits=rework,
+        scheduled=scheduled,
+    )
+
+
+def _runs_world(before, after, *, ran=True, earlier=(), project="proj"):
+    """A session per run: ``before`` and ``after`` lists of main-session runs
+    either side of the change, ``earlier`` those of the fortnight before
+    ``before``'s (the control's own before side). Each session ran one spawn
+    of ``gp`` unless ``ran`` is false."""
+
+    def session(sid, days, run):
+        return _session(sid, days, [_spawn(60_000)] if ran else [], runs=[run], project=project)
+
+    sessions = [session(f"b{n}", -13 + n * 0.5, run) for n, run in enumerate(before)]
+    sessions += [session(f"a{n}", 0.5 + n * 0.5, run) for n, run in enumerate(after)]
+    sessions += [session(f"c{n}", -27 + n * 0.5, run) for n, run in enumerate(earlier)]
+    return sessions, _bundles(sessions)
+
+
+def _guard(world, agent="gp", key="tools"):
+    point = _point(f"agents.{agent}.{key}" if agent else f"effective.{key}")
+    return _read(point, agent, key, outcomes.Prediction(None, 30_000), world)
+
+
+def test_the_guardrail_says_worse_only_when_the_test_holds_with_enough_runs(stub_carry):
+    # Four runs a side is too few, whatever the rise.
+    few = _guard(_runs_world([_run(0)] * 4, [_run(5, messages=5)] * 4))
+    assert few.guard == "too_little_data"
+    assert few.guard_counts["runs"] == (4, 4)
+    # Eight runs a side, corrections from none in 40 messages to 12 in 40.
+    rising = [_run(3)] * 4 + [_run(0)] * 4
+    worse = _guard(_runs_world([_run(0)] * 8, rising))
+    assert worse.guard == "worse"
+    assert worse.guard_counts["corrections"] == (0, 40, 12, 40)
+    assert worse.guard_counts["runs"] == (8, 8)
+    # A small rise is no clear change.
+    steady = _guard(_runs_world([_run(1)] * 4 + [_run(2)] * 4, [_run(1)] * 3 + [_run(2)] * 4 + [_run(3)]))
+    assert steady.guard == "holds"
+    # Better is not worse.
+    assert _guard(_runs_world([_run(3)] * 4 + [_run(0)] * 4, [_run(0)] * 8)).guard == "holds"
+
+
+def test_a_guardrail_with_one_signal_too_thin_to_read_is_unclear(stub_carry):
+    thin_edits = [_run(2, edits=1)] * 8
+    reading = _guard(_runs_world(thin_edits, thin_edits))
+    # Corrections can be read (8 runs, 40 messages a side) but rework has 8 edits a side.
+    assert reading.guard == "unclear"
+    assert reading.guard_counts["rework"] == (0, 8, 0, 8)
+
+
+def test_the_guardrail_counts_only_unscheduled_main_session_runs(stub_carry):
+    runs = [_run(0)] * 8 + [_run(5, scheduled=True)] * 8
+    reading = _guard(_runs_world(runs, runs))
+    assert reading.guard_counts["runs"] == (8, 8)
+    assert reading.guard == "holds"
+
+
+def test_an_agent_fixs_guardrail_reads_only_sessions_that_ran_it(stub_carry):
+    steady, rising = [_run(0)] * 8, [_run(5)] * 8
+    ran = _runs_world(steady, steady)
+    others = _runs_world(steady, rising, ran=False)
+    world = _merged(ran, others)
+    # The sessions that never ran the agent got worse; the ones that did, did not.
+    reading = _guard(world)
+    assert reading.guard == "holds"
+    assert reading.guard_counts["runs"] == (8, 8)
+    # A settings fix reads every main session.
+    everyone = _guard(world, agent=None, key="effortLevel")
+    assert everyone.guard_counts["runs"] == (16, 16)
+    assert everyone.guard == "worse"
+    assert everyone.guard_counts["corrections"] == (0, 80, 40, 80)
+
+
+def test_the_guardrail_is_read_for_a_fix_that_is_not_measured(stub_carry):
+    world = _runs_world([_run(0)] * 8, [_run(3)] * 4 + [_run(0)] * 4)
+    point = _point("agents.gp.tools")
+    for prediction in (None, outcomes.Prediction(None, None)):
+        reading = _read(point, "gp", "tools", prediction, world)
+        assert reading.verdict == "not_measured" and reading.guard == "worse"
+    effort = _read(_point("agents.gp.effort"), "gp", "effort", outcomes.Prediction(None, 5.0), world)
+    assert effort.verdict == "not_measured" and effort.guard == "worse"
+
+
+def test_the_control_reads_the_two_weeks_before_the_change(stub_carry):
+    steady, rising = [_run(0)] * 8, [_run(3)] * 4 + [_run(0)] * 4
+    # Nothing moves across the change, but the fortnight before it rose against the one before that.
+    world = _runs_world(rising, rising, earlier=steady)
+    reading = _guard(world)
+    assert reading.guard == "holds"
+    assert reading.control == "worse"
+    # Sessions older than that are not read: with none in the fortnight before, the control has nothing.
+    old = [_session(f"o{n}", -40 + n, [_spawn(60_000)], runs=[_run(5)]) for n in range(8)]
+    bare = _runs_world(steady, steady)
+    assert _guard((bare[0] + old, _bundles(bare[0] + old))).control == "too_little_data"
+
+
+def test_the_control_of_an_agent_fix_reads_only_the_sessions_that_ran_it(stub_carry):
+    steady, rising = [_run(0)] * 8, [_run(3)] * 4 + [_run(0)] * 4
+    ran = _runs_world(steady, steady, earlier=steady)
+    others = _runs_world(rising, steady, ran=False, earlier=steady)
+    assert _guard(_merged(ran, others)).control == "holds"
+
+
+def test_the_control_of_a_change_in_one_project_reads_that_project(stub_carry):
+    steady, rising = [_run(0)] * 8, [_run(3)] * 4 + [_run(0)] * 4
+    mine = _runs_world(steady, steady, earlier=steady, project="proj-a")
+    theirs = _runs_world(rising, steady, earlier=steady, project="proj-b")
+    point = _point("agents.gp.tools", project="proj-a")
+    reading = _read(point, "gp", "tools", outcomes.Prediction(None, 30_000), _merged(mine, theirs))
+    assert reading.control == "holds"
+    assert reading.guard_counts["runs"] == (8, 8)
