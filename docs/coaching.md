@@ -51,11 +51,13 @@ right more often than wrong (`LIVE_OFF_HINTS` in `capture_catalogue.py`,
 read by the hook and by the mod). An off hint says nothing live, and the
 rule given for it here is the one it follows once it is back on. Its rule
 and the figures read from transcripts stay (the prompting page still
-counts cold returns). While `split_run` is off, `SubagentStop` keeps no
-counts (nothing would read them), so switching it back on reports only
-runs that end after that. Taking a name out of the list switches its note
-back on. `claudeglass capture status` names the hints that are off, and
-[capture.md](capture.md#live-coaching) the ones that speak.
+counts cold returns). While `split_run` is off, coaching notes add no
+`SubagentStop` entry, as nothing would read its counts. Switching it back
+on brings the entry back at the next `capture connect` or update, and
+reports only runs that end after that. Taking a name out of the list
+switches its note back on. `claudeglass capture status` names the hints
+that are off, and [capture.md](capture.md#live-coaching) the ones that
+speak.
 
 One note at most per message: the first hint in the table that applies.
 The hints about how you prompt (`drip_feed`, `big_paste` and
@@ -143,7 +145,8 @@ end of the transcript alone and Setup › Capture shows a "Needs a hook entry" c
 record it makes has to be there when the main session's hook runs right
 after an agent call. Without it, `split_run` never speaks, and Setup ›
 Capture shows the same chip.
-While `split_run` is off, `SubagentStop` records nothing.
+While `split_run` is off, coaching notes need no `SubagentStop` entry, and
+`capture connect` takes out one an earlier version added.
 
 The /cg-feedback rating reminder (`feedback_reminder`) has the same look,
 labelled **ClaudeGlass:**. It comes on a message of yours, not at the

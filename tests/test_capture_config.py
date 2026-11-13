@@ -209,21 +209,64 @@ def test_a_light_sample_runs_only_once_capture_has_ended_and_light_was_chosen(tm
     assert (capture_catalogue.LIGHT_METRICS, capture_catalogue.LIGHT_SAMPLE) == (("task", "level", "size", "shift"), 20)
 
 
-def test_a_light_sample_needs_only_its_own_hook_entries(tmp_path):
-    _write(tmp_path / "light", '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n')
-    capture = load_config(config_dir=tmp_path / "light").capture
-    assert capture.light()
-    assert capture.hook_metrics() == capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
-    events = {spec[1] for spec in capture_catalogue.hook_specs(capture.hook_metrics())}
-    assert "PostToolUse" not in events and "SubagentStop" not in events
-    # Coaching notes run at any level, so their entries stay.
-    _write(tmp_path / "coach", '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n'
-           'coaching = ["coaching_notes"]\n')
-    assert load_config(config_dir=tmp_path / "coach").capture.hook_metrics()[-1] == "coaching_notes"
-    # Before the end, the level's own entries.
-    _write(tmp_path / "full", '[capture]\nlevel = "deep"\nuntil = "2099-01-01T00:00:00+00:00"\nafter = "light"\n')
-    full = load_config(config_dir=tmp_path / "full").capture
-    assert full.hook_metrics() == full.active_metrics()
+#: The ``[capture]`` table of each state the hook entries are checked in: capture running, a light sample
+#: after the end, past the end with no sample, and capture off.
+STATE_TABLES = {
+    "full": 'level = "deep"\nuntil = "2099-01-01T00:00:00+00:00"\nafter = "light"',
+    "light": 'level = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"',
+    "ended": 'level = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "stop"',
+    "off": 'level = "off"',
+}
+DEEP_FEEDBACK = 'feedback = ["feedback_skill", "feedback_note", "feedback_reminder", "plan_check"]'
+#: (state, tagger) -> the events the hook does something on in that state, with Deep's feedback items on and
+#: coaching notes off (`` bg``: in the background), read from ``capture_hook._run``. The plan check and the
+#: rating reminder run on your messages in every state, so ``UserPromptSubmit`` is always there. Deep's note
+#: after a large result is never added while Haiku writes the tags, so it needs no ``PostToolUse``.
+HOOK_EVENTS = {
+    ("full", "claude"): {"SessionStart", "SubagentStop", "UserPromptSubmit", "PostToolUse", "SessionEnd",
+                         "Notification bg", "PermissionRequest bg", "Stop bg", "StopFailure bg"},
+    ("full", "haiku"): {"SubagentStop", "UserPromptSubmit", "SessionEnd", "Notification bg", "PermissionRequest bg",
+                        "Stop", "StopFailure bg"},
+    ("light", "claude"): {"SessionStart", "UserPromptSubmit", "Stop bg"},
+    ("light", "haiku"): {"UserPromptSubmit", "Stop"},
+    ("ended", "claude"): {"UserPromptSubmit"},
+    ("ended", "haiku"): {"UserPromptSubmit"},
+    ("off", "claude"): {"UserPromptSubmit"},
+    ("off", "haiku"): {"UserPromptSubmit"},
+}
+
+
+@pytest.mark.parametrize("state, tagger", sorted(HOOK_EVENTS))
+def test_the_hook_entries_are_for_what_the_hook_runs_in_every_state(tmp_path, state, tagger):
+    capture = _capture_with(tmp_path, f'{STATE_TABLES[state]}\n{DEEP_FEEDBACK}\ntagger = "{tagger}"')
+    events = {spec[1] + (" bg" if spec[3] else "") for spec in capture_catalogue.hook_specs(capture.hook_metrics())}
+    assert events == HOOK_EVENTS[state, tagger]
+    # The items on your messages are counted as running in every state, as the hook runs them.
+    assert {"feedback_skill", "plan_check", "feedback_reminder"} <= set(capture.running_metrics())
+
+
+@pytest.mark.parametrize("state", sorted(STATE_TABLES))
+def test_coaching_notes_keep_their_own_entries_in_every_state(tmp_path, state):
+    capture = _capture_with(tmp_path, f'{STATE_TABLES[state]}\nfeedback = []\ncoaching = ["coaching_notes"]')
+    specs = {spec[1:] for spec in capture_catalogue.hook_specs(capture.hook_metrics())}
+    assert ("UserPromptSubmit", "", False) in specs
+    assert ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False) in specs
+    assert any(event == "Stop" for event, _matcher, _bg in specs)
+    # Nothing runs at an agent's end for coaching notes while split_run is off, and no agent metric runs
+    # past the end.
+    if state != "full" and "split_run" in capture_catalogue.LIVE_OFF_HINTS:
+        assert all(event != "SubagentStop" for event, _matcher, _bg in specs)
+
+
+def test_what_runs_follows_the_clock_it_is_given(tmp_path):
+    capture = set_capture(tmp_path, level="deep", now=NOW)
+    assert capture.running_metrics(NOW) == capture.active_metrics()
+    assert capture.running_metrics(LATER) == tuple(i for i in capture_catalogue.FEEDBACK_IDS if i in capture.feedback)
+    light = set_capture(tmp_path, after="light", now=NOW)
+    assert light.running_metrics(LATER) == capture_catalogue.active_metrics(
+        capture_catalogue.CUSTOM_LEVEL, capture_catalogue.LIGHT_METRICS, light.feedback
+    )
+    assert light.hook_metrics(NOW) == light.active_metrics()
 
 
 def test_capture_still_running_keeps_its_span_when_the_level_is_named_again(tmp_path):

@@ -4658,14 +4658,39 @@ def agent_grounded(tag: str, facts: dict | None) -> str:
     return " ".join(words)
 
 
+#: The least buffer the pipe a worker reads its job from gets on Windows:
+#: the system's own is 4 KB, smaller than a turn's job, so the write would
+#: wait until the worker had started Python and read it.
+_JOB_PIPE_BYTES = 1 << 16
+
+
+def _job_pipe(size: int) -> tuple[int, int]:
+    """Windows: a pipe whose buffer holds ``size`` bytes, as ``(read file
+    descriptor, write handle)``. Raises when it can't be made."""
+    import _winapi
+    import msvcrt
+
+    read, write = _winapi.CreatePipe(None, max(_JOB_PIPE_BYTES, 2 * size))
+    try:
+        return msvcrt.open_osfhandle(read, os.O_RDONLY), write
+    except BaseException:
+        _winapi.CloseHandle(read)
+        _winapi.CloseHandle(write)
+        raise
+
+
 def spawn_judge(config_dir: Path, job: dict) -> None:
     """Hand ``job`` to a worker (the launcher with ``--judge``) that
     outlives this call, so the Stop hook returns at once and Haiku's
     answer still lands when Claude Code has moved on or, run with ``-p``,
-    exited."""
+    exited. The job goes through a pipe, never a file. On Windows the pipe
+    is made with a buffer that holds it (:func:`_job_pipe`), so the write
+    doesn't wait for the worker to start; the write still comes after the
+    worker has started, so a smaller buffer only waits as long as the
+    system's own would. A pipe that can't be made is the system's own."""
     import subprocess
 
-    options: dict = {"stdin": subprocess.PIPE, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    options: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
         options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -4673,9 +4698,32 @@ def spawn_judge(config_dir: Path, job: dict) -> None:
     # -I -S as the hook itself runs: no user site or PYTHON* settings.
     launcher = Path(__file__).resolve().with_name(LAUNCHER_FILE)
     command = [sys.executable, "-I", "-S", str(launcher), "--judge", "--config-dir", str(config_dir)]
-    worker = subprocess.Popen(command, **options)
-    worker.stdin.write(json.dumps(job).encode("utf-8"))
-    worker.stdin.close()
+    data = json.dumps(job).encode("utf-8")
+    pipe = None
+    if _WINDOWS:
+        try:
+            pipe = _job_pipe(len(data))
+        except Exception:  # noqa: BLE001 - the system's own pipe instead
+            pipe = None
+    if pipe is None:
+        worker = subprocess.Popen(command, stdin=subprocess.PIPE, **options)
+        worker.stdin.write(data)
+        worker.stdin.close()
+        return
+    import _winapi
+
+    read, write = pipe
+    try:
+        subprocess.Popen(command, stdin=read, **options)
+    except BaseException:
+        _winapi.CloseHandle(write)
+        raise
+    finally:
+        os.close(read)
+    try:
+        _winapi.WriteFile(write, data)
+    finally:
+        _winapi.CloseHandle(write)
 
 
 def _claude_command() -> str | None:
@@ -4891,8 +4939,7 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
             record["model"] = model
     folder = config_dir / judge["dir"]
     folder.mkdir(parents=True, exist_ok=True)
-    with open(folder / f"{record['ts'][:7]}.jsonl", "a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+    append_line(folder / f"{record['ts'][:7]}.jsonl", json.dumps(record, separators=(",", ":")) + "\n")
     return record
 
 
@@ -4985,8 +5032,59 @@ def write_signal(config_dir: Path, catalogue: dict, record: dict) -> None:
     """Append ``record`` to this month's signal file, as one write."""
     folder = config_dir / catalogue["signals_dir"]
     folder.mkdir(parents=True, exist_ok=True)
-    with open(folder / f"{record['ts'][:7]}.jsonl", "a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+    append_line(folder / f"{record['ts'][:7]}.jsonl", json.dumps(record, separators=(",", ":")) + "\n")
+
+
+#: Whether the hook runs on Windows, where :func:`append_line` opens the file
+#: for appending only (a test sets it to try the other path).
+_WINDOWS = os.name == "nt"
+#: ``CreateFile``'s arguments for that: append access alone, so the system
+#: puts every write at the end of the file; every share mode, as ``open``
+#: leaves the file open to others (and to a delete, so a prune never fails);
+#: the file made when it isn't there.
+_FILE_APPEND_DATA = 0x0004
+_FILE_SHARE_ALL = 0x0007
+_OPEN_ALWAYS = 4
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
+def _append_windows(path: Path, data: bytes) -> bool:
+    """Write ``data`` at the end of ``path`` through a handle opened for
+    appending only. ``False`` when that handle could not be opened, so
+    nothing was written; ``True`` once it was, whatever the write did, so
+    the caller never writes the line a second time."""
+    try:
+        import _winapi
+
+        handle = _winapi.CreateFile(
+            str(path), _FILE_APPEND_DATA, _FILE_SHARE_ALL, 0, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, 0
+        )
+    except Exception:  # noqa: BLE001 - append_line falls back to open()
+        return False
+    try:
+        _winapi.WriteFile(handle, data)
+    except Exception:  # noqa: BLE001 - lost as a failed open() write would be; never written twice
+        pass
+    finally:
+        try:
+            _winapi.CloseHandle(handle)
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
+def append_line(path: Path, line: str) -> None:
+    """Append ``line`` (one JSON line and its ``\\n``) to ``path`` in one
+    write. Parallel hooks and workers append to the same file: on Windows
+    ``open(path, "a")`` moves to the end and then writes, so two of them can
+    write at the same place and a line is lost or two are mixed. There the
+    file is opened for appending only, which the system keeps whole
+    (:func:`_append_windows`), and ``open`` is used should that fail.
+    Elsewhere ``open(path, "a")`` already appends in one step."""
+    if _WINDOWS and _append_windows(path, line.encode("utf-8")):
+        return
+    with open(path, "a", encoding="utf-8", newline="\n") as handle:
+        handle.write(line)
 
 
 #: Claude Code's ``CLAUDE_CODE_ENTRYPOINT`` starts with this for a run

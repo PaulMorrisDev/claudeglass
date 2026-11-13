@@ -1363,8 +1363,10 @@ def test_coaching_notes_add_the_prompt_and_plan_hooks():
     # A background Stop keeps the newest reply for the cold-return receipt: it prints nothing, so nothing waits.
     assert (cat.HOOK_SCRIPT, "Stop", "", True) in specs
     assert sum(1 for spec in deep if spec[1] == "Stop") == 1
-    # A SubagentStop records a run that ended too big, in the foreground like the agent metrics' own.
-    assert [spec for spec in specs if spec[1] == "SubagentStop"] == [(cat.HOOK_SCRIPT, "SubagentStop", "", False)]
+    # A SubagentStop records a run that ended too big, in the foreground like the agent metrics' own, while
+    # split_run is on; while it is off nothing would read the record, so there is no entry.
+    split = [] if "split_run" in cat.LIVE_OFF_HINTS else [(cat.HOOK_SCRIPT, "SubagentStop", "", False)]
+    assert [spec for spec in specs if spec[1] == "SubagentStop"] == split
     agents = cat.hook_specs((*cat.agent_metric_ids(cat.level_metrics("standard")), "coaching_notes"))
     assert sum(1 for spec in agents if spec[1] == "SubagentStop") == 1
     assert not any(spec[1] == "SubagentStop" for spec in cat.hook_specs(("big_output",)))

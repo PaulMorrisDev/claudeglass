@@ -144,6 +144,22 @@ Capture and dashboard:
   quotes. A saved profile that breaks the rule says why when you open it.
 - **An id, model id or card key with a line break at its end is
   refused.** A profile id like that gave an error 500 on Windows.
+- **During a light sample, capture keeps the hook entry the plan check and
+  the rating reminder need.** `capture connect` no longer offers to take it
+  out, and `capture status` counts both again. Past its end, capture asks
+  only for the entries that still run.
+- **No hook runs where nothing switched on uses it.** Coaching notes no
+  longer start Python at every agent's end, and Deep adds no hook after
+  each read or web result while Haiku writes the tags. `capture status`
+  names a leftover entry and the command that takes it out.
+- **docs/capture.md names the question Deep asks after a summary**
+  (`lost=yes|no`), and the note after a compaction is given its own size:
+  about 709 tokens at Deep. `capture status` and Setup › Capture say so too.
+- **Parallel sessions and agents no longer lose signal or tag lines on
+  Windows.** Each line is now added in one step the system keeps whole.
+- **The Stop hook no longer waits for Haiku's worker to start on
+  Windows**, a wait measured at 160 to 420 ms a turn on a large session.
+  The job still goes through a pipe, never a file.
 
 Cards and checks:
 

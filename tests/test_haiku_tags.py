@@ -1706,7 +1706,8 @@ def test_capture_tagger_asks_first_and_says_what_it_sends(claude_dir):
 
 
 def test_capture_status_says_what_haiku_did(claude_dir):
-    set_capture(claude_dir, level="essentials", tagger="haiku", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    # No end, so capture still runs whatever the clock says: what an ended capture shows is tested apart.
+    set_capture(claude_dir, level="essentials", tagger="haiku", until="", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
     rc, out = _capture(claude_dir, "status")
     assert "tags by Haiku" in out and "hasn't tagged a turn yet" in out
     assert f"a Claude Haiku call of about ${cat.JUDGE_USD_PER_CALL:.4f} after each of your messages" in out
@@ -2416,7 +2417,7 @@ def test_a_fallback_tag_lands_on_the_untagged_reply_and_never_over_claudes_own(t
 
 
 def test_capture_status_says_what_haiku_filled_in_while_claude_writes_the_tags(claude_dir):
-    set_capture(claude_dir, level="essentials", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    set_capture(claude_dir, level="essentials", until="", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
     rc, out = _capture(claude_dir, "status")
     assert "Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one." in out
     assert "tags by Haiku" not in out

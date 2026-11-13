@@ -3667,7 +3667,7 @@ def _cmd_update_finish(
         capture = None
         stdout.write(f"config.toml has a problem, so capture's hook entries weren't checked: {exc}\n")
     if capture is not None and capture.hooked:
-        wanted = hook_health.capture_specs(capture.hook_metrics())
+        wanted = hook_health.capture_specs(capture.hook_metrics(now))
         capture_health = hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir)
         if capture_health.blocked_by is not None:
             stdout.write(f"{hook_health.POLICY_TEXT[capture_health.blocked_by]}\n")
@@ -3875,7 +3875,12 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
     makes for a reply Claude ends without its tag otherwise."""
     rough = capture_catalogue.rough_tokens(ids, tagger)
     lines = []
-    if rough["session_note"]:
+    if rough["compact_note"] > rough["session_note"]:
+        lines.append(
+            f"about {rough['session_note']} tokens of note when a session starts or is cleared, "
+            f"and about {rough['compact_note']} when it compacts"
+        )
+    elif rough["session_note"]:
         lines.append(f"about {rough['session_note']} tokens of note when a session starts, is cleared or compacts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
@@ -4386,16 +4391,11 @@ _HAIKU_ERRORS = {
 }
 
 
-def _running_metrics(capture: CaptureConfig) -> tuple[str, ...]:
-    """The metrics the hook asks for now: the level's, or only the light
-    sample's four keys once the end has passed and a light sample runs."""
-    if capture.light():
-        return capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
-    return capture.active_metrics()
-
-
 def _haiku_lines(
-    capture: CaptureConfig, config_dir: Path, agent_replies: Callable[[], frozenset[str]] | None = None
+    capture: CaptureConfig,
+    config_dir: Path,
+    agent_replies: Callable[[], frozenset[str]] | None = None,
+    now: datetime | None = None,
 ) -> list[str]:
     """What Claude Haiku has done since capture was turned on: the main
     session's turns while it writes the tags, the replies it tags when
@@ -4411,6 +4411,9 @@ def _haiku_lines(
         if agent_replies is not None and haiku_tags.summary(config_dir, since=since, kind="main").errors
         else None
     )
+    # What Haiku was asked for in this span: the light sample's keys while one runs, else the level's,
+    # also once the end has passed, as these lines count what it did since capture was turned on.
+    asked = capture.running_metrics(now) if capture.light(now) else capture.active_metrics()
     lines: list[str] = []
     if capture.haiku_tags:
         done = haiku_tags.summary(
@@ -4423,7 +4426,7 @@ def _haiku_lines(
                 "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
                 "change, once the hook's Stop entry is in settings.json."
             )
-    elif capture.is_on and capture_catalogue.tagged_keys(_running_metrics(capture)):
+    elif capture.is_on and capture_catalogue.tagged_keys(asked):
         done = haiku_tags.summary(
             config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER, agent_reply_ids=agent_ids
         )
@@ -4431,7 +4434,7 @@ def _haiku_lines(
             lines += _haiku_done_lines(done, "filled in", "missing tag", "No tag")
         else:
             lines.append("Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one.")
-    if capture.is_on and capture_catalogue.agent_metric_ids(_running_metrics(capture)):
+    if capture.is_on and capture_catalogue.agent_metric_ids(asked):
         done = haiku_tags.summary(config_dir, since=since, kind="agent", agent_reply_ids=agent_ids)
         if done.calls:
             lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
@@ -4469,21 +4472,29 @@ def _haiku_done_lines(done: haiku_tags.Summary, verb: str, what: str, none: str)
 
 
 def _capture_status(
-    capture: CaptureConfig, *, config_dir: Path, claude_root: Path, stdout, args=None, config: Config | None = None
+    capture: CaptureConfig,
+    *,
+    config_dir: Path,
+    claude_root: Path,
+    stdout,
+    args=None,
+    config: Config | None = None,
+    now: datetime | None = None,
 ) -> int:
-    stdout.write(f"Metrics capture: {capture_view.describe(capture)}\n")
-    ids = _running_metrics(capture)
+    stdout.write(f"Metrics capture: {capture_view.describe(capture, now)}\n")
+    ids = capture.running_metrics(now)
     if capture.is_on:
-        if capture.light():
+        if capture.light(now):
             stdout.write(
                 "Its end time has passed, so full capture has stopped. A light sample goes on: Claude tags the kind, "
                 f"difficulty and size of the work, and task changes, in {capture_view.one_session_in(capture)}. "
                 "'claudeglass capture off' stops it; 'claudeglass capture on' starts full capture again.\n"
             )
-        elif capture.expired():
+        elif capture.expired(now):
             stdout.write(
-                "Its end time has passed, so capture's notes, tags and signals have stopped; coaching notes and the "
-                "feedback facts line, if you have them on, still run. 'claudeglass capture on' starts capture again.\n"
+                "Its end time has passed, so capture's notes, tags and signals have stopped. Coaching notes and the "
+                "feedback items on your messages still run, if you have them on. 'claudeglass capture on' starts "
+                "capture again.\n"
             )
         if capture.projects:
             only = [p for p in capture.projects if not p.startswith("!")]
@@ -4514,7 +4525,7 @@ def _capture_status(
     agent_replies = (
         (lambda: _agent_reply_ids(args, config, config_dir, capture)) if args is not None and config is not None else None
     )
-    for line in _haiku_lines(capture, config_dir, agent_replies):
+    for line in _haiku_lines(capture, config_dir, agent_replies, now):
         stdout.write(f"{line}\n")
     if args is not None and config is not None:
         for line in _capture_measured(capture, args=args, config=config, config_dir=config_dir):
@@ -4530,7 +4541,7 @@ def _capture_status(
         recommendation = _scan_hook_errors(args, config, config_dir).recommendation()
         if recommendation:
             stdout.write(f"{recommendation}\n")
-    wanted = hook_health.capture_specs(capture.hook_metrics())
+    wanted = hook_health.capture_specs(capture.hook_metrics(now))
     health = hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir, check_python=True)
     if wanted or health.extra:
         stdout.write(f"Hooks: {health.summary()}\n")
@@ -4640,7 +4651,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     action = args.action
     if action == "status":
         return _capture_status(
-            current, config_dir=config_dir, claude_root=claude_root, stdout=stdout, args=args, config=config
+            current, config_dir=config_dir, claude_root=claude_root, stdout=stdout, args=args, config=config, now=now
         )
     if action == "prune":
         return _capture_prune(config_dir, retention_days=config.retention_days, dry_run=args.dry_run, stdout=stdout, now=now)
@@ -4732,7 +4743,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         if action == "feedback" and on and not args.dry_run and preview.hooked:
             # The facts line a /cg-feedback run starts with comes from the capture hook's message entry,
             # which this switch leaves to `connect` (it changes settings.json, after a yes of its own).
-            wanted = hook_health.capture_specs(preview.hook_metrics())
+            wanted = hook_health.capture_specs(preview.hook_metrics(now))
             if hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir).missing:
                 stdout.write(
                     "The facts line a survey run starts with comes from the capture hook, so it needs an entry in "
@@ -4849,7 +4860,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             "The /cg-brief skill stays: it works with capture off. "
             "'claudeglass capture brief off' removes it.\n"
         )
-    wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics())
+    wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics(now))
     if action == "connect" and not preview.hooked:
         stdout.write("Capture is off, so no hook entries are needed. 'claudeglass capture on' turns it on.\n")
         return 0
@@ -4863,7 +4874,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         stdout=stdout,
         removing=action == "remove",
     )
-    if not done and wanted and not args.dry_run:
+    if not done and wanted and not args.dry_run and hook_health.check_capture(wanted, claude_root=claude_root).missing:
         stdout.write("Until then the chosen metrics can't be captured.\n")
     return 0
 

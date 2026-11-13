@@ -1900,8 +1900,9 @@ def _coaching_hooked(config_dir) -> list[tuple[str, str, bool]]:
 
 
 COACHING_HOOKS = [
-    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next call.
-    ("SubagentStop", "", False),
+    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next
+    # call: only while that hint is on.
+    *([] if "split_run" in cat.LIVE_OFF_HINTS else [("SubagentStop", "", False)]),
     ("UserPromptSubmit", "", False),
     ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
     # cold_return's state is kept by the Stop entry: the one entry that runs in the background.
@@ -2614,3 +2615,92 @@ def test_install_hook_files_tries_another_kind_of_error_once(tmp_path, monkeypat
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
     assert len(calls) == 1
     assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+
+
+# -- what the entries are for, past the end and during a light sample ----------------------------
+
+PAST_THE_END = NOW + timedelta(days=30)  # past the default time-box of 14 days
+
+
+def test_a_light_sample_keeps_the_entry_the_plan_check_and_the_reminder_run_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "on", "--level", "deep", "--after", "light", "--yes")
+    assert rc == 0, out
+    rc, out = _capture(config_dir, "status", now=PAST_THE_END)
+    assert "A light sample goes on" in out
+    assert "  feedback: feedback_skill, feedback_note, feedback_reminder, plan_check\n" in out
+    assert "tokens for the /cg-feedback reminder, at most once every 3 days" in out
+    assert "tokens for the plan check's question, once per approved plan" in out
+    rc, out = _capture(config_dir, "connect", stdin="n\n", now=PAST_THE_END)
+    assert "when a subagent finishes" in out and "when you send a message" not in out
+    assert "can't be captured" not in out
+    rc, out = _capture(config_dir, "connect", "--yes", now=PAST_THE_END)
+    assert sorted((event, bool(entry.get("async"))) for event, _matcher, entry in _capture_entries(config_dir)) == [
+        ("SessionStart", False), ("Stop", True), ("UserPromptSubmit", False),
+    ]
+
+
+def test_past_the_end_only_the_entries_that_still_run_are_needed(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--level", "deep", "--yes")
+    rc, out = _capture(config_dir, "status", now=PAST_THE_END)
+    assert (
+        "Hooks: The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture connect' takes "
+        "them out.\n"
+    ) in out
+    assert "tokens of note when a session starts" not in out
+    assert "tokens for the plan check's question" in out
+    rc, out = _capture(config_dir, "connect", "--yes", now=PAST_THE_END)
+    assert [event for event, _matcher, _entry in _capture_entries(config_dir)] == ["UserPromptSubmit"]
+    # Starting capture again brings its entries back.
+    rc, out = _capture(config_dir, "on", "--level", "deep", "--yes", now=PAST_THE_END)
+    wanted = hook_health.capture_specs(load_config(config_dir).capture.hook_metrics(PAST_THE_END))
+    assert "SessionStart" in {spec.event for spec in wanted}
+    assert hook_health.check_capture(wanted, claude_root=config_dir.parent, config_dir=config_dir).ok
+
+
+def test_with_capture_off_status_names_the_command_that_takes_the_entries_out(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--yes")
+    _capture(config_dir, "off")
+    rc, out = _capture(config_dir, "status")
+    assert (
+        "Hooks: The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture remove' takes "
+        "them out.\n"
+    ) in out
+    assert "'claudeglass capture connect' takes them out" not in out
+    # The command it names does take them out.
+    assert _capture_entries(config_dir)
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert _capture_entries(config_dir) == []
+
+
+def test_coaching_notes_alone_need_no_entry_at_an_agents_end(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    # The entry an earlier version wrote for split_run, which is off.
+    settings = _settings(config_dir)
+    settings["hooks"]["SubagentStop"] = [dict(settings["hooks"]["UserPromptSubmit"][0])]
+    (config_dir.parent / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    rc, out = _capture(config_dir, "status")
+    assert "settings.json also runs capture hooks that nothing switched on uses" in out
+    rc, out = _capture(config_dir, "connect", stdin="n\n")
+    assert "- Remove the capture hook that runs capture-hook.py when a subagent finishes.\n" in out
+    assert "Left unchanged." in out and "can't be captured" not in out
+
+
+def test_the_rough_size_says_when_the_note_after_a_compaction_is_bigger():
+    deep = cat.level_includes("deep")
+    rough = cat.rough_tokens(deep)
+    assert rough["compact_note"] > rough["session_note"]
+    assert cli._capture_cost_lines(deep)[0] == (
+        f"about {rough['session_note']} tokens of note when a session starts or is cleared, "
+        f"and about {rough['compact_note']} when it compacts"
+    )
+    standard = cli._capture_cost_lines(cat.level_includes("standard"))[0]
+    assert standard.endswith("tokens of note when a session starts, is cleared or compacts")

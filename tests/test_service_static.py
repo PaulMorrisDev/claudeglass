@@ -4150,6 +4150,12 @@ def test_capture_segment_no_longer_claims_a_subagent_is_asked_for_anything() -> 
     assert "subagent starts" not in capture_view.WARNING and "when a session or subagent" not in capture_view.WARNING
 
 
+def test_the_capture_page_gives_the_note_after_a_compaction_where_it_is_bigger() -> None:
+    rough = _function_source(_static_text("page-capture.js"), "roughLine")
+    assert "rough.compact_note > rough.session_note" in rough
+    assert '" when it compacts"' in rough
+
+
 def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one() -> None:
     capture_js = _static_text("page-capture.js")
     render = _function_source(capture_js, "renderCaptureData")
