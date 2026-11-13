@@ -1032,9 +1032,15 @@ names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
 One profile's contents. `404` if `<id>` names neither a catalogue id
 nor an existing `<config_dir>/profiles/<id>.toml`.
 
-`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
-`setting_count` counts settings, agent keys and environment variables
-together.
+`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
+`roles` is the profile's `[roles.<role>]` tables as written (the only
+role is `writer`, the agent that writes code). `agents` is as resolved
+(`profiles.roles.resolve`): the profile's own agent tables, plus each
+role's keys on every one of the user's agents the latest config snapshot
+records (user and project agents together) that is named like a writer
+and can edit files. A role with no such agent adds nothing, and so does
+a role when no snapshot has recorded any agents. `setting_count` counts
+settings, the resolved agent keys and environment variables together.
 
 ### `GET /api/profiles/<id>/diff`
 
@@ -1058,16 +1064,29 @@ service's privacy rule forbids regardless of who supplied it — so a
 `--project-dir`; fill it in yourself when you run the command.
 
 `data`: `{"profile_id": str, "scope": str, "diff": str, "settings": [DiffRow, ...], "agents": [DiffRow, ...], "env": [DiffRow, ...], "apply_command": str, "dry_run_command": str, "launch_command": str, "prompt": str, "notes": [str, ...]}`,
-where a `DiffRow` is `{"key", "setting", "agent", "label", "description", "where", "current_value", "current_provenance", "proposed_value", "target_file", "managed"}`
+where a `DiffRow` is `{"key", "setting", "agent", "role", "label", "description", "where", "current_value", "current_provenance", "proposed_value", "target_file", "managed"}`
 (`profiles.diff.DiffRow`'s own fields, split by key prefix into the
 three lists rather than left as one flat `rows` array — `settings.*` /
 `agents.<name>.*` / `env.*`). The display fields: `setting` is the key
 without its prefix (dotted agent keys such as `experimental.cacheTtl`
 stay whole), `agent` the agent's name for an `agents.*` row (else
-`null`), `label`/`description` its plain name and what it controls, and
+`null`), `role` `"writer"` when the row's key came from the profile's
+`[roles.writer]` table rather than from an `[agents.<name>]` table of
+its own (else `null`), `label`/`description` its plain name and what it controls, and
 `where` the file the change is written to under the chosen `scope`
 (`fixes.profile_change_where`). `target_file` is where the key is set
 today.
+
+A profile's roles are resolved against the agents the latest snapshot
+records at the chosen `scope` (the `user` agents for `user`, the
+`project` agents for `project-local` and `repo`), so the rows, the diff
+and the prompt name the user's own agent. `notes` then says, in one
+sentence each: that no agent at this scope is named like a writer and
+can edit files, so no agent file changes (with, when the other scope has
+one, which target to pick instead); that several agents are named like a
+writer and each gets the changes; or, when the snapshot records no
+agents, that the user's agents have not been recorded yet and so no
+agent file is listed.
 
 `apply_command`/`launch_command` are the two lines
 `profiles.diff.apply_command` returns, split apart — the exact
