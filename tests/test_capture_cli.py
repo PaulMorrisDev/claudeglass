@@ -2614,3 +2614,46 @@ def test_install_hook_files_tries_another_kind_of_error_once(tmp_path, monkeypat
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
     assert len(calls) == 1
     assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+
+
+# -- what the entries are for, past the end and during a light sample ----------------------------
+
+PAST_THE_END = NOW + timedelta(days=30)  # past the default time-box of 14 days
+
+
+def test_a_light_sample_keeps_the_entry_the_plan_check_and_the_reminder_run_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "on", "--level", "deep", "--after", "light", "--yes")
+    assert rc == 0, out
+    rc, out = _capture(config_dir, "status", now=PAST_THE_END)
+    assert "A light sample goes on" in out
+    assert "  feedback: feedback_skill, feedback_note, feedback_reminder, plan_check\n" in out
+    assert "tokens for the /cg-feedback reminder, at most once every 3 days" in out
+    assert "tokens for the plan check's question, once per approved plan" in out
+    rc, out = _capture(config_dir, "connect", stdin="n\n", now=PAST_THE_END)
+    assert "when a subagent finishes" in out and "when you send a message" not in out
+    assert "can't be captured" not in out
+    rc, out = _capture(config_dir, "connect", "--yes", now=PAST_THE_END)
+    assert sorted((event, bool(entry.get("async"))) for event, _matcher, entry in _capture_entries(config_dir)) == [
+        ("SessionStart", False), ("Stop", True), ("UserPromptSubmit", False),
+    ]
+
+
+def test_past_the_end_only_the_entries_that_still_run_are_needed(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--level", "deep", "--yes")
+    rc, out = _capture(config_dir, "status", now=PAST_THE_END)
+    assert (
+        "Hooks: The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture connect' takes "
+        "them out.\n"
+    ) in out
+    assert "tokens of note when a session starts" not in out
+    assert "tokens for the plan check's question" in out
+    rc, out = _capture(config_dir, "connect", "--yes", now=PAST_THE_END)
+    assert [event for event, _matcher, _entry in _capture_entries(config_dir)] == ["UserPromptSubmit"]
+    # Starting capture again brings its entries back.
+    rc, out = _capture(config_dir, "on", "--level", "deep", "--yes", now=PAST_THE_END)
+    wanted = hook_health.capture_specs(load_config(config_dir).capture.hook_metrics(PAST_THE_END))
+    assert "SessionStart" in {spec.event for spec in wanted}
+    assert hook_health.check_capture(wanted, claude_root=config_dir.parent, config_dir=config_dir).ok

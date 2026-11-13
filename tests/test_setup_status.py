@@ -151,6 +151,15 @@ def test_capture_past_its_time_box_is_off(tmp_path):
     assert "2026-09-01" in item.detail
 
 
+def test_a_light_sample_after_the_time_box_is_not_called_stopped(tmp_path):
+    config_dir, claude = _dirs(tmp_path)
+    set_capture(config_dir, level="deep", until="2026-09-01T00:00:00+00:00", after="light", now=NOW)
+    item = _items(config_dir, claude)["capture"]
+    assert item.detail.startswith("Light sample (since 2026-09-01, 20% of sessions)")
+    # Its entries are not in settings.json here: a problem the connect command fixes.
+    assert (item.state, item.fix) == ("problem", "claudeglass capture connect")
+
+
 def test_skill_missing_is_a_problem_only_when_feedback_is_on(tmp_path):
     config_dir, claude = _dirs(tmp_path)
     assert _items(config_dir, claude)["skill"].state == "off"

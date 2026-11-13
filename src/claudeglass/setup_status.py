@@ -233,7 +233,7 @@ def _capture(config_dir: Path, claude_root, capture: CaptureConfig, now: datetim
             "Turned on, Claude tags each reply with the kind of work it was, so the tips fit how you work.",
             CAPTURE_COMMAND,
         )
-    elif capture.expired(now):
+    elif capture.expired(now) and not capture.light(now):
         stopped = SetupItem(
             "capture",
             label,
@@ -245,7 +245,7 @@ def _capture(config_dir: Path, claude_root, capture: CaptureConfig, now: datetim
         return _stopped_capture(stopped, config_dir, claude_root, capture)
     described = capture_view.describe(capture)
     health = hook_health.check_capture(
-        hook_health.capture_specs(capture.hook_metrics()), claude_root=claude_root, config_dir=config_dir
+        hook_health.capture_specs(capture.hook_metrics(now)), claude_root=claude_root, config_dir=config_dir
     )
     if health.ok:
         return SetupItem("capture", label, "ok", f"{described}.")

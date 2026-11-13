@@ -119,6 +119,10 @@ Capture and dashboard:
   than the one the change sets are left out, and so is a project whose
   sessions before the change never ran the old one. When none is left, the
   Changes page says the change has not changed what you paid.
+- **During a light sample, capture keeps the hook entry the plan check and
+  the rating reminder need.** `capture connect` no longer offers to take it
+  out, and `capture status` counts both again. Past its end, capture asks
+  only for the entries that still run.
 
 Cards and checks:
 
