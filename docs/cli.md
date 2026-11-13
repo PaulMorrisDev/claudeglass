@@ -366,6 +366,7 @@ python -m claudeglass capture on --level essentials --for 7d
 | `--until DATE` | Switch it off at this date or time instead |
 | `--no-limit` | Run until you switch it off, instead of the default 14 days |
 | `--sample {100,50,25,10}` | Capture this percentage of sessions, picked at random per session |
+| `--after {stop,light}` | What happens when the end passes: `stop` (the default), or keep a light sample: the kind, difficulty and size of the work, and task changes, in 1 session in 5. See [`capture.md`](capture.md#turning-it-on-off-or-removing-it) |
 | `--yes` | Make the changes without asking. They're still printed |
 | `--dry-run` | Show what would change, without changing it |
 | `--claude-root PATH` | As for `init` |

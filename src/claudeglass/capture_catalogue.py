@@ -4200,7 +4200,7 @@ def render_markdown() -> str:
     )
     p(
         "- `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] "
-        "[--sample N] [--yes] [--dry-run]` — turn it on (default level: Essentials)."
+        "[--sample N] [--after stop|light] [--yes] [--dry-run]` — turn it on (default level: Essentials)."
     )
     p("- `claudeglass capture level LEVEL` — change the level.")
     p(
@@ -4220,6 +4220,18 @@ def render_markdown() -> str:
         "lack of one) exactly as it is — the default only ever applies to a fresh switch-on. Capture whose "
         "end time has passed counts as off here: turning it back on (`capture on`, a level, or a new end on "
         f"the Capture page) starts a new span, {DEFAULT_CAPTURE_TIMEBOX_DAYS} days unless you say otherwise."
+    )
+    p("")
+    p(
+        "What happens at the end is your choice: `--after stop` (the default) stops capture, and `--after "
+        "light` keeps a light sample going instead, with \"When it ends\" on the Capture page as the same "
+        "choice. A light sample asks only for `task`, `level`, `size` and `shift` (the kind, difficulty and "
+        f"size of the work, and task changes), in {LIGHT_SAMPLE}% of sessions (1 in 5), or fewer if you "
+        "chose a smaller share. Those four are the tags most cards and the matching of sessions read, so "
+        "they stay fresh; every other tag stops at the end, and a card that rests on one says how old it "
+        "is. The banner reads \"Metrics capture: light sample\" and says when the full capture ended. "
+        "`capture off` stops the sample, and `capture on` starts full capture again. An older ClaudeGlass "
+        "ignores the choice and stops at the end."
     )
     p(
         "- `claudeglass capture enable METRIC...` / `capture disable METRIC...` — turn individual "
