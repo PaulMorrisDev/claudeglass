@@ -254,11 +254,14 @@ def _main_units(sessions: list[impact.SessionFacts]) -> list[impact.SessionFacts
     return [s for s in sessions if not s.scheduled]
 
 
-def _units(sessions: list[impact.SessionFacts], agent: str | None) -> int:
-    """How many units ``sessions`` hold: spawns of ``agent``, or main sessions."""
+def _units(sessions: list[impact.SessionFacts], agent: str | None, bundles: dict) -> int:
+    """How many units ``sessions`` hold: main sessions, or for an agent its runs
+    whose model its agent file decides, counted where the counterfactual prices
+    them (``counterfactual.agent_file_runs``), so the count and the rows agree."""
     if agent is None:
         return len(_main_units(sessions))
-    return sum(1 for s in sessions for name, _facts in s.spawns if name == agent)
+    mine = [bundles[s.session_id] for s in sessions if s.session_id in bundles]
+    return len(counterfactual.agent_file_runs(mine, agent)[0])
 
 
 def _carry_on_mains(after: list[impact.SessionFacts], tokens: float, bundles: dict, pricing) -> float:
@@ -423,7 +426,7 @@ def _measure(
     else:
         before = [s for b, _a in sides for s in b]
         after = [s for _b, a in sides for s in a]
-        if _units(after, agent) >= MIN_UNITS:
+        if _units(after, agent, bundles) >= MIN_UNITS:
             result = counterfactual.without_change(point, before, after, bundles, pricing)
             row = next(
                 (
@@ -438,7 +441,7 @@ def _measure(
                 # The card's saving as a share of the cost it repriced, applied to what the units
                 # after the change would have cost without it.
                 predicted = saving / basis * row.without_usd
-                before_n, after_n, counted = _units(before, agent), _units(after, agent), 1
+                before_n, after_n, counted = _units(before, agent, bundles), _units(after, agent, bundles), 1
 
     reading.before_units, reading.after_units, reading.projects = before_n, after_n, counted
     if counted == 0:

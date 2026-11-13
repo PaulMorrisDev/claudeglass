@@ -11,8 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudeglass import counterfactual, impact, outcomes, quality
+from claudeglass import counterfactual, impact, model_swap, outcomes, quality
 from claudeglass.change_points import ChangePoint
+from claudeglass.pricing import load_pricing
+
+from test_counterfactual import _agent_model_point, _agent_model_world, _agent_run
+
+PRICING = load_pricing()
+OPUS, SONNET, HAIKU = "claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5"
 
 T = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
 
@@ -464,6 +470,56 @@ def test_an_exact_fix_with_no_row_for_its_key_is_too_little_data(monkeypatch):
     only = counterfactual.Counterfactual(30.0, 45.0, "before", "", 6, [row])
     monkeypatch.setattr(counterfactual, "without_change", lambda *a: only)
     assert _read(_point("effective.model"), None, "model", prediction, _exact_world()).verdict == "too_little_data"
+
+
+def _agent_model_card():
+    """The card for ``gp``'s six Opus runs, as ``model_swap`` prices it: the saving of moving to
+    Sonnet, and the cost of the runs it was priced on (a share of about 0.6)."""
+    stats = model_swap.compute_model_swap([_agent_run(OPUS) for _ in range(6)], PRICING).by_key["gp"]
+    return outcomes.Prediction(stats.tier_verdict.saving_usd, stats.lever.observed_cost)
+
+
+def _read_agent_model(after_runs):
+    before, after, bundles = _agent_model_world(after_runs, [_agent_run(OPUS) for _ in range(6)], at=T)
+    point = _agent_model_point(T)
+    return outcomes.read_fix(
+        point, "gp", "model", _agent_model_card(), before + after, [point], bundles, PRICING, NOW, START_CORPUS
+    )
+
+
+def _ratio(reading):
+    return reading.measured_usd / reading.predicted_usd
+
+
+def test_an_agents_model_fix_that_took_on_every_run_its_file_decides_reads_as_the_card_said():
+    reading = _read_agent_model([_agent_run(SONNET) for _ in range(6)])
+    assert _agent_model_card().saving_usd / _agent_model_card().basis == pytest.approx(0.6, abs=0.1)
+    assert reading.method == "exact" and reading.verdict == "half_or_more"
+    assert _ratio(reading) == pytest.approx(1.0)
+    assert reading.after_units == 6
+
+
+def test_an_agents_model_fix_is_read_only_on_the_runs_its_file_decides():
+    # Six more runs a spawn gave Opus: the file does not decide them, so they change nothing.
+    reading = _read_agent_model([_agent_run(SONNET) for _ in range(6)] + [_agent_run(OPUS, "opus") for _ in range(6)])
+    assert reading.verdict == "half_or_more"
+    assert _ratio(reading) == pytest.approx(1.0)
+    assert reading.after_units == 6
+    # Five that the file decides still make a reading; the thirteen runs are not the units.
+    five = _read_agent_model([_agent_run(SONNET) for _ in range(5)] + [_agent_run(OPUS, "opus") for _ in range(8)])
+    assert five.verdict == "half_or_more"
+    assert _ratio(five) == pytest.approx(1.0)
+    assert five.after_units == 5
+
+
+def test_an_agents_model_fix_with_every_run_given_a_model_by_its_spawn_is_too_little_data():
+    for model in (OPUS, HAIKU):
+        reading = _read_agent_model([_agent_run(model, "opus") for _ in range(6)])
+        assert reading.verdict == "too_little_data"
+        assert (reading.measured_usd, reading.predicted_usd, reading.after_units) == (None, None, 0)
+    # Four that the file decides are fewer than the five a reading needs.
+    four = _read_agent_model([_agent_run(SONNET) for _ in range(4)] + [_agent_run(OPUS, "opus") for _ in range(8)])
+    assert four.verdict == "too_little_data" and four.measured_usd is None
 
 
 def test_a_fix_with_no_basis_is_not_measured(stub_carry, monkeypatch):

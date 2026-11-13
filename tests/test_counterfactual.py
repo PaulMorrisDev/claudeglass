@@ -91,6 +91,86 @@ def test_an_unset_old_model_is_the_one_the_sessions_before_ran_on(tmp_path):
     assert "claude-opus-5-5" in result.basis
 
 
+OPUS, SONNET = "claude-opus-5", "claude-sonnet-5"
+
+
+def _agent_run(model, spawn_model=None):
+    """One run of the agent ``gp``: a single reply on ``model``. With ``spawn_model``
+    the spawn named a model of its own, so the agent file does not decide the run's."""
+    from test_model_swap import _transcript, _turn
+
+    return _transcript(
+        [_turn(model=model, input_tokens=100_000, output_tokens=10_000, turn_index=1)],
+        kind="subagent",
+        agent_type="gp",
+        agent_model_alias=spawn_model,
+    )
+
+
+def _run_cost(run):
+    return sum(price_turn(t, PRICING.resolve_model(t.model)).total for t in run.turns)
+
+
+def _agent_model_world(after_runs, before_runs, *, at=CHANGE):
+    """One session per run, ``before_runs`` in the days before ``at``, ``after_runs``
+    in the days after it; returns ``(before, after, bundles)`` as ``sides`` does."""
+    sides, bundles = ([], []), {}
+    for side, (label, runs) in enumerate((("b", before_runs), ("a", after_runs))):
+        for n, run in enumerate(runs):
+            sid = f"{label}{n}"
+            start = at + timedelta(days=-5 + n * 0.3 if side == 0 else 0.2 + n * 0.3)
+            spawn = impact._Transcript(cost=_run_cost(run), turns=1, model="x")
+            sides[side].append(
+                impact.SessionFacts(
+                    start=start, main=impact._Transcript(cost=1.0, turns=2), session_id=sid, spawns=[("gp", spawn)], project="p"
+                )
+            )
+            bundles[sid] = SimpleNamespace(top=None, subs=[run])
+    return sides[0], sides[1], bundles
+
+
+def _agent_model_point(at=CHANGE):
+    change = {"key": "model", "agent": "gp", "old": OPUS, "new": SONNET}
+    return ChangePoint(at, "config", "x", keys=["agents.gp.model"], changes=[change])
+
+
+def test_an_agents_model_change_prices_only_the_runs_its_agent_file_decides():
+    file_runs = [_agent_run(SONNET) for _ in range(6)]
+    spawn_runs = [_agent_run(OPUS, "opus") for _ in range(6)]
+    before, after, bundles = _agent_model_world(file_runs + spawn_runs, [_agent_run(OPUS) for _ in range(6)])
+    result = counterfactual.without_change(_agent_model_point(), before, after, bundles, PRICING)
+    row = result.per_key[0]
+    opus = PRICING.resolve_model(OPUS)
+    assert row.fidelity == "repriced"
+    # Paid and without cover the six runs the file decides; the spawn-set runs are in neither.
+    assert row.paid_usd == pytest.approx(sum(_run_cost(r) for r in file_runs))
+    assert row.without_usd == pytest.approx(sum(price_turn(t, opus).total for r in file_runs for t in r.turns))
+    assert row.without_usd > row.paid_usd
+    assert row.basis == f"gp's replies priced at {OPUS}, in the 6 of 12 runs that left the model to its agent file."
+    # The sessions' other cost is the same either way.
+    assert result.without_usd - result.paid_usd == pytest.approx(row.without_usd - row.paid_usd)
+
+
+def test_an_agents_model_change_with_every_run_left_to_its_file_keeps_the_plain_basis():
+    before, after, bundles = _agent_model_world([_agent_run(SONNET) for _ in range(6)], [_agent_run(OPUS) for _ in range(6)])
+    row = counterfactual.without_change(_agent_model_point(), before, after, bundles, PRICING).per_key[0]
+    assert row.basis == f"gp's replies priced at {OPUS}."
+
+
+def test_an_agents_model_change_no_run_left_to_its_file_has_not_changed_what_you_paid():
+    runs = [_agent_run(OPUS, "opus") for _ in range(6)]
+    before, after, bundles = _agent_model_world(runs, [_agent_run(OPUS) for _ in range(6)])
+    result = counterfactual.without_change(_agent_model_point(), before, after, bundles, PRICING)
+    # Not the cost per reply of the sessions before: a row of its own, with nothing priced.
+    assert result.fidelity == "repriced"
+    row = result.per_key[0]
+    assert (row.paid_usd, row.without_usd) == (0.0, 0.0)
+    assert row.basis == (
+        "No run of gp since this change left the model to its agent file, so the change has not changed what you paid."
+    )
+    assert result.without_usd == pytest.approx(result.paid_usd)
+
+
 def test_fast_mode_is_repriced_the_other_way(tmp_path):
     before, after, bundles = _setup(tmp_path, after_model="claude-opus-5-5")
     result = counterfactual.without_change(_point("fastMode", True, False), before, after, bundles, PRICING)

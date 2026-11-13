@@ -8,6 +8,9 @@ sessions after the change, in the most exact way that setting allows:
   replies, priced at the old model's rates (``pricing.price_turn``), or
   with fast mode the other way. The replies themselves would have
   differed on another model, so read it as the price of the same work.
+  An agent's model change is read on the runs of that agent its agent file
+  decides (:func:`agent_file_runs`), not the ones a spawn or a workflow
+  script gave a model of their own.
 - **Simulated** (``"simulated"``): a cache lifetime change, replayed
   under the old lifetime (``ttl.simulate``), or an ``autoCompactWindow``
   the change raised, replayed with the old, smaller window
@@ -44,7 +47,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from statistics import median
 
-from . import compaction_sim, impact, ttl
+from . import compaction_sim, impact, model_swap, ttl
 from .calibration import FALLBACK
 from .change_points import ChangePoint
 from .context_files import _Carry
@@ -178,6 +181,16 @@ def _subs(bundles, agent: str | None) -> list:
     return [sub for b in bundles for sub in b.subs if agent is None or (sub.meta.agent_type or "(unknown)") == agent]
 
 
+def agent_file_runs(bundles, agent: str) -> tuple[list, int]:
+    """``(runs, all)`` for one agent type in ``bundles``: the runs whose model
+    the agent's file decides (``model_swap.model_set_by``), and how many runs
+    of the type there are. A run a spawn or a workflow script gave a model is
+    not the agent file's to change. The one place an agent's model change
+    says which runs it can have changed; ``outcomes`` counts its units here."""
+    every = _subs(bundles, agent)
+    return [run for run in every if model_swap.model_set_by(run) == "agent file"], len(every)
+
+
 def _priced(result) -> list:
     return [turn for turn in result.turns if turn.turn_index > 0]
 
@@ -204,11 +217,25 @@ def _repriced_model(change: dict, after, before, pricing: Pricing) -> KeyResult 
     rates = pricing.resolve_model(old) if old else None
     if rates is None:
         return None
-    results = _subs(after, agent) if agent else _mains(after)
+    if agent:
+        results, every = agent_file_runs(after, agent)
+        if not results:
+            # Nothing the file decides ran since the change: nothing was priced, and nothing is the
+            # cost per reply of the sessions before, which the file's model was never read on.
+            basis = (
+                f"No run of {agent} since this change left the model to its agent file, "
+                "so the change has not changed what you paid."
+            )
+            return KeyResult(change["key"], agent, "repriced", 0.0, 0.0, basis)
+        whose = f"{agent}'s replies"
+        left = ""
+        if len(results) < every:
+            left = f", in the {len(results)} of {every} runs that left the model to its agent file"
+    else:
+        results, whose, left = _mains(after), "Main-session replies", ""
     paid = _cost(results, pricing)
     without = sum(price_turn(turn, rates).total for result in results for turn in _priced(result))
-    whose = f"{agent}'s replies" if agent else "Main-session replies"
-    return KeyResult(change["key"], agent, "repriced", paid, without, f"{whose} priced at {old}.")
+    return KeyResult(change["key"], agent, "repriced", paid, without, f"{whose} priced at {old}{left}.")
 
 
 def _repriced_fast(change: dict, after, pricing: Pricing) -> KeyResult | None:
@@ -486,6 +513,7 @@ __all__ = [
     "FIDELITY_TEXT",
     "KeyResult",
     "MIN_SPAWNS",
+    "agent_file_runs",
     "agent_start_reading",
     "carry_on",
     "for_impact",
