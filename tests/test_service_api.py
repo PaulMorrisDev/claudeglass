@@ -6791,6 +6791,21 @@ def test_the_silent_line_goes_when_coaching_notes_is_switched_off_and_on_again(t
         handle.store.close()
 
 
+def test_the_silent_line_leaves_out_sessions_the_mod_ran_in_on_a_surface_that_draws_hints(tmp_path, monkeypatch):
+    """The service hands the store's mod events to the moments: a session the mod ran in on the terminal gets its
+    hints from the mod, so two such sessions are not 'a coaching tip that did not come'."""
+    handle, _settings = _silent_line_server(tmp_path, monkeypatch, {"now": _hooks_ok})
+    try:
+        seen = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+        for session in ("session-a", "session-b"):
+            event = {"ts": seen.strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "present", "surface": "terminal"}
+            assert handle.store.replace_mod_events(session, [event]) == 1
+        assert _silent_note(handle) is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
 def test_capture_names_a_live_hint_that_had_moments_and_no_tip(tmp_path, monkeypatch):
     """Two stored sessions each hold a big paste and no note from the hook: with coaching notes on, the hook
     entries in order and the setup older than the pastes, the coaching row carries the line."""

@@ -296,6 +296,11 @@ _DRIP_SCRIPTS = {
         ("make the header bigger", 0, True), ("does the header look right?", 2, False),
         ("now move the logo left", 4, True), ("make the button rounder", 6, True),
     ],
+    "a question between two edits of a run that reaches three": [
+        ("make the header bigger", 0, True), ("now move the logo left", 2, True),
+        ("does that look right?", 4, False), ("change the footer colour to blue", 6, True),
+        ("make the button rounder", 8, True),
+    ],
     "a 21 minute gap": [
         ("make the header bigger", 0, True), ("now move the logo left", 2, True),
         ("change the footer colour to blue", 4, True), ("make the button rounder", 25, True),
@@ -322,6 +327,14 @@ def test_a_drip_occasion_is_the_hooks_own_count(tmp_path, name):
     steps = _DRIP_SCRIPTS[name]
     found = _occasions(tmp_path, _script(steps))["drip_feed"]
     assert found == _hook_drip(steps)
+
+
+def test_a_message_asking_for_no_change_neither_counts_nor_ends_a_drip_run(tmp_path):
+    """The hook skips the question (prompt_shape.drip_count: "neither counts nor ends a run"): the edits either side
+    of it make the run of three at the last message. A rule that ended the run there would see two."""
+    steps = _DRIP_SCRIPTS["a question between two edits of a run that reaches three"]
+    assert _hook_drip(steps) == [4]
+    assert _occasions(tmp_path, _script(steps))["drip_feed"] == [4]
 
 
 def test_the_drip_rule_counts_a_run_the_after_the_fact_count_does_not_see(tmp_path):
