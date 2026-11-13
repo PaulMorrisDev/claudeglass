@@ -3269,3 +3269,18 @@ def test_the_effort_checks_flat_level_fix_goes_to_the_project_file_that_sets_it(
     assert fix["command"] == expected["command"]
     assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
     assert "~/.claude/settings.json" not in fix["prompt"] and "--scope user" not in fix["command"]
+
+
+def test_in_a_view_of_several_projects_the_flat_level_fix_goes_to_no_projects_file(tmp_path):
+    # A model id with no canonical form gets the flat level even in a view of several
+    # projects; the snapshot is one project's, so its file is not where the fix goes.
+    model = _main_on(_full_model(), "my-gateway-model")
+    _thinking_rows(model, 40.0)
+    kw = {"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "project_shared"}}
+    model.meta = NS(projects=("alpha", "beta"))
+    result = qa.run("effort", _ctx(tmp_path, model=model, **kw))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    expected = _expected_flat_effort_fix("")
+    assert fix["key"] == "effortLevel"
+    assert fix["command"] == expected["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]

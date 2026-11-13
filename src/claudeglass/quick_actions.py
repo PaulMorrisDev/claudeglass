@@ -475,7 +475,11 @@ def _main_scope(ctx: Context) -> str:
 
 def _main_effort_scope(ctx: Context) -> str:
     """The scope of the project file whose flat ``effortLevel`` decides the main
-    session's level, or ``""`` (the user file) when no project file sets it."""
+    session's level, or ``""`` (the user file) when no project file sets it.
+    Also ``""`` in a view of several projects: the snapshot is one project's,
+    and a model id with no canonical form gets the flat level there too."""
+    if _several_projects(ctx):
+        return ""
     layer = ctx.effective_provenance.get("effortLevel")
     return model_swap.layer_scope(layer) if layer in _OVERRIDING_PROJECT_FILE else ""
 
