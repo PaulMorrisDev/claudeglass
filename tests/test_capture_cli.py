@@ -2660,6 +2660,24 @@ def test_past_the_end_only_the_entries_that_still_run_are_needed(tmp_path):
     assert hook_health.check_capture(wanted, claude_root=config_dir.parent, config_dir=config_dir).ok
 
 
+def test_with_capture_off_status_names_the_command_that_takes_the_entries_out(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--yes")
+    _capture(config_dir, "off")
+    rc, out = _capture(config_dir, "status")
+    assert (
+        "Hooks: The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture remove' takes "
+        "them out.\n"
+    ) in out
+    assert "'claudeglass capture connect' takes them out" not in out
+    # The command it names does take them out.
+    assert _capture_entries(config_dir)
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert _capture_entries(config_dir) == []
+
+
 def test_coaching_notes_alone_need_no_entry_at_an_agents_end(tmp_path):
     config_dir = _claude(tmp_path, {})
     (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")

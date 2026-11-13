@@ -963,7 +963,7 @@ class CaptureHookHealth:
     missing: tuple[HookSpec, ...] = ()
     #: Capture entries nothing switched on uses. They add nothing to
     #: Claude's context, but each still starts Python: ``capture connect``
-    #: takes them out.
+    #: takes them out, or ``capture remove`` when no entry is needed.
     extra: tuple[HookSpec, ...] = ()
     #: Needed entries whose script or catalogue is this tool's own older
     #: copy (SEC-P7/ROB-P7): ``refresh_hook_files`` or ``capture connect``
@@ -990,9 +990,11 @@ class CaptureHookHealth:
         if self.blocked_by is not None:
             return POLICY_TEXT[self.blocked_by]
         if self.ok:
+            # With nothing needed, ``capture connect`` has no entry to add and leaves these in place.
+            command = "connect" if self.needed else "remove"
             return "The capture hooks are set up." + (
                 " settings.json also runs capture hooks that nothing switched on uses. They add nothing to "
-                "Claude's context, but each still starts Python. 'claudeglass capture connect' takes them out."
+                f"Claude's context, but each still starts Python. 'claudeglass capture {command}' takes them out."
                 if self.extra
                 else ""
             )

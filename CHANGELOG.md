@@ -126,7 +126,7 @@ Capture and dashboard:
 - **No hook runs where nothing switched on uses it.** Coaching notes no
   longer start Python at every agent's end, and Deep adds no hook after
   each read or web result while Haiku writes the tags. `capture status`
-  names a leftover entry, and `capture connect` takes it out.
+  names a leftover entry and the command that takes it out.
 - **docs/capture.md names the question Deep asks after a summary**
   (`lost=yes|no`), and the note after a compaction is given its own size:
   about 709 tokens at Deep. `capture status` and Setup › Capture say so too.
