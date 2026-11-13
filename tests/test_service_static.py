@@ -4416,7 +4416,9 @@ def test_cards_are_marked_shown_from_the_list_and_the_overview_only_while_visibl
     assert callers == ["page-actions.js", "page-overview.js"]
     inbox_list = _function_source(actions, "recommendationInbox")
     assert "drawn: function (items)" in inbox_list and "markCardsShown(" in inbox_list
-    assert "!g.ignored" in inbox_list
+    # An ignored card is on the Ignored list, which is not a to-do: it is not marked shown.
+    marking = "markCardsShown(memberKeys(items.filter(function (g) { return !g.ignored; })));"
+    assert marking in inbox_list and inbox_list.index("drawn: function (items)") < inbox_list.index(marking)
     assert "if (spec.drawn) spec.drawn(shownItems)" in _function_source(actions, "inbox")
     checklist = _function_source(overview, "renderChecklist")
     assert "markCardsShown(" in checklist and "check.headline" in checklist

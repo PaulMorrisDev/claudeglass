@@ -6892,6 +6892,37 @@ def test_the_landing_check_waits_for_something_new_to_judge(tmp_path, monkeypatc
         handle.store.close()
 
 
+def test_the_landing_check_runs_again_when_the_list_changes_though_the_store_has_not(tmp_path, monkeypatch):
+    hidden: set = set()
+    real = service_api.build_report
+
+    def build(*args, **kwargs):
+        model = real(*args, **kwargs)
+        model.recommendations = [rec for rec in model.recommendations if rec.key not in hidden]
+        return model
+
+    monkeypatch.setattr(service_api, "build_report", build)
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        store = handle.store
+        _resp, body = handle.get_json("/api/recommendations")
+        listed_key = body["data"][0]["key"]
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {"model": "opus"})
+        _snapshot_at(handle, "2026-09-21T12:00:00Z", {"model": "sonnet"})
+        # A card the report lists, with a setting that has moved since it was shown.
+        store.mark_cards([_gone_card(listed_key)], mark="shown", project="*", folders=[], now=_SEEN_AT)
+        handle.post_json("/api/recommendations/marks", {"mark": "shown", "keys": []})
+        assert store.card_marks()[0]["landed_at"] is None  # listed: not judged
+        # Nothing in the store changes, but another window's report no longer lists the card.
+        hidden.add(listed_key)
+        resp, _ = handle.post_json("/api/recommendations/marks?window_days=7", {"mark": "shown", "keys": []})
+        assert resp.status == 200
+        assert store.card_marks()[0]["landed_at"] == "2026-09-21T12:00:00Z"
+    finally:
+        handle.close()
+        handle.store.close()
+
+
 def test_a_project_views_landing_reads_only_that_projects_snapshots(tmp_path, monkeypatch):
     from claudeglass import snapshots as snapshots_mod
 

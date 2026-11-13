@@ -187,6 +187,16 @@ def test_build_counts_cards_shown_copied_bundled_ignored_landed_and_rated(world)
         assert planted not in text, planted
 
 
+def test_median_days_is_the_middle_of_the_days_to_landing_not_the_longest(world):
+    rows = [_row(f"c{n}", "model-tier", None, changes=[_change()], landed_days=days) for n, days in enumerate((20, 1, 3))]
+    [row] = _build(world, card_marks=_marks(rows))["cards"]["rows"]
+    assert (row["landed"], row["median_days"]) == (3, 3)
+    # With an even number of cards it is the lower of the two in the middle.
+    rows = [_row(f"d{n}", "model-tier", None, changes=[_change()], landed_days=days) for n, days in enumerate((9, 2, 4, 30))]
+    [row] = _build(world, card_marks=_marks(rows))["cards"]["rows"]
+    assert row["median_days"] == 4
+
+
 def test_a_row_whose_times_do_not_read_is_left_out_or_not_counted_landed(world):
     odd_start = _row("a", "model-tier", None, changes=[_change()])
     odd_start["first_shown_at"] = "not a time"
@@ -345,7 +355,9 @@ def test_the_cards_block_matches_the_designs_reference_figures(world):
                     key, rule, agent_type, project=project, folders=folders,
                     changes=[_change()] if n < landable else [],
                     copied=n < own,
-                    bundled=own <= n < own + bundled,
+                    # One copied card of a pair that also has bundle-only cards was bundled as well:
+                    # it counts as copied, not as copied only in the bundle.
+                    bundled=own <= n < own + bundled or (n == 0 and own > 0 and bundled > 0),
                     landed_days=median if n < landed else None,
                 )
             )

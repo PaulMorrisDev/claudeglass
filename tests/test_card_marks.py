@@ -92,6 +92,19 @@ def test_every_change_of_a_card_must_move():
     assert _land(both[:1], snaps, shown) == (_day(3), True)
 
 
+def test_a_card_with_two_changes_is_exact_only_when_both_hold_the_cards_own_value():
+    snaps = [
+        _snap(0, effective={"model": "opus"}, agents={"x": {"model": "opus"}}),
+        _snap(3, effective={"model": "sonnet"}, agents={"x": {"model": "haiku"}}),
+    ]
+    shown = _day(0) + timedelta(hours=1)
+    both = [_model("sonnet"), _agent_model("x", "sonnet")]
+    # Both moved, but the agent to haiku, not to the card's sonnet.
+    assert _land(both, snaps, shown) == (_day(3), False)
+    snaps[1] = _snap(3, effective={"model": "sonnet"}, agents={"x": {"model": "sonnet"}})
+    assert _land(both, snaps, shown) == (_day(3), True)
+
+
 def test_a_tools_line_set_with_more_tools_than_the_card_asked_for_lands_but_not_exact():
     snaps = [
         _snap(0, agents={"x": {"source": "user"}}),
