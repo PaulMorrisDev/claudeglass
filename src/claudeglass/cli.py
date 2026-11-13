@@ -5176,7 +5176,7 @@ def _parse_set_value(raw: str, spec) -> object:
     """``--set``'s VALUE as the allowlisted key's type: true/false for a
     bool, a number for an int, a comma-separated list for a list (empty
     means an empty list), NAME:VALUE pairs for a map, else the text
-    itself."""
+    itself. ``auto`` stays text for a key that takes it or a number."""
     if spec is None:
         return raw
     if spec.kind == "bool":
@@ -5191,8 +5191,16 @@ def _parse_set_value(raw: str, spec) -> object:
             return int(raw)
         except ValueError:
             return raw
+    if spec.kind == "int|auto":
+        try:
+            return int(raw)
+        except ValueError:
+            return raw
     if spec.kind == "list[str]":
         return [item.strip() for item in raw.split(",") if item.strip()]
+    if spec.kind == "map[str,model]":
+        # Set one model's key at a time: modelSettings.<id>.<key>=VALUE.
+        return raw
     if spec.kind.startswith("map["):
         # NAME:VALUE pairs, comma-separated: skillOverrides=pdf:off,xlsx:name-only
         out: dict = {}
@@ -5242,6 +5250,15 @@ def _one_off_profile(set_values: list[str], agent: str | None):
             return None, f"--set {item!r}: expected KEY=VALUE"
         if env_items:
             values[key[len("env.") :]] = raw
+        elif not agent and key.startswith("modelSettings."):
+            # modelSettings.<model id>.<key>=VALUE: a model id has no dot. One
+            # entry per model; the value is read as that key's type.
+            _, _, rest = key.partition(".")
+            model_id, dot, sub_key = rest.partition(".")
+            if not model_id or not dot or not sub_key:
+                return None, f"--set {item!r}: expected modelSettings.<model>.<key>=VALUE"
+            entry = values.setdefault("modelSettings", {}).setdefault(model_id, {})
+            entry[sub_key] = _parse_set_value(raw, schema.MODEL_SETTINGS_ALLOWLIST.get(sub_key))
         else:
             values[key] = _parse_set_value(raw, allowlist.get(key))
     doc: dict = {"id": ONE_OFF_PROFILE_ID, "name": "One-off change"}

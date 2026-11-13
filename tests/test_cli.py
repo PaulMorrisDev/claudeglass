@@ -2310,6 +2310,66 @@ def test_cmd_apply_set_merges_a_skill_override_by_name(tmp_path, capsys):
                      "--claude-root", str(claude_root), "--dry-run"]) == 2
 
 
+def test_set_builds_a_per_model_entry(tmp_path, capsys):
+    profile, err = cli._one_off_profile(
+        [
+            "modelSettings.claude-opus-5-5.effortLevel=medium",
+            "modelSettings.claude-opus-5-5.autoCompactWindow=300000",
+            "modelSettings.claude-sonnet-4-6[1m].autoCompactWindow=auto",
+            "effortLevel=high",
+        ],
+        None,
+    )
+    assert err is None
+    # "auto" stays a string, digits become an int, two keys of one model share its entry, and the
+    # flat setting beside them is untouched
+    assert profile.settings == {
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300000},
+            "claude-sonnet-4-6[1m]": {"autoCompactWindow": "auto"},
+        },
+        "effortLevel": "high",
+    }
+    # what the allowlist rejects is said the usual way
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.effortLevel=max"], None)
+    assert err == "settings.modelSettings.claude-opus-5-5.effortLevel: expected one of low, medium, high, xhigh"
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.autoCompactWindow=99999"], None)
+    assert "autoCompactWindow: expected 'auto' or an int between 100000 and 1000000" in err
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.nonsense=1"], None)
+    assert err == "settings.modelSettings.claude-opus-5-5.nonsense: unknown key"
+    # a name with no key after it, a bare modelSettings, a per-agent use
+    assert cli._one_off_profile(["modelSettings.claude-opus-5-5=medium"], None)[0] is None
+    assert cli._one_off_profile(["modelSettings=medium"], None)[0] is None
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.effortLevel=low"], "reviewer")
+    assert "unknown key" in err
+
+    # end to end, into a settings file that already holds that model's window and another model
+    claude_root = tmp_path / "claude"
+    config_dir = tmp_path / "tl"
+    claude_root.mkdir()
+    settings = claude_root / "settings.json"
+    settings.write_text(
+        json.dumps({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}, "other": {"effortLevel": "low"}}}),
+        encoding="utf-8",
+    )
+    command = [
+        "apply", "--set", "modelSettings.claude-opus-5-5.effortLevel=medium", "--set", "effortLevel=high",
+        "--config-dir", str(config_dir), "--claude-root", str(claude_root),
+    ]
+    assert cli.main([*command, "--dry-run"]) == 0
+    assert "Change: modelSettings" in capsys.readouterr().out
+    assert cli.main([*command, "--yes"]) == 0
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "modelSettings": {
+            "claude-opus-5-5": {"autoCompactWindow": 300000, "effortLevel": "medium"},
+            "other": {"effortLevel": "low"},
+        },
+        "effortLevel": "high",
+    }
+    assert cli.main(["apply", "--set", "modelSettings.claude-opus-5-5.effortLevel=max", "--config-dir",
+                     str(config_dir), "--claude-root", str(claude_root), "--dry-run"]) == 2
+
+
 def test_cmd_apply_set_env_writes_the_settings_env_block(tmp_path, capsys):
     # COV-07/COV-11: apply --set env.NAME=value writes into the target
     # settings file's own "env" object, exactly like any other --set key
