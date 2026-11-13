@@ -359,7 +359,10 @@ Where the agents come from:
   reads both together, returns `agents` as resolved and `roles` as
   written, and counts only the resolved keys. When no snapshot has
   recorded the user's agents, the role's keys are left out and the drawer
-  says the agents have not been recorded yet.
+  says the agents have not been recorded yet. At a project target the
+  drawer reads the picked project's own agents; with no project picked it
+  cannot know which project the command will be run in, so it leaves the
+  role's keys out and asks for one project to be picked.
 - **`apply`**: the `*.md` files in the target scope's agents folder
   (`<claude-root>/agents` or `<project>/.claude/agents`), read with
   `frontmatter.parse_frontmatter`. The agent's name is the frontmatter

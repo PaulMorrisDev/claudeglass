@@ -1116,7 +1116,10 @@ can edit files, so no agent file changes (with, when the other scope has
 one, which target to pick instead); that several agents are named like a
 writer and each gets the changes; or, when the snapshot records no
 agents, that the user's agents have not been recorded yet and so no
-agent file is listed.
+agent file is listed. A `project-local` or `repo` scope with no `project`
+picked cannot say which project's agents the command will see, so the
+role's keys are left out and the only role note asks for one project to
+be picked; with `project`, that project's own agents are read.
 
 `apply_command`/`launch_command` are the two lines
 `profiles.diff.apply_command` returns, split apart — the exact

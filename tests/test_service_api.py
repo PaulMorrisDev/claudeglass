@@ -1380,10 +1380,11 @@ def test_profile_diff_reads_the_picked_projects_snapshot(two_project_server):
     data, row = effort_row("")
     assert (row["current_value"], row["overridden_by"]) == ("high", None)
     assert [r["agent"] for r in data["agents"]] == ["implementer"] * 3
-    # What the agent notes say follows the pick too: every project's project agents (here beta's builder)
-    # count with none picked; with alpha picked, only alpha's own do.
+    # What the agent notes say follows the pick too: with none picked a project target lists no agent
+    # (which project's agents the command will see is not known); with alpha picked, alpha's own do.
     data, _ = effort_row("?scope=project-local")
-    assert [r["agent"] for r in data["agents"]] == ["builder"] * 3
+    assert data["agents"] == []
+    assert [n for n in data["notes"] if "agent that writes code" in n] == [_PICK_ONE_NOTE]
     data, _ = effort_row("?project=proj-alpha&scope=project-local")
     assert data["agents"] == []
     assert [n for n in data["notes"] if "agent that writes code" in n] == [
@@ -1468,6 +1469,8 @@ def test_profile_diff_notes_missing_snapshot_when_store_has_none(tmp_path, monke
 
 def _seed_agents(handle, agents: dict, *, ts: str = "2026-10-01T12:00:00Z", slug: str = "proj-a") -> None:
     """One config snapshot that records ``agents`` (name -> (source, tools))."""
+    from claudeglass.snapshots import snapshot_project_key
+
     handle.store.upsert_snapshot(
         project_slug=slug,
         project_root_path=_FAKE_ROOT,
@@ -1475,6 +1478,7 @@ def _seed_agents(handle, agents: dict, *, ts: str = "2026-10-01T12:00:00Z", slug
         schema_version=2,
         digest_json=json.dumps(
             {
+                "project_slug": snapshot_project_key(slug),
                 "effective": {"effortLevel": "high"},
                 "effective_provenance": {"effortLevel": "user"},
                 "managed_keys": [],
@@ -1545,14 +1549,14 @@ def test_profile_diff_notes_when_no_agent_writes_code_and_where_one_is(server):
     ]
     assert "claude-implementer" not in data["prompt"]
     # project scope: the one project writer is the writer, so no note
-    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local")[1]["data"]
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local&project=proj-a")[1]["data"]
     assert [r["agent"] for r in data["agents"]] == ["builder"] * 3
     assert all(r["where"] == ".claude/agents/builder.md" for r in data["agents"])
     assert not any("agent that writes code" in n for n in data["notes"])
 
     # a user writer, no project writer
     _seed_agents(server, {"implementer": ("user", "Read, Edit"), "reviewer": ("user", "Read")}, ts="2026-10-02T12:00:00Z")
-    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo")[1]["data"]
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]
     assert data["agents"] == []
     assert [n for n in data["notes"] if "agent that writes code" in n] == [
         no_writer_project
@@ -1565,7 +1569,7 @@ def test_profile_diff_notes_when_no_agent_writes_code_and_where_one_is(server):
         {"implementer": ("user", "Read, Edit"), "tester": ("user", "Read, Edit"), "fixer": ("user", "Edit")},
         ts="2026-10-03T12:00:00Z",
     )
-    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local")[1]["data"]
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local&project=proj-a")[1]["data"]
     assert [n for n in data["notes"] if "agent that writes code" in n] == [
         no_writer_project
         + ' Your agents fixer, implementer and tester in ~/.claude/agents write code. '
@@ -1575,8 +1579,40 @@ def test_profile_diff_notes_when_no_agent_writes_code_and_where_one_is(server):
     _seed_agents(server, {"reviewer": ("user", "Read")}, ts="2026-10-04T12:00:00Z")
     notes = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]["notes"]
     assert notes == [no_writer_user]
-    notes = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo")[1]["data"]["notes"]
+    notes = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]["notes"]
     assert [n for n in notes if "agent that writes code" in n] == [no_writer_project]
+
+
+_PICK_ONE_NOTE = (
+    "This profile also changes the agent that writes code. Pick one project to see which of its agents changes."
+)
+
+
+def test_a_project_target_with_no_project_picked_lists_no_agent_rows(server):
+    """The command runs in one project, which the dashboard cannot know with
+    none picked, and the union of every project's agents lists files that are
+    not there (project B's builder, when the command runs in project A)."""
+    _seed_agents(server, {"builder": ("project", "Read, Edit")}, ts="2026-10-01T12:00:00Z", slug="proj-b")
+    _seed_agents(server, {"reviewer": ("user", "Read")}, ts="2026-10-02T12:00:00Z", slug="proj-a")
+    for scope in ("project-local", "repo"):
+        data = server.get_json(f"/api/profiles/implementation-heavy/diff?scope={scope}")[1]["data"]
+        assert data["agents"] == []
+        assert [n for n in data["notes"] if "agent that writes code" in n] == [_PICK_ONE_NOTE]
+        assert "builder" not in data["prompt"] and "agents/" not in data["prompt"]
+    # with a project picked, that project's own agents are read
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=project-local&project=proj-a")[1]["data"]
+    assert data["agents"] == []
+    assert not any(n == _PICK_ONE_NOTE for n in data["notes"])
+    assert any("None of this project's agents in .claude/agents" in n for n in data["notes"])
+    _seed_agents(
+        server, {"builder": ("project", "Read, Edit"), "reviewer": ("user", "Read")}, ts="2026-10-03T12:00:00Z", slug="proj-a"
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]
+    assert [(r["agent"], r["where"]) for r in data["agents"]] == [("builder", ".claude/agents/builder.md")] * 3
+    assert not any("agent that writes code" in n for n in data["notes"])
+    # the user target needs no project
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert not any(n == _PICK_ONE_NOTE for n in data["notes"])
 
 
 def test_a_user_writer_hidden_behind_a_project_agent_of_the_same_name_is_still_a_user_writer(server):
@@ -1613,7 +1649,7 @@ def test_a_user_writer_hidden_behind_a_project_agent_of_the_same_name_is_still_a
     assert not any("agent that writes code" in n for n in data["notes"])
     # at a project target the entry is the project's own agent, and its own
     # tools line (Read only) says it cannot edit
-    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo")[1]["data"]
+    data = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]
     assert data["agents"] == []
 
 
@@ -1653,12 +1689,15 @@ def test_profile_diff_without_a_recorded_snapshot_lists_no_role_rows_and_does_no
     thread.start()
     handle = _ServerHandle(httpd, thread, corpus=corpus, store=store, options=options)
     try:
-        for scope in ("user", "project-local"):
-            data = handle.get_json(f"/api/profiles/implementation-heavy/diff?scope={scope}")[1]["data"]
-            assert data["agents"] == []
-            assert note in data["notes"]
-            assert not any("None of" in n for n in data["notes"])
-            assert "claude-implementer" not in data["prompt"]
+        data = handle.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+        assert data["agents"] == []
+        assert note in data["notes"]
+        assert not any("None of" in n for n in data["notes"])
+        assert "claude-implementer" not in data["prompt"]
+        # a project target with no project picked asks for one first
+        data = handle.get_json("/api/profiles/implementation-heavy/diff?scope=project-local")[1]["data"]
+        assert data["agents"] == []
+        assert [n for n in data["notes"] if "agent that writes code" in n] == [_PICK_ONE_NOTE]
         # a snapshot that records no agents list says the same
         _seed_agents(handle, {})
         store.upsert_snapshot(
@@ -1687,7 +1726,7 @@ def test_a_snapshot_with_no_agents_map_is_treated_like_no_snapshot(server):
         digest_json=json.dumps({"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "user"}}),
     )
     for scope in ("user", "repo"):
-        data = server.get_json(f"/api/profiles/implementation-heavy/diff?scope={scope}")[1]["data"]
+        data = server.get_json(f"/api/profiles/implementation-heavy/diff?scope={scope}&project=proj-a")[1]["data"]
         assert data["agents"] == []
         notes = [n for n in data["notes"] if "agent that writes code" in n]
         assert notes == [
@@ -1721,7 +1760,7 @@ def test_the_note_names_the_pickers_own_target_labels(server):
     assert labels["project-local"].startswith(quoted) and labels["repo"].startswith(quoted)
 
     _seed_agents(server, {"implementer": ("user", "Edit")}, ts="2026-10-02T12:00:00Z")
-    project_notes = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo")[1]["data"]["notes"]
+    project_notes = server.get_json("/api/profiles/implementation-heavy/diff?scope=repo&project=proj-a")[1]["data"]["notes"]
     project_note = next(n for n in project_notes if "agent that writes code" in n)
     quoted = re.search(r'pick "([^"]+)" above', project_note).group(1)
     assert quoted == labels["user"]

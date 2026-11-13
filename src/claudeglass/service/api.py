@@ -2591,15 +2591,27 @@ def make_handler(
             'To change them, pick "Your user settings, every project" above.'
         )
 
-    def _resolve_roles(profile, snapshot, scope: str | None):
+    def _resolve_roles(profile, snapshot, scope: str | None, project=None):
         """``(profile, notes, writers)``: ``profile`` with its roles folded
         into the user's own agents, the notes to show, and the agents the
         writer role went to. ``scope`` is the target file's scope, or
         ``None`` for the scope-free view (the card, the estimate, "Start
         from"), which reads user and project agents together and says
-        nothing."""
+        nothing. ``project`` is the picked project (its raw slugs) or
+        ``None``: a project target with none picked cannot say which
+        project's agents the command will see, so the role's keys are left
+        out and a note asks for one."""
         if not profile.roles:
             return profile, (), ()
+        if scope in ("project-local", "repo") and not project:
+            return (
+                profile_roles.resolve(profile, {}).profile,
+                (
+                    "This profile also changes the agent that writes code. "
+                    "Pick one project to see which of its agents changes.",
+                ),
+                (),
+            )
         recorded = _recorded_agents(snapshot)
         if recorded is None:
             # Nothing is known of the user's agents, so no role key is
@@ -2682,7 +2694,7 @@ def make_handler(
             notes.append("no config snapshot recorded yet; diff computed against an empty effective config")
 
         written = profile
-        profile, role_notes, role_writers = _resolve_roles(written, snapshot, scope)
+        profile, role_notes, role_writers = _resolve_roles(written, snapshot, scope, project)
 
         profile_diff = profile_diff_mod.diff_against_effective(
             profile, effective, effective_agents, provenance, managed_keys
