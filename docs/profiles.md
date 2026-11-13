@@ -950,8 +950,11 @@ above, which is `--allow-tracked`'s job specifically.
 
 This applies to an agent a profile **names** (`[agents.<name>]`). A
 profile's `[roles.writer]` is resolved first (see "`roles.<role>`"
-above) against the agent files that exist at the scope, so a role never
-leaves a profile refused and `--force` never creates a file for one. With
+above) against the agent files that exist at the scope, so a role is
+never refused for a missing agent and `--force` never creates a file for
+one. The writer file a role reaches is still an agent file like any
+other: if git tracks it (a project agent usually is), the apply is
+refused without `--allow-tracked`. With
 no agent named like a writer that can edit files, the profile's settings
 still apply and `apply` prints "No agent in `<folder>` is named like
 implementer, fixer or builder and can edit files. The changes for the

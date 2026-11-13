@@ -381,6 +381,26 @@ def test_plan_apply_blocks_tracked_agent_file(tmp_path):
     assert parse_frontmatter((project / ".claude" / "agents" / "reviewer.md").read_text())["effort"] == "high"
 
 
+def test_a_role_writer_file_that_git_tracks_is_refused_without_allow_tracked(tmp_path):
+    """A role is never refused for a missing agent, but the writer file it
+    reaches is an agent file like any other: git-tracked, it is refused
+    without --allow-tracked (a project agent is usually committed)."""
+    from claudeglass.profiles import catalogue
+
+    home = tmp_path / "home"
+    project = tmp_path / "proj"
+    _init_git_repo_with_file(project, ".claude/agents/builder.md", _agent_text("builder", "Read, Edit"))
+    kwargs = dict(
+        scope="project-local", project_path=project, config_dir=home / ".claude" / "claudeglass", claude_root=home / ".claude"
+    )
+    plan = apply_mod.plan_apply(catalogue.get("implementation-heavy"), **kwargs)
+    assert len(plan.blocked) == 1 and "builder.md is tracked by git" in plan.blocked[0]
+    allowed = apply_mod.plan_apply(catalogue.get("implementation-heavy"), allow_tracked=True, **kwargs)
+    assert allowed.blocked == ()
+    apply_mod.execute(allowed, config_dir=kwargs["config_dir"])
+    assert parse_frontmatter((project / ".claude" / "agents" / "builder.md").read_text())["model"] == "sonnet"
+
+
 # --------------------------------------------------------------------
 # missing agent file refusal + --force
 # --------------------------------------------------------------------
