@@ -389,6 +389,26 @@ def test_a_reply_after_a_boundary_with_no_request_logged_before_it_has_no_rise_e
     }
 
 
+def test_a_reply_after_an_estimated_request_has_no_rise_though_no_boundary_marks_it(tmp_path):
+    """The request that wrote a summary resets the growth by itself: the reply after it may carry no
+    boundary marker, and the fall to the new context is neither a rise nor a shrink."""
+    main = _result(
+        [
+            _turn(100_000, 0, human_prompt_chars=5),
+            _turn(101_000, 10),
+            _request(20),
+            _turn(20_000, 30),
+            _turn(21_000, 40),
+        ]
+    )
+    block = tuning._figures(_ctx_in(tmp_path, _bundle(main)))
+    assert block["growth"] == {
+        "by_reply": {"to_1k": {"replies": 2, "tokens": 2000}},
+        "by_session": {"to_1k": {"sessions": 1, "replies": 2}},
+        "shrinks": 0,
+    }
+
+
 # -- 3. summaries ---------------------------------------------------------------------------------------
 
 
@@ -458,6 +478,43 @@ def test_a_summary_pays_back_when_the_replies_after_it_reach_the_mean_break_even
     _valid({"summaries": block})
 
 
+def _summary_world(*, tight: bool = True, between: int = 3, after: int = 40):
+    """A session with two summaries: the first followed by ``between`` replies, the second by ``after``.
+    The second summary's next reply comes straight after it when ``tight``, and 1,000 seconds after when
+    not (a join over 15 minutes). Each next reply wrote 30,000 tokens to the cache."""
+    first = [_turn(20_000 + 100 * i, 20 + i) for i in range(between)]
+    first[0].preceding_event_kinds = (EventKind.COMPACT_BOUNDARY,)
+    first[0].cache_creation_tokens = 30_000
+    late = 20 + between + 10
+    second = [_turn(20_000 + 100 * i, late + (10 if tight else 1_000) + i) for i in range(after)]
+    second[0].preceding_event_kinds = (EventKind.COMPACT_BOUNDARY,)
+    second[0].cache_creation_tokens = 30_000
+    return _result(
+        [_turn(200_000, 0, human_prompt_chars=5), _request(10), *first, _request(late), *second],
+        events=[_boundary(11), _boundary(late + 1, "manual")],
+    )
+
+
+def test_replies_are_counted_to_the_next_summary_and_not_to_the_end_of_the_session(tmp_path):
+    block = tuning._figures(_ctx_in(tmp_path, _bundle(_summary_world())))["summaries"]
+    assert block["summaries"] == 2
+    # The first summary was followed by 3 replies, up to the second; the second by 40, to the session's end.
+    assert block["followed_to_next"] == {"to_10": 1} and block["followed_to_end"] == {"to_50": 1}
+    _valid({"summaries": block})
+
+
+def test_a_summary_whose_next_reply_came_over_fifteen_minutes_later_writes_nothing_to_write_usd(tmp_path):
+    ctx = _ctx_in(tmp_path, _bundle(_summary_world(tight=False)))
+    records = ctx.compactions[0].records
+    assert [tuning.compaction_mod._join_is_tight(r) for r in records] == [True, False]
+    assert records[1].join_delta_s > 900 and records[1].next_turn_write_cost > 0
+    block = tuning._figures(ctx)["summaries"]
+    assert records[0].next_turn_write_cost > 0
+    assert block["write_usd"] == pytest.approx(records[0].next_turn_write_cost, abs=1e-9)
+    tight = tuning._figures(_ctx_in(tmp_path, _bundle(_summary_world())))["summaries"]
+    assert tight["write_usd"] == pytest.approx(records[0].next_turn_write_cost * 2, abs=1e-9)
+
+
 def test_a_session_an_older_version_read_is_left_out_of_summaries_and_corrections_never_read_as_zero(tmp_path):
     w = _mini_world(tmp_path)
     corpus = copy.deepcopy(w.corpus)
@@ -518,6 +575,15 @@ def test_after_summary_matches_the_next_message_to_one_after_as_long_a_stretch_w
     assert tagged["stretches"]["to_30"]["summarised"] == _side(1, 1, tagged=1, fixes=1)
     assert tagged["stretches"]["to_30"]["plain"] == _side(1, 0)
     _valid({"after_summary": tagged})
+
+
+def test_a_summary_just_before_the_next_message_counts_for_the_message_after_it(tmp_path):
+    """The manual /compact-then-type case: the boundary marks the opening reply of the next message,
+    and no estimated request sits in the stretch before it."""
+    second = _cycle(100, 12, human_correction=True, preceding_event_kinds=(EventKind.COMPACT_BOUNDARY,))
+    main = _result([*_cycle(0, 12), *second], events=[_boundary(95, "manual")])
+    block = tuning._figures(_ctx_in(tmp_path, _bundle(main)))["after_summary"]
+    assert block == {"sessions": 1, "unmeasured": 0, "stretches": {"to_30": {"summarised": _side(1, 1)}}}
 
 
 # -- 5. models ------------------------------------------------------------------------------------------
