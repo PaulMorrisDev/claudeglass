@@ -1225,6 +1225,10 @@ def profile_overridden_by(
         return f"This project's {_OVERRIDING_PROJECT_FILE[layer]} sets it too and wins."
     if key == "autoCompactWindow" and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
         return f"{snapshots_mod.AUTO_COMPACT_WINDOW_ENV} is set and wins over this setting."
+    model_parts = key.split(".")
+    if effort_env_set and len(model_parts) == 3 and model_parts[0] == "modelSettings" and model_parts[2] == "effortLevel":
+        # A model's own effort level loses to the variable too.
+        return "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
     if key == "effortLevel":
         if effort_env_set:
             return "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."

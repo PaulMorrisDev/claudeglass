@@ -112,6 +112,19 @@ def test_profile_prompt_says_so_when_nothing_changes():
     assert "nothing to change" in text
 
 
+def test_profile_overridden_by_says_the_effort_variable_wins_over_a_models_own_effort_row_too():
+    from claudeglass.fixes import profile_overridden_by
+
+    sentence = "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+    row = "settings.modelSettings.claude-opus-5-5.effortLevel"
+    assert profile_overridden_by(row, "user", {}, (), True, None, True) == sentence
+    assert profile_overridden_by(row, "user", {}, (), True, None, False) == sentence
+    assert profile_overridden_by(row, "user", {}, (), False, None, True) is None
+    # only an effort row: the window is not an effort setting
+    window = "settings.modelSettings.claude-opus-5-5.autoCompactWindow"
+    assert profile_overridden_by(window, "user", {}, (), True, None, True) is None
+
+
 def test_profile_overridden_by_names_each_case():
     from claudeglass.fixes import profile_overridden_by
 
