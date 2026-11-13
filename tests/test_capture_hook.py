@@ -163,6 +163,36 @@ def test_a_subagent_that_compacts_gets_nothing_and_the_main_session_its_note(tmp
     assert _note(config_dir, main) == cat.note_text(cat.level_metrics("essentials"), "main")
 
 
+def test_a_compaction_note_asks_lost_once(tmp_path):
+    ask = cat.METRICS_BY_ID["prior"].compact_line
+    deep = cat.level_metrics("deep")
+    config_dir = _config(tmp_path / "deep", '[capture]\nlevel = "deep"\n')
+    startup = _note(config_dir, _start())
+    assert ask not in startup and "lost" not in startup
+    assert _note(config_dir, _start(source="clear")) == startup
+    note = _note(config_dir, _start(source="compact"))
+    lines = note.splitlines()
+    # One line more than the session's note, after the key lines and before the skip line; the marker is the same.
+    assert lines.count(ask) == 1 and lines[lines.index(ask) + 1] == cat.SKIP_KEY_LINE
+    assert [line for line in lines if line != ask] == startup.splitlines()
+    assert note == cat.note_text(deep, "main", source="compact")
+    assert "prior" in lines[0].rpartition(" ")[2].split(",")
+    # A subagent's compaction gets nothing, and neither does a session where Claude does not write the tags or
+    # that never asked for prior.
+    assert _note(config_dir, _start(source="compact", agent_id="a1", agent_type="general-purpose")) == ""
+    haiku = _config(tmp_path / "haiku", '[capture]\nlevel = "deep"\ntagger = "haiku"\n')
+    assert "lost" not in _note(haiku, _start(source="compact"))
+    for n, body in enumerate(('[capture]\nlevel = "standard"\n', '[capture]\nlevel = "custom"\nmetrics = ["task", "check"]\n')):
+        assert "lost" not in _note(_config(tmp_path / f"no-prior-{n}", body), _start(source="compact"))
+    # The twin builds the same note.
+    for source in ("", "startup", "clear", "compact"):
+        assert HOOK.build_note(CATALOGUE, deep, "main", source=source) == cat.note_text(deep, "main", source=source)
+        assert HOOK.build_note(CATALOGUE, deep, "main", tagger="haiku", source=source) == cat.note_text(
+            deep, "main", tagger="haiku", source=source
+        )
+    assert HOOK.build_note(CATALOGUE, deep, "main") == startup
+
+
 def _session_file(tmp_path: Path, records: list[dict], name: str = "s1.jsonl") -> Path:
     path = tmp_path / "projects" / "p" / name
     path.parent.mkdir(parents=True, exist_ok=True)

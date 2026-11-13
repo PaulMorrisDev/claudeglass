@@ -3204,11 +3204,13 @@ def active_metrics(level: str, metrics=(), feedback=()) -> tuple[str, ...]:
     return ids + tuple(i for i in FEEDBACK_IDS if i in set(feedback))
 
 
-def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGER) -> str:
+def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGER, source: str = "") -> str:
     """The note the hook adds for ``scope`` (``"main"`` at session start,
     ``"subagent"`` at agent start) with the metrics in ``ids`` switched
     on; ``""`` when none of them asks anything there. While Haiku writes
     the tags (``tagger``), the main note asks for no ``[cg: ...]`` tag.
+    ``source`` is the SessionStart's: after a compaction (``compact``) the
+    main note also carries each metric's :attr:`Metric.compact_line`.
 
     ``hooks/capture_hook.py`` builds the same text from
     ``capture-catalogue.json`` (:func:`export_json`); a test holds the two
@@ -3229,7 +3231,8 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
         (m.main_extra_untagged or m.main_extra) if untagged else m.main_extra if main else m.sub_extra
         for m in enabled
     ]
-    codes = [m.id for m, line, x in zip(enabled, lines, extras) if line or x]
+    asks = [m.compact_line if main and not untagged and source == "compact" else "" for m in enabled]
+    codes = [m.id for m, line, x, ask in zip(enabled, lines, extras, asks) if line or x or ask]
     if not codes:
         return ""
     out = [f"{NOTE_MARKER}{NOTE_VERSION} {','.join(codes)}", NOTE_INTRO]
@@ -3240,13 +3243,14 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
     before_tag = [x for m, x in zip(enabled, extras) if x and main and m.extra_before_tag]
     after_tag = [x for m, x in zip(enabled, extras) if x and not (main and m.extra_before_tag)]
     out += before_tag
-    if any(lines):
+    if any(lines) or any(asks):
         if main:
             out.append(MAIN_TAG_INTRO)
         else:
             keys = any(line for m, line in zip(enabled, lines) if m.id != "result")
             out.append(SUB_TAG_INTRO.format(tag=SUB_TAG_WITH_KEYS if keys else SUB_TAG))
         out += [line for line in lines if line]
+        out += [ask for ask in asks if ask]
         if main:
             out.append(SKIP_KEY_LINE)
     out += after_tag

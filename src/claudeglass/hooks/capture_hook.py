@@ -412,11 +412,14 @@ def active_ids(catalogue: dict, capture: dict) -> tuple[str, ...]:
     return ids + tuple(i for i in catalogue["feedback_ids"] if i in feedback)
 
 
-def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: str = "claude") -> str:
+def build_note(
+    catalogue: dict, ids, scope: str, agent_type: str = "", tagger: str = "claude", source: str = ""
+) -> str:
     """The note for ``scope`` (``"main"`` or ``"subagent"``); ``""`` when
     none of ``ids`` asks anything there. While Haiku writes the tags
-    (``tagger``), the main note asks for no tag. Same text as
-    ``capture_catalogue.note_text``."""
+    (``tagger``), the main note asks for no tag. After a compaction
+    (``source`` ``compact``) the main note also carries each metric's
+    ``compact_line``. Same text as ``capture_catalogue.note_text``."""
     if scope == "subagent":
         # A subagent is asked for nothing: Haiku judges its run afterwards.
         return ""
@@ -429,7 +432,8 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: s
         (m.get("main_extra_untagged") or m["main_extra"]) if untagged else m["main_extra"] if main else m["sub_extra"]
         for m in enabled
     ]
-    codes = [m["id"] for m, line, x in zip(enabled, lines, extras) if line or x]
+    asks = [m.get("compact_line", "") if main and not untagged and source == "compact" else "" for m in enabled]
+    codes = [m["id"] for m, line, x, ask in zip(enabled, lines, extras, asks) if line or x or ask]
     if not codes:
         return ""
     text = catalogue["text"]
@@ -441,13 +445,14 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: s
     before_tag = [x for m, x in zip(enabled, extras) if x and main and m.get("extra_before_tag")]
     after_tag = [x for m, x in zip(enabled, extras) if x and not (main and m.get("extra_before_tag"))]
     out += before_tag
-    if any(lines):
+    if any(lines) or any(asks):
         if main:
             out.append(text["main_tag_intro"])
         else:
             keys = any(line for m, line in zip(enabled, lines) if m["id"] != "result")
             out.append(text["sub_tag_intro"].format(tag=text["sub_tag_with_keys"] if keys else text["sub_tag"]))
         out += [line for line in lines if line]
+        out += [ask for ask in asks if ask]
         if main:
             out.append(text["skip_key_line"])
     out += after_tag
@@ -771,7 +776,7 @@ def note_for(
         scheduled = catalogue["coaching"]["scheduled_task_prefix"]
         if scope == "main" and _scheduled_session(payload.get("transcript_path"), scheduled):
             return ""
-        return build_note(catalogue, ids, scope, agent_type, tagger_of(capture))
+        return build_note(catalogue, ids, scope, agent_type, tagger_of(capture), str(payload.get("source") or ""))
     if big:
         # A subagent's report carries no tag for the note's word to go in,
         # and nor does the main session's reply while Haiku writes the tags.
