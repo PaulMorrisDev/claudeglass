@@ -4423,6 +4423,27 @@ def test_profile_goals_lists_goals_and_drafts_one(server):
     assert resp.status == 400 and "unknown task" in payload["error"]["message"]
 
 
+def test_the_models_goal_drafts_no_main_session_model_while_anthropic_model_is_set(tmp_path, monkeypatch):
+    """The variable picks the main session's model, so the Setup goal offers no
+    ``model`` setting for it; the same corpus with the name absent does."""
+
+    def main_model_candidates(env_names):
+        handle = _start_agent_model_server(tmp_path / ("with" if env_names else "without"), monkeypatch)
+        try:
+            _seed_settings_snapshot(
+                handle, "proj-b", "2026-09-21T12:00:00Z", effort="high", layer="user", env_names=env_names
+            )
+            resp, body = handle.get_json("/api/profile-goals?goal=models")
+            assert resp.status == 200
+            return [c for c in body["data"]["candidates"] if c["agent"] is None and c["key"] == "model"]
+        finally:
+            handle.close()
+            handle.store.close()
+
+    assert main_model_candidates(["ANTHROPIC_MODEL"]) == []
+    assert [c["value"] for c in main_model_candidates([])] == ["sonnet"]
+
+
 def test_whatif_estimates_and_validates(server):
     resp, payload = server.post_json("/api/whatif", {"settings": {"model": "sonnet"}, "agents": {}})
     assert resp.status == 200

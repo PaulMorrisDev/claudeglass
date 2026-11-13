@@ -255,7 +255,7 @@ Cards and checks:
 - **The main session's model card offers no setting while ANTHROPIC_MODEL
   is set.** The variable wins over the model setting, so the card, the
   Models check and the profile diff say so instead. A snapshot from before
-  this reads as not set.
+  this reads as not set. The Setup goal leaves it out too.
 - **A profile that sets effortLevel in your user settings says Opus 5.5
   and later ignore it there.** The diff row and the prompt suggest /effort
   on each model, or a project target, where it applies to every model.

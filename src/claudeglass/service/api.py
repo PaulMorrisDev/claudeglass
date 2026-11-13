@@ -3349,21 +3349,28 @@ def make_handler(
 
         return claude_md_review.folders_for_slugs(_projects_roots(), project) if project else None
 
-    def _current_settings(project=None) -> tuple[dict, dict, bool]:
+    def _current_settings(project=None) -> tuple[dict, dict, bool, bool]:
         """The latest snapshot's effective settings as in force, every project's agent
         fields, and (PROF-03) whether ``CLAUDE_CODE_EFFORT_LEVEL`` is set
         -- content_layers' own flag, never a value that could be
-        anything else -- or empty/``False`` when no snapshot is recorded
+        anything else -- and whether ``ANTHROPIC_MODEL`` is set (by name
+        only), or empty/``False`` when no snapshot is recorded
         yet. With a ``project`` filter, that project's own settings and
         agents (:func:`_config_snapshot_with_every_project_agents`)."""
         snapshot = _config_snapshot_with_every_project_agents(project)
         if snapshot is None:
-            return {}, {}, False
+            return {}, {}, False, False
         agents = snapshot.data.get("effective_agents")
         env_set = snapshots_mod.effort_level_env_set(snapshot)
+        model_env_set = snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV)
         # In force, not as written: CLAUDE_CODE_AUTO_COMPACT_WINDOW beats
         # autoCompactWindow while it's set.
-        return snapshots_mod.effective_config_in_force(snapshot), agents if isinstance(agents, dict) else {}, env_set
+        return (
+            snapshots_mod.effective_config_in_force(snapshot),
+            agents if isinstance(agents, dict) else {},
+            env_set,
+            model_env_set,
+        )
 
     def route_profile_goals(store, query, body):
         """Without ``goal``: the goals a profile can start from. With it:
@@ -3388,7 +3395,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, effective_agents, effort_level_env_set = _current_settings(project)
+        effective, effective_agents, effort_level_env_set, model_env_set = _current_settings(project)
         return _ok(
             goals.draft(
                 goal,
@@ -3399,6 +3406,7 @@ def make_handler(
                 period=_period_text(*window, name=query.get("window")),
                 task=task,
                 effort_level_env_set=effort_level_env_set,
+                model_env_set=model_env_set,
                 skip_keys=_ignored_keys(model, query),
             )
         )
@@ -3456,7 +3464,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, _agents, _env_set = _current_settings(project)
+        effective, _agents, _env_set, _model_env_set = _current_settings(project)
         units = _report_units(model)
         period = _period_text(*window, name=query.get("window"))
         result = whatif.estimate(
