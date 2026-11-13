@@ -26,7 +26,8 @@ optional block out), registered with
 :func:`_block` beside the spec node that describes it; adding one means
 adding one registration with ``required=False``, so documents made before
 it still validate. The ``cost_centres``, ``project_files`` and
-``compactions`` blocks (Phase 8) are such blocks, and the keys Phase 8 added
+``compactions`` blocks (Phase 8) and the ``cards`` block (what became of the
+cards the dashboard showed) are such blocks, and the keys Phase 8 added
 inside older blocks (``agents.probes``, ``agents.report_turns``,
 ``agents.launches``, ``agents.model_choice``,
 ``prompting.plans.builds`` and ``prompting.plans.asks``) are optional the
@@ -54,7 +55,9 @@ from __future__ import annotations
 import json
 import math
 import re
+import statistics
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, timedelta
 from functools import cached_property
 from pathlib import Path
@@ -75,6 +78,7 @@ from . import events as events_mod
 from . import habits as habits_mod
 from . import handoff as handoff_mod
 from . import haiku_tags, helptext, hook_health, limits, measured
+from . import ignores as ignores_mod
 from . import pieces as pieces_mod
 from . import prompting as prompting_mod
 from . import ratings as ratings_mod
@@ -606,6 +610,7 @@ class _Ctx:
         tip_feedback=None,
         coverage=None,
         projects_roots=None,
+        card_marks=None,
     ):
         self.corpus = corpus
         self.config = config
@@ -620,6 +625,7 @@ class _Ctx:
         self.ratings = ratings or {}
         self.tip_feedback = tip_feedback or {}
         self.coverage = coverage
+        self.card_marks = card_marks
         # Local midnight in the config's zone, where the corpus's --days window starts.
         self.start = discovery.local_midnight(today - timedelta(days=days - 1), config.tz)
 
@@ -817,6 +823,7 @@ def build(
     tip_feedback: dict | None = None,
     coverage: "covered_mod.Coverage | None" = None,
     projects_roots: list[Path] | None = None,
+    card_marks: "CardMarks | None" = None,
 ) -> dict:
     """The export document for ``corpus`` (already loaded for the last
     ``days`` days, Haiku's tags put on its turns). ``config_dir`` is where
@@ -830,12 +837,15 @@ def build(
     the window whose transcripts are gone, fills the ``coverage`` block;
     without it the block is left out. ``projects_roots`` are the
     folders of project folders the corpus was read from, where a session's
-    own folder is looked for (the project-files block). Raises :class:`TuningError` if
-    what it built doesn't validate, which would be a bug here."""
+    own folder is looked for (the project-files block). ``card_marks``
+    (:class:`CardMarks`), given when the dashboard's store has a ``card_marks``
+    table, fills the ``cards`` block; without it the block is left out.
+    Raises :class:`TuningError` if what it built doesn't validate, which would
+    be a bug here."""
     days = max(1, int(days))
     ctx = _Ctx(
         corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback,
-        coverage=coverage, projects_roots=projects_roots,
+        coverage=coverage, projects_roots=projects_roots, card_marks=card_marks,
     )
     version = _VERSION_RE.match(__version__)
     doc: dict = {
@@ -1891,6 +1901,144 @@ def _compactions(ctx: _Ctx) -> dict:
     return block
 
 
+# -- cards -------------------------------------------------------------------------------------
+
+#: The rule ids the service can send (``Recommendation.id``), as the scan in
+#: ``tests/helpers.py`` finds them; a card of any other rule (a newer build's)
+#: counts as ``other``.
+CARD_RULES = (
+    "agent-decide-apply", "agent-model-asked", "agent-model-inherited", "agent-report-size", "baseline-bloat",
+    "batch-instructions", "cache-read-dominance", "compaction-churn", "compaction-window", "data-quality",
+    "discovery-share", "effort-mismatch", "env-attribution-deprecated", "env-disable-prompt-caching",
+    "env-max-output-tokens", "env-subagent-model", "env-tool-search", "hook-block-resent", "hook-context-carry",
+    "hook-failures", "limit-pressure", "long-context-share", "long-tool-waits", "mcp-unused-server", "model-tier",
+    "model-tier-main", "notification-invalidation", "plan-handoff", "plan-rounds", "pricing-coverage", "run-split",
+    "saver-tool-roi", "spawn-claude-md", "spawn-cost", "spawn-shared-claude-md", "spawn-task-prompt",
+    "spawn-tools-list", "spawn-unused-mcp", "spawn-unused-skills", "subagent-volume", "tool-output-carry",
+    "tool-skill-name-only", "ttl-switch", "unused-skill", "unused-skills", "wasted-turns", "window-budget", "other"
+)
+#: Who a card is about: ``none`` for no agent, ``main`` for the main session,
+#: a built-in agent type as itself, and every other agent ``custom``.
+CARD_AGENTS = ("none", "main", *AGENT_TYPES)
+#: The most (rule, agent) rows the block keeps; ``shown`` still counts the rest.
+CARD_ROWS_KEPT = 40
+
+
+@dataclass(frozen=True)
+class CardMarks:
+    """What ``build`` reads for the ``cards`` block: the dashboard's
+    ``card_marks`` rows (``Store.card_marks``), the project folders the export
+    covers, and whether it covers every project."""
+
+    rows: list
+    folders: frozenset
+    every_project: bool
+
+
+def _card_agent(agent_type) -> str:
+    """The class of agent a card is about: only a word of :data:`CARD_AGENTS`
+    leaves here, so a custom agent's name never does."""
+    if not agent_type:
+        return "none"
+    if agent_type == "top-level":
+        return "main"
+    return agent_type if isinstance(agent_type, str) and agent_type in AGENT_TYPES else "custom"
+
+
+_CARD_ROW = Obj(
+    {
+        "rule": Word(CARD_RULES),
+        "agent": Word(CARD_AGENTS),
+        "shown": Count(),
+        "copied": Count(),
+        "bundled": Count(),
+        "ignored": Count(),
+        "landable": Count(),
+        "landed": Count(),
+        "exact": Count(),
+        "median_days": Count(),
+        "answers": Map(catalogue.TIP_CARD_VOCAB, Count()),
+    },
+    required=("rule", "agent", "shown", "copied", "bundled", "ignored", "landable", "landed", "exact"),
+)
+
+
+@_block(
+    "cards",
+    Obj({"shown": Count(), "rows": Arr(_CARD_ROW, limit=CARD_ROWS_KEPT)}, required=("shown", "rows")),
+    required=False,
+)
+def _cards(ctx: _Ctx) -> dict | None:
+    """What became of the recommendation cards the dashboard showed, by rule
+    and class of agent, from its ``card_marks`` rows: how many were shown,
+    copied (``bundled``: copied only in the project's all-fixes prompt, which
+    ``copied`` counts too), ignored now (read from the ignores file, as the
+    dashboard reads it), could land (the card names a setting), landed (it left
+    the list and every setting it names moved, judged by the dashboard when the
+    list was drawn again) and how many of those landed to the card's own value,
+    the days from first shown to landed in the middle, and how the cards were
+    rated. Left out when there is no dashboard store to read; otherwise a block
+    even with nothing in it, since a dashboard that showed no card is not one
+    that isn't there. Counts and fixed words only: no card key, project,
+    agent name, setting or time reaches the document. A row counts when it was
+    first shown in the window and belongs to the export's projects: an
+    every-project row with every project, a project row with a folder the
+    export covers."""
+    marks = ctx.card_marks
+    if marks is None:
+        return None
+    stored = ignores_mod.load(ctx.config_dir) if ctx.config_dir else {}
+    groups: dict[tuple[str, str], list] = {}
+    kept = 0
+    for row in marks.rows:
+        shown = snapshots_mod._parse_ts(row.get("first_shown_at"))
+        if shown is None or shown < ctx.start:
+            continue
+        if row.get("project") == ignores_mod.ALL_PROJECTS:
+            if not marks.every_project:
+                continue
+        elif not set(row.get("folders") or ()) & marks.folders:
+            continue
+        rule = row.get("rule_id")
+        word = rule if rule in CARD_RULES else "other"
+        groups.setdefault((word, _card_agent(row.get("agent_type"))), []).append((row, shown))
+        kept += 1
+    out = []
+    for (rule, agent), members in groups.items():
+        item = {
+            "rule": rule, "agent": agent, "shown": len(members), "copied": 0, "bundled": 0, "ignored": 0,
+            "landable": 0, "landed": 0, "exact": 0,
+        }
+        days = []
+        for row, shown in members:
+            if row.get("copied_at") or row.get("bundled_at"):
+                item["copied"] += 1
+            if row.get("bundled_at") and not row.get("copied_at"):
+                item["bundled"] += 1
+            project = None if row.get("project") == ignores_mod.ALL_PROJECTS else row.get("project")
+            if any(ignores_mod._match(projects, row.get("card_key"), project) is not None for projects in stored.values()):
+                item["ignored"] += 1
+            if row.get("changes"):
+                item["landable"] += 1
+                landed = snapshots_mod._parse_ts(row.get("landed_at"))
+                if landed is not None:
+                    item["landed"] += 1
+                    item["exact"] += 1 if row.get("landed_exact") else 0
+                    days.append(max(0, math.floor((landed - shown).total_seconds() / 86400)))
+        if item["landed"]:
+            item["median_days"] = statistics.median_low(days)
+        answers: Counter = Counter()
+        for key in {row.get("card_key") for row, _shown in members}:
+            answer = (ctx.tip_feedback.get(("recommendation", key)) or {}).get("answer")
+            if answer in catalogue.TIP_CARD_VOCAB:
+                answers[answer] += 1
+        if answers:
+            item["answers"] = _tally(answers, catalogue.TIP_CARD_VOCAB)
+        out.append(item)
+    out.sort(key=lambda item: (-item["shown"], item["rule"], item["agent"]))
+    return {"shown": kept, "rows": out[:CARD_ROWS_KEPT]}
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -1974,6 +2122,7 @@ def summary_text(doc) -> str:
         (_cost_centres_lines, "cost_centres"),
         (_project_files_lines, "project_files"),
         (_compactions_lines, "compactions"),
+        (_cards_lines, "cards"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])
@@ -2232,6 +2381,35 @@ def _compactions_lines(block: dict) -> list[str]:
             f"{_n(heavy['sessions'], 'session')} summarised {compaction_mod.HEAVY_COMPACTIONS} times or more: "
             f"{_usd(heavy['cost_usd'])} of main-session cost{share}."
         )
+    return lines
+
+
+def _cards_lines(block: dict) -> list[str]:
+    if not block["shown"]:
+        return ["Dashboard cards: none shown in this window."]
+    rows = block["rows"]
+
+    def total(key: str) -> int:
+        return sum(row[key] for row in rows)
+
+    copied, bundled, ignored, landable = total("copied"), total("bundled"), total("ignored"), total("landable")
+    line = f"Dashboard cards: {_n(block['shown'], 'card')} shown, {copied:,} copied and {ignored:,} ignored."
+    if bundled:
+        line += f" {_n(bundled, 'card')} {'was' if bundled == 1 else 'were'} copied only in the prompt for every open fix."
+    lines = [line]
+    if landable:
+        lines.append(
+            f"Of {_n(landable, 'card')} that change a setting, {total('landed'):,} left the list after you changed it, "
+            f"{total('exact'):,} to the card's own value."
+        )
+    by_rule: Counter = Counter()
+    answers: Counter = Counter()
+    for row in rows:
+        by_rule[row["rule"]] += row["shown"]
+        answers.update(row.get("answers") or {})
+    lines.append(f"Most shown: {_top(by_rule, 3)}.")
+    if answers:
+        lines.append(f"Your ratings of them: {_top(answers, 4)}.")
     return lines
 
 

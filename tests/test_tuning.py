@@ -636,7 +636,7 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     assert "Capture cost $4.20 and coaching notes $0.35 at list prices." in lines
     for name in ("Tips:", "Plans:", "Tags:", "Rework:", "Agent answers:", "Hooks:", "Limits:"):
         assert any(line.startswith(name) for line in lines), name
-    assert len(lines) < 50
+    assert len(lines) < 60
 
 
 def test_a_file_without_a_coverage_block_as_every_older_one_is_still_passes_and_says_nothing_of_it():
