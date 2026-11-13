@@ -853,6 +853,8 @@ def _banner(
             f"work, and task changes, in {one_session_in(capture)}."
         )
         notes.append(f"'{OFF_COMMAND}' stops it. '{ON_COMMAND}' starts full capture again.")
+        if hooks.get("ok") is False:
+            notes.append(hooks["summary"])
         if low_coverage is not None:
             notes.append(low_coverage)
         return {

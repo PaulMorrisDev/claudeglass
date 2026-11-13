@@ -160,6 +160,23 @@ def test_the_light_sample_names_the_share_the_hook_runs(sample, share, phrase):
     assert banner["notes"][0].endswith(f"and task changes, in {phrase}.")
 
 
+def test_a_light_sample_whose_hook_entry_is_missing_says_so():
+    spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
+    health = CaptureHookHealth(
+        settings_path=Path("settings.json"), needed=(spec,), problems=["The command runs a file that is missing."],
+    )
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light")
+    use = _use(cycles=30, tagged_cycles=30)
+    hooks = capture_view.hooks_block(health)
+    notes = capture_view.view(light, units=API, use=use, hooks=health, now=now)["banner"]["notes"]
+    assert hooks["summary"] in notes
+    # The light sample's own two notes stay, and a connected hook adds nothing.
+    assert any(note.startswith("The full capture ended on 2026-09-21") for note in notes)
+    clean = capture_view.view(light, units=API, use=use, now=now)["banner"]["notes"]
+    assert hooks["summary"] not in clean
+
+
 def test_ended_capture_leaves_out_the_hook_cost_and_step_down_notes():
     spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
     health = CaptureHookHealth(
