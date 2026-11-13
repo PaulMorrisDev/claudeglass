@@ -211,7 +211,8 @@ Cards and checks:
 - **The tools, skills and MCP cards read the agent's `disallowedTools`.** A
   tool on it is not offered again, an entry such as `Bash(git push *)`
   withholds the whole tool, and the tools card says a withheld tool is on
-  that line.
+  that line. Its why says a tool stays only when it is on the line the card
+  proposes.
 - **The CLAUDE.md and skills checks read the project folders the report
   read**, and the CLAUDE.md check offers its cards' fixes when no file
   shows how often it was sent.

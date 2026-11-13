@@ -273,3 +273,14 @@ def test_the_denied_profile_has_an_agent_whose_file_withholds_a_tool_its_spawns_
     for name in NAMES:
         if name != "denied":
             assert not any("disallowedTools" in entry for entry in built(name)[1].agents.values()), name
+
+
+
+def test_check_1_reads_the_tools_a_why_says_stay():
+    # N3: check 1 holds every tool the why says stays to the suggested line.
+    import agreement
+    from types import SimpleNamespace as NS
+
+    assert agreement._why_stays(NS(why="In 20 spawns ... each start: x. Bash and Edit stay too because some of its runs called them.")) == ["Bash", "Edit"]
+    assert agreement._why_stays(NS(why="In 20 spawns ... each start: x. Bash stays too because workflow agents called it.")) == ["Bash"]
+    assert agreement._why_stays(NS(why="No such sentence.")) == []

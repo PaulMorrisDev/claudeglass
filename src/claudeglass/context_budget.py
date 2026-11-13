@@ -2346,7 +2346,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         Column(key="saving_usd", label="Saving across these spawns", kind="money"),
         Column(key="window_days", label="Days in the window", kind="float"),
         Column(key="rare_sizes", label="Size of each rarely used tool", kind="str"),
-        Column(key="rule_kept_tools", label="Tools kept because a run of this agent called them", kind="str"),
+        Column(key="rule_kept_tools", label="Writing or shell tools a run of this agent called", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):

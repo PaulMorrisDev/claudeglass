@@ -1550,3 +1550,27 @@ def test_a_plugin_agents_tools_card_is_information_only():
     rec = _tools_rec(recs, "pr-review-toolkit:code-reviewer")
     assert rec.severity == "info" and rec.changes == [] and rec.fixes == []
     assert fixes.project_prompt([rec])["left_out"]["info"] == 1
+
+
+
+# -- N3: the why names only run-called tools that are on the line --------------
+
+_N3_CHARS = {"Read": 1500, "Grep": 1200, "Edit": 9000, "Write": 9000, "Bash": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+
+
+def _n3_card(entry, uses, other):
+    acc = _diet_acc("implementer", spawns=20, uses=uses, chars=_N3_CHARS)
+    acc.tool_uses["claude-sonnet-5"] = other
+    return _tools_rec(_recs(_report(acc), snapshot=_snapshot({"implementer": {"source": "project", **entry}})), "implementer")
+
+
+def test_the_why_does_not_say_a_tool_stays_when_the_agents_tools_line_lacks_it():
+    rec = _n3_card({"tools": ["Read", "Grep", "Bash", "NotebookEdit", "WebFetch"]}, {"Read": 20, "Grep": 20}, {"Edit": 6, "Bash": 6})
+    assert "Edit isn't on its tools line, so it isn't added." in rec.action
+    assert rec.why.endswith("Bash stays too because some of implementer's runs called it.")
+
+
+def test_the_why_does_not_say_a_tool_stays_when_the_deny_line_withholds_it():
+    rec = _n3_card({"disallowedTools": ["Bash"]}, {"Read": 20, "Grep": 20, "Edit": 8}, {"Bash": 4})
+    assert "Bash is on its disallowedTools line, so it isn't added." in rec.action
+    assert "stays too" not in rec.why and "stay too" not in rec.why

@@ -273,7 +273,22 @@ def check_tools_lines(inp: Inputs) -> list[str]:
                     f"{_who(rec)}: the suggested line leaves out {name}, {why} "
                     f"(line: {', '.join(line)})"
                 )
+        # N3: a tool the why says stays is on the line.
+        for name in _why_stays(rec):
+            if not any(recommend._entry_covers(entry, name) for entry in line):
+                problems.append(f"{_who(rec)}: the why says {name} stays, but the line leaves it out (line: {', '.join(line)})")
     return problems
+
+
+_WHY_STAYS = re.compile(r"\. ([^.]*?) stays? too because")
+
+
+def _why_stays(rec) -> list[str]:
+    """The tools a tools card's why says stay on the line ("Bash and Edit stay too because ...")."""
+    found = _WHY_STAYS.search(rec.why or "")
+    if not found:
+        return []
+    return [name.strip() for name in re.split(r", | and ", found.group(1)) if name.strip()]
 
 
 # -- 2. a card's agents folder is its fix's folder ----------------------------

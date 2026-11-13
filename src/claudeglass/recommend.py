@@ -2126,6 +2126,9 @@ def _tools_list_card(
     # a tool a known line lacks did.
     rule_kept = _split_names(row.get("rule_kept_tools"))
     cleared = [name for name in _split_names(row["keep_tools"]) if name not in rule_kept]
+    # N3: the why names only the run-called tools that are on the line; one the
+    # agent's own tools or disallowedTools line keeps off is in the action instead.
+    rule_kept = [name for name in rule_kept if name in on_line]
     why = (
         f"In {measured} spawns, {agent_type} called {len(cleared)} of the tools it was offered in at least "
         f"{pct}% of them. Leaving out the rest takes about {dropped:,.0f} tokens out of each start: "

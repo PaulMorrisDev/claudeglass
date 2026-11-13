@@ -2114,7 +2114,7 @@ one.
   measured (list prices) and `window_days`. `rare_sizes` gives each
   rarely used tool's definition, deferred names and instructions in tokens
   per spawn (`tool=definition/deferred/instructions`), so a card can work
-  the amounts out again for the tools the agent's file still lists. `rule_kept_tools` names the tools that write files or run commands which a run of that agent called on any model, so `keep_tools` holds them; the card's why names them apart. Whether the skills list and the
+  the amounts out again for the tools the agent's file still lists. `rule_kept_tools` names the tools that write files or run commands which a run of that agent called on any model, so `keep_tools` holds them; the card's why names apart only those still on the line it proposes, so a tool the agent's file no longer offers, or one its `disallowedTools` withholds, is never said to stay. Whether the skills list and the
   agent list really go with their tools is not in Claude Code's docs, so
   the `spawn-tools-list` card asks for a before and after check.
 - `agent_startup_servers` — per agent type (report only): one row per MCP
