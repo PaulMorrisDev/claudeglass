@@ -26,6 +26,9 @@ from .model import Column, Section, SessionRecord, Table
 #: haiku, resolved from model id substrings and agent_model_alias."
 _TIER_FAMILIES: tuple[str, ...] = ("haiku", "sonnet", "opus", "fable")
 
+#: Families ranked with another: Mythos is on the rate card at Fable's prices.
+_SAME_TIER_AS = {"mythos": "fable"}
+
 
 def model_tier(model_id: str | None, agent_model_alias: str | None = None) -> int:
     """Resolve a model tier rank (fable=3, opus=2, sonnet=1, haiku=0) from
@@ -41,6 +44,8 @@ def model_tier(model_id: str | None, agent_model_alias: str | None = None) -> in
     billed, so that takes priority over the ``.meta.json`` alias when
     both are given and happen to disagree.
 
+    Mythos ranks as Fable (fable=3).
+
     Returns ``-1`` when neither string names a recognised family, so
     "unknown" always sorts below every real tier without a separate
     ``None``-handling branch at every call site.
@@ -49,6 +54,8 @@ def model_tier(model_id: str | None, agent_model_alias: str | None = None) -> in
         if not candidate:
             continue
         lowered = candidate.lower()
+        for family, same in _SAME_TIER_AS.items():
+            lowered = lowered.replace(family, same)
         for rank, family in enumerate(_TIER_FAMILIES):
             if family in lowered:
                 return rank

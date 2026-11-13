@@ -170,6 +170,9 @@ Cards and checks:
 - **A change to one model's own setting gets a command apply accepts.**
   The checks gave modelSettings as one value apply refused; the command now
   sets modelSettings.<model>.<key> for each.
+- **A main session on Mythos gets the main model card.** Mythos ranks with
+  Fable, at whose prices the rate card lists it, so the card offers Opus and
+  the Models table no longer says the family is not recognised.
 
 Coaching:
 

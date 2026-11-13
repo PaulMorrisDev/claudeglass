@@ -1007,6 +1007,16 @@ def _model_drift(setting: object, observed: str, resolve: bool = True) -> list:
     return snap_mod.detect_drift(snap, {"model": observed}, resolve_model=resolve_model)
 
 
+def test_no_alias_agrees_with_a_mythos_session():
+    """Mythos ranks with Fable, but no alias names it: ``fable`` and ``best``
+    never agree with a Mythos session, which would hide real drift."""
+    resolve_model = load_pricing().resolve_model
+    assert snap_mod._settings_model_agrees("fable", "claude-mythos-5-2", resolve_model) is False
+    assert snap_mod._settings_model_agrees("best", "claude-mythos-5-2", resolve_model) is False
+    assert snap_mod._settings_model_agrees("claude-mythos-5-2", "claude-mythos-5-2", resolve_model) is True
+    assert snap_mod._settings_model_agrees("fable", "claude-fable-5-2", resolve_model) is True
+
+
 @pytest.mark.parametrize("setting", ["opus", "opus[1m]", "Opus"])
 def test_detect_drift_opus_alias_accepts_an_older_opus(setting):
     """``opus`` follows the newest Opus, so a session that ran an older one

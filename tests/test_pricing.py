@@ -1409,6 +1409,7 @@ def test_model_name_reads_an_id_as_people_say_it():
     assert model_name("claude-opus-5[1m]") == "Opus 5 [1m]"
     assert model_name("gpt-4") == "gpt-4"
     assert model_names_in("claude-sonnet-5 (+2 more), not claudeglass") == "Sonnet 5 (+2 more), not claudeglass"
+    assert model_names_in("claude-mythos-5-2") == "Mythos 5.2"
 
 
 # --------------------------------------------------------------------

@@ -2254,3 +2254,27 @@ def test_g3s_guard_never_meets_a_priced_main_session(tmp_path):
         priced += counted
         assert not (counted and model_swap.at_main_floor(reading["value"])), name
     assert priced == 8 + 5
+
+
+def test_a_mythos_main_session_gets_the_main_model_card(tmp_path):
+    """Mythos is on the rate card at Fable's prices, so it ranks with Fable
+    and a Mythos main session is offered Opus, as one on Fable is."""
+    folder = "C--Dev-alpha"
+    _main_sessions(tmp_path, folder, _days("claude-mythos-5-2", range(0, 8)))
+    config_dir = tmp_path / "tl"
+    _r11_snapshots(config_dir, folder, ("20260930T090000Z", "claude-mythos-5-2", "user"))
+    corpus = load_corpus([tmp_path / "projects" / folder], since="2000-01-01")
+    report = build_report(
+        corpus, PRICING, Config(), projects=(folder,), window="w", snapshots=load_snapshots(config_dir),
+        config_dir=config_dir,
+    )
+    (card,) = [r for r in report.recommendations if r.id == "model-tier-main"]
+    assert card.title == "Your main session could run on Opus"
+    assert [(c.current, c.value, c.scope) for c in card.changes] == [("claude-mythos-5-2", "opus", "user")]
+    assert card.saving_usd == pytest.approx(9.664, abs=1e-3)
+    assert "ran on Mythos 5.2" in card.why
+    swap = next(s for s in report.sections if s.key == "model_swap")
+    table = next(t for t in swap.tables if t.name == "model_swap_by_agent_type")
+    keys = [c.key for c in table.columns]
+    top = next(dict(zip(keys, row)) for row in table.rows if row[keys.index("agent_type")] == "top-level")
+    assert top["best_cheaper_alternative_model"] == "claude-opus-5-5"

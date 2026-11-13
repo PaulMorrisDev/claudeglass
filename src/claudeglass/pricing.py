@@ -1242,7 +1242,7 @@ class PricingCoverage:
 
 #: A raw Claude model id inside prose, e.g. ``claude-haiku-4-5-20251001``
 #: or ``claude-3-5-haiku-20241022``, with an optional ``[1m]`` suffix.
-_MODEL_ID_RE = re.compile(r"\bclaude-(?:\d+-)*(?:opus|sonnet|haiku|fable)(?:-\d+)*(?:\[[0-9a-z]+\])?")
+_MODEL_ID_RE = re.compile(r"\bclaude-(?:\d+-)*(?:opus|sonnet|haiku|fable|mythos)(?:-\d+)*(?:\[[0-9a-z]+\])?")
 
 
 def model_name(model_id: str) -> str:

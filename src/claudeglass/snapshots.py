@@ -1162,7 +1162,9 @@ def _settings_model_agrees(snap_value: object, observed_value: object, resolve_m
       -- agrees with any model of its family, compared through
       :func:`workstyle.model_tier`. An alias follows the newest release,
       so a session on an older model of the same family (``opus`` against
-      ``claude-opus-5`` once ``opus`` means Opus 5.5) isn't drift.
+      ``claude-opus-5`` once ``opus`` means Opus 5.5) isn't drift. No
+      alias names Mythos, so an alias never agrees with a Mythos session
+      although it ranks with Fable.
     - Every other value -- a ``claude-*`` id, a Bedrock or Vertex id, an
       ARN -- is an explicit pin and compares exactly, by canonical id
       (:func:`_model_family`), so a pin moved from Opus 4.1 to 4.5 still
@@ -1179,6 +1181,9 @@ def _settings_model_agrees(snap_value: object, observed_value: object, resolve_m
         if base == "opusplan":
             return _family_tier(observed_value, resolve_model) in _OPUSPLAN_TIERS
         if base and not any(char.isdigit() for char in base):
+            # No alias names Mythos, so an alias never agrees with it.
+            if "mythos" in str(_model_family(observed_value, resolve_model)).lower():
+                return False
             snap_tier = _family_tier(snap_value, resolve_model)
             observed_tier = _family_tier(observed_value, resolve_model)
             if snap_tier >= 0 and observed_tier >= 0:

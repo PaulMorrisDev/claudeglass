@@ -91,7 +91,8 @@ representative model is resolved through `Pricing.aliases[family]` —
 the public alias table `pricing.py` already exposes — never a
 hardcoded model id. If a future rate card drops a family's bare alias
 entirely, the affected row reports "unknown tier" instead of guessing
-at a stale id.
+at a stale id. Mythos ranks with Fable, at whose prices the rate card lists
+it, so a Mythos main session is offered Opus.
 
 Today's packaged rate card points `fable` and `best` at
 `claude-fable-5-2`, `opus` at `claude-opus-5-5`, `sonnet` and
