@@ -2149,10 +2149,10 @@ METRICS: tuple[Metric, ...] = (
         powers=("verification",),
         tag="check=targeted|full|build|run|manual|none",
         hooks=("SessionStart",),
-        main_line="check: targeted|full|build|run|manual|none (how you verified the change: targeted = ran the "
-        "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
-        "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no "
-        "check, or you changed nothing)",
+        main_line="check: targeted|full|build|run|manual|none, only if this reply changed a file (how you verified "
+        "it: targeted = ran the tests for the part changed; full = ran the whole test suite; build = only built "
+        "or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no "
+        "check)",
         out_chars=12,
     ),
     Metric(
@@ -3295,10 +3295,10 @@ JUDGE_LINES = {
     "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the "
     "message only makes sense with it; some = it helped; none = a fresh request, and always none on the first "
     "message)",
-    "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the "
-    "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
-    "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, "
-    "or nothing changed)",
+    "check": "check: targeted|full|build|run|manual|none, only if Claude changed a file in this exchange (how "
+    "Claude verified it: targeted = ran the tests for the part changed; full = ran the whole test suite; build "
+    "= only built or type-checked; run = ran the program itself to see it work; manual = only read it back; "
+    "none = no check)",
 }
 
 

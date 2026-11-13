@@ -444,7 +444,7 @@ one before it:
 | Free | Signals from hooks, logged to a local file. | – | – | – |
 | Essentials | A tag on each message's work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~435 tokens | ~15 tokens | ~$0.002 |
 | Standard | What the request lacked, planning, skills and research, and Haiku's view of each subagent's model and brief. | ~566 tokens | ~24 tokens | ~$0.002 |
-| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~676 tokens | ~29 tokens | ~$0.002 |
+| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~674 tokens | ~29 tokens | ~$0.002 |
 
 The note is written to the prompt cache once, then read from it on each
 later reply. Capture switches itself off 14 days after you turn it on:
