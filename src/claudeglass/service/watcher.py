@@ -1601,6 +1601,10 @@ class FileWatcher:
             return
 
         for path in sorted(profiles_dir.glob("*.toml")):
+            if not path.is_file():
+                # A link whose target is gone, or a folder named like a profile:
+                # nothing to read, and no error a person could trace to a file.
+                continue
             try:
                 text = path.read_text(encoding="utf-8")
                 profile = profile_schema.load_profile(path)

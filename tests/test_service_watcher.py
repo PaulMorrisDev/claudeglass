@@ -2224,6 +2224,7 @@ def test_a_linked_profile_file_whose_target_is_deleted_leaves_no_row(tmp_path, s
     watcher.run_once()
     assert [p["id"] for p in store.profiles()] == ["linked"]
     target.unlink()
-    # The dangling link itself is still counted as a file that can't be read.
-    watcher.run_once()
+    # The dangling link is no file: it is not read, so no scan counts an error for it.
+    stats = watcher.run_once()
     assert store.profiles() == []
+    assert stats.errors == 0
