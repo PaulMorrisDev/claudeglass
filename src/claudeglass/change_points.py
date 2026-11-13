@@ -889,21 +889,23 @@ class _Tracker:
         return change
 
 
-def _transcript_points(corpus) -> list[tuple[datetime, ChangePoint]]:
+def _transcript_changes(corpus) -> list[tuple[dict[str, datetime], ChangePoint]]:
     """A change point wherever one project's sessions show a new value for
     the dominant model, the dominant effort level or the CLAUDE.md or
     memory size (a change of :data:`CLAUDE_MD_CHANGE_PCT` percent or more)
     that then holds for :data:`SUSTAINED_SESSIONS` sessions in a row
-    (EST-P9, see :class:`_Tracker`). Each comes with the start of the
-    session before the new value's first: the change happened between the
-    two, and the point is the first. Values whose runs start at the same
-    session are one point."""
+    (EST-P9, see :class:`_Tracker`). Each comes with, for each key that
+    changed, the start of the session before that key's new value: the
+    change happened between the two, and the point is the first. A session
+    that shows no value for a key (no effort level recorded, no CLAUDE.md)
+    is not that key's session before, so the keys' times can differ.
+    Values whose runs start at the same session are one point."""
     projects: dict[str, list[_SessionSignature]] = {}
     for bundle in corpus.sessions:
         sig = _session_signature(bundle)
         if sig is not None:
             projects.setdefault(sig.key or sig.project, []).append(sig)
-    points: list[tuple[datetime, ChangePoint]] = []
+    points: list[tuple[dict[str, datetime], ChangePoint]] = []
     for signatures in projects.values():
         signatures.sort(key=lambda s: s.start)
         trackers = {key: _Tracker(same) for key, same, _ in _TRACKED}
@@ -919,7 +921,7 @@ def _transcript_points(corpus) -> list[tuple[datetime, ChangePoint]]:
             keys = [key for key, _, _ in _TRACKED if key in changed]
             points.append(
                 (
-                    min(since for since, _old, _new in changed.values()),
+                    {key: changed[key][0] for key in keys},
                     ChangePoint(
                         ts=start,
                         source="transcript",
@@ -933,6 +935,13 @@ def _transcript_points(corpus) -> list[tuple[datetime, ChangePoint]]:
                 )
             )
     return points
+
+
+def _transcript_points(corpus) -> list[tuple[datetime, ChangePoint]]:
+    """:func:`_transcript_changes` with the earliest of a point's times
+    before: the Changes page explains a point by any recorded change since
+    the first of its keys could have changed (:func:`_explained`)."""
+    return [(min(sinces.values()), point) for sinces, point in _transcript_changes(corpus)]
 
 
 def _explained(since: datetime, point: ChangePoint, recorded: list[ChangePoint]) -> ChangePoint | None:
@@ -1069,20 +1078,24 @@ def _main_entry(point: ChangePoint, key: str) -> dict | None:
     return next((c for c in point.changes if c.get("key") == key and not c.get("agent")), None)
 
 
-def settings_model_move(
+def settings_model_crossings(
     snapshots: list[snapshots_mod.Snapshot], keys: Collection[str], floor: Callable[[object], bool]
-) -> tuple[datetime, object] | None:
-    """When the main session's ``model`` setting last moved across ``floor``
+) -> tuple[tuple[datetime, bool] | None, list[tuple[datetime, bool]]]:
+    """Where the main session's ``model`` setting stood against ``floor``
     (a test of a model value, ``model_swap.at_main_floor``: Sonnet or
     smaller) in the project that goes by ``keys`` (every key it carries,
-    ``snapshots.snapshot_project_keys``), and the value it moved to: its
-    own snapshots' effective model, oldest first. A change that stays on
-    one side (``sonnet`` to ``haiku``, ``opus`` to ``fable``) is no move.
-    A project with no snapshot of its own reads your user settings' model in
-    every snapshot instead, the project-less (schema 1) ones included; one
-    with snapshots of its own never reads another project's or a
-    project-less one. An apply or undo shows in the next snapshot, taken
-    when the next session starts. ``None`` when it never moved."""
+    ``snapshots.snapshot_project_keys``), and each time it crossed it: the
+    first snapshot read, as (its time, whether it had the model at or below
+    ``floor``), ``None`` with none; and each crossing after it, oldest
+    first, as (time, whether it moved down). Before the first snapshot the
+    setting is not known. Read from its own snapshots' effective model; a
+    change that stays on one side (``sonnet`` to ``haiku``, ``opus`` to
+    ``fable``) is no crossing, and a value that is not a model name (a list,
+    a number, a dict) reads as no model set. A project with no snapshot of
+    its own reads your user settings' model in every snapshot instead, the
+    project-less (schema 1) ones included; one with snapshots of its own
+    never reads another project's or a project-less one. An apply or undo
+    shows in the next snapshot, taken when the next session starts."""
     wanted = set(keys)
     own = [snap for snap in snapshots if str(snap.data.get("project_slug") or "") in wanted]
     if own:
@@ -1093,34 +1106,57 @@ def settings_model_move(
             for snap in snapshots
             if isinstance(snap.data.get("user_settings"), dict)
         ]
-    move, previous, seen = None, None, False
+    first, crossings, previous = None, [], False
     for ts, value in values:
         when = _parse_backup_ts(ts) or _parse_iso(ts)
         if when is None:
             continue
-        if seen and floor(value) != floor(previous):
-            move = (when, value)
-        previous, seen = value, True
-    return move
+        below = bool(floor(value))
+        if first is None:
+            first = (when, below)
+        elif below != previous:
+            crossings.append((when, below))
+        previous = below
+    return first, crossings
 
 
-def transcript_model_move(
-    points: list[ChangePoint], keys: Collection[str], floor: Callable[[object], bool]
-) -> tuple[datetime, object] | None:
-    """The newest of ``points`` where the sessions' transcripts of the
-    project that goes by ``keys`` showed its main model move across
-    ``floor`` (a transcript point whose old and new model are on different
-    sides), and the model it moved to. A new model on the same side (a newer
-    Sonnet id after an older one) is no move. ``None`` when there is none."""
+def transcript_points(corpus) -> list[tuple[datetime, ChangePoint]]:
+    """Every point the sessions' transcripts show (:func:`_transcript_changes`),
+    oldest first, before :func:`change_points` drops the keys a recorded
+    change explains: the Changes page lists a change once, but the main
+    model's card reads what the sessions ran, whatever else changed then.
+    Each comes with the start of the session before it: for a point where
+    the model changed, the session before the model's new value, whatever
+    else changed at the same session; for any other, the earliest of its
+    keys'. ``[]`` without a ``corpus``."""
+    if corpus is None:
+        return []
+    return sorted(
+        ((sinces.get("model") or min(sinces.values()), point) for sinces, point in _transcript_changes(corpus)),
+        key=lambda pair: pair[1].ts,
+    )
+
+
+def transcript_model_crossings(
+    points: list[tuple[datetime, ChangePoint]], keys: Collection[str], floor: Callable[[object], bool]
+) -> list[tuple[datetime, datetime, bool]]:
+    """Each of ``points`` (:func:`transcript_points`) where the sessions'
+    transcripts of the project that goes by ``keys`` showed its main model
+    cross ``floor`` (a transcript point whose old and new model are on
+    different sides), oldest first, as (the start of the session before it,
+    its time, whether it moved down): the model changed between the two. A
+    new model on the same side (a newer Sonnet id after an older one) is no
+    crossing."""
     wanted = set(keys)
-    found = None
-    for point in points:
+    crossings = []
+    for since, point in points:
         entry = _main_entry(point, "model") if point.source == "transcript" and point.project in wanted else None
-        if entry is None or floor(entry.get("old")) == floor(entry.get("new")):
+        if entry is None:
             continue
-        if found is None or point.ts >= found[0]:
-            found = (point.ts, entry.get("new"))
-    return found
+        down = bool(floor(entry.get("new")))
+        if down != bool(floor(entry.get("old"))):
+            crossings.append((since, point.ts, down))
+    return sorted(crossings, key=lambda c: c[1])
 
 
 def model_runs(points: list[ChangePoint], corpus) -> dict[int, list]:
@@ -1159,7 +1195,8 @@ __all__ = [
     "model_runs",
     "project_key",
     "session_start",
-    "settings_model_move",
+    "settings_model_crossings",
     "summary",
-    "transcript_model_move",
+    "transcript_model_crossings",
+    "transcript_points",
 ]
