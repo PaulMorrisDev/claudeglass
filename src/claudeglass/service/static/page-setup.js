@@ -158,7 +158,8 @@ function renderBaseline(data, container) {
 // ======================================================================
 //
 // v0.3: GET /api/profiles now returns {"profiles": [...each tagged
-// source: "catalogue"|"user"...], "suggested_profile_id"} (docs/api.md)
+// source: "catalogue"|"user"...], "suggested_profile_id",
+// "suggested_reason"} (docs/api.md)
 // rather than a bare list of indexed (user-only) profiles, and GET
 // /api/profiles/<id>/diff is a real computation (profiles/diff.py)
 // rather than a 501 stub -- see that route's own docstring in api.py.
@@ -214,7 +215,7 @@ export function renderProfiles(panel) {
   var editorShown = false;
 
   function refreshList() {
-    loadInto(listContainer, "/api/profiles", function (data, container) {
+    loadInto(listContainer, withWindow("/api/profiles"), function (data, container) {
       renderProfilesList(data, container);
       // Built once, so a save's status line stays on screen.
       if (!editorShown) {
@@ -333,8 +334,8 @@ function renderProfilesList(data, container) {
     cards.appendChild(card);
   });
   container.appendChild(cards);
-  if (suggestedId) {
-    container.appendChild(el("p", { class: "notes", text: "Suggested for you: the profile your latest baseline matches best." }));
+  if (suggestedId && data.suggested_reason) {
+    container.appendChild(el("p", { class: "notes", text: "Suggested for you: " + data.suggested_reason }));
   }
 }
 
@@ -393,7 +394,8 @@ function renderDiffRowsTable(rows) {
         render: function (row) {
           if (row.managed) return "Locked by your organisation's policy; not changed";
           if (diffRowSame(row)) return "Already set; no change";
-          return row.where || row.target_file || "-";
+          var where = row.where || row.target_file || "-";
+          return row.overridden_by ? where + ". " + row.overridden_by : where;
         },
       },
     ],
@@ -420,7 +422,7 @@ function renderProfileDetail(profile, container) {
   function load() {
     loadInto(
       body,
-      "/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value),
+      withWindow("/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value)),
       function (data, box) {
         renderProfileDiff(data, box, logEstimate);
       }

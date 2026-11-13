@@ -623,6 +623,26 @@ def test_profile_copy_names_a_section_not_a_direction() -> None:
     assert '"Your profiles and the built-in ones"' in _function_source(source, "renderProfiles")
 
 
+def test_profiles_list_and_drawer_follow_the_window_and_project() -> None:
+    """PF1 part 2: the list (and its suggestion) and each profile's drawer ask
+    for the picked window and project, the suggestion line gives the live
+    reason, and a row's "Set in" cell adds what wins over the change."""
+    source = _app_js()
+    profiles = _function_source(source, "renderProfiles")
+    assert 'withWindow("/api/profiles")' in profiles and 'loadInto(listContainer, "/api/profiles"' not in profiles
+    detail = _function_source(source, "renderProfileDetail")
+    squeezed = re.sub(r"\s+", "", detail)
+    assert re.sub(
+        r"\s+", "", 'withWindow("/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value))'
+    ) in squeezed
+    listing = _function_source(source, "renderProfilesList")
+    assert '"Suggested for you: " + data.suggested_reason' in listing
+    assert "the profile your latest baseline matches best" not in listing
+    assert 'chip("Suggested for you"' in listing
+    table = _function_source(source, "renderDiffRowsTable")
+    assert 'row.overridden_by ? where + ". " + row.overridden_by : where' in table
+
+
 def test_kind_of_task_reads_by_its_plain_name() -> None:
     """Phase 10 review: the Kind of task picker showed "bugfix" and named
     the profile "bugfix tasks". The draft carries each task's plain name
