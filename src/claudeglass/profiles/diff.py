@@ -55,7 +55,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .schema import AGENT_ALLOWLIST, Profile
+from .schema import AGENT_ALLOWLIST, MODEL_SETTINGS_ALLOWLIST, Profile
 
 __all__ = [
     "DiffRow",
@@ -94,8 +94,9 @@ _ENV_TARGET_FILE = "environment (names only; set the value yourself)"
 @dataclass(frozen=True, slots=True)
 class DiffRow:
     """One profile key's current-vs-proposed comparison. ``key`` is a
-    dotted path: ``"settings.<name>"``, ``"agents.<agent>.<name>"``, or
-    ``"env.<NAME>"``."""
+    dotted path: ``"settings.<name>"``, ``"settings.modelSettings.<model
+    id>.<name>"`` (one row per model and sub-key; a model id has no dot),
+    ``"agents.<agent>.<name>"``, or ``"env.<NAME>"``."""
 
     key: str
     current_value: object = None
@@ -109,6 +110,11 @@ class DiffRow:
     #: decides where the *change* is actually rendered against.
     target_file: str = ""
     managed: bool = False
+    #: ``False`` for a per-model row whose model has an entry in the
+    #: snapshot that lacks this sub-key: the hook keeps only a model's
+    #: ``effortLevel``, so its ``autoCompactWindow`` is not known, and
+    #: ``current_value`` ``None`` there does not mean "not set".
+    recorded: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +157,41 @@ def _is_agent_key_managed(key: str, managed_keys: set) -> bool:
     return False
 
 
+def _model_settings_rows(
+    proposed: dict, effective: dict, provenance: dict, managed_keys: set
+) -> list[DiffRow]:
+    """One row per (model id, sub-key) the profile's ``modelSettings``
+    names, sorted by id then in :data:`MODEL_SETTINGS_ALLOWLIST` order.
+    ``current_value`` is ``effective["modelSettings"][id][sub-key]``;
+    provenance and ``target_file`` are the whole ``modelSettings`` key's."""
+    current_models = effective.get("modelSettings")
+    if not isinstance(current_models, dict):
+        current_models = {}
+    has_current = "modelSettings" in effective
+    prov = provenance.get("modelSettings") if has_current else None
+    target_file = _PROVENANCE_TARGET_FILE.get(prov, "user settings") if has_current else "user settings"
+    rows: list[DiffRow] = []
+    for model_id in sorted(proposed):
+        entry = current_models.get(model_id)
+        entry = entry if isinstance(entry, dict) else None
+        for sub_key in MODEL_SETTINGS_ALLOWLIST:
+            if sub_key not in proposed[model_id]:
+                continue
+            has_value = entry is not None and sub_key in entry
+            rows.append(
+                DiffRow(
+                    key=f"settings.modelSettings.{model_id}.{sub_key}",
+                    current_value=entry[sub_key] if has_value else None,
+                    current_provenance=prov if has_value else None,
+                    proposed_value=proposed[model_id][sub_key],
+                    target_file=target_file if has_value else "user settings",
+                    managed="modelSettings" in managed_keys,
+                    recorded=entry is None or has_value,
+                )
+            )
+    return rows
+
+
 def diff_against_effective(
     profile: Profile,
     effective: dict,
@@ -169,6 +210,9 @@ def diff_against_effective(
     rows: list[DiffRow] = []
 
     for key, proposed in profile.settings.items():
+        if key == "modelSettings":
+            rows.extend(_model_settings_rows(proposed, effective, provenance, managed_keys))
+            continue
         has_current = key in effective
         current = effective.get(key)
         prov = provenance.get(key)

@@ -72,6 +72,57 @@ def test_diff_reports_unset_current_value():
     assert row.current_provenance is None
 
 
+def test_diff_rows_per_model_and_not_recorded_window():
+    profile = _profile(
+        settings={
+            "modelSettings": {
+                "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300_000},
+                "claude-sonnet-4-6": {"effortLevel": "low"},
+            }
+        },
+        agents={},
+        env={},
+    )
+    diff = diff_against_effective(
+        profile,
+        # the hook keeps a model's effort and nothing else of its entry
+        effective={"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+        effective_agents={},
+        provenance={"modelSettings": "project_local"},
+        managed_keys=set(),
+    )
+    rows = {r.key: r for r in diff.rows}
+    assert list(rows) == [
+        "settings.modelSettings.claude-opus-5-5.effortLevel",
+        "settings.modelSettings.claude-opus-5-5.autoCompactWindow",
+        "settings.modelSettings.claude-sonnet-4-6.effortLevel",
+    ]
+    effort = rows["settings.modelSettings.claude-opus-5-5.effortLevel"]
+    assert (effort.current_value, effort.proposed_value, effort.recorded) == ("high", "medium", True)
+    assert effort.current_provenance == "project_local"
+    assert effort.target_file == ".claude/settings.local.json"
+    # the entry is there but carries no window: the snapshot does not say
+    window = rows["settings.modelSettings.claude-opus-5-5.autoCompactWindow"]
+    assert (window.current_value, window.proposed_value, window.recorded) == (None, 300_000, False)
+    # a model with no entry at all has nothing set: that is known, not unrecorded
+    other = rows["settings.modelSettings.claude-sonnet-4-6.effortLevel"]
+    assert (other.current_value, other.proposed_value, other.recorded) == (None, "low", True)
+    assert other.current_provenance is None and other.target_file == "user settings"
+    # every other row is "recorded"
+    plain = diff_against_effective(_profile(), {}, {}, {}, set())
+    assert all(r.recorded for r in plain.rows)
+    # a snapshot with no modelSettings at all gives no model rows, only these
+    empty = diff_against_effective(profile, {}, {}, {}, set())
+    assert len(empty.rows) == 3 and all(r.current_value is None for r in empty.rows)
+    # the unified diff names each as modelSettings.<id>.<key>
+    text = render_unified_diff(diff, scope="user")
+    assert "-modelSettings.claude-opus-5-5.effortLevel: high\n+modelSettings.claude-opus-5-5.effortLevel: medium" in text
+    assert "+modelSettings.claude-opus-5-5.autoCompactWindow: 300000" in text
+    # managed
+    locked = diff_against_effective(profile, {}, {}, {}, {"modelSettings"})
+    assert all(r.managed for r in locked.rows)
+
+
 @pytest.mark.parametrize(
     ("provenance_layer", "expected_target_file"),
     [
