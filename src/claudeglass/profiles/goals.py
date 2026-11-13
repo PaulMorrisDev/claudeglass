@@ -15,7 +15,7 @@ cheapest setup that went about as well as your usual one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .. import habits, model_gate, model_swap, whatif
 from ..capture_catalogue import TASK_LABELS, task_words
@@ -26,7 +26,7 @@ from ..snapshots import AUTO_COMPACT_WINDOW_ENV
 from ..units import Units
 from . import catalogue
 from .diff import _EFFECTIVE_AGENT_FIELD
-from .schema import _EFFORT_LEVELS, _MODEL_ID_RE
+from .schema import _EFFORT_LEVELS, _MODEL_ID_RE, AGENT_RENAME_WORDS, agent_name_problem
 
 TOP = whatif.TOP
 
@@ -114,6 +114,8 @@ class _Draft:
     #: Whether ANTHROPIC_MODEL is set: it wins over the model setting from
     #: any file, so no main-session model candidate is drafted.
     model_env_set: bool = False
+    #: Agents left out because the agent-name rule refuses their names.
+    left_out_names: set = field(default_factory=set)
 
     def now(self, key: str, agent: str | None):
         if agent is None:
@@ -127,6 +129,13 @@ class _Draft:
             return
         # Started by Claude Code itself: no agent file can change them.
         if agent in _NOT_OVERRIDABLE or (key == "omitClaudeMd" and agent in _SKIPS_CLAUDE_MD):
+            return
+        # No profile can name a plugin's agent (its plugin's file sets it)
+        # or a name the agent-name rule refuses; a refused name is counted
+        # for the draft's note, never named.
+        if agent is not None and agent_name_problem(agent) is not None:
+            if agent_name_problem(agent, plugin=True) is not None:
+                self.left_out_names.add(agent)
             return
         now = self.now(key, agent)
         if now == value or already_set(key, value, now):
@@ -862,6 +871,8 @@ def draft(
     combined = whatif.estimate(settings, agents, model, units, period=period, current=d.effective)
     if goal.id == "tasks" and task is not None:
         combined = _scale_whatif(combined, tables, task, units, period)
+    if d.left_out_names:
+        note = " ".join(part for part in (note, names_left_out_note(len(d.left_out_names))) if part)
     return {
         "goal": {"id": goal.id, "title": goal.title, "what": goal.what},
         "period": period,
@@ -875,6 +886,14 @@ def draft(
         "profile": {"settings": settings, "agents": agents},
         "whatif": combined,
     }
+
+
+def names_left_out_note(count: int) -> str:
+    """The draft's sentence for ``count`` (1 or more) agents left out
+    because the agent-name rule refuses their names."""
+    if count == 1:
+        return f"One agent is left out of these changes because its name isn't {AGENT_RENAME_WORDS}."
+    return f"{count} agents are left out of these changes because their names aren't {AGENT_RENAME_WORDS}."
 
 
 def _as_profile(candidates: list[dict]) -> tuple[dict, dict]:

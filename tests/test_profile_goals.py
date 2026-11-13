@@ -877,3 +877,36 @@ def test_the_tasks_goal_finds_the_models_own_entry_under_every_spelling(observed
         _round_trip(by_key["modelSettings"])
     else:
         assert "modelSettings" not in by_key and by_key["effortLevel"]["value"] == "medium"
+
+
+_RENAME_WORDS = "one word of letters, digits, dots, underscores and hyphens"
+
+
+def test_a_goal_draft_leaves_out_a_plugin_agent_and_a_refused_name_and_counts_only_the_refused():
+    import json
+
+    from claudeglass.profiles import schema
+
+    rec = NS(title="Cheaper models", changes=[
+        _change("model", "superpowers:explorer", "sonnet"),
+        _change("model", "Code Reviewer", "sonnet"),
+        _change("effort", "Code Reviewer", "low"),
+        _change("model", "reviewer", "sonnet"),
+    ])
+    for goal in ("recommendations", "subagents", "models"):
+        out = goals.draft(goal, _report([rec]), UNITS)
+        agents = {c["agent"] for c in out["candidates"]}
+        assert "reviewer" in agents and not agents & {"superpowers:explorer", "Code Reviewer"}, goal
+        assert schema.validate({"id": "x", **out["profile"]}) == [], goal
+        # One agent (counted once for its two changes), never named.
+        assert out["note"] == f"One agent is left out of these changes because its name isn't {_RENAME_WORDS}.", goal
+        assert "Code Reviewer" not in json.dumps(out), goal
+
+
+def test_the_draft_note_counts_several_refused_names_and_says_nothing_for_a_plugin_agent_alone():
+    rec = NS(title="x", changes=[_change("model", "a b", "sonnet"), _change("model", "c\nd", "sonnet")])
+    note = goals.draft("recommendations", _report([rec]), UNITS)["note"]
+    assert note == f"2 agents are left out of these changes because their names aren't {_RENAME_WORDS}."
+    rec = NS(title="x", changes=[_change("model", "superpowers:explorer", "sonnet")])
+    out = goals.draft("recommendations", _report([rec]), UNITS)
+    assert out["candidates"] == [] and out["note"] is None

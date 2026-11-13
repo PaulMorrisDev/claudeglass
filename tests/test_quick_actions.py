@@ -3091,3 +3091,23 @@ def test_the_effort_checks_command_names_the_canonical_id_and_apply_reads_it(tmp
     item = words[words.index("--set") + 1]
     profile, error = cli._one_off_profile([item], None)
     assert error is None and profile.settings == {"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+
+
+def test_a_plugin_agent_that_did_worse_is_a_tip_with_no_command(tmp_path):
+    worse = {**_WORSE, "agent_type": "superpowers:explorer"}
+    result = qa.run("quality", _ctx(tmp_path, model=_quality_model([{**_AGENT, "unfinished_pct": 3.0}], [worse])))
+    assert not result["fixes"]
+    [tip] = result["tips"]
+    assert tip["text"].endswith(" It comes from the superpowers plugin, so there is no agent file of yours to change.")
+
+
+def test_a_plugin_agent_retried_on_a_larger_model_names_its_plugin_not_an_agent_file(tmp_path):
+    retried = {**_RETRIED, "agent_type": "superpowers:explorer"}
+    result = qa.run("quality", _ctx(tmp_path, model=_quality_model([{**_AGENT, "unfinished_pct": 3.0}], retried=[retried])))
+    assert not result["fixes"]
+    [tip] = result["tips"]
+    assert "Its agent file" not in tip["text"]
+    assert tip["text"].endswith(
+        " It comes from the superpowers plugin, so there is no agent file of yours to change. "
+        "Don't pick haiku for this agent's work."
+    )

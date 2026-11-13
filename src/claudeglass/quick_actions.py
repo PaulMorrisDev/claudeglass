@@ -22,7 +22,7 @@ from typing import Callable
 
 from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
-from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note
+from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note, plugin_of
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
@@ -192,6 +192,15 @@ def _rec_fixes(recs) -> list[dict]:
             card = {"card": rec.key} if getattr(rec, "key", "") else {}
             out.append({**fix, "title": fix.get("title") or rec.title, **card})
     return out
+
+
+def _plugin_tip(agent: str | None) -> str:
+    """The sentence a tip about a plugin's agent ends with ("" for any
+    other agent): no profile or command can change that agent."""
+    plugin = plugin_of(agent)
+    if plugin is None:
+        return ""
+    return f" It comes from the {plugin} plugin, so there is no agent file of yours to change."
 
 
 def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
@@ -2382,9 +2391,9 @@ def _quality(ctx: Context) -> dict:
             f"On {row.get('model')} at effort {row.get('effort')}, {agent} did worse than on {base_model} at effort "
             f"{base_effort}: {row.get('difference')}"
         )
-        if agent == quality.MAIN or agent in _NOT_OVERRIDABLE:
+        if agent == quality.MAIN or agent in _NOT_OVERRIDABLE or plugin_of(agent) is not None:
             tips.append({"title": f"{_who(None if agent == quality.MAIN else agent)} did worse on "
-                                  f"{row.get('model')}", "text": evidence})
+                                  f"{row.get('model')}", "text": evidence + _plugin_tip(agent)})
             continue
         fields = ctx.effective_agents.get(agent) if isinstance(ctx.effective_agents.get(agent), dict) else {}
         now_model = fields.get("model")
@@ -2423,7 +2432,9 @@ def _quality(ctx: Context) -> dict:
             fixes.append(_candidate_fix(ctx, {"agent": agent, "key": "model", "value": back_to, "now": now_model,
                                               "evidence": evidence}, f"{agent}: back to {back_to}"))
             continue
-        if on_it:
+        if plugin_of(agent) is not None:
+            advice = _plugin_tip(agent) + f" Don't pick {family} for this agent's work."
+        elif on_it:
             advice = (f" One more retry and this check will offer to move it back to {back_to}." if back_to
                       and (row.get("retried") or 0) < quality.MIN_RETRIED_RUNS else "")
         else:

@@ -140,10 +140,11 @@ Capture and dashboard:
   `POST /api/profiles` or `apply --agent` with another name is refused, so
   `apply` can no longer write a file outside the agents folders. A card
   about such an agent offers no prompt, and a writer with such a name is
-  left out and counted, never named; both say how to rename it. "Save my
-  current settings" leaves such agents out and says how many. Agent names
-  in copied prompts are in quotes. A saved profile that breaks the rule
-  says why when you open it.
+  left out and counted, never named; both say how to rename it. Goal
+  drafts and "Save my current settings" leave such agents out and say how
+  many, and goal drafts and quality tips no longer offer a change to a
+  plugin's agent. Agent names in copied prompts are in quotes. A saved
+  profile that breaks the rule says why when you open it.
 - **An id, model id or card key with a line break at its end is
   refused.** A profile id like that gave an error 500 on Windows.
 - **During a light sample, capture keeps the hook entry the plan check and

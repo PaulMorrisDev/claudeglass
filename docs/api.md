@@ -1485,6 +1485,10 @@ name (`"bugfix"` to `"Bug fix"`, from `capture_catalogue.TASK_LABELS`),
 `task` is the one drafted (the one asked for when it's there, else the
 first with a cheaper setup) and `note` says what was found; other goals
 return `[]`, `{}`, `null` and `null`.
+Any goal leaves out an agent no profile can name: one whose name the
+agent-name rule refuses (counted in one sentence added to `note`, never
+named) and a plugin's agent (`plugin:agent`, left out without a word, as its
+plugin owns its file).
 A candidate is ticked only when the data supports it; the main model is
 never pre-ticked. The goals that start from recommendations
 (`recommendations`, `subagents`, `models`) leave out the ones ignored in
