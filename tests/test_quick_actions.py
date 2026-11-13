@@ -3475,3 +3475,31 @@ def test_in_a_view_of_several_projects_the_check_does_not_read_a_projects_own_wi
                       {"autoCompactWindow": "user", "modelSettings": "project_local"}, ("alpha", "beta"),
                       main="claude-opus-5-5")
     assert fix["key"] == "autoCompactWindow" and "--scope user" in fix["command"]
+
+
+# -- R5-2: an ignored main effort card is why the check has nothing, whatever would have drafted the change --
+
+
+@pytest.mark.parametrize("variable_set", [False, True])
+def test_an_ignored_main_effort_card_under_a_managed_level_is_why_the_check_has_nothing(tmp_path, variable_set):
+    """Under a managed level the thinking goal drafts no main-session change to remove, so the check used to
+    fall back to "No agent spends more than 20%" beside a table that shows 40%."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(changes=[
+        SettingChange(target="settings", key="effortLevel", value="medium", current="high", scope="managed")
+    ])]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"}), effort_level_env_set=variable_set,
+               **_MANAGED_HIGH)
+    result = qa.run("effort", ctx)
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == qa._IGNORED_ONLY
+
+
+def test_an_ignored_main_effort_card_with_the_main_session_under_the_bar_changes_nothing(tmp_path):
+    """Guard: under the threshold the check's own sentence is true, card or no card."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 10.0)
+    model.recommendations = [_main_effort_card()]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"}), **_MANAGED_HIGH))
+    assert result["summary"].startswith("No agent spends more than")

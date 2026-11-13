@@ -1259,8 +1259,15 @@ def profile_change_where(key: str, scope: str) -> str:
 #: A model's own setting, in the words of "wins over this model's own ...".
 _MODEL_OWN_WORDS = {"effortLevel": "level", "autoCompactWindow": "window"}
 
-#: Said after the sentence naming a model whose own window wins.
+#: Said after the sentence naming a model whose own window wins, when that
+#: window is in your user file: /autocompact saves it there.
 OWN_WINDOW_STEP = "To change a model's own window, run /autocompact with the new size in a session on that model."
+#: The same, for an own window a project file holds ({file}) and for one in
+#: managed settings: /autocompact cannot change either.
+_OWN_WINDOW_STEP_PROJECT = "To change a model's own window, edit its entry in this project's {file}."
+_OWN_WINDOW_STEP_MANAGED = (
+    "Your organisation's managed settings set a model's own window, so only your administrator can change it."
+)
 
 
 def window_change_note(scope: str, provenance: dict, model_settings: dict | None) -> str:
@@ -1268,9 +1275,22 @@ def window_change_note(scope: str, provenance: dict, model_settings: dict | None
     for the window card and the compaction check alike: the models whose own
     window, in that file or a higher one, wins over it
     (:func:`profile_overridden_by` rule 5 with the real target and
-    ``provenance``), and how to change one; ``""`` when none does."""
+    ``provenance``), and how to change one in the file that holds it
+    (``modelSettings`` is one file's block); ``""`` when none does. A managed
+    flat window is the highest file's, so only a managed own window beats it."""
+    own_layer = provenance.get("modelSettings") or "user"
+    if scope == "managed" and own_layer != "managed":
+        return ""
     own = profile_overridden_by("settings.autoCompactWindow", scope or "user", provenance, (), False, model_settings, False)
-    return f"{own} {OWN_WINDOW_STEP}" if own else ""
+    if not own:
+        return ""
+    if own_layer == "managed":
+        step = _OWN_WINDOW_STEP_MANAGED
+    elif own_layer in _OVERRIDING_PROJECT_FILE:
+        step = _OWN_WINDOW_STEP_PROJECT.format(file=_OVERRIDING_PROJECT_FILE[own_layer])
+    else:
+        step = OWN_WINDOW_STEP
+    return f"{own} {step}"
 
 #: The project file a ``snapshots.SETTINGS_LAYER_NAMES`` layer is, for the
 #: "sets it too and wins" sentence. ``managed`` is not here: the diff

@@ -571,6 +571,10 @@ higher one. The Overview compaction check's fix goes to the same file
 with the same note; under a managed window it asks your administrator.
 When a project or managed file's own window for the main session's model
 decides (`goals.main_own_window`), both change that entry there instead.
+The note's last sentence says how to change a model's own window in the
+file that holds it: /autocompact for your user file, an edit of the entry
+for a project file, your administrator for managed settings. A managed
+flat window carries no note unless the own window is managed too.
 Once the sweep has priced the main sessions, `compaction-churn` is
 dropped and `long-context-share` keeps only its workflow advice, whether
 or not `compaction-window` fires: the replay is the one answer on the

@@ -1408,3 +1408,45 @@ def test_a_project_files_own_entry_for_the_model_wins_over_your_user_files():
     # A block with no entry for this model says nothing of it.
     other = {"claude-sonnet-5": {"effortLevel": "high"}}
     assert profile_overridden_by(key, "user", {"modelSettings": "project_shared"}, [], False, other, True) is None
+
+
+# -- R5-1, R5-3: the window note says how to change a model's own window in the file that holds it ------
+
+_OWN_WINDOW = {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+_OWN_WINDOW_WINS = "claude-opus-5-5 has its own auto-compact window, which wins for it."
+_MANAGED_WINDOW_STEP = (
+    "Your organisation's managed settings set a model's own window, so only your administrator can change it."
+)
+
+
+def test_the_window_note_says_how_to_change_an_own_window_in_the_file_that_holds_it():
+    """R5-1: /autocompact changes the entry in your user file; one in a project or managed file is changed there."""
+    from claudeglass import fixes
+
+    steps = {
+        "user": fixes.OWN_WINDOW_STEP,
+        "project_shared": "To change a model's own window, edit its entry in this project's .claude/settings.json.",
+        "project_local": "To change a model's own window, edit its entry in this project's .claude/settings.local.json.",
+        "managed": _MANAGED_WINDOW_STEP,
+    }
+    for layer, step in steps.items():
+        note = fixes.window_change_note("user", {"modelSettings": layer}, _OWN_WINDOW)
+        assert note == f"{_OWN_WINDOW_WINS} {step}", layer
+        assert ("/autocompact" in note) == (layer == "user"), layer
+
+
+def test_a_managed_flat_window_carries_no_note_about_an_own_window_in_a_lower_file():
+    """R5-3: the managed file is the highest, so its flat window beats a model's own entry anywhere below."""
+    from claudeglass import fixes
+
+    for layer in ("project_local", "project_shared", "user"):
+        provenance = {"autoCompactWindow": "managed", "modelSettings": layer}
+        assert fixes.window_change_note("managed", provenance, _OWN_WINDOW) == "", layer
+
+
+def test_a_managed_own_window_still_wins_over_the_managed_flat_window():
+    """Guard: within one file a model's own window beats the flat one."""
+    from claudeglass import fixes
+
+    provenance = {"autoCompactWindow": "managed", "modelSettings": "managed"}
+    assert fixes.window_change_note("managed", provenance, _OWN_WINDOW) == f"{_OWN_WINDOW_WINS} {_MANAGED_WINDOW_STEP}"

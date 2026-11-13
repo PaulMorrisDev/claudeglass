@@ -696,6 +696,21 @@ def _main_effort_card_leads(ctx: Context) -> bool:
     return False
 
 
+def _main_effort_card_ignored(ctx: Context) -> bool:
+    """Whether the main session's effort card is ignored while the main
+    session spends at least ``goals.THINKING_PCT`` of its output thinking.
+    The check then says an ignored card is why it has nothing, whatever
+    would have drafted the change: under a managed level the thinking goal
+    drafts no main-session change for :func:`_without_main_effort` to count."""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if not any(
+        rec.id == "effort-mismatch" and not getattr(rec, "agent_type", None) and rec.key in ctx.skip_keys for rec in recs
+    ):
+        return False
+    main = whatif._Tables(ctx.model).row("agents", "topology_effort_by_agent_type", goals.TOP)
+    return main is not None and (whatif._num(main.get("thinking_share")) or 0.0) >= goals.THINKING_PCT
+
+
 def _without_main_effort(ctx: Context, draft: dict) -> dict:
     """The thinking goal's draft without its main-session candidate while
     the effort card leads; ``removed`` counts it, so the check can say an
@@ -749,7 +764,12 @@ def _effort(ctx: Context) -> dict:
             "ok",
             " ".join(
                 text
-                for text in (_IGNORED_ONLY if draft["removed"] else "", already, left_to_env, left_to_managed)
+                for text in (
+                    _IGNORED_ONLY if draft["removed"] or _main_effort_card_ignored(ctx) else "",
+                    already,
+                    left_to_env,
+                    left_to_managed,
+                )
                 if text
             )
             or f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",

@@ -1450,3 +1450,19 @@ def test_in_a_view_of_several_projects_a_projects_own_window_is_not_read():
     """Guard: the view rule took the project's block out, so the change is the flat one at your user file."""
     [change] = _own_window_card("project_local", flat=300000, projects=("alpha", "beta")).changes
     assert (change.key, change.scope, change.value) == ("autoCompactWindow", "user", 200000)
+
+
+def test_a_window_card_with_no_value_says_where_a_project_files_own_window_is_changed():
+    """R5-1: the churn and long-context cards carry no value, so their change stays the flat one; the note
+    then names the file that holds the main model's own window, not /autocompact, which cannot change it."""
+    rec = _compaction("compaction-churn", scope="user", title="t")
+    report = _model_swap_report([["top-level", "claude-opus-5-5", None, None]])
+    report.meta.projects = ("alpha",)
+    data = {"effective": {"modelSettings": _OWN_500K}, "effective_provenance": {"modelSettings": "project_shared"}}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    change = advice._window_change(rec, advice._Context(report=report, snapshot=snap, units=Units()), suggested="less")
+    assert (change.key, change.value, change.scope) == ("autoCompactWindow", None, "user")
+    assert change.note == (
+        "claude-opus-5-5 has its own auto-compact window, which wins for it. "
+        "To change a model's own window, edit its entry in this project's .claude/settings.json."
+    )

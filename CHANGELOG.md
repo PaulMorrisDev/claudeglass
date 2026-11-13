@@ -258,7 +258,8 @@ Cards and checks:
   or remove it; it used to suggest --effort, which the variable beats.
   With the variable set and no effort card, the check says the variable
   decides and offers no command. Under a managed effort level and no
-  effort card, it says your administrator sets it.
+  effort card, it says your administrator sets it; with the card ignored,
+  it says the change is on a card you ignored.
 - **A model's own effort entry is matched by its canonical id**, so its
   dated, [1m], Bedrock and Vertex spellings count, and an entry for
   another version of the family is no longer changed in its place. The
@@ -290,7 +291,9 @@ Cards and checks:
   administrator. The check's fix says when a model's own window wins, as
   the card does. A user-scope apply preview names no project's file when
   your snapshots come from several projects. A project or managed file's own
-  window for the main session's model gets the change there.
+  window for the main session's model gets the change there. A note about
+  a model's own window says how to change it in the file that holds it,
+  and a managed window carries no such note for an own window below it.
 
 Coaching:
 
