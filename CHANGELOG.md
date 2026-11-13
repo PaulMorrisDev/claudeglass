@@ -173,6 +173,11 @@ Cards and checks:
 - **A main session on Mythos gets the main model card.** Mythos ranks with
   Fable, at whose prices the rate card lists it, so the card offers Opus and
   the Models table no longer says the family is not recognised.
+- **The project's one prompt for every open fix leaves out model changes.**
+  The main session's model and an agent's model are for you to try first
+  from their own card, so pasting the prompt no longer makes them lasting.
+  The note beside the button says so, and the prompt says when a file it
+  edits is read in every project.
 
 Coaching:
 

@@ -719,7 +719,8 @@ var BUNDLE_COPY_REFUSED = "Couldn't copy. The prompt is selected below: copy it 
 // fix; the rest say which of them are the fixes in M files (data.files), the
 // ones that span several files or set a standing rule (data.several) and the
 // ones with no file to edit (data.other). Each counts fixes, as the prompt
-// states them.
+// states them. A model change the card says to try first is left out
+// (left_out.trial), and the note says so.
 function bundleLine(data, name) {
   var files = data.files.length;
   var several = data.several || 0;
@@ -731,14 +732,20 @@ function bundleLine(data, name) {
     several +
     other;
   var head = total + (total === 1 ? " open fix" : " open fixes") + " for " + name;
-  if (!files && !several) return head + ", with no file to edit.";
+  var trial = (data.left_out && data.left_out.trial) || 0;
+  var tail = !trial
+    ? ""
+    : trial === 1
+      ? " The model change is left out: try it from its own card first."
+      : " The " + trial + " model changes are left out: try each from its own card first.";
+  if (!files && !several) return head + ", with no file to edit." + tail;
   var text = head + ":";
   if (files) text += " " + files + (files === 1 ? " file" : " files") + " to edit";
   if (several) {
     text += (files ? ", plus " : " ") + several + (several === 1 ? " that spans several files or sets a standing rule" : " that span several files or set a standing rule");
   }
   if (other) text += " and " + other + " with no file to edit";
-  return text + ".";
+  return text + "." + tail;
 }
 
 // The bundle's row (its note and Copy prompt) and, under it, the room for

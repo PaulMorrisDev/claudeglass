@@ -3929,8 +3929,8 @@ def make_handler(
     def route_recommendations_prompt(store, query, body):
         """One prompt for the open fixes of the project asked about
         (``fixes.project_prompt``; ``project`` is required): ignored cards,
-        landed fixes, unconfirmed changes and managed settings are left
-        out."""
+        landed fixes, unconfirmed changes, managed settings and model
+        changes to try first are left out."""
         window, err = _window_query(query)
         if err is not None:
             return err

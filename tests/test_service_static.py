@@ -4559,3 +4559,23 @@ def test_cards_are_marked_shown_from_the_list_and_the_overview_only_while_visibl
     shown = _function_source(_static_text("api.js"), "markCardsShown")
     assert 'document.visibilityState === "visible"' in shown
     assert 'document.addEventListener("visibilitychange"' in shown
+
+
+def test_the_bundle_note_says_a_model_change_is_left_out_to_try_first() -> None:
+    """``bundleLine`` ends with a sentence when the bundle left out a model
+    change its card says to try first (``left_out.trial``)."""
+    from test_ui_figures_audit import _node
+
+    def line(data: dict) -> str:
+        return _node([("page-actions.js", "bundleLine")], f"bundleLine({json.dumps(data)}, 'P')")
+
+    assert line({"files": [], "several": 1, "other": 1, "left_out": {"trial": 1}}) == (
+        "2 open fixes for P: 1 that spans several files or sets a standing rule and 1 with no file to edit. "
+        "The model change is left out: try it from its own card first."
+    )
+    assert line({"files": [{"file": "a", "fixes": 2}], "several": 0, "other": 0, "left_out": {"trial": 2}}) == (
+        "2 open fixes for P: 1 file to edit. The 2 model changes are left out: try each from its own card first."
+    )
+    assert line({"files": [{"file": "a", "fixes": 1}], "several": 0, "other": 0, "left_out": {"trial": 0}}) == (
+        "1 open fix for P: 1 file to edit."
+    )

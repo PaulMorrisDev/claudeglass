@@ -826,12 +826,14 @@ detail scrolls) and the one picked.
   copies every to-do card's prompt for that project in one go, under a
   header line per file (`/api/recommendations/prompt`). It leaves out
   ignored cards, cards whose fix has landed (the "fixed" variant),
-  information-only cards, unconfirmed changes and managed settings. The
+  information-only cards, unconfirmed changes, managed settings and the
+  model changes a card says to try first. The
   prompt states the setting changes' closing (show me the diff, restart)
   once, a workflow fix keeps its own diff line, and the
   note beside the button gives the number of open fixes, then how many
   files they edit, plus the fixes that span several files or set a
-  standing rule and the ones that touch no file. If the browser refuses
+  standing rule and the ones that touch no file. When a model change is
+  left out, the note says so. If the browser refuses
   to copy (the Claude Desktop browser pane refuses the Clipboard API, and
   a page served over plain http has none), the copy is tried again
   through a selected text field;

@@ -1490,6 +1490,14 @@ _BUNDLE_OPEN = (
     "ClaudeGlass, which tracks my token use, found these open fixes for this project. "
     "Work through them file by file, in the order below."
 )
+
+#: Said after the opening when a fix sits under a file in ~/.claude.
+_BUNDLE_EVERY_PROJECT = "A file under ~/.claude is read in every project, so its changes reach beyond this one."
+
+#: Cards whose action asks you to try the change before keeping it: the
+#: bundle leaves them out, so pasting it never makes a model change lasting.
+_TRIAL_CARDS = frozenset({"model-tier-main", "model-tier"})
+
 _BUNDLE_CLOSE = (
     "For each file, restate its changes in one sentence each and show me one diff before saving; where an "
     "item says to show me the diff, that one diff covers it. Claude Code will ask my permission to edit "
@@ -1515,8 +1523,9 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
     it holds and ``keys`` names them (``rec.key``, in order), so a copy of
     the prompt can be recorded against them. Leaves out cards in
     ``skip_keys`` (ignored), cards whose fix has landed (the ``fixed``
-    variant), information-only cards, unconfirmed changes and managed
-    settings; ``left_out`` counts the cards with at least one fix left
+    variant), information-only cards, model changes the card says to try
+    first (``trial``), unconfirmed changes and managed settings;
+    ``left_out`` counts the cards with at least one fix left
     out for each reason (a card can count in both ``cards`` and
     ``left_out``). ``files`` lists the groups that hold a fix of one
     file, each with how many; ``several`` counts the prompts whose fix spans
@@ -1527,7 +1536,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
     groups: dict[str, list[str]] = {}
     #: Each group's prompts' kinds, in step with ``groups``.
     kinds: dict[str, list[str]] = {}
-    left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0}
+    left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0, "trial": 0}
     cards = 0
     keys: list[str] = []
     scoped = False
@@ -1539,6 +1548,9 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             continue
         if rec.severity == "info":
             left_out["info"] += 1
+            continue
+        if rec.id in _TRIAL_CARDS:
+            left_out["trial"] += 1
             continue
         used = False
         reasons: set[str] = set()
@@ -1592,7 +1604,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             "keys": keys,
             "left_out": left_out,
         }
-    parts = [_BUNDLE_OPEN]
+    parts = [_BUNDLE_OPEN + (" " + _BUNDLE_EVERY_PROJECT if any(f.startswith("~/") for f in ordered) else "")]
     parts += [f"## {file}\n\n" + "\n\n".join(groups[file]) for file in ordered]
     parts.append(_BUNDLE_CLOSE)
     if scoped:

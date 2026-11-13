@@ -927,8 +927,9 @@ One prompt for a project's open fixes. Query: the same window as
 it is missing or matches no project).
 
 `data`: `{"prompt", "files": [{"file", "fixes"}, ...], "several", "other",
-"cards", "keys", "left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
-one opening line, then each fix's own `prompt` (as in
+"cards", "keys", "left_out": {"fixed", "info", "unconfirmed", "managed", "trial"}}`. `prompt` has
+one opening line (with a second sentence when a fix sits under a file in
+`~/.claude`, which every project reads), then each fix's own `prompt` (as in
 `/api/recommendations`) minus the closing a setting change ends with (its
 "show me the diff" and restart lines), the restart reminder, or the
 question about where a standing rule applies, under a `## <file>` header
@@ -953,7 +954,9 @@ copy of the prompt can be recorded against them (`POST
 reason, so a card can count in both `cards` and `left_out`: its fix has
 landed (the `fixed` variant, which the browser never sees), it is shown
 for information only (a change that isn't safe to make without checking
-first), it is an unconfirmed change, or it is a managed setting. Ignored
+first), it is an unconfirmed change, it is a managed setting, or it is a model
+change its card says to try first (`trial`: the main session's model and an
+agent's model). Ignored
 cards are left out and not counted. `prompt` is `""` when nothing is open.
 
 ### `POST /api/recommendations/ignore`

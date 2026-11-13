@@ -547,7 +547,7 @@ def check_bundle(inp: Inputs) -> list[str]:
     """Check 5. ``fixes.project_prompt`` over the project's cards: the fixed
     and info cards it leaves out are exactly the fixed and info cards, the
     cards it uses are no more than the cards with a prompt to give and, with
-    the ones left out for being unconfirmed or managed, no fewer; an empty
+    the ones left out for being unconfirmed or managed or to try first, no fewer; an empty
     prompt means no cards and a prompt means some; every ``files`` entry is
     one concrete file that the prompt has a heading for and has a one-file fix
     under it; the same cards in the opposite order give the same counts; and no
@@ -566,10 +566,10 @@ def check_bundle(inp: Inputs) -> list[str]:
     live = [rec for rec in on_offer if rec.variant != "fixed" and rec.severity != "info" and _prompt_fixes(rec)]
     if data["cards"] > len(live):
         problems.append(f"the bundle uses {data['cards']} cards, only {len(live)} have a prompt to give")
-    if len(live) > data["cards"] + left["unconfirmed"] + left["managed"]:
+    if len(live) > data["cards"] + left["unconfirmed"] + left["managed"] + left["trial"]:
         problems.append(
             f"{len(live)} cards have a prompt to give but the bundle uses {data['cards']} and leaves out "
-            f"{left['unconfirmed']} unconfirmed and {left['managed']} managed"
+            f"{left['unconfirmed']} unconfirmed and {left['managed']} managed and {left['trial']} to try first"
         )
     if bool(prompt) != bool(data["cards"]):
         problems.append(f"the bundle has {data['cards']} cards and {'a' if prompt else 'no'} prompt")

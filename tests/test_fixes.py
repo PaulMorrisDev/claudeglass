@@ -687,7 +687,7 @@ def test_plan_rounds_prompt_asks_for_a_critique_before_a_plan_and_names_the_plac
     assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE
 
 
-def _bundle_rec(key, changes=(), *, rec_id="model-tier", variant="", scope="user", agent_type=None):
+def _bundle_rec(key, changes=(), *, rec_id="spawn-claude-md", variant="", scope="user", agent_type=None):
     from claudeglass import fixes as fixes_mod
     from claudeglass.model import Recommendation
 
@@ -746,7 +746,7 @@ def test_project_prompt_leaves_out_fixed_unconfirmed_managed_and_skipped_cards()
     out = project_prompt([keep, fixed, unconfirmed, managed, ignored], {"ign"})
     assert out["cards"] == 1
     assert out["keys"] == ["keep"]
-    assert out["left_out"] == {"fixed": 1, "info": 0, "unconfirmed": 1, "managed": 1}
+    assert out["left_out"] == {"fixed": 1, "info": 0, "unconfirmed": 1, "managed": 1, "trial": 0}
     assert fixes_mod._bundle_body(keep.fixes[0]["prompt"])[0] in out["prompt"]
     for rec in (fixed, unconfirmed, managed, ignored):
         assert fixes_mod._bundle_body(rec.fixes[0]["prompt"])[0] not in out["prompt"]
@@ -929,7 +929,7 @@ def test_project_prompt_is_empty_without_open_fixes():
         "other": 0,
         "cards": 0,
         "keys": [],
-        "left_out": {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0},
+        "left_out": {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0, "trial": 0},
     }
 
 
@@ -1051,3 +1051,29 @@ def test_a_managed_setting_asks_claude_only_to_draft_a_note_to_the_administrator
     )
     assert fixes.command_for(change, "managed") is None
     assert fixes.build_fixes(rec)[0]["command"] is None
+
+
+def test_the_bundle_leaves_out_a_model_change_to_try_first():
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    main = _bundle_rec("model-tier-main", [SettingChange(key="model", value="sonnet", scope="user")], rec_id="model-tier-main")
+    tier = _bundle_rec("model-tier", [_agent_change()], rec_id="model-tier")
+    keep = _bundle_rec("k", [SettingChange(target="agent", key="omitClaudeMd", agent="y", value=True)])
+    out = project_prompt([main, tier, keep])
+    assert out["cards"] == 1
+    assert out["keys"] == ["k"]
+    assert out["left_out"]["trial"] == 2
+    assert "set model to" not in out["prompt"]
+
+
+def test_the_bundle_says_a_file_under_home_claude_reaches_every_project():
+    from claudeglass import fixes
+    from claudeglass.model import SettingChange
+
+    user = _bundle_rec("u", [SettingChange(key="autoCompactWindow", value=200000, scope="user")], rec_id="compaction-window")
+    assert fixes.project_prompt([user])["prompt"].split("\n\n")[0] == (
+        fixes._BUNDLE_OPEN + " A file under ~/.claude is read in every project, so its changes reach beyond this one."
+    )
+    repo = _bundle_rec("r", [SettingChange(key="autoCompactWindow", value=200000, scope="repo")], rec_id="compaction-window")
+    assert fixes.project_prompt([repo])["prompt"].split("\n\n")[0] == fixes._BUNDLE_OPEN
