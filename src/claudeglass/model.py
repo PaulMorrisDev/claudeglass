@@ -2028,6 +2028,12 @@ class Recommendation:
     #: The saving as a number (USD at list price), used only to order
     #: recommendations of the same severity; ``None`` when not estimated.
     saving_usd: float | None = None
+    #: What the saving was priced on, as one number: for a start-context card the tokens it
+    #: says leave each start, for a price card the observed cost (USD at list price) its
+    #: saving is a share of. ``None`` when the card names no such figure. Unlike
+    #: ``saving_basis``, a sentence, it is read by ``outcomes`` to price the same figure on
+    #: the sessions after the fix.
+    priced_on: float | None = None
     why: str = ""
     #: Picks a variant of this id's workflow prompt/explainer in
     #: ``fixes._WORKFLOW_PROMPTS``/``fixes._WORKFLOW_EXPLAINER`` (looked
