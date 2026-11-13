@@ -128,8 +128,10 @@ setting.
   bounds it, as above.
 
 Otherwise the reading's own measured and estimated amounts go through the
-same verdict test as below (`measured_usd` is the reading's; there is no
-percentage). The rows a back-test judges this way are the ones logged after
+same verdict test as below (there is no percentage). For these rows
+`measured_usd` is the share of the estimate that came true on the work after the
+change, on the estimate's own scale: the reading's measured amount over its
+estimated one, times the row's `predicted_usd`. The rows a back-test judges this way are the ones logged after
 the change that began recording `priced_on`; an older row is judged by
 steps 2 to 4, unchanged.
 

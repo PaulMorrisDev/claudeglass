@@ -481,9 +481,11 @@ def test_judge_predictions_waits_while_the_after_window_is_still_open(tmp_path):
     assert len(store.predictions(judged=False)) == 1
 
 
-def _priced_prediction(store: Store, key: str, t0: datetime, *, predicted: float = 10.0, priced_on: float | None = 100.0):
+def _priced_prediction(
+    store: Store, key: str, t0: datetime, *, predicted: float = 10.0, priced_on: float | None = 100.0, pid: str = "pred-1"
+):
     store.upsert_prediction(
-        prediction_id="pred-1",
+        prediction_id=pid,
         ts=(t0 - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         source="whatif",
         measure_key=key,
@@ -549,6 +551,36 @@ def test_an_outcomes_reading_is_put_in_the_backtests_own_words(tmp_path, monkeyp
     backtest.judge_predictions(store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=2))
     [row] = store.predictions(judged=True)
     assert (row["verdict"], row["measured_usd"]) == (verdict, measured)
+
+
+@pytest.mark.parametrize(
+    ("measured", "stored", "verdict", "calibration"),
+    [(2.0, 10.0, "as_estimated", 1.0), (1.0, 5.0, "as_estimated", 0.5), (0.4, 2.0, "smaller", 0.2)],
+)
+def test_an_outcomes_reading_is_stored_on_the_scale_of_the_estimate_it_judged(
+    tmp_path, monkeypatch, measured, stored, verdict, calibration
+):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"model": "sonnet"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    store = Store(":memory:")
+    store.open()
+    for n in range(3):
+        _priced_prediction(store, "model", t0 + timedelta(minutes=n), pid=f"pred-{n}")
+    # The estimate is $10 over the window it was made on; the reading prices it on the after work: $2.
+    reading = outcomes.Reading(method="exact", verdict="half_or_more", predicted_usd=2.0, measured_usd=measured)
+    monkeypatch.setattr(outcomes, "read_fix", lambda *args, **kw: reading)
+    backtest.judge_predictions(store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=2))
+    rows = store.predictions(judged=True)
+    assert len(rows) == 3
+    # Every row reads the reading's own ratio on its own $10: the share of the estimate that came true.
+    assert {(row["predicted_usd"], row["measured_usd"], row["verdict"]) for row in rows} == {(10.0, stored, verdict)}
+    assert backtest.calibration_multipliers(store) == {(None, "model"): pytest.approx(calibration)}
+    if stored == 10.0:
+        shown = backtest.present(rows, UNITS)[0]
+        assert shown["measured_text"] == shown["predicted_text"]
 
 
 def test_a_prediction_on_a_lever_with_no_honest_measure_stays_unjudged(tmp_path, monkeypatch):

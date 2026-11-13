@@ -1658,7 +1658,9 @@ point closes the window enough to judge it, then one of the closed set
 `verdict_text` are server-formatted, billing-mode-aware sentences
 (`backtest.present`) — the dashboard never formats a dollar amount or a
 verdict itself. `measured_usd`/`measured_text` stay `null` until
-judged. `priced_on` is the number the estimate was a share of when it was logged
+judged; for a row with a `priced_on` the measured figure is the share of the
+estimate that came true on the work after the change, on the estimate's own
+scale. `priced_on` is the number the estimate was a share of when it was logged
 (the observed cost it repriced, or the tokens per start it takes out), `null`
 when the estimate named none; no verdict reads it yet. `judged_just_now` is how many predictions this call judged for
 the first time (a stale answer can be served while a change is worked

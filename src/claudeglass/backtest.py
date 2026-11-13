@@ -195,8 +195,9 @@ def _judge_priced(
     priced on the same work. ``None`` when the lever has no honest measure
     (or the figure prices to nothing): it is not judged, now or later. A
     reading with too little data is ``enough=False``, for the caller to wait
-    on or close out. Otherwise the reading's figures go through
-    :func:`_verdict` as the rate path's do."""
+    on or close out. Otherwise the reading's ratio of measured to predicted,
+    applied to the row's own estimate, goes through :func:`_verdict` as the
+    rate path's figures do."""
     from . import outcomes  # outcomes reads this module's change-point matching
 
     reading = outcomes.read_fix(
@@ -210,9 +211,13 @@ def _judge_priced(
         return None
     if reading.verdict == "too_little_data":
         return _Judgement(None, None, None, False)
-    measured_usd = round(reading.measured_usd, 6)
+    # The reading priced the estimate on the work after the change, which is a smaller sum than the
+    # estimate the row holds. What it found, as the share of the estimate that came true, goes on the
+    # row's own scale, so its two columns, the verdict and what calibration learns are one ratio.
+    estimate = prediction["predicted_usd"]
+    measured_usd = round(reading.measured_usd / reading.predicted_usd * estimate, 6)
     label = "no_clear_change" if abs(measured_usd) < _NEGLIGIBLE_USD else "lower" if measured_usd > 0 else "higher"
-    return _Judgement(_verdict(reading.predicted_usd, measured_usd, label), measured_usd, None, True)
+    return _Judgement(_verdict(estimate, measured_usd, label), measured_usd, None, True)
 
 
 def _judge_row(
