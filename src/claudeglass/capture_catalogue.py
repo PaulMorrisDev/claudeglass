@@ -1919,9 +1919,9 @@ def _coaching_notes_what() -> str:
     if live:
         speak = f"Hints that speak now: {_joined([titles[hint] for hint in live])}."
         if off:
-            speak += " The others are off until the replay finds them right more often than wrong."
+            speak += " The others are off until a replay of real sessions finds their tips right more often than wrong."
     else:
-        speak = "No hint speaks now: each is off until the replay finds it right more often than wrong."
+        speak = "No hint speaks now: each is off until a replay of real sessions finds its tips right more often than wrong."
     return (
         "Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook "
         "adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip. "
