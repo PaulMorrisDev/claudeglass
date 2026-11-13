@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -239,6 +240,132 @@ def test_no_start_of_context_figure_when_the_two_sides_share_no_model(tmp_path):
     result = counterfactual.without_change(_PLUGINS, *apart, PRICING)
     # No carried figure to give, so the headline falls back to the sessions before.
     assert result.per_key == [] and result.fidelity == "before"
+
+
+class _StubCarry:
+    """Stands in for ``context_files._Carry``: ``cost(chars, start, end)`` is
+    ``chars / 1000`` and every call is kept in ``calls``."""
+
+    calls: list = []
+
+    def __init__(self, sub, pricing):
+        self.sub = sub
+
+    def cost(self, chars, start, end):
+        _StubCarry.calls.append((self.sub, chars, start, end))
+        return chars / 1000
+
+
+@pytest.fixture
+def stub_carry(monkeypatch):
+    _StubCarry.calls = []
+    monkeypatch.setattr(counterfactual, "_Carry", _StubCarry)
+    return _StubCarry
+
+
+def _spawn_world(agents, *, replies=4):
+    """``agents`` maps an agent type to ``(before, after)``, each a list of
+    ``(model family, start tokens)``. Every spawn is in a session of its own
+    that has one spawn of every agent type; returns ``(before, after, bundles)``
+    with stand-ins for the transcripts the carry prices."""
+    sides, bundles = ([], []), {}
+    for side, label in ((0, "b"), (1, "a")):
+        count = max(len(spec[side]) for spec in agents.values())
+        for n in range(count):
+            spawns = [
+                (agent, impact._Transcript(cost=1.0, turns=replies, startup_tokens=spec[side][n][1], model=spec[side][n][0]))
+                for agent, spec in agents.items()
+                if n < len(spec[side])
+            ]
+            sid = f"{label}{n}"
+            start = CHANGE + timedelta(days=-3 + n * 0.1 if side == 0 else 0.1 + n * 0.1)
+            sides[side].append(
+                impact.SessionFacts(start=start, main=impact._Transcript(cost=2.0, turns=5), session_id=sid, spawns=spawns)
+            )
+            subs = [SimpleNamespace(turns=[SimpleNamespace(turn_index=i) for i in range(replies + 1)]) for _ in spawns]
+            bundles[sid] = SimpleNamespace(subs=subs)
+    return sides[0], sides[1], bundles
+
+
+def _same_family(tokens, family="sonnet-5"):
+    return [(family, t) for t in tokens]
+
+
+def test_an_agents_start_reading_is_the_drop_in_median_start_tokens_on_one_family():
+    before, after, _bundles = _spawn_world({"gp": (_same_family([60_000] * 5 + [90_000]), _same_family([20_000] * 6))})
+    reading = counterfactual.agent_start_reading("gp", before, after)
+    assert reading.agent == "gp" and reading.family == "sonnet-5"
+    assert (reading.before_n, reading.after_n) == (6, 6)
+    # The median, so the one 90,000 start does not move it.
+    assert reading.drop_tokens == 40_000
+    assert reading.after_spawns == [(f"a{n}", 0) for n in range(6)]
+
+
+def test_an_agents_start_reading_holds_the_family_with_most_spawns_on_both_sides():
+    haiku = [("haiku-4-5", 50_000)] * 5
+    before, after, _bundles = _spawn_world(
+        {"gp": (haiku + _same_family([60_000] * 8), _same_family([20_000] * 6) + [("haiku-4-5", 30_000)] * 6)}
+    )
+    reading = counterfactual.agent_start_reading("gp", before, after)
+    # Haiku: 5 before, 6 after -> 5 between them. Sonnet: 8 and 6 -> 6.
+    assert reading.family == "sonnet-5"
+    assert reading.drop_tokens == 40_000
+    assert [i for _sid, i in reading.after_spawns] == [0] * 6
+    assert {sid for sid, _i in reading.after_spawns} == {f"a{n}" for n in range(6)}
+
+
+def test_a_tie_between_two_shared_families_goes_to_the_first_name():
+    ran_before = [("sonnet-5", 60_000)] * 5 + [("haiku-4-5", 50_000)] * 5
+    ran_after = [("sonnet-5", 20_000)] * 5 + [("haiku-4-5", 10_000)] * 5
+    before, after, _bundles = _spawn_world({"gp": (ran_before, ran_after)})
+    reading = counterfactual.agent_start_reading("gp", before, after)
+    assert (reading.family, reading.drop_tokens) == ("haiku-4-5", 40_000)
+
+
+def test_an_agents_start_reading_counts_only_its_own_spawns_with_a_recorded_start():
+    before, after, _bundles = _spawn_world(
+        {
+            "gp": (_same_family([60_000] * 5 + [0]), _same_family([20_000] * 5 + [0])),
+            "other": (_same_family([99_000] * 6), _same_family([1_000] * 6)),
+        }
+    )
+    reading = counterfactual.agent_start_reading("gp", before, after)
+    assert (reading.before_n, reading.after_n, reading.drop_tokens) == (5, 5, 40_000)
+    assert [sid for sid, _i in reading.after_spawns] == [f"a{n}" for n in range(5)]
+    assert counterfactual.agent_start_reading("nobody", before, after) is None
+
+
+def test_fewer_than_five_spawns_a_side_gives_no_reading():
+    before, after, _bundles = _spawn_world({"gp": (_same_family([60_000] * 6), _same_family([20_000] * 4))})
+    assert counterfactual.agent_start_reading("gp", before, after) is None
+    before, after, _bundles = _spawn_world({"gp": (_same_family([60_000] * 4), _same_family([20_000] * 6))})
+    assert counterfactual.agent_start_reading("gp", before, after) is None
+    assert counterfactual.MIN_SPAWNS == 5
+
+
+def test_no_shared_model_family_gives_no_reading():
+    before, after, _bundles = _spawn_world(
+        {"gp": (_same_family([60_000] * 6, "haiku-4-5"), _same_family([20_000] * 6, "sonnet-5"))}
+    )
+    assert counterfactual.agent_start_reading("gp", before, after) is None
+
+
+def test_the_carry_prices_the_drop_on_each_after_spawn_of_the_reading(stub_carry):
+    before, after, bundles = _spawn_world({"gp": (_same_family([60_000] * 6), _same_family([20_000] * 6))}, replies=4)
+    reading = counterfactual.agent_start_reading("gp", before, after)
+    # 40,000 tokens at 4 characters each, on each of the 6 spawns.
+    assert counterfactual.carry_on(reading, 40_000, bundles, PRICING) == pytest.approx(6 * 160.0)
+    assert len(stub_carry.calls) == 6
+    assert {(chars, start, end) for _sub, chars, start, end in stub_carry.calls} == {(160_000, 0, 4)}
+    assert [call[0] for call in stub_carry.calls] == [bundles[f"a{n}"].subs[0] for n in range(6)]
+
+
+def test_the_carry_is_negative_when_the_tokens_are_negative(stub_carry):
+    before, after, bundles = _spawn_world({"gp": (_same_family([20_000] * 6), _same_family([60_000] * 6))})
+    reading = counterfactual.agent_start_reading("gp", before, after)
+    assert reading.drop_tokens == -40_000
+    assert counterfactual.carry_on(reading, reading.drop_tokens, bundles, PRICING) == pytest.approx(-6 * 160.0)
+    assert counterfactual.carry_on(reading, 0, bundles, PRICING) == 0
 
 
 def test_several_settings_at_once_are_headlined_from_the_sessions_before(tmp_path):

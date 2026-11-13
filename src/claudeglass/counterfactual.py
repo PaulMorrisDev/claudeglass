@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from statistics import median
 
 from . import compaction_sim, impact, ttl
 from .calibration import FALLBACK
@@ -47,6 +48,12 @@ CARRIED_KEYS = frozenset(
     ("claude_md_chars", "skillOverrides", "enabledPlugins", "enabledMcpjsonServers", "disabledMcpjsonServers")
 )
 _CARRIED_PREFIXES = ("mcp_servers", "enabled_plugins")
+#: An agent's settings whose change adds or removes context at the start of
+#: each of its spawns.
+AGENT_START_KEYS = frozenset(("tools", "disallowedTools", "omitClaudeMd", "skills", "mcpServers"))
+#: Spawns of one agent on one model family, on each side, a start-context
+#: reading needs.
+MIN_SPAWNS = 5
 #: Cache lifetime keys, and the transcripts each applies to.
 _TTL_KEYS = ("promptCacheTtl", "subagentPromptCacheTtl", "experimental.cacheTtl", "cacheTtl")
 _TTL_SECONDS = {"5m": ttl.POLICY_5M, "1h": ttl.POLICY_1H}
@@ -280,6 +287,54 @@ def _carried(key: str, change: dict | None, before_facts, after_facts, after, pr
     )
 
 
+@dataclass(slots=True)
+class AgentStart:
+    """What an agent's spawns started with, before and after a change to its
+    start-context settings, read on one model family."""
+
+    agent: str
+    #: The model family both sides ran on, and the spawns it rests on each side.
+    family: str
+    before_n: int
+    after_n: int
+    #: Median start context per spawn before, less after: positive when the
+    #: change took context off the start.
+    drop_tokens: float
+    #: (session id, index into its ``spawns``) of each spawn after the change
+    #: on that family. The index is also the spawn's index in the bundle's ``subs``.
+    after_spawns: list[tuple[str, int]]
+
+
+def agent_start_reading(agent: str, before_facts, after_facts) -> AgentStart | None:
+    """The drop in start context per spawn of ``agent``, on the model family
+    both sides ran on with the most spawns (ties go to the first name), or
+    ``None`` when they share none or a side has under :data:`MIN_SPAWNS` of it.
+    A start is a different size on each model, so a mix is never compared."""
+    before = [t for s in before_facts for a, t in s.spawns if a == agent and t.startup_tokens]
+    after = [(s.session_id, i, t) for s in after_facts for i, (a, t) in enumerate(s.spawns) if a == agent and t.startup_tokens]
+    shared = Counter(t.model for t in before) & Counter(t.model for _sid, _i, t in after)
+    if not shared:
+        return None
+    family = max(sorted(shared), key=lambda model: shared[model])
+    held_before = [t for t in before if t.model == family]
+    held_after = [(sid, i, t) for sid, i, t in after if t.model == family]
+    if len(held_before) < MIN_SPAWNS or len(held_after) < MIN_SPAWNS:
+        return None
+    drop = median(t.startup_tokens for t in held_before) - median(t.startup_tokens for _sid, _i, t in held_after)
+    return AgentStart(agent, family, len(held_before), len(held_after), drop, [(sid, i) for sid, i, _t in held_after])
+
+
+def carry_on(reading: AgentStart, tokens: float, bundles: dict, pricing: Pricing) -> float:
+    """What carrying ``tokens`` of context on every reply of ``reading``'s
+    spawns after the change costs: negative when ``tokens`` is."""
+    chars = int(round(abs(tokens) * FALLBACK))
+    total = 0.0
+    for session_id, index in reading.after_spawns:
+        sub = bundles[session_id].subs[index]
+        total += _Carry(sub, pricing).cost(chars, 0, len(_priced(sub)))
+    return total if tokens >= 0 else -total
+
+
 def _from_before(before_facts, after_facts) -> tuple[float, float, str] | None:
     """(paid, without, basis): each session after the change at the cost
     per reply of the sessions before it that did the same kind of work."""
@@ -386,11 +441,16 @@ def for_impact(corpus, pricing: Pricing, units: Units):
 
 
 __all__ = [
+    "AGENT_START_KEYS",
+    "AgentStart",
     "CARRIED_KEYS",
     "Counterfactual",
     "FIDELITY_ORDER",
     "FIDELITY_TEXT",
     "KeyResult",
+    "MIN_SPAWNS",
+    "agent_start_reading",
+    "carry_on",
     "for_impact",
     "headline",
     "since_line",
