@@ -155,6 +155,40 @@ def test_a_fix_made_in_that_project_lands_although_another_project_still_holds_t
     assert _land([_model("sonnet")], snaps, _day(1) + timedelta(hours=1)) == (_day(2), True)
 
 
+def _agent_model(agent: str, value: str) -> dict:
+    return {"target": "agent", "key": "model", "agent": agent, "value": value}
+
+
+def test_a_deleted_agent_has_not_moved_its_setting():
+    snaps = [
+        _snap(0, agents={"x": {"model": "opus", "source": "user"}}),
+        _snap(3, agents={}),
+    ]
+    assert _land([_agent_model("x", "sonnet")], snaps, _day(1)) is None
+    # The agent set to the card's value instead is a move.
+    snaps[1] = _snap(3, agents={"x": {"model": "sonnet", "source": "user"}})
+    assert _land([_agent_model("x", "sonnet")], snaps, _day(1)) == (_day(3), True)
+
+
+def test_a_renamed_agent_has_not_moved_its_setting():
+    snaps = [
+        _snap(0, agents={"x": {"model": "opus", "source": "user"}}),
+        _snap(3, agents={"x-new": {"model": "opus", "source": "user"}}),
+    ]
+    assert _land([_agent_model("x", "sonnet")], snaps, _day(1)) is None
+
+
+def test_an_agent_that_was_absent_when_the_card_was_shown_can_still_move_once_it_is_there():
+    snaps = [
+        _snap(0, agents={}),
+        _snap(3, agents={"x": {"model": "sonnet", "source": "user"}}),
+    ]
+    assert _land([_agent_model("x", "sonnet")], snaps, _day(1)) == (_day(3), True)
+    # And an agent that is deleted again after that breaks the run.
+    snaps.append(_snap(5, agents={}))
+    assert _land([_agent_model("x", "sonnet")], snaps, _day(1)) is None
+
+
 def test_a_shared_cache_gives_the_same_answer():
     snaps = [_snap(0, effective={"model": "opus"}), _snap(3, effective={"model": "sonnet"})]
     shown = _day(0) + timedelta(hours=1)

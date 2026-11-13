@@ -6952,6 +6952,33 @@ def test_an_every_project_card_does_not_land_on_another_projects_settings(tmp_pa
         handle.store.close()
 
 
+def test_a_card_whose_agent_was_deleted_is_not_landed(tmp_path, monkeypatch):
+    from claudeglass import snapshots as snapshots_mod
+
+    handle = _card_server(tmp_path, monkeypatch)
+    try:
+        own = snapshots_mod.snapshot_project_key("proj-b")
+        agent = {"target": "agent", "key": "model", "agent": "x", "value": "sonnet"}
+        _snapshot_at(handle, "2026-09-19T12:00:00Z", {}, slug=own, agents={"x": {"model": "opus", "source": "user"}})
+        handle.store.mark_cards(
+            [_gone_card(changes=[agent])], mark="shown", project="proj-b", folders=["proj-b"], now=_SEEN_AT
+        )
+        _snapshot_at(handle, "2026-09-21T12:00:00Z", {}, slug=own, agents={})
+        handle.post_json("/api/recommendations/marks?project=proj-b", {"mark": "shown", "keys": []})
+        [row] = handle.store.card_marks()
+        assert (row["landed_at"], row["landed_exact"]) == (None, None)
+        # Set to the card's value instead of deleted, it lands.
+        _snapshot_at(
+            handle, "2026-09-22T12:00:00Z", {}, slug=own, agents={"x": {"model": "sonnet", "source": "user"}}
+        )
+        handle.post_json("/api/recommendations/marks?project=proj-b", {"mark": "shown", "keys": []})
+        [row] = handle.store.card_marks()
+        assert (row["landed_at"], row["landed_exact"]) == ("2026-09-22T12:00:00Z", 1)
+    finally:
+        handle.close()
+        handle.store.close()
+
+
 def test_a_card_mark_writes_nothing_but_the_store(tmp_path, monkeypatch):
     # A finished report writes the mod's settings file on its own thread; that is
     # the report's doing, not the mark's, and would race with the comparison.

@@ -18,6 +18,9 @@ A card is **shown** when its title is drawn on a page you have open, and
    through the newest one, unbroken. A setting (not an agent's field) is read
    in the project whose snapshot was in force when the card was first shown,
    so another project's session, on a value it has always held, moves nothing.
+   An agent that is no longer in the merged snapshot (deleted or renamed) has
+   not moved its setting; one that was not there when the card was shown can
+   still move once it is.
 
 :func:`landing` answers the second half. It is not
 :func:`fixes.already_set` over every change, the test ``advice`` uses to drop
@@ -95,13 +98,22 @@ def landing(
             snap = own[i]
         return value_in(snap, change)
 
+    def gone(i: int, change: dict) -> bool:
+        """The agent ``change`` names is not in the merged snapshot at ``i``:
+        deleted or renamed, which is not a move of its setting."""
+        if change["target"] != "agent":
+            return False
+        agents = merged(i).data.get("agents")
+        return not (isinstance(agents, dict) and change["agent"] in agents)
+
     before = [read(start, c) if start is not None else None for c in changes]
     run = None
     for i in range((start + 1) if start is not None else 0, len(snaps)):
         if stamps[i] is None:
             continue
         moved = merged(i) is not None and all(
-            not snapshots_mod.same_value(flat_key(c), old, read(i, c)) for c, old in zip(changes, before)
+            not gone(i, c) and not snapshots_mod.same_value(flat_key(c), old, read(i, c))
+            for c, old in zip(changes, before)
         )
         if not moved:
             run = None
