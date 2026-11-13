@@ -282,13 +282,36 @@ def test_tools_list_keeps_the_tools_called_in_at_least_a_tenth_of_the_spawns():
 
 
 def test_a_tool_called_in_under_a_tenth_of_the_spawns_is_left_off_the_list():
-    # Bash in 1 of 20 is 5%: below the tenth, so it is listed as rarely used.
-    acc = _diet_acc("searcher", uses={"Read": 20, "Grep": 20, "Bash": 1})
+    # WebFetch in 1 of 20 is 5%: below the tenth, so it is listed as rarely used.
+    acc = _diet_acc("searcher", uses={"Read": 20, "Grep": 20, "WebFetch": 1})
     recs = _recs(_report(acc), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
     rec = _tools_rec(recs, "searcher")
     assert rec.changes[0].value == ["Grep", "Read"]
-    assert "Rarely used, so left out" in rec.action and "Bash" in rec.action.split("Rarely used")[1]
+    assert "Rarely used, so left out" in rec.action and "WebFetch" in rec.action.split("Rarely used")[1]
     assert "fewer than 10%" in rec.action
+
+
+def test_a_named_agent_keeps_the_tools_that_write_or_run_commands_once_any_run_called_them():
+    # The named agent writes code: Edit, Write and Bash were called by runs on another model than the one the
+    # card is measured on, or by one run in twenty on it. Taking them off its line would break its job.
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "Write": 9000, "Bash": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    snap = _snapshot({"implementer": {"source": "project"}})
+
+    def card(uses, other=None):
+        acc = _diet_acc("implementer", spawns=20, uses=uses, chars=chars)
+        if other:
+            acc.tool_uses["claude-sonnet-5"] = other
+        return _tools_rec(_recs(_report(acc), snapshot=snap, units=Units()), "implementer")
+
+    rec = card({"Read": 20, "Grep": 20}, other={"Edit": 6, "Write": 3, "Bash": 6})
+    assert rec.changes[0].value == ["Bash", "Edit", "Grep", "Read", "Write"]
+    assert rec.why.endswith("Bash, Edit and Write stay too because some of implementer's runs called them.")
+    assert rec.saving_usd == pytest.approx(0.81)
+    rec = card({"Read": 20, "Grep": 20, "Edit": 1, "Bash": 1})
+    assert rec.changes[0].value == ["Bash", "Edit", "Grep", "Read"]
+    assert "Write" in rec.action.split("Rarely used")[1]
+    assert rec.why.endswith("Bash and Edit stay too because some of implementer's runs called them.")
+    assert rec.saving_usd == pytest.approx(1.1138, abs=1e-4)
 
 
 def test_the_card_notes_the_tools_claude_code_adds_and_asks_for_a_before_and_after_check():
@@ -393,7 +416,7 @@ def test_the_tools_list_card_is_priced_on_the_model_that_recorded_tools_not_the_
     assert rec.saving_usd == pytest.approx(row["saving_usd"])
 
 
-def test_workflow_tools_that_write_or_run_commands_are_never_rare_once_any_spawn_called_them():
+def test_tools_that_write_or_run_commands_are_never_rare_once_any_run_called_them():
     # Edit and PowerShell are offered to every spawn and each was called by
     # one spawn on another model than the one the card is measured on (and by
     # none on it), so the measured family alone would call them rare.
@@ -413,9 +436,10 @@ def test_workflow_tools_that_write_or_run_commands_are_never_rare_once_any_spawn
     assert row["keep_tools"] == "Edit, Grep, PowerShell, Read"
     # The saving comes from the final keep list, so it only goes down.
     assert 0 < row["saving_usd"] < plain["saving_usd"]
-    # Any other agent type is measured as before.
+    # Any other agent type keeps them too.
     other = card("searcher", other_family=True)
-    assert {"Edit", "PowerShell"} <= set(other["rare_tools"].split(", "))
+    assert other["keep_tools"] == "Edit, Grep, PowerShell, Read"
+    assert {"Edit", "PowerShell"}.isdisjoint(other["rare_tools"].split(", "))
 
 
 def test_the_why_counts_the_tools_that_cleared_the_bar_not_the_ones_a_rule_added():

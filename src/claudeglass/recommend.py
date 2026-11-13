@@ -2133,7 +2133,8 @@ def _tools_list_card(
     )
     if rule_kept:
         one = len(rule_kept) == 1
-        why += f" {_join_names(rule_kept)} {'stays' if one else 'stay'} too because workflow agents called {'it' if one else 'them'}."
+        who = "workflow agents" if workflow else f"some of {agent_type}'s runs"
+        why += f" {_join_names(rule_kept)} {'stays' if one else 'stay'} too because {who} called {'it' if one else 'them'}."
     evidence = [_evidence("Spawns with tools recorded", measured, "agent_startup", "agent_startup_diet", agent_type)]
     definitions = diet.get("dropped_definitions")
     if _is_number(definitions):

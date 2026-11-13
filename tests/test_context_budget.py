@@ -1477,7 +1477,7 @@ def test_the_diet_row_keeps_the_tools_called_in_a_tenth_of_the_spawns_and_sizes_
 
 
 def test_a_tool_called_in_under_a_tenth_of_the_spawns_moves_from_the_list_to_the_rarely_used(tmp_path):
-    stats = _spawn_many(tmp_path, 20, used=lambda n: "Bash" if n == 0 else "Read")
+    stats = _spawn_many(tmp_path, 20, used=lambda n: "Grep" if n == 0 else "Read")
     row = _diet_row(stats)
     assert row["keep_tools"] == "Read"
     assert row["rare_tools"] == "Bash, Grep, mcp__figma__*"

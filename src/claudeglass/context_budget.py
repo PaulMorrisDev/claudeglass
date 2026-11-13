@@ -602,9 +602,9 @@ TOOLS_MODEL_MIN_SPAWNS = 5
 ALWAYS_ADDED = frozenset(AGENT_ANSWER_TOOLS) | {"advisor"}
 
 #: The agent type every unnamed workflow agent runs as, and the tools that
-#: write files or run commands: its card never calls one rare once any of
-#: its spawns, on any model, called it (a writer on another model than the
-#: measured one, or with no role word, would otherwise be missed).
+#: write files or run commands: an agent's tools card never calls one rare
+#: once any of that agent's runs, on any model, called it (a writer on
+#: another model than the measured one would otherwise be missed).
 _WORKFLOW_AGENT = "workflow-subagent"
 _WRITER_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"})
 
@@ -2346,7 +2346,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         Column(key="saving_usd", label="Saving across these spawns", kind="money"),
         Column(key="window_days", label="Days in the window", kind="float"),
         Column(key="rare_sizes", label="Size of each rarely used tool", kind="str"),
-        Column(key="rule_kept_tools", label="Tools kept because a workflow spawn called them", kind="str"),
+        Column(key="rule_kept_tools", label="Tools kept because a run of this agent called them", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2361,14 +2361,10 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         _total, rare_rows = acc.removable_chars(family)
         builtin = [row for row in rare_rows if not row[0].startswith("mcp__")]
         keep = acc.kept_tools(family)
-        rule_kept: list[str] = []
-        if agent_type == _WORKFLOW_AGENT:
-            called = {key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
-            builtin = [row for row in builtin if row[0] not in called]
-            rule_kept = sorted(called - set(keep))
-            keep = sorted(
-                set(keep) | called, key=lambda key: (key.startswith("mcp__"), key)
-            )
+        called ={key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
+        builtin = [row for row in builtin if row[0] not in called]
+        rule_kept = sorted(called - set(keep))
+        keep = sorted(set(keep) | called, key=lambda key: (key.startswith("mcp__"), key))
         servers = acc.rare_servers(family)
         if not builtin and not servers:
             continue

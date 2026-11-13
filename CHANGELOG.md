@@ -208,11 +208,11 @@ Coaching:
   A card closes when the rare tools left on it fall under the bar, a card
   never adds a tool, and `advisor` is listed with the tools Claude Code always
   adds. A known tools line also stops the generic `spawn-cost` card.
-- **The workflow tools card keeps Edit, Write, MultiEdit, NotebookEdit, Bash
-  and PowerShell on its line once any workflow agent called them, on any
-  model,** and its saving is for that line. Earlier versions could leave
-  them off: if you made an agent file from that line, add back the ones
-  your workflow agents use.
+- **The tools card keeps Edit, Write, MultiEdit, NotebookEdit, Bash and
+  PowerShell on its line once any run of that agent called them, on any
+  model,** for every agent, and its saving is for that line. Earlier
+  versions could leave them off: if you made an agent file from that
+  line, add back the ones the agent uses.
 - **The subagent startup write is priced at the first call's own 5-minute and
   1-hour split**, and at the 5-minute rate when it recorded none.
 - **`spawn-claude-md` holds back on a tie** between runs that said they used

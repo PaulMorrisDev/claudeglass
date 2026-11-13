@@ -231,8 +231,8 @@ def check_tools_lines(inp: Inputs) -> list[str]:
     """Check 1. For each ``spawn-tools-list`` card: every tool its agent
     called in at least :data:`context_budget.REMOVABLE_USE_SHARE` of the
     spawns it was offered to is on the suggested line, unless the agent's own
-    ``tools:`` line already lacks it or its ``disallowedTools:`` line withholds it; for the workflow card every writing or
-    shell tool any workflow agent called is on it too. The tools called are
+    ``tools:`` line already lacks it or its ``disallowedTools:`` line withholds it; every writing or
+    shell tool any run of that agent called is on it too. The tools called are
     the report's own (``agent_startup_diet`` and ``agent_startup_tools``)."""
     problems: list[str] = []
     tables = tables_of(inp.model)
@@ -254,15 +254,15 @@ def check_tools_lines(inp: Inputs) -> list[str]:
             continue
         called = {name: "called in at least the bar's share of its spawns" for name in _names(row.get("keep_tools"))}
         for name in _names(row.get("rule_kept_tools")):
-            called.setdefault(name, "called by a workflow agent")
+            called.setdefault(name, "called by a run of this agent")
         for tool in rarely:
             if tool.get("agent_type") != agent:
                 continue
             used, offered = tool.get("used_spawns") or 0, tool.get("offered_spawns") or 0
             if offered and used / offered >= bar:
                 called.setdefault(tool["tool"], f"called in {used} of {offered} spawns")
-            elif workflow and used and tool["tool"] in context_budget._WRITER_TOOLS:
-                called.setdefault(tool["tool"], f"called by a workflow agent in {used} of {offered} spawns")
+            elif used and tool["tool"] in context_budget._WRITER_TOOLS:
+                called.setdefault(tool["tool"], f"called by a run of this agent in {used} of {offered} spawns")
         file = inp.agents.get(agent) or {}
         own = recommend.read_agent_tools(file.get("tools"), file.get("disallowedTools")) if not workflow else None
         for name, why in sorted(called.items()):
