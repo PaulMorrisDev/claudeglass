@@ -1461,6 +1461,50 @@ def test_profile_diff_rows_say_what_wins_over_them_whatever_the_pick(two_project
     )
 
 
+def test_profile_diff_gives_a_per_model_row_its_setting_model_and_whether_it_was_recorded(two_project_server):
+    handle = two_project_server
+    _seed_settings_snapshot(
+        handle, "proj-alpha", "2026-10-02T12:00:00Z", effort="high", layer="user",
+        model_settings={"claude-opus-5-5": {"effortLevel": "high"}},
+    )
+    (handle.options.config_dir / "profiles").mkdir(exist_ok=True)
+    (handle.options.config_dir / "profiles" / "per-model.toml").write_text(
+        'id = "per-model"\n[settings]\neffortLevel = "medium"\n'
+        'modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWindow" = 300000 } }\n',
+        encoding="utf-8",
+    )
+    resp, body = handle.get_json("/api/profiles/per-model/diff")
+    assert resp.status == 200
+    data = body["data"]
+    rows = {r["key"]: r for r in data["settings"]}
+    effort = rows["settings.modelSettings.claude-opus-5-5.effortLevel"]
+    assert (effort["setting"], effort["model"], effort["recorded"]) == ("modelSettings.effortLevel", "claude-opus-5-5", True)
+    assert (effort["current_value"], effort["proposed_value"]) == ("high", "medium")
+    assert effort["label"] == "Effort level for one model"
+    assert effort["description"].startswith("How hard Claude thinks, for this model only.")
+    assert effort["where"] == "~/.claude/settings.json"
+    window = rows["settings.modelSettings.claude-opus-5-5.autoCompactWindow"]
+    assert (window["setting"], window["model"], window["recorded"]) == (
+        "modelSettings.autoCompactWindow", "claude-opus-5-5", False,
+    )
+    assert window["current_value"] is None and window["proposed_value"] == 300000
+    # every other row has no model and was recorded
+    flat = rows["settings.effortLevel"]
+    assert flat["model"] is None and flat["recorded"] is True and flat["setting"] == "effortLevel"
+    # the prompt and the unified diff name the model
+    assert (
+        '- In ~/.claude/settings.json, set effortLevel for the model claude-opus-5-5 (under "modelSettings") '
+        'to "medium" (now: high).'
+    ) in data["prompt"]
+    assert "+modelSettings.claude-opus-5-5.autoCompactWindow: 300000" in data["diff"]
+    assert_privacy(body)
+    # the schema route gives the key a label and text, so the editor and the card summary can name it
+    lever = next(
+        lever for lever in handle.get_json("/api/profile-schema")[1]["data"]["settings"] if lever["key"] == "modelSettings"
+    )
+    assert lever["label"] == "Per-model settings" and lever["description"]
+
+
 def test_profile_diff_notes_missing_snapshot_when_store_has_none(tmp_path, monkeypatch):
     corpus = _build_corpus(tmp_path)
     _install_fake_rebuild(monkeypatch, corpus)

@@ -951,6 +951,25 @@ def test_a_profile_estimate_scales_by_its_normalised_tasks() -> None:
     assert "p.tasks" in body and "p.for" not in body
 
 
+def test_a_per_model_row_names_its_model_and_says_when_its_value_is_not_recorded() -> None:
+    """PF1 part 3: a diff row for one model's setting says whose in its label, and its "Now" says
+    "not recorded" when the snapshot does not keep that value (an unset one would be a guess). The
+    card summary and the estimate name modelSettings as one settings key, "Per-model settings"; the
+    profile form leaves it to the profile it starts from instead of offering a text box for a table."""
+    source = _app_js()
+    table = _function_source(source, "renderDiffRowsTable")
+    assert 'if (row.model) label += " (" + row.model + ")";' in table
+    assert 'if (row.recorded === false) return "not recorded";' in table
+    assert '"Per-model settings"' in _function_source(source, "profileLeverLabels")
+    assert "profileLeverLabels(results[1])" in _function_source(source, "renderProfilesList")
+    assert "profileLeverLabels(results[1])" in _function_source(source, "renderProfileEstimate")
+    # a table of names reads as "model (key: value)", not "[object Object]"
+    assert 'key + " (" + _diffRowValue(inner) + ")"' in _function_source(source, "_diffRowValue")
+    editor = _function_source(source, "buildProfileEditor")
+    assert 'lever.kind !== "map[str,model]"' in editor
+    assert "doc.settings.modelSettings = carriedModelSettings" in editor
+
+
 @pytest.mark.parametrize("name", FIRST_PARTY_FILES)
 def test_no_emoji_code_points(name: str) -> None:
     text = _static_text(name)

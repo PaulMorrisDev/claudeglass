@@ -2738,6 +2738,12 @@ def make_handler(
             # agents.<agent>.<key>; the key itself may be dotted (experimental.cacheTtl).
             name = ".".join(parts[2:]) if row.key.startswith("agents.") else ".".join(parts[1:])
             agent = parts[1] if row.key.startswith("agents.") else None
+            # settings.modelSettings.<model id>.<key> (a model id has no dot): the
+            # setting is modelSettings.<key> and the id is the row's own ``model``.
+            model = None
+            if row.key.startswith("settings.modelSettings.") and len(parts) == 4:
+                model = parts[2]
+                name = f"modelSettings.{parts[3]}"
             # The role a row came from: the agent got this key from the
             # profile's writer role, not from an [agents.<name>] table.
             from_role = (
@@ -2749,6 +2755,7 @@ def make_handler(
                 "key": row.key,
                 "setting": name,
                 "agent": agent,
+                "model": model,
                 "role": "writer" if from_role else None,
                 "label": LEVER_LABELS.get(name, name),
                 "description": SETTING_TEXT.get(name, ("", "", ""))[0],
@@ -2761,6 +2768,7 @@ def make_handler(
                 "proposed_value": row.proposed_value,
                 "target_file": row.target_file,
                 "managed": row.managed,
+                "recorded": row.recorded,
             }
 
         settings_rows = [_row(r) for r in profile_diff.rows if r.key.startswith("settings.")]

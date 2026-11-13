@@ -177,6 +177,17 @@ function loadProfileSchema() {
   return profileSchemaPromise;
 }
 
+// Key -> plain label from /api/profile-schema's levers. modelSettings is one
+// settings key here (its entries are per model), whatever the schema calls it.
+function profileLeverLabels(schema) {
+  var labels = {};
+  ((schema && schema.settings) || []).concat((schema && schema.agents) || []).forEach(function (lever) {
+    labels[lever.key] = lever.label;
+  });
+  if (!labels.modelSettings || labels.modelSettings === "modelSettings") labels.modelSettings = "Per-model settings";
+  return labels;
+}
+
 var PROFILE_SCOPE_LABELS = {
   user: "Your user settings, every project",
   "project-local": "This project, on your machine only",
@@ -309,10 +320,7 @@ function renderProfilesList(data, container) {
       var body = results[0].body;
       if (!body || body.ok !== true) return;
       var p = body.data;
-      var labels = {};
-      ((results[1] && results[1].settings) || []).concat((results[1] && results[1].agents) || []).forEach(function (lever) {
-        labels[lever.key] = lever.label;
-      });
+      var labels = profileLeverLabels(results[1]);
       var names = Object.keys(p.settings || {}).map(function (key) {
         return labels[key] || key;
       });
@@ -376,6 +384,17 @@ function _diffRowValue(value) {
   if (value === null || value === undefined) return "not set";
   if (Array.isArray(value)) return value.length ? value.join(", ") : "(empty list)";
   if (typeof value === "boolean") return value ? "on" : "off";
+  if (typeof value === "object") {
+    // A table of names (modelSettings: model -> its own settings).
+    return Object.keys(value)
+      .map(function (key) {
+        var inner = value[key];
+        return inner !== null && typeof inner === "object" && !Array.isArray(inner)
+          ? key + " (" + _diffRowValue(inner) + ")"
+          : key + ": " + _diffRowValue(inner);
+      })
+      .join(", ");
+  }
   return String(value);
 }
 
@@ -402,6 +421,7 @@ function renderDiffRowsTable(rows) {
         render: function (row) {
           var label = row.label || row.setting || row.key;
           if (row.agent) label += " (" + row.agent + " agent)";
+          if (row.model) label += " (" + row.model + ")";
           var cell = el("span", null, [el("span", { text: label })]);
           if (row.description) cell.appendChild(el("span", { class: "cell-hint", text: row.description }));
           return cell;
@@ -411,6 +431,8 @@ function renderDiffRowsTable(rows) {
         key: "current_value",
         label: "Now",
         render: function (row) {
+          // A per-model value the snapshot does not keep: unset would be a guess.
+          if (row.recorded === false) return "not recorded";
           return _diffRowValue(row.current_value);
         },
       },
@@ -590,9 +612,16 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
   form.appendChild(el("div", { class: "lever-field" }, [el("label", { for: "profile-form-name", text: "Display name" }), nameInput]));
 
   form.appendChild(el("h3", { text: "Settings for every session" }));
-  var settingFields = schema.settings.map(function (lever) {
-    return leverInput(lever, "profile-setting-");
-  });
+  // modelSettings is a table of tables, not a value to type: the form leaves it out and
+  // carries a "Start from" profile's through, so a copy keeps it.
+  var carriedModelSettings = null;
+  var settingFields = schema.settings
+    .filter(function (lever) {
+      return lever.kind !== "map[str,model]";
+    })
+    .map(function (lever) {
+      return leverInput(lever, "profile-setting-");
+    });
   var settingsGrid = el("div", { class: "lever-grid" });
   settingFields.forEach(function (f) {
     settingsGrid.appendChild(f.node);
@@ -671,6 +700,7 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       var v = leverValue(f);
       if (v !== undefined) doc.settings[f.lever.key] = v;
     });
+    if (carriedModelSettings) doc.settings.modelSettings = carriedModelSettings;
     agentBlocks.forEach(function (block) {
       var agentName = block.name.value.trim();
       if (!agentName) return;
@@ -692,11 +722,13 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       agentsWrap.removeChild(block.node);
     });
     agentBlocks.length = 0;
+    carriedModelSettings = null;
     if (!startSelect.value) return;
     fetchJson("/api/profiles/" + encodeURIComponent(startSelect.value)).then(function (result) {
       var body = result.body;
       if (!body || body.ok !== true) return;
       var p = body.data;
+      carriedModelSettings = p.settings.modelSettings || null;
       settingFields.forEach(function (f) {
         setLeverValue(f, p.settings[f.lever.key]);
       });
@@ -1024,10 +1056,7 @@ function renderProfileEstimate(profile, container) {
     var body = results[0].body;
     if (!body || body.ok !== true) return;
     var p = body.data;
-    var labels = {};
-    ((results[1] && results[1].settings) || []).concat((results[1] && results[1].agents) || []).forEach(function (lever) {
-      labels[lever.key] = lever.label;
-    });
+    var labels = profileLeverLabels(results[1]);
     // F11: `tasks` is the profile's `for` words normalised to the task
     // vocabulary (a catalogue word like "implementation" isn't one, and
     // /api/whatif rejects it); several scale by their combined share.
