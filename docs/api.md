@@ -1418,6 +1418,17 @@ row; for `tasks`, its `saving_usd` and `effect_text` are then scaled to
 that task's own share of the window (`habits_by_task`, or the agent's
 task share of its own cost for an agent candidate) — `saving_usd` is
 `null` and `basis` says why when there's no clean share to scale by.
+When the model the cheaper setup ran on already has its own effort level
+in `modelSettings` (matched by its family, and unless
+`CLAUDE_CODE_EFFORT_LEVEL` is set, which beats every model's entry), `tasks`
+drafts a `modelSettings` candidate in place of the `effortLevel` one: `key`
+`"modelSettings"`, `agent` `null`, `label` "Per-model settings", and a
+`value` shaped `{<model id as written in the settings file>: {"effortLevel":
+<the cheaper effort>}}`. It is ticked by the same rule as the plain
+`effortLevel`. Its `now` is the same shape, holding only that model's
+current `effortLevel` (not every model's entry), and its `estimate` is a row
+that is not simulated ("This change isn't simulated."). In `profile`, the
+ticked `modelSettings` candidates are merged model by model.
 `profile` holds the ticked changes and `whatif` their combined
 estimate, scaled the same way for `tasks`. `current` returns no
 candidates (`from_current: true`): the dashboard saves your current
