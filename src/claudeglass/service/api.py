@@ -130,6 +130,7 @@ from ..config import (
 from ..pricing import PricingError, cache_read_savings_usd, load_pricing
 from ..profiles import catalogue as profile_catalogue
 from ..profiles import diff as profile_diff_mod
+from ..profiles import roles as profile_roles
 from ..profiles import schema as profile_schema
 from ..render.html import render_html
 from ..render.json_out import render_json, to_jsonable
@@ -2540,6 +2541,86 @@ def make_handler(
         except (OSError, profile_schema.ProfileError, ValueError):
             return None
 
+    def _recorded_agents(snapshot):
+        """The snapshot's ``agents`` map (name -> entry), or ``None`` when
+        there is no snapshot or it records no agents list: the dashboard
+        then knows nothing of the user's agents."""
+        raw = snapshot.data.get("agents") if snapshot is not None else None
+        if not isinstance(raw, dict):
+            return None
+        return {name: entry for name, entry in raw.items() if isinstance(entry, dict)}
+
+    def _agents_from(agents: dict, *sources: str) -> dict:
+        return {name: entry for name, entry in agents.items() if entry.get("source") in sources}
+
+    def _other_scope_note(names: tuple[str, ...], scope: str) -> str:
+        """The sentence added to the no-writer note when the other target
+        file has a writer. The quoted target names are the picker's own
+        labels (``PROFILE_SCOPE_LABELS`` in page-setup.js)."""
+        one = len(names) == 1
+        listed = profile_roles.join_names(names)
+        if scope == "user":
+            if one:
+                return f'Your project agent {listed} writes code. To change it, pick a "This project" target above.'
+            return f'Your project agents {listed} write code. To change them, pick a "This project" target above.'
+        if one:
+            return (
+                f"Your agent {listed} in ~/.claude/agents writes code. "
+                'To change it, pick "Your user settings, every project" above.'
+            )
+        return (
+            f"Your agents {listed} in ~/.claude/agents write code. "
+            'To change them, pick "Your user settings, every project" above.'
+        )
+
+    def _resolve_roles(profile, snapshot, scope: str | None):
+        """``(profile, notes, writers)``: ``profile`` with its roles folded
+        into the user's own agents, the notes to show, and the agents the
+        writer role went to. ``scope`` is the target file's scope, or
+        ``None`` for the scope-free view (the card, the estimate, "Start
+        from"), which reads user and project agents together and says
+        nothing."""
+        if not profile.roles:
+            return profile, (), ()
+        recorded = _recorded_agents(snapshot)
+        if recorded is None:
+            # Nothing is known of the user's agents, so no role key is
+            # listed and no "none of your agents" claim is made.
+            folded = profile_roles.resolve(profile, {}).profile
+            if scope is None:
+                return folded, (), ()
+            return (
+                folded,
+                (
+                    "This profile also changes the agent that writes code. "
+                    "Your agents have not been recorded yet, so no agent file is listed here.",
+                ),
+                (),
+            )
+        if scope is None:
+            resolved = profile_roles.resolve(profile, _agents_from(recorded, "user", "project"))
+            return resolved.profile, (), resolved.matched.get("writer", ())
+        here, there = ("user", "project") if scope == "user" else ("project", "user")
+        resolved = profile_roles.resolve(profile, _agents_from(recorded, here))
+        found = resolved.matched.get("writer")
+        if found is None:
+            return resolved.profile, (), ()
+        if len(found) > 1:
+            return resolved.profile, (profile_roles.several_writers_note(found),), found
+        if found:
+            return resolved.profile, (), found
+        folder = "~/.claude/agents" if scope == "user" else ".claude/agents"
+        whose = "your agents" if scope == "user" else "this project's agents"
+        note = (
+            "This profile also changes the agent that writes code. "
+            f"None of {whose} in {folder} is named like implementer, fixer or builder and can edit files, "
+            "so no agent file changes."
+        )
+        elsewhere = profile_roles.writers(_agents_from(recorded, there))
+        if elsewhere:
+            note += " " + _other_scope_note(elsewhere, scope)
+        return resolved.profile, (note,), ()
+
     def route_profile_diff(store, query, body):
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
@@ -2566,6 +2647,9 @@ def make_handler(
             effective, provenance, managed_keys, effective_agents = {}, {}, set(), {}
             notes.append("no config snapshot recorded yet; diff computed against an empty effective config")
 
+        written = profile
+        profile, role_notes, role_writers = _resolve_roles(written, snapshot, scope)
+
         profile_diff = profile_diff_mod.diff_against_effective(
             profile, effective, effective_agents, provenance, managed_keys
         )
@@ -2580,6 +2664,7 @@ def make_handler(
         apply_cmd, launch_cmd = profile_diff_mod.apply_command(profile.id, scope).split("\n", 1)
         if scope != "user":
             notes.append("Run the command in the project's own folder: --project-dir . means the folder you run it from.")
+        notes.extend(role_notes)
 
         from ..fixes import LEVER_LABELS, SETTING_TEXT, profile_change_where, profile_prompt
 
@@ -2587,10 +2672,19 @@ def make_handler(
             parts = row.key.split(".")
             # agents.<agent>.<key>; the key itself may be dotted (experimental.cacheTtl).
             name = ".".join(parts[2:]) if row.key.startswith("agents.") else ".".join(parts[1:])
+            agent = parts[1] if row.key.startswith("agents.") else None
+            # The role a row came from: the agent got this key from the
+            # profile's writer role, not from an [agents.<name>] table.
+            from_role = (
+                agent in role_writers
+                and name in written.roles.get("writer", {})
+                and name not in written.agents.get(agent, {})
+            )
             return {
                 "key": row.key,
                 "setting": name,
-                "agent": parts[1] if row.key.startswith("agents.") else None,
+                "agent": agent,
+                "role": "writer" if from_role else None,
                 "label": LEVER_LABELS.get(name, name),
                 "description": SETTING_TEXT.get(name, ("", "", ""))[0],
                 "where": profile_change_where(row.key, scope),
@@ -2658,7 +2752,10 @@ def make_handler(
         profile = _load_profile_by_id(profile_id)
         if profile is None:
             return _not_found(f"unknown profile: {profile_id!r}")
-        setting_count = len(profile.settings) + sum(len(v) for v in profile.agents.values()) + len(profile.env)
+        # PF1: the card, the estimate and "Start from" read the agents the
+        # writer role goes to among the user's own (user and project).
+        resolved, _notes, _writers = _resolve_roles(profile, _config_snapshot_with_every_project_agents(), None)
+        setting_count = len(resolved.settings) + sum(len(v) for v in resolved.agents.values()) + len(resolved.env)
         return _ok(
             {
                 "id": profile.id,
@@ -2669,7 +2766,8 @@ def make_handler(
                 "tasks": list(profile_catalogue.tasks_for(profile)),
                 "notes": profile.notes,
                 "settings": dict(profile.settings),
-                "agents": {name: dict(keys) for name, keys in profile.agents.items()},
+                "agents": {name: dict(keys) for name, keys in resolved.agents.items()},
+                "roles": {name: dict(keys) for name, keys in profile.roles.items()},
                 "env": dict(profile.env),
                 "setting_count": setting_count,
             }
