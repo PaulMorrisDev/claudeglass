@@ -996,7 +996,10 @@ the store) plus every user profile written under
 watcher's `_scan_profiles`), each tagged with which of the two it came
 from.
 
-`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "suggested_profile_id": str|null, "active_profile_id": str|null, "active_profile_name": str|null}`.
+`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "suggested_profile_id": str|null, "suggested_reason": str|null, "active_profile_id": str|null, "active_profile_name": str|null}`.
+
+Query: the usual `window` and `project` (see "Filtering by project"); an
+unknown project or window is a `400`.
 
 A catalogue entry's `archetype`/`for` come straight from its shipped
 TOML document; `tasks` is `for` normalised to the capture task
@@ -1006,9 +1009,15 @@ none), the form `POST /api/whatif`'s `task` takes. A user entry never
 carries them (the `profiles` table
 only indexes `id`/`name`/`updated_at` — no `toml_path`, never
 API-returned). `updated_at` is `null` for a catalogue entry (nothing to
-timestamp). `suggested_profile_id` is the latest recorded baseline's own
-`suggested_profile` field (`null` if no baseline has been captured yet),
-so the UI can mark that entry in the list without a second round trip.
+timestamp). `suggested_profile_id` is worked out live for the window and
+project asked for, from the same report the page already builds
+(`baseline.suggest_for_model`: the rule `init` and `baseline` store, run on
+that report's tables), and `suggested_reason` is the one plain sentence
+saying what decided it (for example "19 of 78 sessions in this window ran a
+workflow script."); the UI marks that entry in the list and shows the
+sentence under it. Both are `null` when the view has fewer than
+`baseline.SUGGEST_MIN_SESSIONS` (5) sessions. The stored baseline record is
+not read here: `/api/baseline` still returns it.
 `active_profile_id` is the profile `apply <profile>` last marked active
 (`<config_dir>/active-profile`), `null` when none has been; ignored
 recommendations are kept under it. `active_profile_name` is its name
@@ -1056,7 +1065,11 @@ than erroring. `404` if `<id>` names neither a catalogue id nor an
 existing `<config_dir>/profiles/<id>.toml`.
 
 Query: `scope` — one of `user` (default), `project-local`, `repo` (same
-three scopes `profiles.diff`/`apply` use); `400` for anything else. This
+three scopes `profiles.diff`/`apply` use); `400` for anything else.
+`project` (additive, see "Filtering by project") reads the picked project's
+own newest snapshot for "now", the agents the roles go to and what wins over
+a change, as `/api/profile-goals` does; without it, the machine's newest
+snapshot. An unknown project is a `400`. This
 route never accepts a client-supplied project directory — doing so
 would put a raw filesystem path in the response body, which this
 service's privacy rule forbids regardless of who supplied it — so a
@@ -1064,7 +1077,7 @@ service's privacy rule forbids regardless of who supplied it — so a
 `--project-dir`; fill it in yourself when you run the command.
 
 `data`: `{"profile_id": str, "scope": str, "diff": str, "settings": [DiffRow, ...], "agents": [DiffRow, ...], "env": [DiffRow, ...], "apply_command": str, "dry_run_command": str, "launch_command": str, "prompt": str, "notes": [str, ...]}`,
-where a `DiffRow` is `{"key", "setting", "agent", "role", "label", "description", "where", "current_value", "current_provenance", "proposed_value", "target_file", "managed"}`
+where a `DiffRow` is `{"key", "setting", "agent", "role", "label", "description", "where", "overridden_by", "current_value", "current_provenance", "proposed_value", "target_file", "managed"}`
 (`profiles.diff.DiffRow`'s own fields, split by key prefix into the
 three lists rather than left as one flat `rows` array — `settings.*` /
 `agents.<name>.*` / `env.*`). The display fields: `setting` is the key
@@ -1074,7 +1087,14 @@ stay whole), `agent` the agent's name for an `agents.*` row (else
 `[roles.writer]` table rather than from an `[agents.<name>]` table of
 its own (else `null`), `label`/`description` its plain name and what it controls, and
 `where` the file the change is written to under the chosen `scope`
-(`fixes.profile_change_where`). `target_file` is where the key is set
+(`fixes.profile_change_where`). `overridden_by` is one plain sentence saying
+what wins over the change, or `null` (`fixes.profile_overridden_by`): a
+project file ranking above the target file that sets the key too (only when a
+`project` is asked for; without one the snapshot is whichever project's took
+it), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` over `autoCompactWindow`,
+`CLAUDE_CODE_EFFORT_LEVEL` over `effortLevel`, or models that have an effort
+level of their own (`modelSettings`) over `effortLevel`. The dashboard adds
+it to the "Set in" cell after `where`. `target_file` is where the key is set
 today.
 
 A profile's roles are resolved against the agents the latest snapshot
@@ -1110,12 +1130,12 @@ the config hook records only the agents of the project a session
 started in, so the newest snapshot alone would show another project's
 agents as not set.
 
-This diff, and `POST /api/profiles/from-current`, always read the
-machine's newest snapshot and take no `project`: a profile is applied to
+`POST /api/profiles/from-current` always reads the machine's newest
+snapshot and takes no `project`: a profile is applied to
 your user settings (or to a project folder you name when you run the
-command), whichever project the dashboard is showing. The routes that
-judge a window do follow a picked project: with `project`,
-`/api/profile-goals`, `/api/quick-actions`, `/api/quick-actions/<id>` and
+command), whichever project the dashboard is showing. This diff, and the
+routes that judge a window, follow a picked project: with `project`,
+`/api/profiles/<id>/diff`, `/api/profile-goals`, `/api/quick-actions`, `/api/quick-actions/<id>` and
 `POST /api/whatif` read the picked project's own newest snapshot for
 "in force now" (the settings, and the agents widened over that project's
 snapshots only), as the report's own advice does
@@ -1901,9 +1921,8 @@ this window".
 
 Some routes keep covering every project whichever one is picked:
 `/api/baseline` (the dashboard's "All time, all projects" chip beside
-the latest baseline) and `/api/recache`; `/api/profiles/<id>/diff` and
-`POST /api/profiles/from-current`, which read the machine's newest
-settings; and `/api/backtest`, which checks `project` and ignores it
+the latest baseline) and `/api/recache`; `POST /api/profiles/from-current`,
+which reads the machine's newest settings; and `/api/backtest`, which checks `project` and ignores it
 (the dashboard's "All projects" chip beside it says so while a project is
 picked). The hook and statusline rows of `/api/diagnostics` also stay
 machine-wide. The dashboard checks an unknown slug once with

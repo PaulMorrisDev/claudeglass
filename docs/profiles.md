@@ -195,8 +195,20 @@ and the estimate itself is scaled by the mean ratio of what was
 measured to what was predicted across those judged points.
 
 Setup › Profiles also shows one card per profile with the settings it
-changes by their plain labels. Opening one shows a table of Setting /
-Now / After / Set in for the scope you pick, then three ways to use it:
+changes by their plain labels. One card is marked "Suggested for you", with
+a line under the cards saying why ("19 of 78 sessions in this window ran a
+workflow script."). It is worked out live for the window and project picked
+(`baseline.suggest_for_model`: `suggest()`'s rule below, on that report's
+tables), so it changes with the pick; it is not the record `init` stored. A
+view with fewer than 5 sessions (`baseline.SUGGEST_MIN_SESSIONS`) gets no
+suggestion at all. Opening a card shows a table of Setting /
+Now / After / Set in for the scope you pick, read from the picked project's
+own newest settings (the machine's newest with none picked). "Set in" names
+the file the change is written to and, when something wins over it, says so
+in the same cell: a project file that sets the key too (only when a project
+is picked, since otherwise the settings are whichever project's were
+recorded last), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or `CLAUDE_CODE_EFFORT_LEVEL`
+being set, or a model with an effort level of its own. Then three ways to use it:
 a prompt that asks Claude to make the changes and show you the diff
 first (`fixes.profile_prompt`), the `claudeglass apply <id>
 --dry-run` command, and a one-session `--launch` trial that changes no
@@ -507,6 +519,14 @@ overnight session can be any archetype. `catalogue.get("overnight-batch")`
 still returns it directly, and `baseline._suggested_profile` suggests
 it before calling `suggest()` when at least half the window's sessions
 are overnight (`sessions_by_mode`).
+
+The dashboard's live suggestion (`baseline.suggest_for_model`) gives the same
+id as `baseline._suggested_profile` and adds one plain sentence for the branch
+that decided it: overnight runs, a structural purpose (a workflow script,
+several agents at once, a local model pipeline), planning then building in
+one session, the kind of task Claude tagged, a purpose
+(`baseline.PURPOSE_WORDS`), or the archetype. The stored reason `init` prints
+is unchanged.
 
 ## Diffing a profile against a project's effective config
 
