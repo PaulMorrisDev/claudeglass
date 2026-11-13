@@ -1396,55 +1396,109 @@ def _main_model_lever(
     (``model_swap.BEFORE_CHANGE``), else ``None``. A session already on
     Sonnet or smaller is left out by its own model, inside ``model_swap``.
 
-    The move is the newer of two, for the session's project: the last time
-    its own snapshots' effective model moved across the Sonnet line
-    (``change_points.settings_model_move``; with no snapshot of its own,
-    your user settings' model in every snapshot), and the newest move across
-    it that its sessions' transcripts show (``change_points.transcript_model_move``).
-    A change that stays on one side of the line is no move. Of two at the
-    same time, the settings move. It cuts only when the value it moved the
-    model to is Sonnet or smaller: a newest move to a larger model, a move
-    back included, cuts nothing. A session that started at the move's time
+    The time is read from one timeline per project (:func:`_cut_time`): its
+    first snapshot and each time its own snapshots' effective model crossed
+    the Sonnet line (``change_points.settings_model_crossings``; with no
+    snapshot of its own, your user settings' model in every snapshot), and
+    each time its sessions' transcripts crossed it
+    (``change_points.transcript_points``, every point the tracker finds, read
+    by ``change_points.transcript_model_crossings``). A change that stays on
+    one side of the line is no crossing. A session that started at the time
     counts.
 
-    A move that only the transcripts show is passed over when every session
-    of the run that made it is headless or has fewer than
-    :data:`MOVE_MIN_REPLIES` priced replies; the newest one left is read.
-    ``None`` without a config folder, so every main session counts."""
+    A crossing that only the transcripts show is passed over when every
+    session of the run that made it is headless or has fewer than
+    :data:`MOVE_MIN_REPLIES` priced replies. ``None`` without a config
+    folder, so every main session counts."""
     if config_dir is None:
         return None
-    points = change_points_mod.change_points(config_dir, corpus)
-    runs = change_points_mod.model_runs(points, corpus)
-    points = [p for i, p in enumerate(points) if i not in runs or any(_steered(b) for b in runs[i])]
+    points = change_points_mod.transcript_points(corpus)
+    runs = change_points_mod.model_runs([point for _since, point in points], corpus)
+    points = [pair for i, pair in enumerate(points) if i not in runs or any(_steered(b) for b in runs[i])]
     snapshots = snapshots_mod.load_snapshots(config_dir)
-    moves: dict[tuple[str, ...], tuple | None] = {}
+    times: dict[tuple[str, ...], datetime | None] = {}
     cut: set[str] = set()
     for bundle in corpus.sessions:
         if bundle.top is None:
             continue
         session_id = bundle.top.meta.session_id
         keys = tuple(keys_by_session.get(session_id) or ())
-        if keys not in moves:
-            moves[keys] = _newer_move(
-                change_points_mod.settings_model_move(snapshots, keys, model_swap.at_main_floor),
-                change_points_mod.transcript_model_move(points, keys, model_swap.at_main_floor),
+        if keys not in times:
+            first, settings = change_points_mod.settings_model_crossings(snapshots, keys, model_swap.at_main_floor)
+            times[keys] = _cut_time(
+                first,
+                settings,
+                change_points_mod.transcript_model_crossings(points, keys, model_swap.at_main_floor),
             )
-        move = moves[keys]
-        if move is None or not model_swap.at_main_floor(move[1]):
+        cut_at = times[keys]
+        if cut_at is None:
             continue
         start = change_points_mod.session_start(bundle)
-        if start is None or start < move[0]:
+        if start is None or start < cut_at:
             cut.add(session_id)
     return lambda tr: model_swap.BEFORE_CHANGE if tr.meta.session_id in cut else None
 
 
-def _newer_move(settings: tuple | None, transcript: tuple | None) -> tuple | None:
-    """The newer of a settings move and a transcript move, each a (time,
-    value) or ``None``; of two at the same time, the settings move: it is
-    what was in force, the transcripts only show it."""
-    if settings is None or (transcript is not None and transcript[0] > settings[0]):
-        return transcript
-    return settings
+#: Of the first snapshot, a settings crossing and a transcript crossing at
+#: the same time, the first snapshot is read first and the transcript last.
+_FIRST, _SETTINGS, _TRANSCRIPT = 0, 1, 2
+
+
+def _cut_time(
+    first: tuple[datetime, bool] | None,
+    settings: list[tuple[datetime, bool]],
+    transcript: list[tuple[datetime, datetime, bool]],
+) -> datetime | None:
+    """When a project's main sessions stop being counted from: the time its
+    main model moved to Sonnet or smaller and still stands, or ``None``.
+    ``first`` is its first snapshot (time, whether it had the model at or
+    below the line), ``None`` with none; ``settings`` its setting's
+    crossings, each (time, whether it moved down); ``transcript`` its
+    sessions' crossings, each (start of the session before, time, whether it
+    moved down). Read as one timeline:
+
+    - until the first snapshot the setting is not known, and that reads as
+      above the line; the first snapshot sets and undoes nothing;
+    - with the setting above the line, the transcripts decide alone: a move
+      down sets the time unless one stands, a move up undoes it;
+    - with it at or below the line, the transcripts move nothing: a larger
+      model then is a pick against the setting;
+    - the setting moving down sets the time, keeping an earlier one that
+      stands; moving up undoes it.
+
+    A transcript crossing with the first snapshot between its two times is
+    read before the snapshot: the model changed before the snapshot saw it.
+    The snapshot hook runs as a session starts, so the first session on the
+    new model takes the first snapshot seconds before its own first reply.
+    That moves it ahead of nothing else: its first time is the session
+    before the model's new value, which is at or after the third session of
+    the run before (:data:`change_points.SUSTAINED_SESSIONS`), so after the
+    crossing before it. Events are sorted by their place and source alone;
+    each list is in time order already, and the sort keeps it on a tie."""
+    known = first[0] if first else None
+    events = sorted(
+        ([(known, _FIRST, first[1], known)] if first else [])
+        + [(when, _SETTINGS, down, when) for when, down in settings]
+        + [
+            (since if known is not None and since < known <= when else when, _TRANSCRIPT, down, when)
+            for since, when, down in transcript
+        ],
+        key=lambda event: event[:2],
+    )
+    cut, below = None, False
+    for _order, source, down, when in events:
+        if source == _FIRST:
+            below = down
+        elif source == _SETTINGS:
+            below = down
+            cut = (cut if cut is not None else when) if down else None
+        elif below:
+            continue
+        elif down:
+            cut = cut if cut is not None else when
+        else:
+            cut = None
+    return cut
 
 
 # -- build_report -----------------------------------------------------------
