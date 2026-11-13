@@ -8,8 +8,9 @@ real agent files.
 
 The only role is the ``writer``: the agent that writes code. An agent is a
 writer when its *name* says so (``agent_roles``' closed vocabulary: implement,
-fix, build, test, write and their forms) and its ``tools`` line lets it edit
-files. Nothing else about the agent is read: not its description, not its
+fix, build, test, write and their forms), none of its words is a role word
+of another class (a ``fix-verifier`` is a verifier), and its ``tools`` line
+lets it edit files. Nothing else about the agent is read: not its description, not its
 body. A name that carries no such word is never a writer.
 """
 
@@ -31,7 +32,8 @@ ROLE_WORDS = {"writer": "agent that writes code"}
 
 def is_writer(name: str, fields: Mapping | None) -> bool:
     """Whether the agent ``name`` is the agent that writes code: its name
-    reads as a writer (``agent_roles``) and its ``tools`` and
+    holds a writer word (``agent_roles``) and no role word of another class
+    (``fix-verifier`` is a verifier, not a writer), and its ``tools`` and
     ``disallowedTools`` lines (``fields``) let it use a file-editing tool.
     A tools line that is not known (no line, cut off, no snapshot) means
     every tool, so it counts as able to edit. A name in
@@ -40,6 +42,10 @@ def is_writer(name: str, fields: Mapping | None) -> bool:
         return False
     if agent_roles.role_class(agent_roles.role_word(None, name, None)) != "writer":
         return False
+    for token in agent_roles._TOKEN_RE.findall(name.lower()):
+        word = agent_roles.FORMS.get(token)
+        if word is not None and agent_roles.role_class(word) != "writer":
+            return False
     fields = fields if isinstance(fields, Mapping) else {}
     tools = read_agent_tools(fields.get("tools"), fields.get("disallowedTools"))
     return any(tools.offered(tool) for tool in _FILE_TOOLS)

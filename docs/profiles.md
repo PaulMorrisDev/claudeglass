@@ -336,8 +336,12 @@ goes to. An agent is a writer when both hold:
   `agent_roles` knows (implement, fix, build, test, write, apply, migrate,
   refactor, and their forms: `implementer`, `fixer`, `builder`, `tester`,
   `claude-implementer`). The agent's description and body are never read.
-  A name with no such word (`helper`, `scribe`) is never a writer, and a
-  name that decides (`reviewer`, `researcher`) is not one either;
+  A name with no such word (`helper`, `scribe`) is never a writer, a
+  name that decides (`reviewer`, `researcher`) is not one either, and
+  neither is a name that also holds a role word of another class
+  (`fix-verifier`, `build-checker`, `test-auditor`, `integrator`: the
+  second word says what the agent is). A word `agent_roles` does not know
+  (`test-architect`) says nothing;
 - its **tools** let it edit files: its `tools` line (less its
   `disallowedTools` line) offers `Edit`, `Write`, `MultiEdit` or
   `NotebookEdit`. A tools line that is not known (no line, cut off, or no

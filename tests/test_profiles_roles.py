@@ -45,6 +45,26 @@ def test_a_name_with_no_role_word_is_not_a_writer():
     assert roles.is_writer("claude-implementer", CAN_EDIT)
 
 
+def test_a_name_with_a_second_role_word_of_another_class_is_not_a_writer():
+    """The first role word used to win, so a reviewer or architect named
+    after the thing it checks (``fix-verifier``) was moved to the writer's
+    model. A writer word and no role word of another class."""
+    for name in ("fix-verifier", "build-checker", "test-auditor", "implementer-reviewer", "plan-implementer"):
+        assert not roles.is_writer(name, CAN_EDIT), name
+    # the same word order the other way round
+    assert not roles.is_writer("verifier-fixer", CAN_EDIT)
+    # two writer words are still a writer
+    for name in ("test-writer", "claude-implementer", "fix-builder", "test-runner", "docs-writer"):
+        assert roles.is_writer(name, CAN_EDIT), name
+    # a name the vocabulary has no word for is not caught by it
+    assert roles.is_writer("test-architect", CAN_EDIT)
+
+
+def test_an_integrator_that_can_edit_is_not_a_writer():
+    assert not roles.is_writer("integrator", CAN_EDIT)
+    assert not roles.is_writer("integration-tester", CAN_EDIT)
+
+
 def test_a_cut_or_unknown_tools_line_still_counts_as_able_to_edit():
     assert roles.is_writer("implementer", None)
     assert roles.is_writer("implementer", {})
