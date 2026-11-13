@@ -600,6 +600,39 @@ def test_a_muted_hint_is_never_silent(tmp_path):
     assert occ.hints["big_paste"].sessions == 2 and hint_occasions.silent(occ) == {}
 
 
+def test_the_inputs_fingerprint_moves_with_each_thing_collect_reads_besides_the_corpus(tmp_path):
+    config_dir, claude_root = _env(tmp_path)
+    config = _config()
+
+    def now():
+        return hint_occasions.inputs_fingerprint(claude_root, config_dir, config)
+
+    seen = [now()]
+    assert now() == seen[0]  # nothing changed, nothing moves
+
+    def moved():
+        seen.append(now())
+        assert seen[-1] != seen[-2]
+
+    (claude_root / "settings.json").write_text('{"hooks": {}}', encoding="utf-8")
+    moved()
+    (config_dir / "coaching.json").write_text(json.dumps({"muted": ["big_paste"]}), encoding="utf-8")
+    moved()
+    (config_dir / "capture-log.jsonl").write_text(json.dumps(_switch(SINCE, [], ["coaching_notes"])) + "\n", encoding="utf-8")
+    moved()
+    (config_dir / "hooks").mkdir()
+    (config_dir / "hooks" / hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT][0]).write_text("# hook", encoding="utf-8")
+    moved()
+    config.capture.projects = ["proj-a"]
+    moved()
+    config.exclude_projects = ["proj-b"]
+    moved()
+    config.thresholds = {"coaching_drip_count": 4, "idle_minutes": 9}
+    moved()
+    config.thresholds = {"coaching_drip_count": 4, "idle_minutes": 10}  # not a coaching threshold: not an input
+    assert now() == seen[-1]
+
+
 def test_a_moment_is_found_by_when_the_message_was_typed(tmp_path):
     top = _parsed(tmp_path, [_said("one", 0), _reply(2), _said("two", 3), _reply(4), _said("three", 5), _said("four", 5.5), _reply(6)])
     cycles = capture.prompt_cycles(top)

@@ -6691,6 +6691,106 @@ def test_the_quick_actions_name_project_files_from_the_projects_folder_the_servi
         assert check["status"] == "act" and check["summary"].startswith("docs/context.md is now about 10k tokens"), route
 
 
+def _silent_line_server(tmp_path, monkeypatch, health):
+    """A server whose store holds two sessions that each had a big paste and no note, two days ago, with coaching
+    notes on and the setup older than the pastes. ``health["now"]`` makes the hook health from the settings path.
+    Returns ``(handle, settings_path)``."""
+    from claudeglass import hook_health
+
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    settings = claude_root / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).timestamp()
+    os.utime(settings, (old, old))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_root))
+    monkeypatch.setattr(hook_health, "check_capture", lambda *a, **k: health["now"](settings))
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+    when = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
+    for name in ("session-a", "session-b"):
+        write_jsonl(project_dir / f"{name}.jsonl", [
+            user_str_line("x" * 41_000, origin={"kind": "human"}, timestamp=when.strftime("%Y-%m-%dT%H:%M:%S.000Z")),
+            turn_line(timestamp=(when + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")),
+        ])
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+    (handle.options.config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8"
+    )
+    return handle, settings
+
+
+def _silent_note(handle):
+    resp, body = handle.get_json("/api/capture")
+    assert resp.status == 200 and body["ok"] is True
+    rows = {row["id"]: row for s in body["data"]["sections"] for row in s["metrics"]}
+    return rows["coaching_notes"]["silent_note"]
+
+
+def _hooks_ok(settings):
+    from claudeglass.hook_health import CaptureHookHealth
+
+    return CaptureHookHealth(settings_path=settings)
+
+
+def _hooks_missing(settings):
+    from claudeglass.hook_health import CaptureHookHealth, HookSpec
+
+    entry = HookSpec(capture_catalogue.HOOK_SCRIPT, "UserPromptSubmit", "", False)
+    return CaptureHookHealth(settings_path=settings, needed=(entry,), missing=(entry,))
+
+
+def test_the_silent_line_does_not_appear_right_after_the_hook_entry_is_connected(tmp_path, monkeypatch):
+    """The entry is missing (no line), then 'capture connect' writes settings.json and the health is ok: the
+    evidence restarts there, so the pastes of two days ago make no line, though the store has not changed."""
+    health = {"now": _hooks_missing}
+    handle, settings = _silent_line_server(tmp_path, monkeypatch, health)
+    try:
+        assert _silent_note(handle) is None
+        health["now"] = _hooks_ok
+        os.utime(settings, None)
+        assert _silent_note(handle) is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_the_silent_line_goes_once_the_hint_is_muted(tmp_path, monkeypatch):
+    handle, _settings = _silent_line_server(tmp_path, monkeypatch, {"now": _hooks_ok})
+    try:
+        assert _silent_note(handle) is not None
+        (handle.options.config_dir / "coaching.json").write_text(json.dumps({"muted": ["big_paste"]}), encoding="utf-8")
+        assert _silent_note(handle) is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_the_silent_line_goes_when_coaching_notes_is_switched_off_and_on_again(tmp_path, monkeypatch):
+    """The dashboard writes config.toml and a capture-log record for each switch: the evidence restarts at the
+    last switch-on, so the earlier pastes no longer count, though the store has not changed."""
+    handle, _settings = _silent_line_server(tmp_path, monkeypatch, {"now": _hooks_ok})
+    try:
+        assert _silent_note(handle) is not None
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
+        def record(at, before, after):
+            return json.dumps({
+                "ts": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "level": "off",
+                "changed": {"coaching": {"from": before, "to": after}},
+            }) + "\n"
+
+        log = handle.options.config_dir / "capture-log.jsonl"
+        log.write_text(
+            record(now - timedelta(minutes=1), ["coaching_notes"], []) + record(now, [], ["coaching_notes"]),
+            encoding="utf-8",
+        )
+        assert _silent_note(handle) is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
 def test_capture_names_a_live_hint_that_had_moments_and_no_tip(tmp_path, monkeypatch):
     """Two stored sessions each hold a big paste and no note from the hook: with coaching notes on, the hook
     entries in order and the setup older than the pastes, the coaching row carries the line."""

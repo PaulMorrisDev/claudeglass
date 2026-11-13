@@ -1849,9 +1849,18 @@ def make_handler(
             skill = footprint.feedback_skill_state()
         coaching_use = occasions = None
         if capture.coaching_notes_on:
+            from .. import hint_occasions
+
             token = store.change_token()
+            # The moments also read the setup's files, the capture log, coaching.json and the project lists: a
+            # change to one of them must not be answered with the part built before it (so it is in ``soft`` too).
+            inputs = hint_occasions.inputs_fingerprint(None, options.config_dir, config)
             coaching_use, occasions = _capture_part(
-                "coaching", (token, *soft), soft, lambda: _capture_coaching(config), _STALE_REPORT_MAX_AGE_S
+                "coaching",
+                (token, *soft, inputs),
+                (*soft, inputs),
+                lambda: _capture_coaching(config),
+                _STALE_REPORT_MAX_AGE_S,
             )
         brief_skill = None
         if "brief_templates" in capture.coaching:

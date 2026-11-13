@@ -122,6 +122,33 @@ def setup_changed_at(claude_root, config_dir) -> datetime | None:
     return datetime.fromtimestamp(newest, tz=timezone.utc) if newest is not None else None
 
 
+def inputs_fingerprint(claude_root, config_dir, config) -> tuple:
+    """What :func:`collect` reads besides the corpus, as a value that changes
+    when any of it does, for a cache key: the size and time of Claude Code's
+    ``settings.json``, the capture hook's files, ``coaching.json`` (mutes,
+    thresholds) and ``capture-log.jsonl`` (the coaching spans), then the
+    ``[capture] projects`` and ``exclude_projects`` lists and the
+    ``coaching_`` thresholds of ``[thresholds]``. A few ``stat`` calls and no
+    file is read; a file that cannot be read is ``None``."""
+    paths = [hook_health.settings_path(claude_root)]
+    if config_dir:
+        directory = Path(config_dir)
+        paths += [directory / "hooks" / name for name in hook_health.CAPTURE_FILES[capture_catalogue.HOOK_SCRIPT]]
+        paths += [coaching_mod.path(directory), directory / config_mod.CAPTURE_LOG_NAME]
+    stamps = []
+    for path in paths:
+        try:
+            info = os.stat(path)
+        except OSError:
+            stamps.append(None)
+        else:
+            stamps.append((info.st_mtime_ns, info.st_size))
+    thresholds = tuple(sorted(
+        (key, value) for key, value in (config.thresholds or {}).items() if str(key).startswith("coaching_")
+    ))
+    return (tuple(stamps), tuple(config.capture.projects), tuple(config.exclude_projects), thresholds)
+
+
 def _typed_events(top, cycles) -> list:
     """For each cycle, the ``HUMAN_TEXT`` event of the message that opened it
     (``None`` when the transcript holds none): the last one not sent again
@@ -427,6 +454,7 @@ __all__ = [
     "collect",
     "coaching_spans",
     "session_occasions",
+    "inputs_fingerprint",
     "setup_changed_at",
     "silent",
     "silent_sentence",
