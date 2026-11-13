@@ -142,7 +142,8 @@ def break_answers(top: TranscriptResult, cycles) -> list[BreakAnswer]:
     at least :data:`habits.LONG_BREAK_S` seconds after a reply whose context
     and output came to :data:`habits.STALE_TOKENS` or more (the reader
     ``_item_clear_between`` uses), not a wait for a usage limit and not a
-    gap across a summary."""
+    gap across a summary. A line you did not type in the gap (a ``!`` shell
+    command) does not end the break: the message itself is the one typed."""
     from . import habits  # habits imports this module
 
     replies = capture_mod._priced(top)
@@ -159,7 +160,6 @@ def break_answers(top: TranscriptResult, cycles) -> list[BreakAnswer]:
         if (
             cycle is not None
             and last is not None
-            and not turn.preceding_not_typed
             and turn.gap_cause != "limit"
             and not compacted.intersection(turn.preceding_event_kinds)
         ):

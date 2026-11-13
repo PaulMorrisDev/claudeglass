@@ -327,16 +327,31 @@ def test_break_answers_take_the_prior_word_at_each_break_and_whether_a_file_came
     assert _breaks(_parsed(tmp_path, _Session("calm").typed("start").say("one").typed("more").say("two"))) == []
 
 
-def test_break_answers_leave_out_a_wait_for_a_usage_limit_and_a_message_you_did_not_type(tmp_path):
+def test_break_answers_leave_out_a_wait_for_a_usage_limit(tmp_path):
     top = _parsed(tmp_path, _break_session("flags"))
     wanted = len(_breaks(top))
     opened = [t for t in top.turns if t.gap_s is not None and t.gap_s >= 3_600 and not t.is_synthetic]
     assert len(opened) >= wanted
-    # The first break's reply marked as the end of a wait for a limit, then the second's as not typed.
+    # The first break's reply marked as the end of a wait for a limit.
     opened[0].gap_cause = "limit"
     assert len(_breaks(top)) == wanted - 1
-    opened[1].preceding_not_typed = True
-    assert len(_breaks(top)) == wanted - 2
+
+
+def test_a_shell_command_between_the_old_reply_and_the_typed_message_does_not_end_the_break(tmp_path):
+    # A line you did not type (a ! shell command) came in the gap; the prompt that returned is still typed.
+    session = _Session("bash").context(30_000).typed("start").use("Read", "a.py").say("one", TAG.format("needed"))
+    session.later(7_200)
+    session.lines.append(user_str_line("<bash-input>ls</bash-input>", **session._stamp()))
+    session.lines.append(
+        user_str_line("<bash-stdout>a.py</bash-stdout><bash-stderr></bash-stderr>", **session._stamp())
+    )
+    session.typed("back to it").use("Read", "a.py").say("two", TAG.format("needed"))
+    top = _parsed(tmp_path, session)
+    opening = [t for t in top.turns if t.gap_s is not None and t.gap_s >= 7_200]
+    assert opening and all(t.preceding_not_typed for t in opening)
+    from claudeglass.capture_checks import BreakAnswer
+
+    assert _breaks(top) == [BreakAnswer("needed", True)]
 
 
 # -- the joins: tags against what became of the work ----------------------------------------------------------
