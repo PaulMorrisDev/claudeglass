@@ -111,6 +111,9 @@ class _Draft:
     #: effortLevel candidate warns rather than implying the profile
     #: alone would move it.
     effort_level_env_set: bool = False
+    #: Whether ANTHROPIC_MODEL is set: it wins over the model setting from
+    #: any file, so no main-session model candidate is drafted.
+    model_env_set: bool = False
 
     def now(self, key: str, agent: str | None):
         if agent is None:
@@ -192,6 +195,9 @@ def _models(draft: _Draft, tables, *, subagents_only: bool) -> None:
         best = row.get("best_cheaper_alternative_model")
         pct = whatif._num(row.get("saving_pct")) or 0.0
         if not best or pct < MIN_SHARE_PCT or (subagents_only and agent == TOP):
+            continue
+        if agent == TOP and draft.model_env_set:
+            # ANTHROPIC_MODEL picks the main session's model; the setting would do nothing.
             continue
         if agent == TOP and model_swap.at_main_floor(draft.now("model", None)):
             # A main-session setting at Sonnet or smaller is already there:
@@ -737,6 +743,7 @@ def draft(
     task: str | None = None,
     effort_level_env_set: bool = False,
     skip_keys: frozenset[str] = frozenset(),
+    model_env_set: bool = False,
 ) -> dict:
     """The candidate changes for ``goal_id``, each with its what-if row.
     Raises ``KeyError`` for an unknown goal. ``task``: for the ``tasks``
@@ -744,12 +751,12 @@ def draft(
     when it's missing or not in the data). ``effort_level_env_set``:
     PROF-03, see ``_Draft``. ``skip_keys``: the keys of recommendations
     ignored on the dashboard (``ignores.skip_keys``), whose changes are
-    left out."""
+    left out. ``model_env_set``: see ``_Draft``."""
     goal = next(g for g in GOALS if g.id == goal_id) if goal_id in GOAL_IDS else None
     if goal is None:
         raise KeyError(goal_id)
     tables = whatif._Tables(model)
-    d = _Draft(goal, dict(effective or {}), dict(effective_agents or {}), [], effort_level_env_set)
+    d = _Draft(goal, dict(effective or {}), dict(effective_agents or {}), [], effort_level_env_set, model_env_set)
     reading = model_swap.main_setting(model)
     if reading is not None:
         # The main session's model setting as the saving reads it, so a

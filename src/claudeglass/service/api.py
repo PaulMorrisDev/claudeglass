@@ -3530,6 +3530,7 @@ def make_handler(
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
             projects_roots=tuple(_projects_roots()),
+            model_env_set=snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV),
         )
 
     def route_quick_actions(store, query, body):

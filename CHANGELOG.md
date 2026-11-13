@@ -216,6 +216,10 @@ Cards and checks:
   ignored model card takes out its main session or agent row, and an
   ignored auto-compact, tool-output or wasted-replies card takes out its
   lever.
+- **The main session's model card offers no setting while ANTHROPIC_MODEL
+  is set.** The variable wins over the model setting, so the card, the
+  Models check and the profile diff say so instead. A snapshot from before
+  this reads as not set.
 
 Coaching:
 

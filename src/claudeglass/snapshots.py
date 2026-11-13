@@ -553,6 +553,26 @@ def auto_compact_window_env_set(snapshot: Snapshot | None) -> bool:
     )
 
 
+#: Picks the main session's model over the model setting from any file
+#: (model-config docs: /model, --model, then this, then the setting).
+MODEL_ENV = "ANTHROPIC_MODEL"
+
+
+def env_var_set(snapshot: Snapshot | None, name: str) -> bool:
+    """Whether ``name`` was set when ``snapshot`` was taken: in the hook's
+    own environment (``env_names``) or a settings file's env block
+    (``effective_env_names``). Names only, never values. ``False`` for a
+    snapshot that records neither, so a card reads as it did before."""
+    if snapshot is None:
+        return False
+    names: set[str] = set()
+    for field in ("env_names", "effective_env_names"):
+        value = snapshot.data.get(field)
+        if isinstance(value, list):
+            names.update(str(n) for n in value)
+    return name in names
+
+
 def effort_level_env_set(snapshot: Snapshot | None) -> bool:
     """Whether ``CLAUDE_CODE_EFFORT_LEVEL`` was set when ``snapshot`` was
     taken (``content_layers.effort_level_env_set``). It wins over /effort

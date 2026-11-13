@@ -56,11 +56,13 @@ from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
 from .snapshots import (
     AUTO_COMPACT_WINDOW_ENV,
+    MODEL_ENV,
     Snapshot,
     auto_compact_window,
     auto_compact_window_env_set,
     effective_config,
     effort_level_env_set,
+    env_var_set,
 )
 from .units import NO_LIMIT_SHARE_HINT, Units
 
@@ -399,6 +401,13 @@ def _left_out_sentence(rec: Recommendation) -> str:
     return f" It leaves out {sum(n for n, _one, _many in parts):,} main sessions: {listed}."
 
 
+#: Said on the main model's card and check while ANTHROPIC_MODEL is set.
+MODEL_ENV_WINS = (
+    "ANTHROPIC_MODEL is set, and it wins over your model setting. To keep a model, change the variable where "
+    "you set it: your shell profile or a settings file's env block."
+)
+
+
 def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) -> Recommendation:
     """The main session's model, one tier down. ``model_swap`` never
     suggests Haiku here (its ``main_floor`` verdict), so this is only ever
@@ -412,6 +421,8 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
     # project's sessions ran on a larger one anyway. A setting at Sonnet or
     # smaller never gets here (_merge_model_tier).
     set_already = already_set("model", _family_alias(alt), current)
+    # ANTHROPIC_MODEL wins over the setting from any file: no change to it would take effect.
+    model_env = env_var_set(ctx.snapshot, MODEL_ENV)
     if set_already:
         since += f" Your model setting already says {family}, and the sessions it counts still ran on a larger model."
     scope = "managed" if rec.scope == "managed" else (
@@ -446,11 +457,12 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
             if set_already
             else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
             "the results before making it your default."
-        ),
+        )
+        + (" " + MODEL_ENV_WINS if model_env else ""),
         lever="model",
         scope=rec.scope,
         evidence=list(rec.evidence),
-        changes=[] if set_already else [change],
+        changes=[] if set_already or model_env else [change],
         estimated_saving=ctx.money(saving, prefix="At most "),
         saving_basis=ctx.basis(_TIER_BASIS),
         saving_usd=saving,

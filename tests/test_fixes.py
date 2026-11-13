@@ -182,6 +182,7 @@ def test_profile_overridden_by_names_each_case():
     effort = "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
     assert by("settings.effortLevel", effort_env_set=True) == effort
     assert by("settings.model", effort_env_set=True) is None
+    assert by("settings.model", env_names=["ANTHROPIC_MODEL"]) == "ANTHROPIC_MODEL is set and wins over this setting."
     assert by("settings.effortLevel") is None
 
     # A model's own effort level wins for that model.

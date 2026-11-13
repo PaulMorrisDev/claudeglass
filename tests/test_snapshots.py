@@ -1379,3 +1379,15 @@ def test_effort_level_env_set_reads_the_content_layers_flag():
     ) is True
     assert snap_mod.effort_level_env_set(snap_mod.Snapshot(path=None, ts="x", data={})) is False
     assert snap_mod.effort_level_env_set(None) is False
+
+
+def test_env_var_set_reads_both_env_name_lists():
+    def snapshot(**data):
+        return snap_mod.Snapshot(path=None, ts="x", data=data)
+
+    assert snap_mod.env_var_set(snapshot(env_names=["ANTHROPIC_MODEL"]), "ANTHROPIC_MODEL") is True
+    assert snap_mod.env_var_set(snapshot(effective_env_names=["ANTHROPIC_MODEL"]), "ANTHROPIC_MODEL") is True
+    assert snap_mod.env_var_set(snapshot(env_names=["OTHER"], effective_env_names=["OTHER"]), "ANTHROPIC_MODEL") is False
+    assert snap_mod.env_var_set(snapshot(), "ANTHROPIC_MODEL") is False
+    assert snap_mod.env_var_set(None, "ANTHROPIC_MODEL") is False
+    assert snap_mod.MODEL_ENV == "ANTHROPIC_MODEL"

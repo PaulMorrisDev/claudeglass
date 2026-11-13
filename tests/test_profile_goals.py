@@ -708,3 +708,19 @@ def test_opusplan_is_not_offered_when_no_main_session_is_counted():
 
     assert all(c["value"] != "opusplan" for c in candidates(0))
     assert any(c["value"] == "opusplan" for c in candidates(5))
+
+
+def test_the_models_goal_drafts_no_main_model_while_anthropic_model_is_set():
+    model = _report()
+    [table] = model.sections[0].tables
+    table.columns.append(NS(key="best_cheaper_alternative_model"))
+    table.columns.append(NS(key="saving_pct"))
+    table.rows[0] += ["claude-sonnet-4-5", 40.0]
+    table.rows[1] += ["claude-haiku-4-5-20251001", 80.0]
+
+    def candidates(**kw):
+        return {(c["agent"], c["key"]) for c in goals.draft("models", model, UNITS, **kw)["candidates"]}
+
+    assert candidates(model_env_set=False) == {(None, "model"), ("Explore", "model")}
+    # ANTHROPIC_MODEL picks the main session's model, so only the agent's setting is drafted.
+    assert candidates(model_env_set=True) == {("Explore", "model")}

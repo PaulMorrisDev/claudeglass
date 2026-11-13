@@ -2278,3 +2278,41 @@ def test_a_mythos_main_session_gets_the_main_model_card(tmp_path):
     keys = [c.key for c in table.columns]
     top = next(dict(zip(keys, row)) for row in table.rows if row[keys.index("agent_type")] == "top-level")
     assert top["best_cheaper_alternative_model"] == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize("field", ["env_names", "effective_env_names"])
+def test_the_main_card_offers_no_setting_while_anthropic_model_is_set(tmp_path, field):
+    """ANTHROPIC_MODEL wins over the model setting from any file, so the card keeps its /model trial and
+    offers no change or command; without the variable it offers the setting as before."""
+    from test_change_points import _snapshot
+
+    folder = "C--Dev-alpha"
+
+    def card(env_names):
+        root = tmp_path / ("with" if env_names else "without")
+        _main_sessions(root, folder, _days(_R11_OPUS, range(0, 8)))
+        config_dir = root / "tl"
+        sections = {"user_settings": {"model": "opus"}}
+        if env_names:
+            sections[field] = env_names
+        _snapshot(config_dir, "20260930T090000Z", {"model": "opus"}, {"model": "user"},
+                  slug=snapshot_project_key(folder), **sections)
+        corpus = load_corpus([root / "projects" / folder], since="2000-01-01")
+        report = build_report(
+            corpus, PRICING, Config(), projects=(folder,), window="w", snapshots=load_snapshots(config_dir),
+            config_dir=config_dir,
+        )
+        (found,) = [r for r in report.recommendations if r.id == "model-tier-main"]
+        return found
+
+    plain = card([])
+    assert plain.changes[0].value == "sonnet"
+    set_card = card(["ANTHROPIC_MODEL"])
+    assert set_card.changes == []
+    assert all(fix["command"] is None for fix in set_card.fixes)
+    assert set_card.action == (
+        "Try Sonnet for a session or two of routine work (/model sonnet) and compare the results before making "
+        "it your default. ANTHROPIC_MODEL is set, and it wins over your model setting. To keep a model, change "
+        "the variable where you set it: your shell profile or a settings file's env block."
+    )
+    assert set_card.saving_usd == plain.saving_usd

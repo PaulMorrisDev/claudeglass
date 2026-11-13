@@ -1285,6 +1285,7 @@ def profile_overridden_by(
        choose.
     2. ``settings.autoCompactWindow`` while ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
        is among ``env_names``.
+    2b. ``settings.model`` while ``ANTHROPIC_MODEL`` is among ``env_names``.
     3. ``settings.effortLevel`` while ``effort_env_set``
        (``CLAUDE_CODE_EFFORT_LEVEL``).
     4. ``settings.effortLevel`` while ``model_settings`` (the effective
@@ -1309,6 +1310,8 @@ def profile_overridden_by(
         and precedence[layer] < precedence[target]
     ):
         return f"This project's {_OVERRIDING_PROJECT_FILE[layer]} sets it too and wins."
+    if key == "model" and snapshots_mod.MODEL_ENV in env_names:
+        return f"{snapshots_mod.MODEL_ENV} is set and wins over this setting."
     if key == "autoCompactWindow" and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
         return f"{snapshots_mod.AUTO_COMPACT_WINDOW_ENV} is set and wins over this setting."
     model_parts = key.split(".")

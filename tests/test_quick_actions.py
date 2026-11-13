@@ -47,6 +47,7 @@ def _ctx(tmp_path, model=None, **kw):
         skip_keys=kw.get("skip_keys", frozenset()),
         since_ts=kw.get("since_ts"),
         until_ts=kw.get("until_ts"),
+        model_env_set=kw.get("model_env_set", False),
     )
 
 
@@ -216,6 +217,22 @@ def test_models_check_offers_a_fix_per_cheaper_model_with_a_dry_run_command(tmp_
     assert explore["command"].endswith("--dry-run") and "--agent Explore" in explore["command"]
     assert any("Saves 8.00 USD" in text for _h, text in explore["explainer"])
     assert result["table"]["rows"][0][0] == "Main session"
+
+
+def test_the_models_check_says_anthropic_model_wins(tmp_path):
+    from claudeglass import advice
+
+    plain = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}))
+    result = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}, model_env_set=True))
+
+    def main_fixes(res):
+        return [f for f in res["fixes"] if "--set model=" in (f["command"] or "") and "--agent" not in f["command"]]
+
+    assert main_fixes(plain) and not main_fixes(result)
+    # The agent's own model change is not touched by the variable.
+    assert [f["title"] for f in result["fixes"]] == ["Explore: use haiku"]
+    tip = {"title": "ANTHROPIC_MODEL picks your main session's model", "text": advice.MODEL_ENV_WINS}
+    assert tip in result["tips"] and tip not in plain["tips"]
 
 
 def test_models_check_says_where_each_agents_model_is_set(tmp_path):

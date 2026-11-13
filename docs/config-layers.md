@@ -335,6 +335,10 @@ layer the plan's "Configuration layers" section lists:
   `/effort` too, so a profile candidate that would set `effortLevel`
   checks this flag first — see "PROF-03" under `effective` below.
 
+`env_names` also tells whether `ANTHROPIC_MODEL` is set, by name only.
+While it is, the main model card and the Models check offer no `model`
+change, since the variable wins over the setting.
+
 ## `project_slug`
 
 The same algorithm `discovery.slug_for` uses (duplicated in the

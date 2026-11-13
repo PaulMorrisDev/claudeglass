@@ -64,6 +64,9 @@ class Context:
     #: and skill listings, never your own files.
     claude_root: Path | None = None
     projects_roots: tuple[Path, ...] | None = None
+    #: Whether ANTHROPIC_MODEL was set when the settings were read
+    #: (``snapshots.env_var_set``): it wins over the model setting.
+    model_env_set: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +257,7 @@ def _goal(ctx: Context, goal_id: str) -> dict:
         effective_agents=ctx.effective_agents,
         period=ctx.period,
         skip_keys=ctx.skip_keys,
+        model_env_set=ctx.model_env_set,
     )
     ignored = _ignored_changes(ctx)
     kept, removed = [], []
@@ -294,7 +298,11 @@ def _models(ctx: Context) -> dict:
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_main_left_out(rows) + _models_set_elsewhere(rows)
-    picked = " ".join(text for text in (_models_main_picked(ctx, rows), _models_main_said(rows)) if text)
+    if ctx.model_env_set and any(r.get("agent_type") == TOP and r.get("best_cheaper_alternative_model") for r in rows):
+        from .advice import MODEL_ENV_WINS
+
+        tips.append({"title": "ANTHROPIC_MODEL picks your main session's model", "text": MODEL_ENV_WINS})
+    picked =" ".join(text for text in (_models_main_picked(ctx, rows), _models_main_said(rows)) if text)
     # The agent-model cards (agents that ran on a larger model than their
     # work needed): an advice-level one makes the check "act". Each one's
     # own fix is offered either way; an info-level one with no prompt in

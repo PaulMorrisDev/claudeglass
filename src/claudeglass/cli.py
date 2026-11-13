@@ -2028,6 +2028,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             until_ts=until_dt.timestamp() if until_dt else None,
             claude_root=claude_root,
             projects_roots=tuple(roots),
+            model_env_set=snapshots.env_var_set(snapshot, snapshots.MODEL_ENV),
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))
