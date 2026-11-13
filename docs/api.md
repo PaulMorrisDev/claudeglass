@@ -1126,7 +1126,7 @@ names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
 One profile's contents. `404` if `<id>` names neither a catalogue id
 nor an existing `<config_dir>/profiles/<id>.toml`.
 
-`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
+`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "own_agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
 `roles` is the profile's `[roles.<role>]` tables as written (the only
 role is `writer`, the agent that writes code). `agents` is as resolved
 (`profiles.roles.resolve`): the profile's own agent tables, plus each
@@ -1135,6 +1135,9 @@ records (user and project agents together) that is named like a writer
 and can edit files. A role with no such agent adds nothing, and so does
 a role when no snapshot has recorded any agents. `setting_count` counts
 settings, the resolved agent keys and environment variables together.
+`own_agents` is the profile's own `[agents.<name>]` tables as written,
+with no role folded in. The editor's "Start from" copies `own_agents` and
+`roles`, so a copy keeps a role as a role.
 
 ### `GET /api/profiles/<id>/diff`
 

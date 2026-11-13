@@ -438,9 +438,12 @@ Where the agents come from:
 - **Dashboard** (`GET /api/profiles/<id>/diff`): the agents the latest
   config snapshot recorded, those from `~/.claude/agents` for the user
   target and those from the project's `.claude/agents` for either project
-  target. `GET /api/profiles/<id>` (the card, the estimate, "Start from")
-  reads both together, returns `agents` as resolved and `roles` as
-  written, and counts only the resolved keys. When no snapshot has
+  target. `GET /api/profiles/<id>` (the card) reads both together,
+  returns `agents` as resolved, `own_agents` and `roles` as written, and
+  counts only the resolved keys. "Start from" copies `own_agents` and
+  `roles`, so the copy resolves its role wherever it is used, like the
+  original. The estimate follows the drawer's target (see the diff
+  route). When no snapshot has
   recorded the user's agents, the role's keys are left out and the drawer
   says the agents have not been recorded yet. At a project target the
   drawer reads the picked project's own agents; with no project picked it

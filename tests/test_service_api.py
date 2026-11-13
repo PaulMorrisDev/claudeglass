@@ -8079,3 +8079,75 @@ def test_the_bundle_prompt_names_the_cards_it_holds(tmp_path, monkeypatch):
         handle.close()
         handle.store.close()
 
+
+_WRITER_ROLE = {"model": "sonnet", "effort": "medium", "maxTurns": 60}
+
+
+def test_the_profile_route_returns_its_own_agents_beside_the_resolved_ones(server):
+    _seed_agents(server, {"builder": ("project", "Read, Edit"), "implementer": ("user", "Read, Edit")})
+    data = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
+    assert data["agents"] == {"builder": _WRITER_ROLE, "implementer": _WRITER_ROLE}  # the card's view, unchanged
+    assert data["own_agents"] == {}
+    assert data["roles"] == {"writer": _WRITER_ROLE}
+    server.post_json(
+        "/api/profiles",
+        {"id": "both", "agents": {"reviewer": {"model": "haiku"}}, "roles": {"writer": {"maxTurns": 30}}},
+    )
+    data = server.get_json("/api/profiles/both")[1]["data"]
+    assert data["own_agents"] == {"reviewer": {"model": "haiku"}}
+    assert data["roles"] == {"writer": {"maxTurns": 30}}
+
+
+def _start_from_copy(server, source_id: str, new_id: str) -> dict:
+    """What the editor posts after Start from <source_id> and Save: its settings, its own agents, its roles."""
+    p = server.get_json(f"/api/profiles/{source_id}")[1]["data"]
+    doc = {"id": new_id, "name": p["name"] + " (my copy)", "settings": p["settings"], "agents": p["own_agents"]}
+    if p["roles"]:
+        doc["roles"] = p["roles"]
+    resp, _body = server.post_json("/api/profiles", doc)
+    assert resp.status == 201
+    return doc
+
+
+@pytest.mark.parametrize(
+    "agents",
+    [
+        {"builder": ("project", "Read, Edit"), "researcher": ("user", "Read, Grep")},  # writer only in the project
+        {"researcher": ("user", "Read, Grep")},  # no writer at all
+        {"implementer": ("user", "Read, Edit"), "builder": ("project", "Read, Edit")},
+    ],
+)
+def test_a_copy_made_with_start_from_shows_what_the_shipped_profile_shows_at_every_target(server, agents):
+    _seed_agents(server, agents)
+    _start_from_copy(server, "implementation-heavy", "my-copy")
+    _start_from_copy(server, "my-copy", "my-copy-2")  # a copy of the copy
+    text = (server.options.config_dir / "profiles" / "my-copy-2.toml").read_text(encoding="utf-8")
+    assert "[roles.writer]" in text and "[agents." not in text
+    for query in ("scope=user", "scope=project-local&project=proj-a", "scope=repo&project=proj-a", "scope=repo"):
+        shipped = server.get_json(f"/api/profiles/implementation-heavy/diff?{query}")[1]["data"]
+        for copy_id in ("my-copy", "my-copy-2"):
+            copy = server.get_json(f"/api/profiles/{copy_id}/diff?{query}")[1]["data"]
+            for part in ("settings", "agents", "env", "notes", "diff"):
+                assert copy[part] == shipped[part], (query, copy_id, part)
+
+
+def test_a_copy_made_with_start_from_applies_like_the_shipped_profile(server, tmp_path):
+    from claudeglass.profiles import apply as apply_mod
+    from claudeglass.profiles.schema import load_profile
+
+    _seed_agents(server, {"builder": ("project", "Read, Edit")})
+    _start_from_copy(server, "implementation-heavy", "my-copy")
+    copy = load_profile(server.options.config_dir / "profiles" / "my-copy.toml")
+    for agent_files in ({}, {"implementer.md": "---\nname: implementer\ntools: Read, Edit\n---\n"}):
+        root = tmp_path / f"root-{len(agent_files)}"
+        (root / "agents").mkdir(parents=True)
+        for name, body in agent_files.items():
+            (root / "agents" / name).write_text(body, encoding="utf-8")
+        plans = [
+            apply_mod.plan_apply(p, scope="user", project_path=None, config_dir=tmp_path / "cfg", claude_root=root)
+            for p in (profile_catalogue.get("implementation-heavy"), copy)
+        ]
+        assert [(a.kind, a.path, a.new_bytes) for a in plans[0].actions if a.kind != "active_profile"] == [
+            (a.kind, a.path, a.new_bytes) for a in plans[1].actions if a.kind != "active_profile"
+        ]
+        assert plans[0].blocked == plans[1].blocked == ()

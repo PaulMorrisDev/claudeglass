@@ -119,6 +119,12 @@ Capture and dashboard:
   than the one the change sets are left out, and so is a project whose
   sessions before the change never ran the old one. When none is left, the
   Changes page says the change has not changed what you paid.
+- **"Start from" a profile that changes the agent that writes code keeps
+  that change as it is.** The copy names the role, not the agents found
+  on this machine, so it shows and applies like the original at every
+  target. Before, it named one agent, and `apply` refused the copy or
+  dropped the change. Make such a copy again to get this.
+  `GET /api/profiles/<id>` adds `own_agents`.
 
 Cards and checks:
 

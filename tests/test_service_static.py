@@ -4579,3 +4579,16 @@ def test_the_bundle_note_says_a_model_change_is_left_out_to_try_first() -> None:
     assert line({"files": [{"file": "a", "fixes": 1}], "several": 0, "other": 0, "left_out": {"trial": 0}}) == (
         "1 open fix for P: 1 file to edit."
     )
+
+
+def test_start_from_carries_the_role_and_fills_only_the_profiles_own_agents() -> None:
+    """F1: "Start from" copies a profile's own agents and carries its role as a role, so the copy
+    shows and applies like the original at every target."""
+    editor = re.sub(r"\s+", " ", _function_source(_app_js(), "buildProfileEditor"))
+    assert "p.own_agents" in editor and "p.agents" not in editor
+    assert "carriedRoles = p.roles && Object.keys(p.roles).length ? p.roles : null;" in editor
+    assert "if (carriedRoles) doc.roles = carriedRoles;" in editor
+    assert '"For the agent that writes code: "' in editor
+    assert (
+        '". It goes to each of your agents named like implementer, fixer or builder that can edit files."' in editor
+    )

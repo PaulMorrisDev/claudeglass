@@ -639,10 +639,29 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       : "";
     carriedLine.hidden = !carriedModelSettings;
   }
+  // A "Start from" profile's role ([roles.writer]) is carried through as it is, so a
+  // copy changes the agent that writes code at every target, as the original does.
+  var carriedRoles = null;
+  var carriedRolesLine = el("p", { class: "notes", id: "profile-form-roles", hidden: true });
+  function showCarriedRoles() {
+    var writer = carriedRoles && carriedRoles.writer;
+    var labels = profileLeverLabels(schema);
+    carriedRolesLine.textContent = writer
+      ? "For the agent that writes code: " +
+        Object.keys(writer)
+          .map(function (key) {
+            return (labels[key] || key) + " " + _diffRowValue(writer[key]);
+          })
+          .join(", ") +
+        ". It goes to each of your agents named like implementer, fixer or builder that can edit files."
+      : "";
+    carriedRolesLine.hidden = !writer;
+  }
 
   form.appendChild(el("h3", { text: "Settings for one agent" }));
   form.appendChild(el("p", { class: "notes", text: "Written to that agent's file. Use the agent's name as it appears under Agents & context." }));
   var agentBlocks = [];
+  form.appendChild(carriedRolesLine);
   var agentsWrap = el("div", { class: "agent-blocks" });
   form.appendChild(agentsWrap);
   var addAgentBtn = button("Add an agent", { variant: "quiet", icon: "plus" });
@@ -713,6 +732,7 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       if (v !== undefined) doc.settings[f.lever.key] = v;
     });
     if (carriedModelSettings) doc.settings.modelSettings = carriedModelSettings;
+    if (carriedRoles) doc.roles = carriedRoles;
     agentBlocks.forEach(function (block) {
       var agentName = block.name.value.trim();
       if (!agentName) return;
@@ -736,6 +756,8 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
     agentBlocks.length = 0;
     carriedModelSettings = null;
     showCarriedModelSettings();
+    carriedRoles = null;
+    showCarriedRoles();
     if (!startSelect.value) return;
     fetchJson("/api/profiles/" + encodeURIComponent(startSelect.value)).then(function (result) {
       var body = result.body;
@@ -743,11 +765,14 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       var p = body.data;
       carriedModelSettings = p.settings.modelSettings || null;
       showCarriedModelSettings();
+      carriedRoles = p.roles && Object.keys(p.roles).length ? p.roles : null;
+      showCarriedRoles();
       settingFields.forEach(function (f) {
         setLeverValue(f, p.settings[f.lever.key]);
       });
-      Object.keys(p.agents || {}).forEach(function (agentName) {
-        addAgentBlock(agentName, p.agents[agentName]);
+      // Only the agents the profile names itself: a role stays a role (carriedRoles).
+      Object.keys(p.own_agents || {}).forEach(function (agentName) {
+        addAgentBlock(agentName, p.own_agents[agentName]);
       });
       if (!nameInput.value) nameInput.value = (p.name || p.id) + " (my copy)";
     });

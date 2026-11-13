@@ -2883,6 +2883,9 @@ def make_handler(
                 "notes": profile.notes,
                 "settings": dict(profile.settings),
                 "agents": {name: dict(keys) for name, keys in resolved.agents.items()},
+                # What the profile itself names, for "Start from": a copy keeps the role
+                # as a role, not the agents it went to here.
+                "own_agents": {name: dict(keys) for name, keys in profile.agents.items()},
                 "roles": {name: dict(keys) for name, keys in profile.roles.items()},
                 "env": dict(profile.env),
                 "setting_count": setting_count,
