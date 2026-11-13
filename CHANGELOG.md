@@ -251,6 +251,8 @@ Cards and checks:
   or a project effort card is open, the check offers no user-level effort
   command. With the variable set, a goal's effort change says to change
   or remove it; it used to suggest --effort, which the variable beats.
+  With the variable set and no effort card, the check says the variable
+  decides and offers no command.
 - **A model's own effort entry is matched by its canonical id**, so its
   dated, [1m], Bedrock and Vertex spellings count, and an entry for
   another version of the family is no longer changed in its place. The

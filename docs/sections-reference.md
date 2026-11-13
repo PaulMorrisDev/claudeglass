@@ -2630,7 +2630,11 @@ cites the cell it used:
   a flat user level only on Opus 5, Fable 5.1, Fable 5 and earlier models.
   A session on two models is read for its first one. The card is dropped,
   not shown as fixed, and Your changes shows the saved setting as a
-  settings change.
+  settings change. The Overview effort check follows the card
+  (`quick_actions._main_effort_already_set`). While the variable is set and
+  no main-session effort card is open, the check offers no setting for the
+  main session and says the variable decides
+  (`quick_actions._main_effort_left_to_env`).
 - `spawn-claude-md` is held back when at least as many of an agent type's
   runs said they used CLAUDE.md as said they didn't (a tie holds it back),
   and cites the ones that didn't. With no runs that said, it still fires.

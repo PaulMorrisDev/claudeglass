@@ -634,12 +634,16 @@ def _main_effort_card_leads(ctx: Context) -> bool:
 def _without_main_effort(ctx: Context, draft: dict) -> dict:
     """The thinking goal's draft without its main-session candidate while
     the effort card leads; ``removed`` counts it, so the check can say an
-    ignored card is why it has nothing left."""
-    if not _main_effort_card_leads(ctx):
-        return draft
+    ignored card is why it has nothing left. While CLAUDE_CODE_EFFORT_LEVEL
+    is set and no card leads, the candidates go without being counted:
+    nothing was ignored, and no setting wins over the variable."""
     main = [c for c in draft["candidates"] if c["agent"] is None]
     if not main:
         return draft
+    if not _main_effort_card_leads(ctx):
+        if not ctx.effort_level_env_set:
+            return draft
+        return {**draft, "candidates": [c for c in draft["candidates"] if c["agent"] is not None]}
     kept = [c for c in draft["candidates"] if c["agent"] is not None]
     return {**draft, "candidates": kept, "removed": draft["removed"] + len(main), "ignored": draft["ignored"] + main}
 
@@ -673,10 +677,11 @@ def _effort(ctx: Context) -> dict:
         _goal_fixes(ctx, draft, _effort_title),
     )
     already = _main_effort_already_set(ctx)
+    left_to_env = _main_effort_left_to_env(ctx)
     if not fixes:
         return _result(
             "ok",
-            " ".join(text for text in (_IGNORED_ONLY if draft["removed"] else "", already) if text)
+            " ".join(text for text in (_IGNORED_ONLY if draft["removed"] else "", already, left_to_env) if text)
             or f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
             table=table,
         )
@@ -690,7 +695,8 @@ def _effort(ctx: Context) -> dict:
         )
         + " Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
         "check {{page:changes}} after a few sessions."
-        + (f" {already}" if already else ""),
+        + (f" {already}" if already else "")
+        + (f" {left_to_env}" if left_to_env else ""),
         table=table,
         fixes=fixes,
     )
@@ -729,6 +735,31 @@ def _main_effort_already_set(ctx: Context) -> str:
     return _EFFORT_ALREADY_SET.format(
         level=level, model=goals._canonical_model(goals._main_model_id(observed)) or "its model"
     )
+
+
+#: What the effort check says when the main session thinks a lot and
+#: CLAUDE_CODE_EFFORT_LEVEL, not a setting, decides its effort.
+_MAIN_EFFORT_LEFT_TO_ENV = (
+    "The main session spends {share} of its output thinking, but CLAUDE_CODE_EFFORT_LEVEL sets its effort, "
+    "so there is no setting to change. Set the variable to medium where you set it, or remove it."
+)
+
+
+def _main_effort_left_to_env(ctx: Context) -> str:
+    """:data:`_MAIN_EFFORT_LEFT_TO_ENV` when CLAUDE_CODE_EFFORT_LEVEL is set
+    and the main session spent at least ``goals.THINKING_PCT`` of its output
+    thinking, else ``""``. Also ``""`` when a main-session effort card is
+    there: an open one already carries the same advice as a fix, and an
+    ignored one means the person said no."""
+    if not ctx.effort_level_env_set:
+        return ""
+    main = whatif._Tables(ctx.model).row("agents", "topology_effort_by_agent_type", goals.TOP)
+    if main is None or (whatif._num(main.get("thinking_share")) or 0.0) < goals.THINKING_PCT:
+        return ""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "effort-mismatch" and not getattr(rec, "agent_type", None) for rec in recs):
+        return ""
+    return _MAIN_EFFORT_LEFT_TO_ENV.format(share=_pct(main.get("thinking_share")))
 
 
 #: The replay keeps every real summary, so it can only test smaller windows.

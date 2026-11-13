@@ -8379,3 +8379,51 @@ def test_a_profile_file_that_is_not_valid_toml_is_listed_and_its_drawer_says_why
     )
     resp, body = server.get_json("/api/profiles/typo")
     assert resp.status == 409 and body["error"]["message"] == problem
+
+
+def _start_thinking_server(tmp_path, monkeypatch) -> _ServerHandle:
+    """A server whose corpus has six main sessions on Opus 5.5 that spend 75% of their output thinking.
+    Every id and path here is made up."""
+    project_dir = tmp_path / "projects" / "proj-b"
+    project_dir.mkdir(parents=True)
+    for n in range(6):
+        lines = []
+        for i in range(3):
+            line = turn_line(
+                model="claude-opus-5-5",
+                output_tokens=400,
+                timestamp=f"2026-09-20T09:{n:02d}:{i:02d}.000Z",
+                content=[tool_use_block("Bash", f"toolu_think_{n}_{i}", {"command": "ls"})],
+            )
+            line["message"]["usage"]["output_tokens_details"] = {"thinking_tokens": 300}
+            lines.append(line)
+        write_jsonl(project_dir / f"session-{n}.jsonl", lines)
+    return _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+
+
+def test_the_effort_check_says_the_variable_decides_when_the_snapshot_has_it_set(tmp_path, monkeypatch):
+    """The service sets ``Context.effort_level_env_set`` from the snapshot's ``content_layers``: the check offers
+    no main-session setting and says why; without the variable it offers one."""
+
+    def effort_check(effort_env_set):
+        handle = _start_thinking_server(tmp_path / ("with" if effort_env_set else "without"), monkeypatch)
+        try:
+            _seed_settings_snapshot(
+                handle, "proj-b", "2026-09-21T12:00:00Z", effort="high", layer="user", effort_env_set=effort_env_set
+            )
+            resp, body = handle.get_json("/api/quick-actions/effort")
+            assert resp.status == 200
+            return body["data"]
+        finally:
+            handle.close()
+            handle.store.close()
+
+    with_variable = effort_check(True)
+    assert with_variable["fixes"] == []
+    assert with_variable["summary"] == (
+        "The main session spends 75% of its output thinking, but CLAUDE_CODE_EFFORT_LEVEL sets its effort, "
+        "so there is no setting to change. Set the variable to medium where you set it, or remove it."
+    )
+    without = effort_check(False)
+    assert [f["title"] for f in without["fixes"]] == ["Main session: effort medium on claude-opus-5-5"]
+    assert "CLAUDE_CODE_EFFORT_LEVEL sets its effort" not in without["summary"]

@@ -3151,3 +3151,70 @@ def test_the_effort_check_never_says_the_level_is_set_while_the_variable_decides
     result = qa.run("effort", _ctx(tmp_path, model=model, effective=effective, effective_provenance=provenance,
                                    effort_level_env_set=True))
     assert "is already medium" not in result["summary"]
+
+
+# -- the effort check while CLAUDE_CODE_EFFORT_LEVEL decides ---------------------
+
+_LEFT_TO_ENV = (
+    "The main session spends {share} of its output thinking, but CLAUDE_CODE_EFFORT_LEVEL sets its effort, "
+    "so there is no setting to change. Set the variable to medium where you set it, or remove it."
+)
+
+
+def _with_reviewer_over_the_bar(model):
+    """``_thinking_rows``'s main session at 40%, and a ``reviewer`` row at 40% too."""
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    row = list(table.rows[0])
+    row[keys.index("agent_type")] = "reviewer"
+    table.rows.append(row)
+    return model
+
+
+def _effort_level_fixes(result) -> list:
+    return [f for f in result["fixes"] if "effortLevel" in (f["command"] or "") + (f["prompt"] or "")]
+
+
+def test_the_effort_check_offers_no_setting_while_the_variable_decides_and_no_card_exists(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    assert not [r for r in model.recommendations if r.id == "effort-mismatch"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True))
+    assert result["status"] == "ok"
+    assert _effort_level_fixes(result) == [] and result["fixes"] == []
+    assert result["summary"] == _LEFT_TO_ENV.format(share="40%")
+
+
+def test_the_effort_check_keeps_another_agents_fix_and_adds_the_sentence_while_the_variable_decides(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    _with_reviewer_over_the_bar(model)
+    ctx = dict(model=model, effective_agents={"reviewer": {}})
+    plain = qa.run("effort", _ctx(tmp_path, **ctx))
+    assert [f["title"] for f in plain["fixes"] if f.get("agent") is not None] == ["reviewer: effort medium"]
+    result = qa.run("effort", _ctx(tmp_path, effort_level_env_set=True, **ctx))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["reviewer: effort medium"]
+    assert result["summary"].endswith(" " + _LEFT_TO_ENV.format(share="40%"))
+
+
+def test_an_open_env_effort_card_keeps_its_fix_and_the_check_adds_no_sentence(tmp_path):
+    """Guard (passes before and after): the card already carries the variable's advice."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(variant="env")]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True))
+    assert [f for f in result["fixes"] if f.get("card") == "effort-mismatch"]
+    assert "CLAUDE_CODE_EFFORT_LEVEL sets its effort" not in result["summary"]
+
+
+def test_the_effort_check_is_what_it_was_with_the_variable_unset(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert result["summary"] == (
+        "1 of your agents or sessions spent more than 20% of their output thinking. Thinking is billed as output; "
+        "a lower effort thinks less, but how much less isn't measured, so check {{page:changes}} after a few sessions."
+    )
+    assert [f["title"] for f in result["fixes"]] == ["Main session: effort medium on claude-opus-5-5"]
