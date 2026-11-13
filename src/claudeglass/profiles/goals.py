@@ -424,6 +424,12 @@ def _thinking(draft: _Draft, tables, *, subagents_only: bool) -> None:
             # asks for), or set where no profile can win (managed settings).
             if level in EFFORT_DONE or layer == "managed":
                 continue
+            if decided_by == "effortLevel" and _project_effort_note(layer):
+                # N6: a project file's flat level wins over a model's own level in
+                # a lower file, so the change goes to that flat level, as the
+                # project effort card's does.
+                draft.add("effortLevel", None, "medium", ticked=False, evidence=evidence + _project_effort_note(layer))
+                continue
             if model_id:
                 entry = _model_with_own_effort(draft, model_id) or model_id
                 draft.add(
@@ -521,6 +527,19 @@ def main_effort_reading(
 def main_effort_in_force(effective: dict, provenance: dict, observed: str | None) -> str | None:
     """:func:`main_effort_reading`'s level alone."""
     return main_effort_reading(effective, provenance, observed)[0]
+
+
+def _project_effort_note(layer: str | None) -> str:
+    """N6: when a project file's flat effortLevel is what decides now, a
+    sentence saying it wins over a model's own level in a lower file."""
+    from ..fixes import _OVERRIDING_PROJECT_FILE
+
+    if layer not in _OVERRIDING_PROJECT_FILE:
+        return ""
+    return (
+        f" This project's {_OVERRIDING_PROJECT_FILE[layer]} sets effortLevel, which wins over a model's own level, "
+        "so apply this to that file."
+    )
 
 
 def _omit_claude_md(draft: _Draft, tables) -> None:

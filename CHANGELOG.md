@@ -245,7 +245,8 @@ Cards and checks:
   effortLevel did nothing on Opus 5.5 and later. The entry goes under the
   model's canonical id, so a dated, [1m], Bedrock or Vertex id gets one
   `apply` accepts, and a model name it cannot read gets the plain effort
-  level. It drafts nothing when the level is already medium or lower.
+  level. It drafts nothing when the level is already medium or lower, and
+  changes a project file's flat effortLevel when that is what wins.
 - **The effort check follows the effort card.** Ignoring the card removes
   the check's main-session change. While CLAUDE_CODE_EFFORT_LEVEL is set
   or a project effort card is open, the check offers no user-level effort
@@ -270,6 +271,8 @@ Cards and checks:
 - **A profile that sets effortLevel in your user settings says Opus 5.5
   and later ignore it there.** The diff row and the prompt suggest /effort
   on each model, or a project target, where it applies to every model.
+  A model's own effortLevel row says when a project file's flat level wins
+  over it, and the apply preview lists it as overridden.
 
 Coaching:
 

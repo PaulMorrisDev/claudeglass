@@ -1320,3 +1320,28 @@ def test_a_plugin_agent_never_gets_the_rename_row():
     rec = Recommendation(id="x", title="t", scope="user", why="", estimated_saving="", saving_basis="",
                          changes=[change], agent_type=agent)
     assert list(fixes.NO_FIX_FOR_NAME) not in fixes.build_fix(rec, change)["explainer"]
+
+
+# -- N6: a model's own level loses to a project file's flat effortLevel ---------
+
+
+def test_a_models_own_effort_row_says_a_project_files_flat_level_wins():
+    from claudeglass.fixes import profile_overridden_by
+
+    key = "settings.modelSettings.claude-opus-5-5.effortLevel"
+    assert profile_overridden_by(key, "user", {"effortLevel": "project_shared"}, [], False, None, True) == (
+        "This project's .claude/settings.json sets effortLevel, which wins over this model's own level."
+    )
+    # Applied to that file, the model's own entry wins within it.
+    assert profile_overridden_by(key, "repo", {"effortLevel": "project_shared"}, [], False, None, True) is None
+    # With no project picked, no project file is named.
+    assert profile_overridden_by(key, "user", {"effortLevel": "project_shared"}, [], False, None, False) is None
+
+
+def test_a_models_own_window_row_says_the_window_variable_wins():
+    from claudeglass.fixes import profile_overridden_by
+
+    key = "settings.modelSettings.claude-opus-5-5.autoCompactWindow"
+    assert profile_overridden_by(key, "user", {}, ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], False, None, True) == (
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
+    )

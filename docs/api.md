@@ -1538,7 +1538,10 @@ or while `CLAUDE_CODE_EFFORT_LEVEL` is set, it drafts `effortLevel`.
 It drafts nothing when the settings already give that model `low` or
 `medium`, or a managed file sets its level (`main_effort_reading`, which
 reads `effective_provenance`: `draft(..., provenance=)`, passed by the goal
-route and the CLI).
+route and the CLI). When a project, local or project-shared file's flat
+`effortLevel` is what decides, it drafts that flat level, and the evidence
+adds "This project's <file> sets effortLevel, which wins over a model's own
+level, so apply this to that file."
 While `ANTHROPIC_MODEL` is set, the `models` goal drafts no change to the main
 session's model, as the variable picks it.
 `profile` holds the ticked changes and `whatif` their combined

@@ -1290,8 +1290,11 @@ def profile_overridden_by(
        ``project_picked``: with none, the snapshot is whichever project's
        took it, and the sentence would name a project the reader did not
        choose.
-    2. ``settings.autoCompactWindow`` while ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
-       is among ``env_names``.
+    1b. ``settings.modelSettings.<id>.effortLevel`` while such a project file
+       sets the flat ``effortLevel``: a higher file's flat value beats a lower
+       file's per-model entry (N6).
+    2. ``settings.autoCompactWindow``, or a model's own window, while
+       ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` is among ``env_names``.
     2b. ``settings.model`` while ``ANTHROPIC_MODEL`` is among ``env_names``.
     3. ``settings.effortLevel`` while ``effort_env_set``
        (``CLAUDE_CODE_EFFORT_LEVEL``).
@@ -1313,6 +1316,8 @@ def profile_overridden_by(
     precedence = {name: rank for rank, name in enumerate(snapshots_mod.SETTINGS_LAYER_NAMES)}
     target = _SCOPE_LAYER.get(scope)
     layer = provenance.get(key)
+    model_parts = key.split(".")
+    own_key = model_parts[2] if len(model_parts) == 3 and model_parts[0] == "modelSettings" else None
     if (
         project_picked
         and target in precedence
@@ -1320,12 +1325,21 @@ def profile_overridden_by(
         and precedence[layer] < precedence[target]
     ):
         return f"This project's {_OVERRIDING_PROJECT_FILE[layer]} sets it too and wins."
+    flat_layer = provenance.get("effortLevel")
+    if (
+        own_key == "effortLevel"
+        and project_picked
+        and target in precedence
+        and flat_layer in _OVERRIDING_PROJECT_FILE
+        and precedence[flat_layer] < precedence[target]
+    ):
+        # N6: a higher file's flat effortLevel beats a lower file's per-model entry.
+        return f"This project's {_OVERRIDING_PROJECT_FILE[flat_layer]} sets effortLevel, which wins over this model's own level."
     if key == "model" and snapshots_mod.MODEL_ENV in env_names:
         return f"{snapshots_mod.MODEL_ENV} is set and wins over this setting."
-    if key == "autoCompactWindow" and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
+    if (key == "autoCompactWindow" or own_key == "autoCompactWindow") and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
         return f"{snapshots_mod.AUTO_COMPACT_WINDOW_ENV} is set and wins over this setting."
-    model_parts = key.split(".")
-    if effort_env_set and len(model_parts) == 3 and model_parts[0] == "modelSettings" and model_parts[2] == "effortLevel":
+    if effort_env_set and own_key == "effortLevel":
         # A model's own effort level loses to the variable too.
         return "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
     if key == "effortLevel":

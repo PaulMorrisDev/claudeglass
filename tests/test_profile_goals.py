@@ -925,6 +925,20 @@ def test_the_thinking_goal_offers_nothing_for_a_model_already_at_medium_or_lower
     assert out["candidates"] == []
 
 
+def test_a_project_files_flat_level_gets_the_flat_change_with_where_to_apply_it():
+    # N6: a project file's flat level wins over a model's own level in your user settings.
+    out = goals.draft(
+        "thinking", _with_observed_model("claude-opus-5-5"), UNITS,
+        effective={"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+        provenance={"effortLevel": "project_shared", "modelSettings": "user"},
+    )
+    [candidate] = out["candidates"]
+    assert (candidate["key"], candidate["value"]) == ("effortLevel", "medium")
+    assert candidate["evidence"].endswith(
+        "This project's .claude/settings.json sets effortLevel, which wins over a model's own level, so apply this to that file."
+    )
+
+
 def test_a_managed_effort_level_gets_no_thinking_candidate():
     out = goals.draft(
         "thinking", _with_observed_model("claude-opus-5-5"), UNITS,

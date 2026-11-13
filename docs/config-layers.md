@@ -130,7 +130,15 @@ or the generic marker:
   first model of a mixed-model row), keyed by its canonical id
   (`_canonical_model`), as `/effort` saves it; it falls back to the flat
   `effortLevel` when no model was recorded, the name has no canonical id, or
-  the variable is set.
+  the variable is set. A flat `effortLevel` in a higher file beats a model's
+  own entry in a lower one (model-config docs), so when a project file's
+  flat level decides, `thinking` drafts the flat level, and
+  `profile_overridden_by` says of a lower target's per-model row "This
+  project's <file> sets effortLevel, which wins over this model's own
+  level." The apply preview lists such a row as overridden. A per-model
+  `autoCompactWindow` row says `CLAUDE_CODE_AUTO_COMPACT_WINDOW` wins, as
+  the flat key's row does; whether a higher file's flat window beats a
+  lower file's per-model one is not in the docs, so no row claims it.
 
 `effective`/`effective_provenance` merge exactly this same key set
 (`SETTINGS_SUMMARY_KEYS`) across the four layers — a value there has

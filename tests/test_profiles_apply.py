@@ -1480,3 +1480,21 @@ def test_a_per_model_effort_level_merges_and_is_explained_like_the_flat_one(tmp_
     assert "Change: modelSettings.claude-opus-5-5.effortLevel" in lines
     assert f"  What it controls: {SETTING_TEXT['modelSettings.effortLevel'][0]}" in lines
     assert any(line.startswith("  Trade-off: Lower effort can miss things") for line in lines)
+
+
+def test_the_apply_preview_says_a_project_files_flat_effort_beats_a_models_own_level(tmp_path):
+    # N6: within a file a model's own level wins; across files the higher file's flat level does.
+    claude_root = tmp_path / ".claude"
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    snap = _snapshot(effective={"effortLevel": "high"}, effective_provenance={"effortLevel": "project_shared"})
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass",
+                                claude_root=claude_root, snapshot=snap)
+    assert plan.overridden == (
+        "modelSettings.claude-opus-5-5.effortLevel: effortLevel is set by this project's shared settings "
+        "(.claude/settings.json), which takes precedence",
+    )
+    same_file = apply_mod.plan_apply(profile, scope="repo", project_path=project, config_dir=claude_root / "claudeglass",
+                                     claude_root=claude_root, snapshot=snap)
+    assert same_file.overridden == ()
