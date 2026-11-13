@@ -531,8 +531,8 @@ runs under the context window now in force, is [its own tip](run-split.md).
   counts for the piece that started the agent.
 
 Without the service, `claudeglass capture refresh` works the file
-out now. Until there is one, no agent type gets the split hint and the
-plan hint is on, and `typical` is `0`, which leaves the reminder at its
+out now. Until there is one, nothing is muted, raised or shown once for
+you, and `typical` is `0`, which leaves the reminder at its
 million tokens. `capture status` says what the file holds. The service
 also writes the file for a survey item on your messages, with coaching
 notes off, since the facts line and the reminder read it too.
@@ -651,8 +651,9 @@ loses it skips that write; the next call catches up from the transcript.
 
 A hint left out is not marked as shown, so it comes back at once if the mod
 stops. A mod that is missing, closed, or whose file is unreadable or stale
-(no refresh for 10 minutes) changes nothing. An agent run that ended too big
-is still noted while the mod runs, so it is told once the mod stops.
+(no refresh for 10 minutes) changes nothing. The mod never tells an agent
+run that ended too big: while `split_run` is on, the hook notes and tells
+it, mod or no mod.
 
 On the dashboard's Work habits tab, the Tips table counts both sources.
 **Passed on by Claude** is the tips in Claude's replies, as before.
@@ -763,7 +764,9 @@ it) and keeps a small state file,
 times, how long it rests, the time, context and cache lifetime of the
 newest reply (numbers only), and how many agent runs ended too big and
 have not been told yet, by the two words `compaction` and `brief`. Entries
-older than a day are dropped. For the survey it also keeps,
+older than a day are dropped. When the `claude` command that runs Claude
+Haiku isn't signed in, it also holds the time, an hour on, when the hook
+will ask it again (`judge`). For the survey it also keeps,
 for every session together, how many plan checks in a row went unanswered
 and when the check rests until, the time of the last rating reminder, and
 short salted hashes of the plans and pieces of work it has already noted
