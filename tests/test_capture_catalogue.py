@@ -556,6 +556,21 @@ def test_the_check_line_asks_only_on_a_reply_that_changed_a_file():
     ) in judge.splitlines()
 
 
+def test_prior_carries_the_summary_question_and_lost_is_yes_or_no():
+    prior = cat.METRICS_BY_ID["prior"]
+    assert cat.TAG_VOCAB["lost"] == ("yes", "no")
+    assert prior.compact_line == (
+        "lost: yes|no, in your next final reply only (yes = the summary just made left out something this work "
+        "needed, so you read it again or asked)"
+    )
+    assert len(prior.compact_line) == 140
+    # Only prior has one, and the ordinary note and the judge's prompt never carry it.
+    assert [m.id for m in cat.METRICS if m.compact_line] == ["prior"]
+    deep = cat.level_metrics("deep")
+    assert "lost" not in cat.note_text(deep, "main") and "lost" not in cat.judge_text(deep)
+    assert prior.compact_line in json.dumps(cat.export_json(), ensure_ascii=False)
+
+
 def test_the_session_note_offers_fix_for_a_fault_in_earlier_work_and_the_parser_keeps_it():
     assert cat.TAG_VOCAB["shift"] == ("new", "build", "grew", "redo", "fix")
     note = cat.note_text(cat.level_metrics("essentials"), "main")

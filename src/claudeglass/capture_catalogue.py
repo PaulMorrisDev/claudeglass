@@ -80,6 +80,10 @@ TAG_VOCAB: dict[str, tuple[str, ...]] = {
     "rules": ("used", "unused"),
     # Deep, main session
     "prior": ("needed", "some", "none"),
+    # Asked once, in the reply after a summary (``Metric.compact_line``,
+    # riding on ``prior``'s switch): whether the summary left out
+    # something the work needed.
+    "lost": ("yes", "no"),
     "detour": ("none", "dead-end", "reread", "overbuilt", "env", "flaky"),
     "check": ("targeted", "full", "build", "run", "manual", "none"),
     "out": ("needed", "part", "unneeded"),
@@ -1919,6 +1923,11 @@ class Metric:
     main_extra_untagged: str = ""
     #: The note a PostToolUse hook adds after a matching tool result.
     tool_note: str = ""
+    #: A key line only a compaction's note carries (the SessionStart whose
+    #: source is ``compact``, in the main session, while Claude writes the
+    #: tags): after the key lines and before the skip line. Its key rides on
+    #: this metric's switch (``capture_tags.MAIN_TAG_FIELDS``).
+    compact_line: str = ""
     #: Other metrics it can't work without (a subagent's extras ride on
     #: ``result``).
     requires: tuple[str, ...] = ()
@@ -2136,6 +2145,8 @@ METRICS: tuple[Metric, ...] = (
         hooks=("SessionStart",),
         main_line="prior: needed|some|none (how much of the earlier conversation this work needed; always none "
         "on the first message)",
+        compact_line="lost: yes|no, in your next final reply only (yes = the summary just made left out something "
+        "this work needed, so you read it again or asked)",
         out_chars=10,
     ),
     Metric(
@@ -3442,6 +3453,7 @@ def export_json() -> dict:
                 "group": m.group,
                 "requires": list(m.requires),
                 "main_line": m.main_line,
+                "compact_line": m.compact_line,
                 "extra_keys": list(m.extra_keys),
                 "main_extra": m.main_extra,
                 "extra_before_tag": m.extra_before_tag,

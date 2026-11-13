@@ -203,7 +203,9 @@ def test_fingerprint_is_pinned():
     to remember to bump this by hand), not to silently ship it.
     """
     # Re-pinned for the ``report_reread`` and ``split_run`` tip titles (parser 43 already starts a new cache generation).
-    assert FINGERPRINT == "1b51edd3cea4b3c2a19d137e9d9a76024e6c9050d133fe108fd40278df393080"
+    # Re-pinned for the ``lost`` key (the summary question; the parser version does not move, the fingerprint
+    # alone starts a new set of cache entries).
+    assert FINGERPRINT == "cf3100d9a9d78cda6dc0c5f7ea3f092a1d4929a4e4f50f6d45379578c1bb9fc3"
 
 
 def test_the_parser_version_has_a_note_saying_what_its_bump_changed():
