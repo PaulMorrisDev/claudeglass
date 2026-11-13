@@ -36,8 +36,8 @@ settings key, e.g. `"model"`, `"subagentPromptCacheTtl"`), an optional
 number can never compound (see "Calibration" below). A row also holds
 `priced_on`: the number the estimate is a share of, such as the observed cost it
 repriced or the tokens per start it takes out, or nothing (`null`) when the
-estimate names none. It is kept so that a later check can price the same
-figure on the sessions after the change; no verdict reads it yet.
+estimate names none. It is kept so that the check can price the same
+figure on the sessions after the change ("An estimate that says what it was priced on", below).
 
 ## The method, in five steps
 
@@ -98,6 +98,40 @@ figure on the sessions after the change; no verdict reads it yet.
    verdict below is built from.
 5. **Verdict**, one of a closed set: `as_estimated`, `smaller`,
    `larger`, `opposite`, `too_little_data`.
+
+### An estimate that says what it was priced on
+
+A row with a `priced_on` is not judged by steps 2 to 4. They compare an
+estimate for the whole report window with the cost per session or per
+spawn of an after-window of another length, and a short after-window reads
+"smaller" however good the estimate was. `outcomes.read_fix` reads such a
+row instead (see [exports](exports.md#reading-the-outcomes-block)): the
+sessions in the 14 days before the change and the 30 days after it,
+in each project the change applies to, cut by other changes to the same
+setting.
+
+- **A model, fast mode, cache lifetime or raised compaction window** is
+  measured by pricing the same replies both ways. The estimate is its saving as a
+  share of the cost it repriced, applied to what the replies after the change would
+  have cost without it.
+- **An agent's tools, disallowed tools, CLAUDE.md, skills or MCP servers**
+  is measured on the context at the start of each agent run, on the one model
+  family both sides share, carried over every reply of the runs after the
+  change. The estimate is the tokens it said it takes out of each start,
+  carried the same way.
+- **Any other setting** has no honest measure (cost per session moves with the
+  kind of work by more than an estimate's size), so the row stays unjudged
+  ("Not judged yet.") and expires like one that never matched. Waiting does not
+  change that.
+- **Fewer than 5 runs after the change** (5 on each side for the start-context
+  measure) waits, then closes out as `too_little_data` once a later change
+  bounds it, as above.
+
+Otherwise the reading's own measured and estimated amounts go through the
+same verdict test as below (`measured_usd` is the reading's; there is no
+percentage). The rows a back-test judges this way are the ones logged after
+the change that began recording `priced_on`; an older row is judged by
+steps 2 to 4, unchanged.
 
 ## Verdicts
 
@@ -165,6 +199,8 @@ predicted_usd` ratios into one multiplier per key. `whatif.estimate`
 applies a matching multiplier to that row's `saving_usd`, and its
 `fidelity` becomes `"calibrated"`. The prior is implicitly 1.0: a key
 with fewer than 3 judged points is estimated exactly as before.
+Only predictions that say what they were priced on count: an older row's ratio carries the
+bias of how it was measured (a window of another length), not the estimate's.
 
 The pre-calibration value and fidelity survive in every row as
 `uncalibrated_usd`/`uncalibrated_fidelity` (`null` when calibration

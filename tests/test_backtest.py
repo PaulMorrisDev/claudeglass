@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudeglass import backtest, counterfactual, impact
+from claudeglass import backtest, counterfactual, impact, outcomes
 from claudeglass.change_points import ChangePoint
 from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing, price_turn
@@ -197,17 +197,19 @@ def test_present_every_closed_verdict_has_its_own_sentence():
 # -- EST-P6: calibration_multipliers -----------------------------------------
 
 
-def _judged_store(rows: list[tuple[str | None, str, float, float | None]]) -> Store:
+def _judged_store(rows: list[tuple]) -> Store:
     """A store with one judged prediction per ``(agent, measure_key,
     predicted_usd, measured_usd)`` row (``measured_usd=None`` for a
-    too_little_data verdict)."""
+    too_little_data verdict). A fifth element is what the estimate was priced
+    on (``None`` for a row logged before that was kept); without one it is 100."""
     store = Store(":memory:")
     store.open()
-    for i, (agent, key, predicted, measured) in enumerate(rows):
+    for i, (agent, key, predicted, measured, *priced) in enumerate(rows):
         pid = f"pred-{i}"
         store.upsert_prediction(
             prediction_id=pid, ts="2026-09-20T09:00:00Z", source="whatif", measure_key=key,
             agent=agent, predicted_usd=predicted, predicted_pct=None, fidelity="ceiling",
+            priced_on=priced[0] if priced else 100.0,
         )
         verdict = "too_little_data" if measured is None else "as_estimated"
         store.judge_prediction(pid, change_ts="2026-09-21T09:00:00Z", verdict=verdict, measured_usd=measured, measured_pct=None)
@@ -242,6 +244,16 @@ def test_calibration_skips_too_little_data_and_zero_predicted_rows():
         [(None, "model", 1.0, None), (None, "model", 0.0, 5.0), (None, "model", 1.0, 2.0)]
     )
     assert backtest.calibration_multipliers(store) == {}
+
+
+def test_calibration_learns_only_from_predictions_that_say_what_they_were_priced_on():
+    old = [(None, "model", 1.0, 5.0, None)] * 3
+    new = [(None, "model", 1.0, 2.0)] * 3
+    # Rows logged before the figure was kept were judged against a whole window's estimate on a short
+    # after-window, so their ratios carry a bias that is not the estimate's: they teach nothing.
+    assert backtest.calibration_multipliers(_judged_store(old)) == {}
+    assert backtest.calibration_multipliers(_judged_store(old + new)) == {(None, "model"): 2.0}
+    assert backtest.calibration_multipliers(_judged_store(old[:2] + new[:2])) == {}
 
 
 # -- judge_predictions: end to end -------------------------------------------
@@ -467,6 +479,154 @@ def test_judge_predictions_waits_while_the_after_window_is_still_open(tmp_path):
 
     assert judged == 0
     assert len(store.predictions(judged=False)) == 1
+
+
+def _priced_prediction(store: Store, key: str, t0: datetime, *, predicted: float = 10.0, priced_on: float | None = 100.0):
+    store.upsert_prediction(
+        prediction_id="pred-1",
+        ts=(t0 - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        source="whatif",
+        measure_key=key,
+        agent=None,
+        predicted_usd=predicted,
+        predicted_pct=None,
+        fidelity="ceiling",
+        priced_on=priced_on,
+    )
+
+
+def _no_rate_path(monkeypatch):
+    """Judging through ``outcomes`` never reads cost per session or per spawn, nor the counterfactual directly."""
+
+    def refuse(*args, **kw):
+        raise AssertionError("a prediction with a figure it was priced on takes the rate path")
+
+    monkeypatch.setattr(backtest, "_judge_row", refuse)
+    monkeypatch.setattr(backtest, "_exact_saving", refuse)
+
+
+def test_a_prediction_with_a_figure_it_was_priced_on_is_judged_through_outcomes(tmp_path, monkeypatch):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"model": "sonnet"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    corpus = load_corpus([project_dir])
+    store = Store(":memory:")
+    store.open()
+    _priced_prediction(store, "model", t0)
+    seen = []
+
+    def fake(point, agent, key, prediction, *args, **kw):
+        seen.append((point.iso(), agent, key, prediction.saving_usd, prediction.basis))
+        return outcomes.Reading(method="exact", verdict="half_or_more", predicted_usd=10.0, measured_usd=9.0)
+
+    monkeypatch.setattr(outcomes, "read_fix", fake)
+    _no_rate_path(monkeypatch)
+    judged = backtest.judge_predictions(store, corpus, load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=2))
+    assert judged == 1
+    assert seen == [(point_ts.strftime("%Y-%m-%dT%H:%M:%SZ"), None, "model", 10.0, 100.0)]
+    [row] = store.predictions(judged=True)
+    # The reading's own figures, per unit of the work measured: nine against ten is as estimated.
+    assert (row["verdict"], row["measured_usd"], row["measured_pct"]) == ("as_estimated", 9.0, None)
+
+
+@pytest.mark.parametrize(
+    ("measured", "verdict"),
+    [(4.0, "smaller"), (-4.0, "opposite"), (25.0, "larger"), (0.001, "smaller")],
+)
+def test_an_outcomes_reading_is_put_in_the_backtests_own_words(tmp_path, monkeypatch, measured, verdict):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"model": "sonnet"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    store = Store(":memory:")
+    store.open()
+    _priced_prediction(store, "model", t0)
+    reading = outcomes.Reading(method="exact", verdict="under_half", predicted_usd=10.0, measured_usd=measured)
+    monkeypatch.setattr(outcomes, "read_fix", lambda *args, **kw: reading)
+    backtest.judge_predictions(store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=2))
+    [row] = store.predictions(judged=True)
+    assert (row["verdict"], row["measured_usd"]) == (verdict, measured)
+
+
+def test_a_prediction_on_a_lever_with_no_honest_measure_stays_unjudged(tmp_path, monkeypatch):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"effortLevel": "medium"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    for i, hours in enumerate((2, 1.5, 1), start=1):
+        _session_file(project_dir, f"before-{i}", point_ts - timedelta(hours=hours), input_tokens=100_000)
+        _session_file(project_dir, f"after-{i}", point_ts + timedelta(hours=hours), input_tokens=10_000)
+    store = Store(":memory:")
+    store.open()
+    _priced_prediction(store, "effortLevel", t0)
+    _no_rate_path(monkeypatch)
+    # Even with a later change bounding the window, and sessions on both sides, the rate path is never
+    # taken for it and the row waits: waiting does not change what cannot be measured.
+    _snapshot(config_dir, point_ts + timedelta(hours=5), {"customKey": "a"})
+    _snapshot(config_dir, point_ts + timedelta(hours=6), {"customKey": "b"})
+    judged = backtest.judge_predictions(
+        store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=1)
+    )
+    assert judged == 0
+    [row] = store.predictions(judged=False)
+    assert row["verdict"] is None and backtest.present([row], UNITS)[0]["verdict_text"] == "Not judged yet."
+
+
+@pytest.mark.parametrize(("bounded", "judged_as"), [(False, None), (True, "too_little_data")])
+def test_a_prediction_with_too_little_data_after_waits_until_a_later_change_closes_its_window(
+    tmp_path, monkeypatch, bounded, judged_as
+):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"model": "sonnet"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    for i, hours in enumerate((2, 1.5, 1), start=1):
+        _session_file(project_dir, f"before-{i}", point_ts - timedelta(hours=hours), input_tokens=100_000)
+    for i, hours in enumerate((1, 2, 3), start=1):
+        _session_file(project_dir, f"after-{i}", point_ts + timedelta(hours=hours), input_tokens=10_000)
+    store = Store(":memory:")
+    store.open()
+    _priced_prediction(store, "model", t0)
+    _no_rate_path(monkeypatch)
+    if bounded:
+        _snapshot(config_dir, point_ts + timedelta(hours=5), {"customKey": "a"})
+        _snapshot(config_dir, point_ts + timedelta(hours=6), {"customKey": "b"})
+    judged = backtest.judge_predictions(
+        store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=1)
+    )
+    if judged_as is None:
+        assert judged == 0 and len(store.predictions(judged=False)) == 1
+        return
+    assert judged == 1
+    [row] = store.predictions(judged=True)
+    assert (row["verdict"], row["measured_usd"]) == ("too_little_data", None)
+
+
+def test_a_prediction_without_a_figure_it_was_priced_on_is_judged_as_before(tmp_path):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"effortLevel": "medium"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    for i, hours in enumerate((2, 1.5, 1), start=1):
+        _session_file(project_dir, f"before-{i}", point_ts - timedelta(hours=hours), input_tokens=100_000)
+    for i, hours in enumerate((1, 2, 3), start=1):
+        _session_file(project_dir, f"after-{i}", point_ts + timedelta(hours=hours), input_tokens=10_000)
+    store = Store(":memory:")
+    store.open()
+    _priced_prediction(store, "effortLevel", t0, predicted=0.01, priced_on=None)
+    judged = backtest.judge_predictions(
+        store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(hours=10)
+    )
+    assert judged == 1
+    [row] = store.predictions(judged=True)
+    # The rate path: a measured total from the change in cost per session.
+    assert row["verdict"] == "larger" and row["measured_usd"] > 0 and row["measured_pct"] is not None
 
 
 def _snapshot(config_dir: Path, ts: datetime, effective: dict) -> None:

@@ -3703,7 +3703,7 @@ def test_whatif_calibrates_once_three_predictions_for_the_key_are_judged(server)
         pid = f"pred-{i}"
         server.store.upsert_prediction(
             prediction_id=pid, ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
-            agent=None, predicted_usd=1.0, predicted_pct=None, fidelity="ceiling",
+            agent=None, predicted_usd=1.0, predicted_pct=None, fidelity="ceiling", priced_on=100.0,
         )
         server.store.judge_prediction(pid, change_ts="2026-09-21T09:00:00Z", verdict="larger", measured_usd=2.0, measured_pct=None)
 
