@@ -1285,7 +1285,7 @@ def make_handler(
         # its settings still show (report._settings_snapshots) and the
         # report's meta.projects names it, as the CLI's does for a selected
         # folder.
-        projects =tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
+        projects = tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
         window = _window_label(window_days, since, until)
         try:
             overrides = load_session_overrides(options.config_dir)

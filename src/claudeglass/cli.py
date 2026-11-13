@@ -2233,7 +2233,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         return err
 
     try:
-        arm_a =compare_mod.parse_arm_spec(args.arm_a)
+        arm_a = compare_mod.parse_arm_spec(args.arm_a)
         arm_b = compare_mod.parse_arm_spec(args.arm_b)
     except ValueError as exc:
         print(f"claudeglass compare: {exc}", file=sys.stderr)
@@ -4772,7 +4772,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             also = [m for m in current.active_metrics() if m not in preview.active_metrics() and m not in args.values]
             if also:
                 stdout.write(f"{', '.join(also)} need{'s' if len(also) == 1 else ''} {', '.join(args.values)}, so {'it goes' if len(also) == 1 else 'they go'} too.\n")
-        added =[m for m in preview.active_metrics() if m not in current.active_metrics()]
+        added = [m for m in preview.active_metrics() if m not in current.active_metrics()]
         costly = [m for m in added if capture_catalogue.asks_claude(m)]
         coaching_added = preview.coaching_notes_on and not current.coaching_notes_on
         if coaching_added:
