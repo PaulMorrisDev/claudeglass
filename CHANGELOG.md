@@ -230,32 +230,30 @@ Cards and checks:
   asks for /effort medium, which Claude Code saves per model. While
   CLAUDE_CODE_EFFORT_LEVEL is set, it says the variable wins. The
   auto-compact cards name a model whose own window wins.
-- **The thinking goal and the Overview effort check now set the main
-  session's effort for the model it ran on, as /effort does.** A user-level
-  effortLevel did nothing on Opus 5.5 and later.
-- **Ignoring the effort card now also removes the effort check's
-  main-session change.**
-- **The effort check no longer offers a user-level effort command while
-  CLAUDE_CODE_EFFORT_LEVEL is set, or while a project effort card is open.**
-- **When CLAUDE_CODE_EFFORT_LEVEL is set, a goal's effort change now says to
-  change or remove the variable.** It used to suggest --effort, which the
-  variable beats.
-- **The apply preview now explains a per-model effort level or window the
-  way it explains the flat setting.**
-- **A model's own effort entry is now matched by its canonical id, so
-  dated, [1m], Bedrock and Vertex spellings count.** An entry for another
-  version of the family is no longer changed in its place.
-- **On Bedrock, Vertex or a dated model id, the thinking goal now writes
-  the model's canonical id, which apply accepts.** A model name it cannot
-  read gets the plain effort level.
+- **The thinking goal and the Overview effort check set the main session's
+  effort for the model it ran on, as /effort does.** A user-level
+  effortLevel did nothing on Opus 5.5 and later. The entry goes under the
+  model's canonical id, so a dated, [1m], Bedrock or Vertex id gets one
+  `apply` accepts, and a model name it cannot read gets the plain effort
+  level.
+- **The effort check follows the effort card.** Ignoring the card removes
+  the check's main-session change. While CLAUDE_CODE_EFFORT_LEVEL is set
+  or a project effort card is open, the check offers no user-level effort
+  command. With the variable set, a goal's effort change says to change
+  or remove it; it used to suggest --effort, which the variable beats.
+- **A model's own effort entry is matched by its canonical id**, so its
+  dated, [1m], Bedrock and Vertex spellings count, and an entry for
+  another version of the family is no longer changed in its place. The
+  apply preview explains a per-model effort level or window the way it
+  explains the flat setting.
 - **The Overview's headline saving leaves out cards you ignored.** An
   ignored model card takes out its main session or agent row, and an
   ignored auto-compact, tool-output or wasted-replies card takes out its
   lever.
 - **The main session's model card offers no setting while ANTHROPIC_MODEL
   is set.** The variable wins over the model setting, so the card, the
-  Models check and the profile diff say so instead. A snapshot from before
-  this reads as not set. The Setup goal leaves it out too.
+  Models check and the profile diff say so instead, and the Setup goal
+  drafts no change to it. A snapshot from before this reads as not set.
 - **A profile that sets effortLevel in your user settings says Opus 5.5
   and later ignore it there.** The diff row and the prompt suggest /effort
   on each model, or a project target, where it applies to every model.
