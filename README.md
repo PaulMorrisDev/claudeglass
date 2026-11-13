@@ -475,7 +475,8 @@ and they work at any capture level, Off included:
   adds a short note and Claude passes the tip on. Some hints stay off until
   a replay of real sessions finds them right more often than wrong.
   [`docs/capture.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/capture.md#live-coaching)
-  names the ones that speak, and `capture status` the ones that are off.
+  names the ones that speak, and, once coaching notes are on, `capture
+  status` the ones that are off.
   Where your app shows hook messages, you also see a
   one-line notice the moment you send the message. They're made for the
   desktop app, where the status line doesn't show.
