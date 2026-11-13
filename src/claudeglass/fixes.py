@@ -1024,7 +1024,18 @@ def command_for(change: SettingChange, scope: str) -> str | None:
     scope = change.scope or scope
     if change.value is None or change.new_agent_file or scope == "managed":
         return None
-    parts = ["claudeglass", "apply", "--set", f"{change.key}={_cli_value(change.value)}"]
+    if change.key == "modelSettings" and isinstance(change.value, dict):
+        # apply reads one model's key as modelSettings.<model>.<key>=VALUE.
+        sets = [
+            f"modelSettings.{model}.{sub}={_cli_value(value)}"
+            for model, entry in change.value.items()
+            for sub, value in entry.items()
+        ]
+    else:
+        sets = [f"{change.key}={_cli_value(change.value)}"]
+    parts = ["claudeglass", "apply"]
+    for item in sets:
+        parts += ["--set", item]
     if change.target == "agent" and change.agent:
         parts += ["--agent", change.agent]
     if scope in ("repo", "project-local"):

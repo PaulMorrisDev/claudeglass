@@ -1007,3 +1007,23 @@ def test_the_bundle_lists_the_cards_it_holds_and_none_it_leaves_out():
     assert out["keys"] == ["first", "second"]
     assert len(out["keys"]) == out["cards"]
     assert project_prompt([unconfirmed])["keys"] == []
+
+
+def test_a_per_model_change_gets_the_command_apply_takes():
+    import shlex
+
+    from claudeglass import cli
+    from claudeglass.fixes import command_for
+    from claudeglass.model import SettingChange
+
+    change = SettingChange(
+        target="settings", key="modelSettings", value={"claude-opus-5-5": {"effortLevel": "medium"}}, scope="user"
+    )
+    command = command_for(change, "user")
+    assert command == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope user --dry-run"
+    )
+    # apply accepts what the command sets
+    words = shlex.split(command)
+    profile, error = cli._one_off_profile([words[words.index("--set") + 1]], None)
+    assert error is None and profile is not None

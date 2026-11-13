@@ -167,6 +167,9 @@ Cards and checks:
 - **The CLAUDE.md and skills checks read the project folders the report
   read**, and the CLAUDE.md check offers its cards' fixes when no file
   shows how often it was sent.
+- **A change to one model's own setting gets a command apply accepts.**
+  The checks gave modelSettings as one value apply refused; the command now
+  sets modelSettings.<model>.<key> for each.
 
 Coaching:
 
