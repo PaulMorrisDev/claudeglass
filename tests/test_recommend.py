@@ -1930,7 +1930,9 @@ def test_effort_mismatch_fires_with_evidence_per_purpose_row():
     # purpose group-by by session (no report table carries both), so
     # the approximation is disclosed in the action text rather than
     # presented as a genuine per-session join.
-    assert "not only the light ones" in rec.changes[0].note
+    # No snapshot is given, so effortLevel is not known to be a project, local or managed key: the card
+    # asks for /effort, which Claude Code saves per model, and offers no change.
+    assert rec.changes == [] and rec.variant == "session"
     # No snapshot given -- _lever_scope has nothing to consult, so this
     # defaults to "user" rather than raising.
     assert rec.scope == "user"

@@ -182,6 +182,11 @@ Cards and checks:
   Its file belongs to the plugin, so a card that would edit it is shown
   for information only, the model card leaves it out, and no prompt names
   a path under ~/.claude/agents for it.
+- **The effort card no longer offers a setting that would do nothing.**
+  Opus 5.5 and later ignore effortLevel in your user settings, so the card
+  asks for /effort medium, which Claude Code saves per model. While
+  CLAUDE_CODE_EFFORT_LEVEL is set, it says the variable wins. The
+  auto-compact cards name a model whose own window wins.
 
 Coaching:
 

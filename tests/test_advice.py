@@ -421,6 +421,7 @@ def test_cache_ttl_and_effort_cards_are_dropped_when_already_set():
         ts="2026-09-20T00:00:00Z",
         data={
             "effective": {"effortLevel": "Medium"},
+            "effective_provenance": {"effortLevel": "project_shared"},
             "agents": {"verification-runner": {"source": "user", "experimental.cacheTtl": "1h"}},
         },
     )
@@ -431,7 +432,7 @@ def test_cache_ttl_and_effort_cards_are_dropped_when_already_set():
             agent_type="verification-runner",
             evidence=[("TTL recommendation", "switch to 1h", "ttl", "verification-runner")],
         ),
-        Recommendation(id="effort-mismatch", severity="advice"),
+        Recommendation(id="effort-mismatch", severity="advice", scope="repo"),
     ]
     assert advice.finish(recs, report, snap, Units()) == []
 
@@ -829,7 +830,7 @@ def test_effort_mismatch_from_reported_work_is_explained_as_measured():
         "Claude reported 6 of your messages as easy work, yet they ran at high effort or above, and up to 55% of "
         "their output was thinking."
     )
-    assert out.changes[0].key == "effortLevel" and out.changes[0].value == "medium"
+    assert out.changes == [] and out.variant == "session"
     assert out.estimated_saving.startswith("About ")
 
 
@@ -886,6 +887,7 @@ def test_effort_mismatch_change_keeps_the_recommendations_own_scope():
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {}})
     (out,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "effort-mismatch"]
     assert out.changes[0].scope == "project-local"
+    assert out.action == "Make medium your default effort, and raise it with /effort for the tasks that need it."
 
 
 # -- long-context-share: evidence lookup, title, tokensave variant --------
@@ -1180,4 +1182,93 @@ def test_a_card_that_edits_a_plugin_agents_file_is_information_only(rec_id):
     assert rec.action == (
         "pr-review-toolkit:code-reviewer comes from the pr-review-toolkit plugin. Its file belongs to the "
         "plugin, and the plugin's next update would replace any edit to it."
+    )
+
+
+def _reported_effort_rec(**kw) -> Recommendation:
+    return Recommendation(
+        id="effort-mismatch",
+        severity="advice",
+        category="settings",
+        title="x",
+        lever="effortLevel",
+        saving_usd=1.5,
+        evidence=[
+            ("Easy messages at high effort", 6, "habits.habits_effort_fit", "easy:high"),
+            ("Easy work at high effort, thinking share of output", 55.0, "habits.habits_effort_fit", "easy:high"),
+        ],
+        **kw,
+    )
+
+
+def _effort_card(snapshot_data: dict, **kw) -> Recommendation:
+    report = ReportModel(meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)), sections=[],
+                         diagnostics=Diagnostics(lines=1000))
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=snapshot_data)
+    (out,) = [r for r in advice.finish([_reported_effort_rec(**kw)], report, snap, Units()) if r.id == "effort-mismatch"]
+    fixes.attach_fixes([out])
+    return out
+
+
+@pytest.mark.parametrize(
+    "snapshot_data",
+    [
+        {"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "user"}},
+        {"effective": {}},
+        {
+            "effective": {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+            "effective_provenance": {"modelSettings": "user"},
+        },
+    ],
+)
+def test_the_effort_card_asks_for_the_effort_command_when_user_settings_cannot_set_it(snapshot_data):
+    out = _effort_card(snapshot_data)
+    assert out.changes == []
+    assert out.variant == "session"
+    assert out.action == (
+        "Run /effort medium in a session on each model you use. Claude Code saves it for that model. "
+        "Raise it with /effort when a task needs it."
+    )
+    assert out.fixes[0]["command"] is None and out.fixes[0]["prompt"] == ""
+    assert fixes.project_prompt([out])["cards"] == 0
+
+
+def test_the_effort_card_says_the_variable_wins_while_it_is_set():
+    out = _effort_card(
+        {
+            "effective": {"effortLevel": "high"},
+            "effective_provenance": {"effortLevel": "user"},
+            "content_layers": {"effort_level_env_set": True},
+        }
+    )
+    assert out.changes == []
+    assert out.variant == "env"
+    assert out.action == (
+        "CLAUDE_CODE_EFFORT_LEVEL is set, and it wins over /effort and every effort setting. "
+        "Set it to medium where you set it, or remove it."
+    )
+    assert "CLAUDE_CODE_EFFORT_LEVEL" in out.fixes[0]["prompt"] and out.fixes[0]["command"] is None
+    assert fixes.fix_group(out, None) == ("Your shell profile or a settings file's env block", "several")
+
+
+def test_an_effort_card_stays_when_the_medium_is_in_user_settings():
+    # A user-level medium does not reach Opus 5.5 and later, so the evidence stands.
+    report = _model_swap_report([])
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {"effortLevel": "Medium"}})
+    (out,) = advice.finish([Recommendation(id="effort-mismatch", severity="advice")], report, snap, Units())
+    assert out.id == "effort-mismatch" and out.variant == "session"
+
+
+def test_a_compaction_card_names_a_model_whose_own_window_wins():
+    window = _compaction("compaction-window", title="Set autoCompactWindow to at least 200,000")
+    snap = Snapshot(
+        path=None,
+        ts="2026-09-20T00:00:00Z",
+        data={"effective": {"autoCompactWindow": 400000, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}},
+    )
+    (out,) = [r for r in advice.finish([window], _model_swap_report([]), snap, Units()) if r.id == "compaction-window"]
+    assert out.changes[0].key == "autoCompactWindow"
+    assert out.changes[0].note == (
+        "claude-opus-5-5 has its own auto-compact window, which wins for it. "
+        "To change a model's own window, run /autocompact with the new size in a session on that model."
     )

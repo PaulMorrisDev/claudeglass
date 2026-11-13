@@ -2619,7 +2619,10 @@ cites the cell it used:
   50, unvalidated) and the thinking share over the high, xhigh and max
   rows together (weighted by output tokens) is over the threshold. It cites
   each of those rows' own thinking share and output tokens, and the card says
-  "N of M (P%)" and the pooled percent.
+  "N of M (P%)" and the pooled percent. The card offers no settings change
+  in user settings or while `CLAUDE_CODE_EFFORT_LEVEL` is set: Opus 5.5 and
+  later ignore a user `effortLevel`, so it asks for `/effort medium`. In a
+  project, local or managed file it changes `effortLevel` there.
 - `spawn-claude-md` is held back when at least as many of an agent type's
   runs said they used CLAUDE.md as said they didn't (a tie holds it back),
   and cites the ones that didn't. With no runs that said, it still fires.

@@ -553,6 +553,14 @@ def auto_compact_window_env_set(snapshot: Snapshot | None) -> bool:
     )
 
 
+def effort_level_env_set(snapshot: Snapshot | None) -> bool:
+    """Whether ``CLAUDE_CODE_EFFORT_LEVEL`` was set when ``snapshot`` was
+    taken (``content_layers.effort_level_env_set``). It wins over /effort
+    and every effort setting."""
+    layers = snapshot.data.get("content_layers") if snapshot is not None else None
+    return bool(isinstance(layers, dict) and layers.get("effort_level_env_set"))
+
+
 def auto_compact_window(snapshot: Snapshot | None) -> int | None:
     """The auto-compact window, in tokens, a session under ``snapshot``
     runs at: ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` when it's set (clamped to

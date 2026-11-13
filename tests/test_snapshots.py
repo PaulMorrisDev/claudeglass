@@ -1371,3 +1371,11 @@ def test_profile_marks_ignore_captures_without_a_profile_field(tmp_path):
     fixtures_with_field = [s for s in _load() if "profile_id" in s.data]
     assert len(marks) == len(fixtures_with_field)
     assert snap_mod.load_profile_marks(tmp_path / "missing") == []
+
+
+def test_effort_level_env_set_reads_the_content_layers_flag():
+    assert snap_mod.effort_level_env_set(
+        snap_mod.Snapshot(path=None, ts="x", data={"content_layers": {"effort_level_env_set": True}})
+    ) is True
+    assert snap_mod.effort_level_env_set(snap_mod.Snapshot(path=None, ts="x", data={})) is False
+    assert snap_mod.effort_level_env_set(None) is False

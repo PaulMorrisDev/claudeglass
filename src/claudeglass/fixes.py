@@ -531,6 +531,11 @@ _WORKFLOW_PROMPTS = {
         "new agent file and each changed call before saving anything. Claude Code will ask my permission "
         "before editing files under .claude."
     ),
+    "effort-mismatch:env": (
+        "Please find where CLAUDE_CODE_EFFORT_LEVEL is set: my shell profile, or the env block of "
+        "~/.claude/settings.json or this project's .claude/settings.json. Propose setting it to medium, or "
+        "removing it so my saved levels apply. Show me the diff before saving."
+    ),
     "effort-mismatch": (
         "Please check the current effortLevel in ~/.claude/settings.json (or the relevant agent's "
         "frontmatter) and propose lowering it, keeping /effort in mind for the odd hard task. Show me the "
@@ -794,6 +799,20 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "workflow agents, so a job that needs a tool few jobs use must keep it.",
         "Take agentType out of the call, or put the tool back in the agent file's list (Claude Code shows the "
         "change before saving it).",
+    ),
+    "effort-mismatch:session": (
+        "The effort level Claude Code saves for each model you run /effort medium on, in your user settings. "
+        "/effort raises it again for a single task.",
+        "Lower effort can miss things on hard problems. You trade that risk against thinking spent on work that "
+        "did not need it.",
+        "Run /effort with the level you had before, on that model.",
+    ),
+    "effort-mismatch:env": (
+        "CLAUDE_CODE_EFFORT_LEVEL, where you set it: your shell profile or a settings file's env block. While "
+        "it is set, it wins over /effort and every effort setting.",
+        "Lower effort can miss things on hard problems. You trade that risk against thinking spent on work that "
+        "did not need it.",
+        "Set the variable back to the level it had.",
     ),
     "effort-mismatch": (
         "settings.json's effortLevel (or an agent's own effort frontmatter field), at whichever scope "
@@ -1259,6 +1278,8 @@ def profile_overridden_by(
        (``CLAUDE_CODE_EFFORT_LEVEL``).
     4. ``settings.effortLevel`` while ``model_settings`` (the effective
        ``modelSettings``) gives models an effort level of their own.
+    5. ``settings.autoCompactWindow`` while ``model_settings`` gives models
+       an auto-compact window of their own.
 
     Pure: the caller reads the snapshot."""
     from .profiles.apply import _SCOPE_LAYER
@@ -1295,6 +1316,16 @@ def profile_overridden_by(
             return f"{ids[0]} has its own effort level, which wins for it."
         if ids:
             return f"{join_names(ids)} have their own effort level, which wins for them."
+    if key == "autoCompactWindow":
+        ids = sorted(
+            str(model)
+            for model, entry in (model_settings or {}).items()
+            if isinstance(entry, dict) and entry.get("autoCompactWindow") is not None
+        )
+        if len(ids) == 1:
+            return f"{ids[0]} has its own auto-compact window, which wins for it."
+        if ids:
+            return f"{join_names(ids)} have their own auto-compact window, which wins for them."
     return None
 
 
@@ -1407,7 +1438,7 @@ def build_fixes(rec: Recommendation) -> list[dict]:
         return [build_fix(rec, change) for change in rec.changes]
     variant_id = f"{rec.id}:{rec.variant}" if rec.variant else rec.id
     workflow_entry = _WORKFLOW_EXPLAINER.get(variant_id, _WORKFLOW_EXPLAINER.get(rec.id))
-    template = _WORKFLOW_PROMPTS.get(variant_id, _WORKFLOW_PROMPTS.get(rec.id))
+    template = None if variant_id in _NO_PROMPT else _WORKFLOW_PROMPTS.get(variant_id, _WORKFLOW_PROMPTS.get(rec.id))
     if template is None and workflow_entry is None:
         return []
     explainer = (
@@ -1442,6 +1473,10 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     return [fix]
 
 
+#: Variants with no prompt: the change is a command only you can run in a
+#: session (/effort), so there is nothing for Claude to edit.
+_NO_PROMPT = frozenset({"effort-mismatch:session"})
+
 #: The file a workflow prompt (no setting to change) works in, keyed like
 #: :data:`_WORKFLOW_PROMPTS`; :func:`fix_file` uses it to group a
 #: project's fixes under one header per file. A scope prompt (see
@@ -1457,6 +1492,7 @@ _FIX_FILE: dict[str, str] = {
     "compaction-churn": "~/.claude/settings.json or .claude/settings.json",
     "compaction-window": "~/.claude/settings.json or .claude/settings.json",
     "effort-mismatch": "~/.claude/settings.json or .claude/settings.json",
+    "effort-mismatch:env": "Your shell profile or a settings file's env block",
     "model-tier": "~/.claude/settings.json or .claude/settings.json",
     "env-attribution-deprecated": "~/.claude/settings.json or .claude/settings.json",
     "plan-handoff": "~/.claude/CLAUDE.md",
@@ -1487,6 +1523,7 @@ _FIX_KIND: dict[str, str] = {
     "hook-context-carry": "several",
     "spawn-tools-list:workflow-script": "several",
     "agent-model-asked": "several",
+    "effort-mismatch:env": "several",
     # An instruction in ~/.claude/CLAUDE.md and, when the agent has a file, a line in it.
     "run-split": "rule",
     "discovery-share": "none",

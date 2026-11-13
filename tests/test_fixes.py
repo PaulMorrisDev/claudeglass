@@ -1116,3 +1116,18 @@ def test_a_plugin_agents_run_split_prompt_names_no_agent_file():
 
     assert "agents/" not in prompt("p:a")
     assert ".claude/agents/implementer.md" in prompt("implementer")
+
+
+def test_profile_overridden_by_names_a_model_whose_own_auto_compact_window_wins():
+    from claudeglass.fixes import profile_overridden_by
+
+    def by(model_settings):
+        return profile_overridden_by("settings.autoCompactWindow", "user", {}, [], False, model_settings, False)
+
+    assert by({"claude-opus-5-5": {"autoCompactWindow": 500000}}) == (
+        "claude-opus-5-5 has its own auto-compact window, which wins for it."
+    )
+    assert by({"b": {"autoCompactWindow": 300000}, "a": {"autoCompactWindow": 500000}, "c": {"effortLevel": "low"}}) == (
+        "a and b have their own auto-compact window, which wins for them."
+    )
+    assert by({"c": {"effortLevel": "low"}}) is None and by(None) is None

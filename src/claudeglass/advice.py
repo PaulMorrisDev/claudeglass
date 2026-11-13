@@ -50,7 +50,7 @@ from datetime import date
 from typing import Callable
 
 from . import cost_centres, known_savers, model_gate, model_swap, whatif
-from .fixes import CRITIQUE_PLAN_LINE, PLUGIN_AGENT_FILE_CARDS, already_set, plugin_of
+from .fixes import CRITIQUE_PLAN_LINE, PLUGIN_AGENT_FILE_CARDS, already_set, plugin_of, profile_overridden_by
 from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
@@ -60,6 +60,7 @@ from .snapshots import (
     auto_compact_window,
     auto_compact_window_env_set,
     effective_config,
+    effort_level_env_set,
 )
 from .units import NO_LIMIT_SHARE_HINT, Units
 
@@ -619,13 +620,32 @@ def _advice_scope(rec_scope: str) -> str:
     return _SCOPE_ALIASES.get(rec_scope, rec_scope)
 
 
+#: Said after the sentence naming a model whose own window wins.
+_OWN_WINDOW_STEP = "To change a model's own window, run /autocompact with the new size in a session on that model."
+
+
 def _window_change(rec: Recommendation, ctx: _Context, *, value: int | None = None, suggested: str) -> SettingChange:
     """A change to the auto-compact window. While
     CLAUDE_CODE_AUTO_COMPACT_WINDOW is set it overrides autoCompactWindow,
     so the change goes to the variable, in a settings file's env block
-    (whose value replaces the shell's)."""
+    (whose value replaces the shell's). A model's own window, saved with
+    /autocompact, wins over the setting for that model, so the change's
+    note names it."""
     now = ctx.window_now()
     if not auto_compact_window_env_set(ctx.snapshot):
+        own = (
+            profile_overridden_by(
+                "settings.autoCompactWindow",
+                "user",
+                {},
+                (),
+                False,
+                effective_config(ctx.snapshot).get("modelSettings"),
+                False,
+            )
+            if ctx.snapshot is not None
+            else None
+        )
         return SettingChange(
             target="settings",
             key="autoCompactWindow",
@@ -633,6 +653,7 @@ def _window_change(rec: Recommendation, ctx: _Context, *, value: int | None = No
             current=now,
             suggested=suggested,
             scope=_advice_scope(rec.scope),
+            note=f"{own} {_OWN_WINDOW_STEP}" if own else "",
         )
     from .recommend import _env_lever_scope
 
@@ -825,6 +846,44 @@ def _pooled_thinking_share(rec: Recommendation) -> float | None:
     return sum(shares.values()) / len(shares)
 
 
+def _effort_lever(rec: Recommendation, ctx: _Context, note: str) -> None:
+    """The effort card's action and change. CLAUDE_CODE_EFFORT_LEVEL wins
+    over /effort and every effort setting, and no settings file can change
+    it. In user settings, Opus 5.5 and later models ignore the top-level
+    effortLevel, and /effort saves a level per model instead (the
+    settings-reference and model-config docs). A project, local or managed
+    file's effortLevel applies to every model, so only there is it the
+    change."""
+    scope = _advice_scope(rec.scope)
+    if effort_level_env_set(ctx.snapshot):
+        rec.variant = "env"
+        rec.action = (
+            "CLAUDE_CODE_EFFORT_LEVEL is set, and it wins over /effort and every effort setting. "
+            "Set it to medium where you set it, or remove it."
+        )
+        rec.changes = []
+        return
+    if scope in ("repo", "project-local", "managed"):
+        rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
+        rec.changes = [
+            SettingChange(
+                target="settings",
+                key="effortLevel",
+                value="medium",
+                current=ctx.setting_now("effortLevel"),
+                note=note,
+                scope=scope,
+            )
+        ]
+        return
+    rec.variant = "session"
+    rec.action = (
+        "Run /effort medium in a session on each model you use. Claude Code saves it for that model. "
+        "Raise it with /effort when a task needs it."
+    )
+    rec.changes = []
+
+
 def _explain_effort_mismatch(rec: Recommendation, ctx: _Context) -> None:
     if any(source == "habits.habits_effort_fit" for _label, _value, source, _row in rec.evidence):
         _explain_effort_mismatch_reported(rec, ctx)
@@ -839,17 +898,7 @@ def _explain_effort_mismatch(rec: Recommendation, ctx: _Context) -> None:
     else:
         rec.why = f"{lead}yet most of your sessions are docs or light edits that rarely need it."
     rec.why = rec.why[:1].upper() + rec.why[1:]
-    rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
-    rec.changes = [
-        SettingChange(
-            target="settings",
-            key="effortLevel",
-            value="medium",
-            current=ctx.setting_now("effortLevel"),
-            note="The high-effort thinking share is measured across all sessions, not only the light ones.",
-            scope=_advice_scope(rec.scope),
-        )
-    ]
+    _effort_lever(rec, ctx, "The high-effort thinking share is measured across all sessions, not only the light ones.")
 
 
 def _explain_effort_mismatch_reported(rec: Recommendation, ctx: _Context) -> None:
@@ -862,17 +911,7 @@ def _explain_effort_mismatch_reported(rec: Recommendation, ctx: _Context) -> Non
         f"Claude reported {easy} of your messages as easy work, yet they ran at high effort or above"
         + (f", and up to {max(shares):.0f}% of their output was thinking." if shares else ".")
     )
-    rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
-    rec.changes = [
-        SettingChange(
-            target="settings",
-            key="effortLevel",
-            value="medium",
-            current=ctx.setting_now("effortLevel"),
-            note="Measured on the messages Claude reported as easy (metrics capture).",
-            scope=_advice_scope(rec.scope),
-        )
-    ]
+    _effort_lever(rec, ctx, "Measured on the messages Claude reported as easy (metrics capture).")
     rec.estimated_saving = ctx.money(rec.saving_usd, prefix="About ")
     rec.saving_basis = ctx.basis("Half the thinking on those messages, at list price. Not measured.")
 

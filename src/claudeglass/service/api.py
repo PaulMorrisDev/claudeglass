@@ -2733,8 +2733,7 @@ def make_handler(
                 names = snapshot.data.get(field)
                 if isinstance(names, list):
                     env_names.update(str(n) for n in names)
-            content_layers = snapshot.data.get("content_layers")
-            effort_env_set = bool(isinstance(content_layers, dict) and content_layers.get("effort_level_env_set"))
+            effort_env_set = snapshots_mod.effort_level_env_set(snapshot)
             # Deviation (mirrors profiles/apply.py's own, documented
             # deviation note): snapshots.py has no effective_agents()
             # accessor, so the schema-2 field is read straight off the
@@ -3329,8 +3328,7 @@ def make_handler(
         if snapshot is None:
             return {}, {}, False
         agents = snapshot.data.get("effective_agents")
-        content_layers = snapshot.data.get("content_layers")
-        env_set = bool(isinstance(content_layers, dict) and content_layers.get("effort_level_env_set"))
+        env_set = snapshots_mod.effort_level_env_set(snapshot)
         # In force, not as written: CLAUDE_CODE_AUTO_COMPACT_WINDOW beats
         # autoCompactWindow while it's set.
         return snapshots_mod.effective_config_in_force(snapshot), agents if isinstance(agents, dict) else {}, env_set
