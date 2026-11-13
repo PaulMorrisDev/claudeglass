@@ -1641,6 +1641,7 @@ class FileWatcher:
                 source = record.get("source")
                 measure_key = record.get("measure_key")
                 fidelity = record.get("fidelity")
+                priced_on = record.get("priced_on")
                 if not all(isinstance(value, str) and value for value in (prediction_id, ts, source, measure_key, fidelity)):
                     continue
                 self._time_store(
@@ -1654,6 +1655,7 @@ class FileWatcher:
                     predicted_usd=record.get("predicted_usd"),
                     predicted_pct=record.get("predicted_pct"),
                     fidelity=fidelity,
+                    priced_on=priced_on if isinstance(priced_on, (int, float)) and not isinstance(priced_on, bool) else None,
                 )
             except Exception as exc:
                 stats.errors += 1

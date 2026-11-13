@@ -2190,6 +2190,7 @@ def _tools_list_card(
         estimated_saving=_startup_saving(units, usd, prefix="about "),
         saving_basis=basis if usd is not None else "",
         saving_usd=usd,
+        priced_on=float(dropped) if _is_number(dropped) else None,
         why=why,
         variant="workflow-script" if workflow else "",
     )
@@ -2364,6 +2365,7 @@ def _rule_spawn_parts(
                     ],
                     estimated_saving=_startup_saving(units, claude_md_usd),
                     saving_usd=claude_md_usd if _is_number(claude_md_usd) and claude_md_usd > 0 else None,
+                    priced_on=float(claude_md) if _is_number(claude_md) else None,
                     saving_basis=(
                         _startup_basis(units, carried=carried)
                         + (" It is priced as the Context files section prices carrying it." if carried else "")
@@ -2436,6 +2438,7 @@ def _rule_spawn_parts(
                         )
                     ],
                     estimated_saving=_startup_saving(units, skills_usd, prefix="if the list is dropped, about "),
+                    priced_on=float(skills_tokens),
                     saving_basis=(
                         _startup_basis(units, carried=skills_carried)
                         + (" It is part of the tools list saving, not on top of it." if in_tools_list else "")

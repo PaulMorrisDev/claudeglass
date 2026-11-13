@@ -4346,6 +4346,12 @@ def test_backtest_is_empty_without_predictions(server):
     assert "too_little_data" in payload["data"]["verdicts"]
 
 
+def test_backtest_lists_not_measured_among_the_verdicts(server):
+    resp, payload = server.get_json("/api/backtest")
+    assert resp.status == 200
+    assert "not_measured" in payload["data"]["verdicts"]
+
+
 def test_backtest_lists_a_logged_prediction_after_a_matching_apply(server):
     from claudeglass.profiles import apply as apply_mod
     from claudeglass.profiles.schema import load_dict
@@ -4480,6 +4486,25 @@ def test_whatif_log_flag_appends_a_prediction_per_estimated_row(server):
     assert records[0]["fidelity"] == row["fidelity"]
 
 
+def test_a_logged_estimate_records_what_it_was_priced_on(server):
+    from claudeglass import config as config_mod
+
+    resp, payload = server.post_json(
+        "/api/whatif", {"settings": {"model": "sonnet"}, "agents": {}, "log": True}
+    )
+    assert resp.status == 200
+    [row] = payload["data"]["rows"]
+    # The observed cost the model reprice is a share of: a plain number the saving fits inside.
+    assert isinstance(row["priced_on"], float) and row["priced_on"] > 0
+    assert 0 < row["saving_usd"] <= row["priced_on"]
+    [record] = config_mod.load_prediction_log(server.options.config_dir)
+    assert record["priced_on"] == row["priced_on"]
+    # A row that was not logged (no log flag) still shows it, and writes nothing.
+    again = server.post_json("/api/whatif", {"settings": {"model": "sonnet"}, "agents": {}})[1]
+    assert again["data"]["rows"][0]["priced_on"] == row["priced_on"]
+    assert len(config_mod.load_prediction_log(server.options.config_dir)) == 1
+
+
 def test_whatif_log_flag_skips_rows_that_could_not_be_estimated(server):
     from claudeglass import config as config_mod
 
@@ -4498,7 +4523,7 @@ def test_whatif_calibrates_once_three_predictions_for_the_key_are_judged(server)
         pid = f"pred-{i}"
         server.store.upsert_prediction(
             prediction_id=pid, ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
-            agent=None, predicted_usd=1.0, predicted_pct=None, fidelity="ceiling",
+            agent=None, predicted_usd=1.0, predicted_pct=None, fidelity="ceiling", priced_on=100.0,
         )
         server.store.judge_prediction(pid, change_ts="2026-09-21T09:00:00Z", verdict="larger", measured_usd=2.0, measured_pct=None)
 

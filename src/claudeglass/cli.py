@@ -1501,6 +1501,17 @@ def _dashboard_card_marks(config_dir: Path) -> list[dict] | None:
     return read_card_marks(config_dir / STORE_FILENAME)
 
 
+def _dashboard_predictions(config_dir: Path) -> list[dict]:
+    """The estimates the dashboard logged for profile changes
+    (``predictions``), read from ``<config-dir>/service.db`` without writing to
+    it; empty when there is no store. The tuning export's ``outcomes`` block
+    reads which of them turned into a change."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import read_predictions
+
+    return read_predictions(config_dir / STORE_FILENAME)
+
+
 def _dashboard_mod_events(config_dir: Path) -> list[dict]:
     """What the ClaudeGlass mod's sensor files said, by event, read from
     ``<config-dir>/service.db`` without writing to it."""
@@ -2720,8 +2731,8 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     it, as the dashboard and capture do. A document that fails the checks is
     printed as problem lines and nothing is written (exit 2). With ``--out``
     the file is written whole or not at all; without it the JSON is printed.
-    Your dashboard ratings and tip-card answers, and what it kept of the
-    cards it showed, are read from its store without writing to it, as
+    Your dashboard ratings and tip-card answers, what it kept of the
+    cards it showed and the estimates it logged for profile changes, are read from its store without writing to it, as
     ``report`` reads them. When the dashboard's
     store holds sessions of the window whose transcripts are gone, they are
     read from its digests, so the file covers what the dashboard covers; its
@@ -2771,6 +2782,13 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
         if card_rows is None
         else tuning_mod.CardMarks(card_rows, frozenset(p.name for p in project_dirs), bool(args.all_projects))
     )
+    outcomes = (
+        None
+        if card_rows is None
+        else tuning_mod.OutcomeInputs(
+            card_rows, _dashboard_predictions(config_dir), frozenset(p.name for p in project_dirs), bool(args.all_projects)
+        )
+    )
     today = discovery.to_local(datetime.now(timezone.utc), config.tz).date()
     try:
         doc = tuning_mod.build(
@@ -2787,6 +2805,7 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
             projects_roots=_read_where(args, config_dir)[1],
             mod_events=_dashboard_mod_events(config_dir),
             card_marks=card_marks,
+            outcomes=outcomes,
         )
         text = tuning_mod.dumps(doc)
     except tuning_mod.TuningError as exc:

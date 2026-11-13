@@ -67,9 +67,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from . import PARSER_VERSION, __version__
+from . import backtest as backtest_mod
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
 from . import capture_checks as capture_checks_mod
+from . import change_points as change_points_mod
 from . import claude_md_review, classify
 from . import compaction as compaction_mod
 from . import context_budget as context_budget_mod
@@ -81,9 +83,11 @@ from . import coaching as coaching_mod
 from . import events as events_mod
 from . import habits as habits_mod
 from . import handoff as handoff_mod
+from . import impact as impact_mod
 from . import hint_occasions as hint_occasions_mod
 from . import haiku_tags, helptext, hook_health, limits, measured
 from . import ignores as ignores_mod
+from . import outcomes as outcomes_mod
 from . import pieces as pieces_mod
 from . import pricing as pricing_mod
 from . import prompting as prompting_mod
@@ -93,6 +97,7 @@ from . import rework as rework_mod
 from . import snapshots as snapshots_mod
 from .calibration import Calibration
 from .capture_tags import CHANGE_PATTERN, GROUNDED_KEYS
+from .profiles import schema as profile_schema
 from .model import EventKind, scheduled_main_session
 from .pricing import price_turn
 from .report import _agent_file_models, _dominant_transcript_model
@@ -101,8 +106,10 @@ from .topology import LAUNCH_WORDS
 KIND = "claudeglass-tuning"
 FORMAT = 1
 #: The most a document may be, serialised (:func:`dumps`) as UTF-8. The
-#: real ones are a few tens of kilobytes.
-MAX_BYTES = 256 * 1024
+#: real ones are a few tens of kilobytes; the fullest one the description
+#: allows, with every count and amount as wide as it can print, is about
+#: 306 KB.
+MAX_BYTES = 320 * 1024
 
 #: No count or amount is anywhere near this; a bigger one is a mistake or
 #: a forgery.
@@ -621,6 +628,7 @@ class _Ctx:
         projects_roots=None,
         mod_events=None,
         card_marks=None,
+        outcomes=None,
     ):
         self.corpus = corpus
         self.config = config
@@ -638,6 +646,7 @@ class _Ctx:
         self.tip_feedback = tip_feedback or {}
         self.coverage = coverage
         self.card_marks = card_marks
+        self.outcomes = outcomes
         # Local midnight in the config's zone, where the corpus's --days window starts.
         self.start = discovery.local_midnight(today - timedelta(days=days - 1), config.tz)
 
@@ -837,6 +846,7 @@ def build(
     projects_roots: list[Path] | None = None,
     mod_events: list[dict] | None = None,
     card_marks: "CardMarks | None" = None,
+    outcomes: "OutcomeInputs | None" = None,
 ) -> dict:
     """The export document for ``corpus`` (already loaded for the last
     ``days`` days, Haiku's tags put on its turns). ``config_dir`` is where
@@ -854,14 +864,16 @@ def build(
     store's mod sensor events (``Store.read_mod_events``), for the coaching
     moments the mod showed; none of their words reach the document. ``card_marks``
     (:class:`CardMarks`), given when the dashboard's store has a ``card_marks``
-    table, fills the ``cards`` block; without it the block is left out.
+    table, fills the ``cards`` block; without it the block is left out. ``outcomes``
+    (:class:`OutcomeInputs`), given with it and the store's predictions, fills the ``outcomes``
+    block; without it the block is left out.
     Raises :class:`TuningError` if what it built doesn't validate, which would
     be a bug here."""
     days = max(1, int(days))
     ctx = _Ctx(
         corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback,
         coverage=coverage, projects_roots=projects_roots,
-        mod_events=mod_events, card_marks=card_marks,
+        mod_events=mod_events, card_marks=card_marks, outcomes=outcomes,
     )
     version = _VERSION_RE.match(__version__)
     doc: dict = {
@@ -2698,6 +2710,284 @@ def _figures_lines(block: dict) -> list[str]:
     return lines
 
 
+# -- outcomes (VF1) ---------------------------------------------------------------------------
+
+#: The settings a profile can change, named as a profile names them with the one dot of
+#: ``experimental.cacheTtl`` written as an underscore (a closed word is never a path); every other key
+#: counts as ``other``.
+OUTCOME_LEVERS = (
+    *sorted(
+        key.replace(".", "_")
+        for key in set(profile_schema.SETTINGS_ALLOWLIST) | set(profile_schema.AGENT_ALLOWLIST)
+    ),
+    "other",
+)
+#: The most (rule, agent) rows and (lever, agent) rows the block keeps; ``landed`` still counts the rest.
+OUTCOME_CARD_ROWS = 8
+OUTCOME_LEVER_ROWS = 4
+
+
+@dataclass(frozen=True)
+class OutcomeInputs:
+    """What ``build`` reads for the ``outcomes`` block: the dashboard's
+    ``card_marks`` rows (``read_card_marks``), the store's logged predictions
+    (``read_predictions``), the project folders the export covers and whether
+    it covers every project."""
+
+    card_rows: list
+    predictions: list
+    folders: frozenset
+    every_project: bool
+
+
+_OUTCOME_AMOUNTS = ("predicted_usd", "saved_usd", "lost_usd")
+_OUTCOME_COUNTS = ("landed", "measured", "half_or_more", "too_little_data", "guard_holds", "guard_worse")
+_OUTCOME_ROW_FIELDS: dict[str, Node] = {
+    "agent": Word(CARD_AGENTS),
+    **{name: Count() for name in _OUTCOME_COUNTS},
+    **{name: Num() for name in _OUTCOME_AMOUNTS},
+}
+_OUTCOME_CARD = Obj({"rule": Word(CARD_RULES), **_OUTCOME_ROW_FIELDS}, required=("rule", "agent", *_OUTCOME_COUNTS))
+_OUTCOME_LEVER = Obj(
+    {"lever": Word(OUTCOME_LEVERS), **_OUTCOME_ROW_FIELDS}, required=("lever", "agent", *_OUTCOME_COUNTS)
+)
+
+
+@dataclass
+class _Fix:
+    """One fix to read: whether it is a card or a profile change, the rule or
+    setting word and class of agent it is counted under, the change point it
+    turned into, the lever it names and what its card or profile predicted."""
+
+    kind: str
+    name: str
+    agent: str
+    point: change_points_mod.ChangePoint
+    lever: tuple
+    prediction: outcomes_mod.Prediction
+    rank: int = 0
+
+
+def _outcome_row_in_view(row: dict, inputs: OutcomeInputs) -> bool:
+    """Whether a card row belongs to the export's projects: an every-project row
+    with every project, a project row with a folder the export covers (as the
+    ``cards`` block counts them)."""
+    if row.get("project") == ignores_mod.ALL_PROJECTS:
+        return inputs.every_project
+    return bool(set(row.get("folders") or ()) & inputs.folders)
+
+
+def _outcome_rows(readings: list, name: str, limit: int) -> list[dict]:
+    """The rows of one kind of fix, grouped by ``(word, agent class)``, the most
+    landed first, cut to ``limit``. The three amounts are written only for a row
+    with a measured fix."""
+    groups: dict[tuple[str, str], list] = {}
+    for fix, reading in readings:
+        groups.setdefault((fix.name, fix.agent), []).append(reading)
+    out = []
+    for (word, agent), group in groups.items():
+        measured = [r for r in group if r.verdict in ("half_or_more", "under_half")]
+        item = {
+            name: word,
+            "agent": agent,
+            "landed": len(group),
+            "measured": len(measured),
+            "half_or_more": sum(1 for r in group if r.verdict == "half_or_more"),
+            "too_little_data": sum(1 for r in group if r.verdict == "too_little_data"),
+            "guard_holds": sum(1 for r in group if r.guard == "holds"),
+            "guard_worse": sum(1 for r in group if r.guard == "worse"),
+        }
+        if measured:
+            gains = [r.measured_usd for r in measured]
+            item["predicted_usd"] = _num(sum(r.predicted_usd for r in measured))
+            item["saved_usd"] = _num(sum(g for g in gains if g > 0))
+            item["lost_usd"] = _num(sum(-g for g in gains if g < 0))
+        out.append(item)
+    out.sort(key=lambda item: (-item["landed"], item[name], item["agent"]))
+    return out[:limit]
+
+
+@_block(
+    "outcomes",
+    Obj(
+        {
+            "landed": Count(),
+            "short_export": Count(),
+            "controls": _counts("judged", "worse"),
+            "cards": Arr(_OUTCOME_CARD, limit=OUTCOME_CARD_ROWS),
+            "levers": Arr(_OUTCOME_LEVER, limit=OUTCOME_LEVER_ROWS),
+        },
+        required=("landed", "short_export", "controls", "cards", "levers"),
+    ),
+    required=False,
+)
+def _outcomes(ctx: _Ctx) -> dict | None:
+    """What became of the fixes that landed (``outcomes``): the cards the
+    dashboard showed whose settings moved, and the profile changes whose
+    estimate was logged, each matched to the change it turned into. Rows of
+    several views of one card are one fix. Each fix is read once
+    (``outcomes.read_fix``): how many landed, were measured against what the
+    card or profile estimated (and how many saved at least half), had too
+    little data, and whether the main session's corrections and rework held, by
+    rule or setting and class of agent; with the amounts over the measured
+    ones. ``controls`` is how often the same check read ``worse`` a fortnight
+    earlier, where nothing was changed, and ``short_export`` how many fixes
+    landed too soon after the window's start to have a before side. Left out
+    when there is no dashboard store to read, or nothing landed and nothing was
+    predicted: the corpus is not read then. Counts, amounts and fixed words
+    only: no card key, project, agent name, setting value, time or ratio
+    reaches the document, and neither does the figure a saving was priced on."""
+    inputs = ctx.outcomes
+    if inputs is None:
+        return None
+    rows = [
+        row for row in inputs.card_rows
+        if row.get("landed_at") and row.get("changes") and _outcome_row_in_view(row, inputs)
+    ]
+    predictions = [p for p in inputs.predictions if p.get("source") == "whatif"]
+    if not rows and not predictions:
+        return None
+    points = change_points_mod.change_points(ctx.config_dir, ctx.corpus) if ctx.config_dir else []
+    fixes: dict[tuple, _Fix] = {}
+    for row in rows:
+        landed = snapshots_mod._parse_ts(row.get("landed_at"))
+        levers = [
+            outcomes_mod.lever_of(change) for change in row["changes"] if isinstance(change, dict) and change.get("key")
+        ]
+        if landed is None or not levers:
+            continue
+        view_keys = (
+            set()
+            if row.get("project") == ignores_mod.ALL_PROJECTS
+            else {key for folder in row.get("folders") or () for key in snapshots_mod.snapshot_project_keys(folder)}
+        )
+        point = outcomes_mod.match_point(levers, view_keys, landed, points)
+        if point is None or point.ts < ctx.start:
+            continue
+        rule = row.get("rule_id")
+        word = rule if rule in CARD_RULES else "other"
+        agent_type = row.get("agent_type")
+        fix = _Fix(
+            "card", word, _card_agent(agent_type), point, outcomes_mod.lever_for(levers),
+            outcomes_mod.Prediction(row.get("saving_usd"), row.get("priced_on")), outcomes_mod.view_rank(point, view_keys),
+        )
+        # Rows of several views that match one change point are one fix: the row whose view is the
+        # point's own is the one read, else the every-project row; the first of equals wins.
+        ident = ("card", *outcomes_mod.fix_key(word, agent_type, point))
+        if ident not in fixes or fix.rank > fixes[ident].rank:
+            fixes[ident] = fix
+    export_keys = {key for folder in inputs.folders for key in snapshots_mod.snapshot_project_keys(folder)}
+    for prediction in predictions:
+        point = backtest_mod._match_point(prediction, points)
+        if point is None or point.ts < ctx.start:
+            continue
+        if not (inputs.every_project or not point.project or point.project in export_keys):
+            continue
+        measure_key = prediction.get("measure_key")
+        word = str(measure_key).replace(".", "_")
+        word = word if word in OUTCOME_LEVERS else "other"
+        agent = prediction.get("agent") or None
+        fix = _Fix(
+            "profile", word, _card_agent(agent), point, (agent, str(measure_key).split(".")[-1]),
+            outcomes_mod.Prediction(prediction.get("predicted_usd"), prediction.get("priced_on")),
+        )
+        fixes.setdefault(("profile", *outcomes_mod.fix_key(word, agent, point)), fix)
+    readings: list[tuple[_Fix, outcomes_mod.Reading]] = []
+    if fixes:
+        sessions = impact_mod.session_facts(ctx.corpus, ctx.pricing)
+        bundles = {bundle.session_id: bundle for bundle in ctx.corpus.sessions}
+        # The sides end at the window's end; its start is where a before side runs short.
+        end = discovery.local_midnight(ctx.today + timedelta(days=1), ctx.config.tz)
+        for fix in fixes.values():
+            agent, key = fix.lever
+            readings.append((
+                fix,
+                outcomes_mod.read_fix(
+                    fix.point, agent, key, fix.prediction, sessions, points, bundles, ctx.pricing, end, ctx.start
+                ),
+            ))
+    return {
+        "landed": len(readings),
+        "short_export": sum(1 for _fix, r in readings if r.short_export),
+        "controls": {
+            "judged": sum(1 for _fix, r in readings if r.control != "too_little_data"),
+            "worse": sum(1 for _fix, r in readings if r.control == "worse"),
+        },
+        "cards": _outcome_rows([item for item in readings if item[0].kind == "card"], "rule", OUTCOME_CARD_ROWS),
+        "levers": _outcome_rows([item for item in readings if item[0].kind == "profile"], "lever", OUTCOME_LEVER_ROWS),
+    }
+
+
+def _outcomes_lines(block: dict) -> list[str]:
+    landed = block["landed"]
+    if not landed:
+        return ["Fixes that landed: none in this window."]
+    rows = [*block["cards"], *block["levers"]]
+
+    def total(key: str) -> float:
+        return sum(row.get(key, 0) for row in rows)
+
+    measured, half = int(total("measured")), int(total("half_or_more"))
+    waiting = int(total("too_little_data"))
+    # The fixes the rows count that were neither measured nor waiting for sessions: not measurable here.
+    cannot = int(total("landed")) - measured - waiting
+    shown = int(total("landed"))
+    if shown < landed:
+        # The rows are cut: the counts below are of the fixes they hold, not of every fix that landed.
+        lead = f"Of the {shown:,} this file breaks down, "
+        if measured:
+            tail = lead + (
+                f"{measured:,} {'was' if measured == 1 else 'were'} measured and {half:,} saved at least half "
+                "of what was estimated."
+            )
+        elif not cannot:
+            tail = lead + "none has had enough sessions on both sides to measure yet."
+        elif not waiting:
+            tail = lead + "none can be measured from your sessions."
+        else:
+            tail = lead + (
+                f"none is measured yet: {_n(waiting, 'fix needs', 'fixes need')} more sessions, "
+                f"and {cannot:,} can't be measured."
+            )
+    elif measured:
+        tail = f"Measured so far: {measured:,}, of which {half:,} saved at least half of what the card or profile estimated."
+    elif not cannot:
+        tail = "None has had enough sessions on both sides to measure yet."
+    elif not waiting:
+        tail = "None of them can be measured from your sessions."
+    else:
+        tail = f"None is measured yet: {_n(waiting, 'fix needs', 'fixes need')} more sessions, and {cannot:,} can't be measured."
+    lines = [f"Fixes that landed: {landed:,}. {tail}"]
+    short = block["short_export"]
+    if short:
+        lines.append(
+            f"{_n(short, 'fix', 'fixes')} landed too soon after this window's start to measure. "
+            f"Export more days to read {'it' if short == 1 else 'them'}."
+        )
+    left_out = landed - int(total("landed"))
+    if left_out > 0:
+        lines.append(
+            f"{_n(left_out, 'more fix is', 'more fixes are')} not broken down in this file, "
+            f"so the counts below leave {'it' if left_out == 1 else 'them'} out."
+        )
+    if measured:
+        net, estimated = total("saved_usd") - total("lost_usd"), total("predicted_usd")
+        lines.append(
+            f"Over the same work they saved {_usd(net)}, against {_usd(estimated)} estimated."
+            if net >= 0
+            else f"Over the same work they cost {_usd(-net)} more, against {_usd(estimated)} estimated."
+        )
+    holds, worse = int(total("guard_holds")), int(total("guard_worse"))
+    lines.append(
+        f"Corrections and rework after a fix: {holds:,} held, {worse:,} got worse, "
+        f"{int(total('landed')) - holds - worse:,} had too few sessions to tell."
+    )
+    controls = block["controls"]
+    if controls["judged"]:
+        lines.append(f"The same check at an earlier date read worse {controls['worse']:,} of {controls['judged']:,} times.")
+    return lines
+
+
 # -- capture checks (Q1 part G) ---------------------------------------------------------------
 
 _MOMENT_SIDE = _counts("answers", "evidence")
@@ -2894,6 +3184,7 @@ def summary_text(doc) -> str:
         (_cards_lines, "cards"),
         (_hint_occasions_lines, "hint_occasions"),
         (_figures_lines, "figures"),
+        (_outcomes_lines, "outcomes"),
         (_capture_checks_lines, "capture_checks"),
     ):
         if doc.get(name):
@@ -3207,6 +3498,7 @@ __all__ = [
     "FORMAT",
     "KIND",
     "MAX_BYTES",
+    "OutcomeInputs",
     "TuningError",
     "build",
     "dumps",

@@ -1035,7 +1035,8 @@ def _rule_model_tier(
     priced_turns_idx = _col_index(table, "lever_priced_turns")
     if priced_turns_idx is None:
         priced_turns_idx = _col_index(table, "priced_turns")
-    observed_cost_idx = _col_index(table, "lever_cost")
+    lever_cost_idx = _col_index(table, "lever_cost")
+    observed_cost_idx = lever_cost_idx
     if observed_cost_idx is None:
         observed_cost_idx = _col_index(table, "observed_cost")
     observed_model_idx = _col_index(table, "lever_model")
@@ -1079,6 +1080,8 @@ def _rule_model_tier(
             continue
 
         observed_cost = row[observed_cost_idx] if observed_cost_idx is not None else None
+        # The lever's cost is that of the runs the change reaches; an older table has only the whole row's.
+        cost_label = "Cost of the runs this change reaches" if lever_cost_idx is not None else "Observed cost"
         observed_model = row[observed_model_idx] if observed_model_idx is not None else "the observed model"
         alt_label = row[alt_label_idx] if alt_label_idx is not None else alt_model
 
@@ -1123,7 +1126,7 @@ def _rule_model_tier(
                 scope=scope,
                 agent_type=agent_type,
                 evidence=[
-                    _evidence("Observed cost", observed_cost, "model_swap", "model_swap_by_agent_type", agent_type),
+                    _evidence(cost_label, observed_cost, "model_swap", "model_swap_by_agent_type", agent_type),
                     _evidence("Best cheaper alternative", alt_label, "model_swap", "model_swap_by_agent_type", agent_type),
                     _evidence("Ceiling saving (USD)", saving_usd, "model_swap", "model_swap_by_agent_type", agent_type),
                     _evidence("Ceiling saving (%)", saving_pct, "model_swap", "model_swap_by_agent_type", agent_type),

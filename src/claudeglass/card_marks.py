@@ -196,7 +196,7 @@ def landing(
 
 def card_row(rec) -> dict:
     """What the store keeps of a card (``Store.mark_cards``): its key, the
-    rule and agent it is about, the changes it names and its own saving."""
+    rule and agent it is about, the changes it names, its own saving and what that saving was priced on."""
     return {
         "key": rec.key,
         "rule_id": rec.id,
@@ -205,4 +205,5 @@ def card_row(rec) -> dict:
             {"target": c.target, "key": c.key, "agent": c.agent, "value": c.value} for c in rec.changes or ()
         ],
         "saving_usd": rec.saving_usd,
+        "priced_on": rec.priced_on,
     }

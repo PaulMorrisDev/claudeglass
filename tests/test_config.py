@@ -609,7 +609,17 @@ def test_append_prediction_log_writes_a_record_and_returns_its_id(tmp_path):
         "predicted_usd": 1.23,
         "predicted_pct": None,
         "fidelity": "ceiling",
+        "priced_on": None,
     }
+
+
+def test_the_prediction_log_line_carries_priced_on(tmp_path):
+    append_prediction_log(
+        tmp_path, source="whatif", measure_key="model", agent=None,
+        predicted_usd=1.0, predicted_pct=None, fidelity="ceiling", priced_on=12.5,
+    )
+    [record] = load_prediction_log(tmp_path)
+    assert record["priced_on"] == 12.5
 
 
 def test_append_prediction_log_generates_a_fresh_id_each_call(tmp_path):

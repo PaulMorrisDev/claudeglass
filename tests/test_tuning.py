@@ -122,7 +122,7 @@ def test_the_sample_document_is_valid_and_holds_every_block():
     assert set(doc) == set(spec.fields) == {*tuning._HEADER, *tuning._BLOCKS}
     assert [name for name in doc if name in tuning._BLOCKS] == list(tuning._BLOCKS)
     assert (doc["kind"], doc["format"]) == (tuning.KIND, tuning.FORMAT) == ("claudeglass-tuning", 1)
-    assert tuning.MAX_BYTES == 256 * 1024
+    assert tuning.MAX_BYTES == 320 * 1024
     # What a person is shown to check is what a machine reads back.
     assert tuning.loads(tuning.dumps(doc)) == doc
 
@@ -400,15 +400,20 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
     def weeks(n: int) -> list[str]:
         return [f"{2020 + i // 52}-W{i % 52 + 1:02d}" for i in range(n)]
 
+    def widest(words) -> list[str]:
+        return sorted(words, key=lambda word: (-len(word), word))
+
+    # Every value as wide as the description lets it print: the largest count, a float with all
+    # 17 digits and a three-digit exponent (23 characters), the longest word and the longest keys.
     def fill(node):
         if isinstance(node, tuning.Count):
-            return 123456
+            return tuning._MAX_NUMBER
         if isinstance(node, tuning.Num):
-            return 123456.789012
+            return 1.2345678901234567e-100
         if isinstance(node, tuning.Const):
             return node.expected
         if isinstance(node, tuning.Word):
-            return sorted(node.words)[0]
+            return widest(node.words)[0]
         if isinstance(node, tuning.Pattern):
             return examples[node.regex]
         if isinstance(node, tuning.Obj):
@@ -417,17 +422,20 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
             return [fill(node.item)] * node.limit
         keys = node.keys
         names = (
-            sorted(keys.words)[: node.limit]
+            widest(keys.words)[: node.limit]
             if isinstance(keys, tuning.Closed)
             else weeks(node.limit)
             if isinstance(keys, tuning.Weeks)
-            else changes()[: node.limit]
+            else widest(changes())[: node.limit]
         )
         return {key: fill(node.item) for key in names}
 
     doc = fill(tuning.spec())
     assert tuning.validate(doc) == []
-    assert len(tuning.dumps(doc).encode("utf-8")) < tuning.MAX_BYTES
+    size = len(tuning.dumps(doc).encode("utf-8"))
+    assert size < tuning.MAX_BYTES
+    # SECURITY.md and the comment on MAX_BYTES give this figure as about 306 KB.
+    assert 300 * 1024 < size < 312 * 1024, size
     # Every change grounding can make has a place.
     assert len(changes()) <= tuning._MAX_CHANGES
     assert all(tuning.Changes().accepts(change) for change in changes())

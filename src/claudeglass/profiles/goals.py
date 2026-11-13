@@ -682,6 +682,9 @@ def _scale_estimate(row: dict, pct: float | None, units: Units, period: str, who
         row["basis"] = "Not estimated: no per-task cost to scale this window's reprice by."
         return row
     row["saving_usd"] = round(row["saving_usd"] * pct / 100.0, 6)
+    # The saving is now a share of a task's cost, not of the figure the row
+    # was priced on across the whole window.
+    row["priced_on"] = None
     if row.get("uncalibrated_usd") is not None:
         row["uncalibrated_usd"] = round(row["uncalibrated_usd"] * pct / 100.0, 6)
     row["effect_text"] = whatif._effect_text(row["saving_usd"], units, period)

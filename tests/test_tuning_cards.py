@@ -42,6 +42,7 @@ def _row(
     bundled=False,
     landed_days=None,
     exact=False,
+    priced_on=None,
 ):
     """One ``Store.card_marks`` row."""
     landed = _stamp(shown + timedelta(days=landed_days, hours=3)) if landed_days is not None else None
@@ -53,6 +54,7 @@ def _row(
         "agent_type": agent_type,
         "changes": list(changes),
         "saving_usd": 1.0,
+        "priced_on": priced_on,
         "first_shown_at": _stamp(shown),
         "copied_at": _stamp(shown + timedelta(minutes=5)) if copied else None,
         "bundled_at": _stamp(shown + timedelta(minutes=9)) if bundled else None,
@@ -239,6 +241,16 @@ def test_the_card_rows_keep_the_most_shown_and_the_total_counts_them_all(world):
     assert len(kept) == tuning.CARD_ROWS_KEPT == 40
     assert doc["cards"]["shown"] == sum(range(1, 46)) == len(rows)
     assert [r["shown"] for r in kept] == list(range(45, 5, -1))
+    assert tuning.validate(doc) == []
+
+
+def test_what_a_cards_saving_was_priced_on_does_not_reach_the_document(world):
+    # The mark rows carry the figure (outcomes reads it); the export keeps only counts.
+    rows = [_row("k1", "spawn-tools-list", "custom", priced_on=424242.5), _row("k2", "model-tier", priced_on=31337.25)]
+    doc = _build(world, card_marks=_marks(rows))
+    assert doc["cards"]["shown"] == 2
+    text = json.dumps(doc)
+    assert "priced_on" not in text and "424242" not in text and "31337" not in text
     assert tuning.validate(doc) == []
 
 

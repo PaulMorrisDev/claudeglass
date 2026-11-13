@@ -338,14 +338,19 @@ on, so reading it again changes nothing, and rows older than
 adds the `card_marks` table: one row per card per view of the dashboard (the
 project it was shown in, or every project), holding the card's key, the rule
 and agent it is about, the settings it asked you to change, its estimated
-saving, and when it was first shown, first copied (its own prompt), first
+saving and what that saving was priced on (`priced_on`: the tokens it takes out of each
+start, or the observed cost it is a share of; empty when the card names none),
+and when it was first shown, first copied (its own prompt), first
 copied in the project's all-fixes prompt, and, once that view is drawn again,
 when it left the list with every setting it names moved (`landed_at`, and
 whether the settings hold the card's own values). It is written by
 `POST /api/recommendations/marks`, stays on this machine and is returned by
 no route; only counts and fixed words from it reach a tuning export. Rows
 older than `retention_days` (180 by default) are removed. A store at 11 gains
-the table in place. Version 9,
+the table in place, with a nullable `predictions.priced_on` column beside it (the
+`priced_on` of the prediction log's line, below); a store already stamped 12 by an
+earlier build of this release gains both `priced_on` columns when it is opened.
+Version 9,
 from the /cg-feedback
 redesign, added the rating's `why`, `missed_in`, `tip` and
 `tip_hint` columns and the `session_plan_feedback` and `tip_feedback`
@@ -875,7 +880,7 @@ window rather than a fresh corpus scan.
 Query: `window`, `window_days`, or `since`/`until` (see "Report-backed
 routes: windowing query params" above).
 
-`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt", "note"}, ...], "key"}, ...]` —
+`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "priced_on", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt", "note"}, ...], "key"}, ...]` —
 exactly `render/json_out.py`'s existing `Recommendation` encoding.
 `fixes` (from `fixes.py`) holds, per change, the six-part explainer, an
 `apply --set ... --dry-run` command (`null` when the value needs
@@ -893,7 +898,12 @@ prompt or change was never something Claude Code reads at startup).
 `saving_usd` is `estimated_saving`
 as a plain number (USD at list price, `null` when not estimated) —
 used to order recommendations of the same severity, and safe for a
-client to format or sort by directly. `key` (additive) is a
+client to format or sort by directly. `priced_on` (additive) is what that
+saving was priced on, as one number: the tokens a start-context card says
+leave each start, or the observed cost (USD at list price) a price card's
+saving is a share of; `null` when the card names no one figure (a card
+whose saving adds several parts, or a workflow card). `/api/report.json`
+carries it too; the Markdown, HTML and CSV reports do not show it. `key` (additive) is a
 deterministic, URL-safe id for this recommendation: `id` alone repeats
 across agent types (the same rule can fire once per subagent type), so
 `key` adds a slug of `agent_type` when one is set, and stays the same
@@ -1656,13 +1666,17 @@ same count is used on both sides of a comparison.
 
 `without` is what the sessions after the change would have cost
 without it (`counterfactual.py`), or `null` with fewer than
-`min_sessions` sessions after it. `fidelity` says how:
+`min_sessions` sessions after it. It is also `null` for an agent's
+start-context keys (see below) when the agent has fewer than 5 spawns on
+one model family on a side, or when the change names any other key.
+`fidelity` says how:
 
 | `fidelity` | For | How |
 |---|---|---|
-| `repriced` | `model`, `fastMode` | The same replies at the old model's prices, or with fast mode the other way. An old model that wasn't set is the one the sessions before ran on. |
+| `repriced` | `model`, `fastMode` | The same replies at the old model's prices, or with fast mode the other way. An old model that wasn't set is the one the sessions before ran on. An agent's `model` is priced only on the runs of that agent its agent file decides: a run a spawn or a workflow script gave a model is in neither figure, and `basis` says how many of the agent's runs were read. With none left the row is zero and says the change has not changed what you paid. The main session's `model` is priced only on the sessions after the change that ran on the model it sets, leaving out a project whose sessions before it ran none on the old one, and `basis` says how many were read. With none left its row is zero too. |
 | `simulated` | cache lifetime keys; an `autoCompactWindow` the change raised | The same replies replayed under the old lifetime, or the old, smaller window. A lowered window can't be undone: its compactions happened. |
 | `approximate` | a CLAUDE.md size change, MCP servers, plugins, skills | The context the change removed or added, carried on every main-session reply. |
+| `approximate` | an agent's `tools`, `disallowedTools`, `omitClaudeMd`, `skills`, `mcpServers` | The drop in median context at the start of that agent's own spawns, from before the change to after it, on the one model family both sides ran on, carried on every reply of each spawn after the change. `null` with under 5 spawns on that family on a side, and when the change names any other key. |
 | `before` | anything else, and any change to several settings at once | Each session after the change at the cost per reply of the sessions before it that did the same kind of work. |
 
 `paid_usd` and `without_usd` are list prices over the whole of each
@@ -1736,15 +1750,21 @@ prediction an earlier version closed as `too_little_data`, once, because
 their windows were cut too short then. Such a prediction waits like any
 other unjudged one, and is dropped 90 days after it was made.
 
-`data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
+`data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "priced_on", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
 Newest prediction first. `verdict` is `null` until a matching change
 point closes the window enough to judge it, then one of the closed set
-`as_estimated`, `smaller`, `larger`, `opposite` or `too_little_data`
+`as_estimated`, `smaller`, `larger`, `opposite`, `too_little_data` or `not_measured`
 (`verdicts` lists them). `predicted_text`, `measured_text` and
 `verdict_text` are server-formatted, billing-mode-aware sentences
 (`backtest.present`) — the dashboard never formats a dollar amount or a
 verdict itself. `measured_usd`/`measured_text` stay `null` until
-judged. `judged_just_now` is how many predictions this call judged for
+judged; for a row with a `priced_on` the measured figure is the share of the
+estimate that came true on the work after the change, on the estimate's own
+scale. `priced_on` is the number the estimate was a share of when it was logged
+(the observed cost it repriced, or the tokens per start it takes out), `null`
+when the estimate named none. A row with one is judged on the work after the
+change by `outcomes.read_fix`, and calibration learns only from such rows
+([backtest](backtest.md#an-estimate-that-says-what-it-was-priced-on)). `judged_just_now` is how many predictions this call judged for
 the first time (a stale answer can be served while a change is worked
 out in the background, as with `/api/impact`).
 
@@ -2238,7 +2258,7 @@ scaled to that task's share of the window (several tasks' shares add up),
 and a row with no per-task cost to scale by is not estimated. An unknown
 task is a `400`.
 
-`data`: `{"period", "rows": [{"key", "agent", "value", "saving_usd", "fidelity", "fidelity_text", "basis", "effect_text", "uncalibrated_usd", "uncalibrated_fidelity"}, ...], "total_usd", "total_text", "estimated", "not_estimated", "total_note"}`.
+`data`: `{"period", "rows": [{"key", "agent", "value", "saving_usd", "fidelity", "fidelity_text", "basis", "effect_text", "uncalibrated_usd", "uncalibrated_fidelity", "priced_on"}, ...], "total_usd", "total_text", "estimated", "not_estimated", "total_note"}`.
 `saving_usd` is `null` when a change is not estimated. `fidelity` says
 how it was worked out (`fidelity_text` in plain words) and `basis`
 explains it in a sentence: `"ceiling"` (a `model` change -- the same
@@ -2257,7 +2277,12 @@ of the turns it's read back from cache until re-sent, EST-P10),
 (not estimated) or `"calibrated"` (EST-P6: scaled by how this same kind
 of change actually turned out for you before, see below).
 `effect_text` and `total_text` are in the billing mode's units;
-`estimated`/`not_estimated` are counts of rows.
+`estimated`/`not_estimated` are counts of rows. `priced_on` is the number
+the row's saving is a share of -- the observed cost a `model`, cache-TTL or
+`autoCompactWindow` row reprices (a TTL row sums the agents it replays), the
+build cost after approved plans for `opusplan`, the CLAUDE.md tokens at each
+start for `omitClaudeMd` -- and `null` on every other row, on a row that was
+not estimated, and on a row scaled to a task's share (`?task=`).
 
 **EST-P6 calibration.** Once at least
 `backtest.MIN_JUDGED_FOR_CALIBRATION` (3) of your own past predictions
@@ -2274,7 +2299,9 @@ saving could be estimated is then appended to this tool's own
 `prediction-log.jsonl` (`config.append_prediction_log`) — always the
 *uncalibrated* estimate (`uncalibrated_usd`/`uncalibrated_fidelity`
 when present, `saving_usd`/`fidelity` otherwise), so calibrating an
-already-calibrated number never compounds. The dashboard sets this
+already-calibrated number never compounds. Each line also carries a
+`priced_on` key: the number the estimate is a share of, `null` when it names none
+(`config.append_prediction_log`'s `priced_on`). The dashboard sets this
 only for a change you mean to track, not for interactive "what if"
 exploration. A logged row reaches `GET /api/backtest` once the file
 watcher's next tick ingests it (`service.watcher._scan_predictions`)

@@ -397,12 +397,13 @@ def test_flat_key_and_value_in_read_a_change_where_the_advice_reads_it():
     assert card_marks.value_in(snap, agent_change) is None
 
 
-def test_card_row_names_the_card_its_rule_agent_changes_and_saving():
+def test_card_row_names_the_card_its_rule_agent_changes_saving_and_what_it_was_priced_on():
     rec = Recommendation(
         id="spawn-tools-list",
         key="spawn-tools-list:x",
         agent_type="x",
         saving_usd=1.5,
+        priced_on=3000.0,
         changes=[SettingChange(target="agent", key="tools", agent="x", value=["Read"], suggested="s")],
     )
     assert card_marks.card_row(rec) == {
@@ -411,6 +412,8 @@ def test_card_row_names_the_card_its_rule_agent_changes_and_saving():
         "agent_type": "x",
         "changes": [{"target": "agent", "key": "tools", "agent": "x", "value": ["Read"]}],
         "saving_usd": 1.5,
+        "priced_on": 3000.0,
     }
     bare = card_marks.card_row(Recommendation(id="habit", key="habit"))
     assert bare["changes"] == [] and bare["agent_type"] is None and bare["saving_usd"] is None
+    assert bare["priced_on"] is None

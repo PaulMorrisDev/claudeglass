@@ -438,7 +438,7 @@ python -m claudeglass tuning summary my-figures.json
 | Action or flag | What it does |
 |---|---|
 | `export` | Build the figures from your sessions and your dashboard ratings, and check them. Exit 2, with the problems on stderr and nothing written, if they fail |
-| `summary FILE` | Check the file, then print a few lines for each block. Exit 2 and no figures if it fails the checks, is not JSON or is over 256 KB |
+| `summary FILE` | Check the file, then print a few lines for each block. Exit 2 and no figures if it fails the checks, is not JSON or is over 320 KB |
 | `--out PATH` | With `export`: write the file to `PATH`, whole or not at all. Without it the JSON goes to the terminal |
 | `--days N` | With `export`: the last `N` local days. Default 30, from 1 to 365. `--since`, `--until` and `--limit` are refused |
 | `--project`, `--project-family` | With `export`: narrow the projects. Without either, every project is included |

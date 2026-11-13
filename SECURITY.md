@@ -939,8 +939,9 @@ file and nothing else. Export also reads `<config-dir>/service.db`, read-only:
 your dashboard ratings and tip-card answers, as `report` does, the digests
 of the window's sessions whose transcripts were not found, which it
 counts like the rest, and what the dashboard kept of the recommendation
-cards it showed (its `card_marks` table); only counts and fixed words reach
-the file. Neither makes a network call. Export writes only
+cards it showed (its `card_marks` table) and the estimates it logged for
+profile changes (its `predictions` table); only counts, amounts and fixed words reach
+the file. The figure a saving was priced on does not. Neither makes a network call. Export writes only
 to the terminal or the single file `--out` names. The properties below are the
 ones the code enforces, not promises about intent:
 
@@ -962,9 +963,9 @@ ones the code enforces, not promises about intent:
   `Users\`, a Git Bash `/c/` path, an `@`, `://` or `www.`. At read, the scan
   also covers the file's own text, and a key repeated in one object is
   refused, so nothing can hide in a value the parser would drop.
-- **A size limit.** The document is 256 KB or less. The fullest one the
-  description allows is about 248 KB, so a valid document always fits, and
-  a real one is about 35 KB.
+- **A size limit.** The document is 320 KB or less. The fullest one the
+  description allows, with every number as wide as it can print, is about
+  306 KB, so a valid document always fits, and a real one is about 35 KB.
 - **Fail closed, at write and at read.** `tuning.build` validates what it
   built and `tuning.dumps` validates again before it returns text, so a
   document that fails produces no file and no JSON on stdout: `tuning

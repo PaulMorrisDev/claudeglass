@@ -197,6 +197,16 @@ def test_managed_claude_md_is_excluded_from_the_omit_claude_md_saving():
     assert "Managed policy CLAUDE.md per spawn (still loads)" in labels
 
 
+def test_spawn_claude_md_records_the_claude_md_tokens_per_spawn_without_the_managed_part():
+    acc = _acc("reviewer", claude_md=5000.0)
+    acc.claude_md_by_source = {"Managed": [2000.0] * acc.spawns, "Project": [3000.0] * acc.spawns}
+    recs = _recs(_report(acc), snapshot=_snapshot({"reviewer": {"source": "user"}}), units=Units())
+    rec = next(r for r in recs if r.id == "spawn-claude-md")
+    assert rec.priced_on == 3000.0
+    assert isinstance(rec.saving_basis, str)  # the sentence is its own field
+    plain = _recs(_report(_acc("reviewer")), snapshot=_snapshot({"reviewer": {"source": "user"}}), units=Units())
+    assert next(r for r in plain if r.id == "spawn-claude-md").priced_on == 3000.0
+
 def test_omit_claude_md_never_offered_when_only_managed_claude_md_is_seen():
     acc = _acc("reviewer", claude_md=5000.0)
     acc.claude_md_by_source = {"Managed": [5000.0] * acc.spawns}
@@ -239,6 +249,13 @@ def test_unused_skills_are_unconfirmed_and_prompt_only_for_an_existing_file():
 
 # -- the tools list --------------------------------------------------------
 
+
+def test_spawn_unused_skills_records_the_skills_list_tokens_per_spawn():
+    snap = _snapshot({"reviewer": {"source": "project"}})
+    recs = _recs(_report(_acc("reviewer", claude_md=0.0, skills_used=0)), snapshot=snap, units=Units())
+    rec = next(r for r in recs if r.id == "spawn-unused-skills")
+    assert rec.priced_on == 800.0
+    assert next(e for e in rec.evidence if e[0] == "Skills list per spawn")[1] == rec.priced_on
 
 def _tools_rec(recs, agent_type):
     return next((r for r in recs if r.id == "spawn-tools-list" and r.agent_type == agent_type), None)
@@ -304,6 +321,18 @@ def test_the_card_is_priced_from_the_diet_table_and_is_the_only_one_to_carry_a_s
     assert "part of the tools list saving, not on top of it" in skills.saving_basis
     assert skills.estimated_saving
 
+
+def test_spawn_tools_list_records_the_tokens_it_takes_out_of_each_start():
+    recs = _recs(_report(_diet_acc("searcher")), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
+    rec = _tools_rec(recs, "searcher")
+    said = re.search(r"takes about ([\d,]+) tokens out of each start", rec.why)
+    assert said is not None
+    assert rec.priced_on == pytest.approx(float(said.group(1).replace(",", "")), abs=0.5)
+    # With no units the card still names the tokens.
+    bare = _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=_snapshot({"searcher": {"source": "user"}})), "searcher")
+    assert bare.priced_on == rec.priced_on
+    # A card that prices nothing on tokens leaves it None.
+    assert Recommendation().priced_on is None
 
 def test_the_shared_tool_prefix_is_not_counted_at_the_write_price_by_every_sibling():
     # The same agent type, once where every spawn wrote the tool prefix and
@@ -681,6 +710,12 @@ def test_unused_mcp_names_a_server_only_at_two_percent_of_spawns_and_five_dollar
     recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": small})), units=Units())
     assert not any(r.id == "spawn-unused-mcp" for r in recs)
 
+
+def test_spawn_unused_mcp_leaves_priced_on_none_because_its_saving_adds_servers():
+    big = (0, 25_000.0, 800.0, 300.0)
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": big})), units=Units())
+    rec = next(r for r in recs if r.id == "spawn-unused-mcp" and r.agent_type == "searcher")
+    assert rec.priced_on is None
 
 def test_unused_mcp_goes_per_server_and_is_a_breakdown_not_an_addition():
     servers = {"playwright": (0, 25_000.0, 800.0, 300.0), "sentry": (0, 20_000.0, 500.0, 200.0), "tiny": (0, 200.0, 20.0, 50.0)}

@@ -322,6 +322,17 @@ _TIER_BASIS = (
 )
 
 
+def _tier_priced_on(ctx: _Context, agent: str) -> float | None:
+    """The cost of the runs the model setting decides, which the tier
+    saving is a share of: what the rule cites as the observed cost (the
+    lever's own runs when the table has them, else the whole row)."""
+    for column in ("lever_cost", "observed_cost"):
+        cost = ctx.cell("model_swap", "model_swap_by_agent_type", agent, column)
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            return float(cost)
+    return None
+
+
 def _main_setting(ctx: _Context) -> tuple:
     """The main session's model setting now and the ``fixes.py`` scope a
     change to it goes to, as the saving reads it (``model_swap.main_setting``);
@@ -429,6 +440,7 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         estimated_saving=ctx.money(saving, prefix="At most "),
         saving_basis=ctx.basis(_TIER_BASIS),
         saving_usd=saving,
+        priced_on=_tier_priced_on(ctx, _agent),
     )
 
 
@@ -512,6 +524,8 @@ def _agent_tier_card(
         estimated_saving=ctx.money(total, prefix="At most "),
         saving_basis=ctx.basis(_TIER_BASIS),
         saving_usd=total,
+        # One agent's saving is a share of its cost; several agents' is not.
+        priced_on=_tier_priced_on(ctx, top[1]) if len(rows) == 1 else None,
     )
 
 
@@ -636,6 +650,8 @@ def _explain_compaction_window(rec: Recommendation, ctx: _Context) -> None:
     rec.changes = [_window_change(rec, ctx, value=value, suggested=f"{label} tokens")]
     rec.estimated_saving = ctx.money(saving, prefix="About ")
     rec.saving_usd = saving if isinstance(saving, (int, float)) else None
+    observed = _evidence_value(rec, "Observed cost")
+    rec.priced_on = float(observed) if isinstance(observed, (int, float)) and not isinstance(observed, bool) else None
     rec.saving_basis = ctx.basis(
         "Modelled by replaying your main sessions with summaries at this size, shaped like your past ones. "
         "It counts the summary itself, the cache rebuild on the reply after it, and an allowance for "
@@ -756,6 +772,8 @@ def _explain_ttl_switch(rec: Recommendation, ctx: _Context) -> None:
     rec.changes = [change]
     rec.estimated_saving = ctx.money(saving, prefix="About ")
     rec.saving_usd = saving if isinstance(saving, (int, float)) else None
+    observed = ctx.cell("ttl", "ttl_by_agent_type", agent, "cost_observed")
+    rec.priced_on = float(observed) if isinstance(observed, (int, float)) and not isinstance(observed, bool) else None
     rec.saving_basis = ctx.basis(
         "Replays every reply's cache writes and reads under the other lifetime at list price."
     )
