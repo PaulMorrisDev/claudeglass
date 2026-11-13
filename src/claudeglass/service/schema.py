@@ -208,8 +208,8 @@ view (``project`` is the view the dashboard names, the redacted project slug
 or ``*`` for every project; ``folders`` is that view's raw project folder
 names as JSON), written by ``POST /api/recommendations/marks``: the card's
 key, the rule it comes from (``rule_id``), the agent it is about, the setting
-changes it named, its own estimated saving and the basis that saving rests on
-(``saving_basis``: the tokens it takes out of each start, or the observed cost
+changes it named, its own estimated saving and what that saving was priced on
+(``priced_on``: the tokens it takes out of each start, or the observed cost
 it is a share of; ``NULL`` when the card names none) as they were when last
 marked, and when it was first shown, first copied (its own prompt), first copied in
 the project's all-fixes prompt, and, once the view is drawn again, when it
@@ -221,9 +221,9 @@ drop-and-rebuild keeps it like the ratings (``Store._export_marks``), and it
 is left out of ``Store.change_token``: a mark is written each time a list is
 drawn, so a mark that changed the token would rebuild every report each time.
 A v11 store gains the table in place (``store.MIGRATIONS[11]``). A store a
-build of this release stamped 12 before ``saving_basis`` was added gains the
+build of this release stamped 12 before ``priced_on`` was added gains the
 column when it is opened (``store._add_v12_columns``). The same goes for
-``predictions.basis`` (the log line's ``basis``: the observed cost or the
+``predictions.priced_on`` (the log line's ``priced_on``: the observed cost or the
 tokens per start the estimate was a share of, ``NULL`` when it names none).
 """
 
@@ -580,7 +580,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     measured_usd   REAL,
     measured_pct   REAL,
     created_at     TEXT NOT NULL,
-    basis          REAL
+    priced_on      REAL
 );
 CREATE INDEX IF NOT EXISTS idx_predictions_judged_at ON predictions(judged_at);
 """
@@ -625,7 +625,7 @@ CREATE TABLE IF NOT EXISTS card_marks (
     agent_type     TEXT,
     changes        TEXT NOT NULL DEFAULT '[]',
     saving_usd     REAL,
-    saving_basis   REAL,
+    priced_on      REAL,
     first_shown_at TEXT NOT NULL,
     copied_at      TEXT,
     bundled_at     TEXT,

@@ -233,14 +233,14 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 #: ``card_marks``'s columns in the order the marks export reads them (the
 #: first two are its key).
 _CARD_MARK_COLUMNS = (
-    "card_key", "project", "folders", "rule_id", "agent_type", "changes", "saving_usd", "saving_basis",
+    "card_key", "project", "folders", "rule_id", "agent_type", "changes", "saving_usd", "priced_on",
     "first_shown_at", "copied_at", "bundled_at", "landed_at", "landed_exact", "updated_at",
 )
 
 
 def _card_mark_select(held: set[str]) -> str:
     """``card_marks``'s columns for a ``SELECT``, a column the table does not
-    hold (``saving_basis`` in a store an earlier build of this release made,
+    hold (``priced_on`` in a store an earlier build of this release made,
     before the column was added) read as ``NULL``."""
     return ", ".join(column if column in held else f"NULL AS {column}" for column in _CARD_MARK_COLUMNS)
 
@@ -363,7 +363,7 @@ def _migrate_11_to_12(conn: sqlite3.Connection) -> None:
 #: column, type)``. The version-12 statements create them; a store made
 #: before gains them in :func:`_add_v12_columns`, from the step out of 11 and
 #: whenever it is opened at 12.
-_V12_COLUMNS = (("card_marks", "saving_basis", "REAL"), ("predictions", "basis", "REAL"))
+_V12_COLUMNS = (("card_marks", "priced_on", "REAL"), ("predictions", "priced_on", "REAL"))
 
 
 def _add_v12_columns(conn: sqlite3.Connection) -> None:
@@ -1529,11 +1529,11 @@ class Store:
         with _transaction(conn):
             conn.executemany(
                 "INSERT INTO card_marks (card_key, project, folders, rule_id, agent_type, changes, saving_usd, "
-                "saving_basis, first_shown_at, copied_at, bundled_at, updated_at) "
+                "priced_on, first_shown_at, copied_at, bundled_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(card_key, project) DO UPDATE SET folders = excluded.folders, "
                 "rule_id = excluded.rule_id, agent_type = excluded.agent_type, changes = excluded.changes, "
-                "saving_usd = excluded.saving_usd, saving_basis = excluded.saving_basis, "
+                "saving_usd = excluded.saving_usd, priced_on = excluded.priced_on, "
                 "updated_at = excluded.updated_at, "
                 "copied_at = COALESCE(card_marks.copied_at, excluded.copied_at), "
                 "bundled_at = COALESCE(card_marks.bundled_at, excluded.bundled_at), "
@@ -1542,7 +1542,7 @@ class Store:
                     (
                         card["key"], project, folders_json, card["rule_id"], card.get("agent_type"),
                         json.dumps(card.get("changes") or [], sort_keys=True, default=str), card.get("saving_usd"),
-                        card.get("saving_basis"), stamp, copied_at, bundled_at, stamp,
+                        card.get("priced_on"), stamp, copied_at, bundled_at, stamp,
                     )
                     for card in cards
                 ],
@@ -2644,21 +2644,21 @@ class Store:
 
     def upsert_prediction(
         self, *, prediction_id: str, ts: str, source: str, measure_key: str, agent: str | None,
-        predicted_usd: float | None, predicted_pct: float | None, fidelity: str, basis: float | None = None,
+        predicted_usd: float | None, predicted_pct: float | None, fidelity: str, priced_on: float | None = None,
     ) -> bool:
         """Ingest one ``prediction-log.jsonl`` record
         (``watcher._scan_predictions``). A prediction is immutable once
         logged, so this is ``INSERT OR IGNORE`` keyed on ``prediction_id``
         -- a repeat tick over an already-ingested line is a no-op.
-        ``basis`` is what the estimate was a share of (the observed cost, or
+        ``priced_on`` is what the estimate was a share of (the observed cost, or
         the tokens per start), ``None`` when the line names none.
         Returns whether a new row was actually inserted."""
         conn = self._connection()
         cursor = conn.execute(
             "INSERT OR IGNORE INTO predictions "
-            "(id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, created_at, basis) "
+            "(id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, created_at, priced_on) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (prediction_id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, _now(), basis),
+            (prediction_id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, _now(), priced_on),
         )
         return cursor.rowcount > 0
 
@@ -2717,7 +2717,7 @@ class Store:
             "measured_usd": row["measured_usd"],
             "measured_pct": row["measured_pct"],
             # A store an earlier build of this release made has no such column.
-            "basis": row["basis"] if "basis" in row.keys() else None,
+            "priced_on": row["priced_on"] if "priced_on" in row.keys() else None,
         }
 
     def predictions(self, *, judged: bool | None = None) -> list[dict]:

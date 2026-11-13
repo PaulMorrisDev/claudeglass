@@ -1988,21 +1988,21 @@ def test_upsert_prediction_is_idempotent_on_its_id(store: Store) -> None:
     assert row["predicted_usd"] == 1.5  # the second (differing) write was ignored
 
 
-def test_a_prediction_keeps_its_basis(store: Store) -> None:
+def test_a_prediction_keeps_what_it_was_priced_on(store: Store) -> None:
     store.upsert_prediction(
         prediction_id="with", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
-        agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", basis=12.5,
+        agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", priced_on=12.5,
     )
     store.upsert_prediction(
         prediction_id="without", ts="2026-09-20T09:01:00Z", source="whatif", measure_key="model",
         agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling",
     )
     rows = {row["id"]: row for row in store.predictions()}
-    assert rows["with"]["basis"] == 12.5
-    assert rows["without"]["basis"] is None
+    assert rows["with"]["priced_on"] == 12.5
+    assert rows["without"]["priced_on"] is None
 
 
-def test_a_store_already_at_12_without_the_prediction_basis_column_opens_and_reads_none(tmp_path) -> None:
+def test_a_store_already_at_12_without_the_prediction_priced_on_column_opens_and_reads_none(tmp_path) -> None:
     from claudeglass.service import schema
     from claudeglass.service import store as store_mod
 
@@ -2015,30 +2015,30 @@ def test_a_store_already_at_12_without_the_prediction_basis_column_opens_and_rea
     )
     store.close()
     conn = sqlite3.connect(str(db_path))
-    conn.execute("ALTER TABLE predictions DROP COLUMN basis")
+    conn.execute("ALTER TABLE predictions DROP COLUMN priced_on")
     conn.commit()
     conn.close()
 
     # The backtest command reads without writing: the column reads as None.
     [read] = store_mod.read_predictions(db_path)
-    assert read["id"] == "early" and read["basis"] is None
+    assert read["id"] == "early" and read["priced_on"] is None
 
     reopened = Store(str(db_path))
     reopened.open()
     try:
         assert reopened.schema_version() == schema.SCHEMA_VERSION == 12
         [row] = reopened.predictions()
-        assert row["id"] == "early" and row["basis"] is None
+        assert row["id"] == "early" and row["priced_on"] is None
         reopened.upsert_prediction(
             prediction_id="later", ts="2026-09-21T09:00:00Z", source="whatif", measure_key="model",
-            agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", basis=7.0,
+            agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", priced_on=7.0,
         )
-        assert {row["id"]: row["basis"] for row in reopened.predictions()} == {"early": None, "later": 7.0}
+        assert {row["id"]: row["priced_on"] for row in reopened.predictions()} == {"early": None, "later": 7.0}
     finally:
         reopened.close()
 
 
-def test_migrate_adds_the_basis_column_to_a_v11_stores_predictions(tmp_path) -> None:
+def test_migrate_adds_the_priced_on_column_to_a_v11_stores_predictions(tmp_path) -> None:
     from claudeglass.service import schema
     from claudeglass.service import store as store_mod
 
@@ -2051,7 +2051,7 @@ def test_migrate_adds_the_basis_column_to_a_v11_stores_predictions(tmp_path) -> 
     )
     store.close()
     conn = sqlite3.connect(str(db_path))
-    conn.execute("ALTER TABLE predictions DROP COLUMN basis")
+    conn.execute("ALTER TABLE predictions DROP COLUMN priced_on")
     conn.execute("UPDATE meta SET value = '11' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
     conn.commit()
     conn.close()
@@ -2061,7 +2061,7 @@ def test_migrate_adds_the_basis_column_to_a_v11_stores_predictions(tmp_path) -> 
     try:
         assert upgraded.schema_version() == schema.SCHEMA_VERSION
         [row] = upgraded.predictions()
-        assert row["id"] == "early" and row["basis"] is None
+        assert row["id"] == "early" and row["priced_on"] is None
     finally:
         upgraded.close()
 
@@ -2985,14 +2985,14 @@ def test_a_moved_sessions_series_is_read_from_the_present_transcript(store: Stor
 
 def _card(
     key="spawn-tools-list:x", rule_id="spawn-tools-list", agent_type="x", changes=None, saving_usd=1.5,
-    saving_basis=None,
+    priced_on=None,
 ):
     """A ``card_marks.card_row``-shaped dict."""
     if changes is None:
         changes = [{"target": "agent", "key": "tools", "agent": "x", "value": ["Read"]}]
     return {
         "key": key, "rule_id": rule_id, "agent_type": agent_type, "changes": changes, "saving_usd": saving_usd,
-        "saving_basis": saving_basis,
+        "priced_on": priced_on,
     }
 
 
@@ -3017,17 +3017,17 @@ def test_a_card_mark_keeps_when_it_was_first_shown_and_its_first_copy(store: Sto
     )
 
 
-def test_a_card_mark_keeps_the_cards_basis_with_its_estimate(store: Store) -> None:
-    store.mark_cards([_card(saving_basis=54_020.0)], mark="shown", project="*", folders=[], now=_T1)
+def test_a_card_mark_keeps_what_its_saving_was_priced_on(store: Store) -> None:
+    store.mark_cards([_card(priced_on=54_020.0)], mark="shown", project="*", folders=[], now=_T1)
     (row,) = store.card_marks()
-    assert row["saving_basis"] == 54_020.0
+    assert row["priced_on"] == 54_020.0
     # Rewritten with the saving at every mark; a card row with none writes none.
-    store.mark_cards([_card(saving_usd=2.5, saving_basis=61_000.0)], mark="shown", project="*", folders=[], now=_T2)
+    store.mark_cards([_card(saving_usd=2.5, priced_on=61_000.0)], mark="shown", project="*", folders=[], now=_T2)
     (row,) = store.card_marks()
-    assert (row["saving_usd"], row["saving_basis"]) == (2.5, 61_000.0)
+    assert (row["saving_usd"], row["priced_on"]) == (2.5, 61_000.0)
     store.mark_cards([_card(saving_usd=2.5)], mark="copied", project="*", folders=[], now=_T3)
     (row,) = store.card_marks()
-    assert row["saving_basis"] is None
+    assert row["priced_on"] is None
 
 
 def test_a_copy_of_a_card_never_shown_counts_it_shown_then(store: Store) -> None:
@@ -3125,7 +3125,7 @@ def _without_column(path, table: str, column: str) -> None:
     conn.close()
 
 
-def test_a_store_already_at_12_without_the_basis_column_opens_and_reads_none(tmp_path) -> None:
+def test_a_store_already_at_12_without_the_priced_on_column_opens_and_reads_none(tmp_path) -> None:
     from claudeglass.service import schema
     from claudeglass.service import store as store_mod
 
@@ -3134,25 +3134,25 @@ def test_a_store_already_at_12_without_the_basis_column_opens_and_reads_none(tmp
     store.open()
     store.mark_cards([_card()], mark="shown", project="proj-a", folders=["proj-a"], now=_T1)
     store.close()
-    _without_column(db_path, "card_marks", "saving_basis")
+    _without_column(db_path, "card_marks", "priced_on")
 
     # The tuning export reads it without writing: the column reads as None.
     (row,) = store_mod.read_card_marks(db_path)
-    assert row["saving_basis"] is None and row["card_key"] == "spawn-tools-list:x"
+    assert row["priced_on"] is None and row["card_key"] == "spawn-tools-list:x"
 
     reopened = Store(str(db_path))
     reopened.open()
     try:
         assert reopened.schema_version() == schema.SCHEMA_VERSION == 12
         (row,) = reopened.card_marks()
-        assert row["saving_basis"] is None and row["saving_usd"] == 1.5
-        reopened.mark_cards([_card(saving_basis=54_020.0)], mark="shown", project="proj-a", folders=["proj-a"], now=_T2)
-        assert reopened.card_marks()[0]["saving_basis"] == 54_020.0
+        assert row["priced_on"] is None and row["saving_usd"] == 1.5
+        reopened.mark_cards([_card(priced_on=54_020.0)], mark="shown", project="proj-a", folders=["proj-a"], now=_T2)
+        assert reopened.card_marks()[0]["priced_on"] == 54_020.0
     finally:
         reopened.close()
 
 
-def test_migrate_adds_the_basis_column_to_a_v11_store_that_held_card_marks(tmp_path) -> None:
+def test_migrate_adds_the_priced_on_column_to_a_v11_store_that_held_card_marks(tmp_path) -> None:
     from claudeglass.service import schema
     from claudeglass.service import store as store_mod
 
@@ -3161,7 +3161,7 @@ def test_migrate_adds_the_basis_column_to_a_v11_store_that_held_card_marks(tmp_p
     store.open()
     store.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T1)
     store.close()
-    _without_column(db_path, "card_marks", "saving_basis")
+    _without_column(db_path, "card_marks", "priced_on")
     conn = sqlite3.connect(str(db_path))
     conn.execute("UPDATE meta SET value = '11' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
     conn.commit()
@@ -3172,7 +3172,7 @@ def test_migrate_adds_the_basis_column_to_a_v11_store_that_held_card_marks(tmp_p
     try:
         assert upgraded.schema_version() == schema.SCHEMA_VERSION
         (row,) = upgraded.card_marks()
-        assert row["saving_basis"] is None and row["first_shown_at"] == _T1
+        assert row["priced_on"] is None and row["first_shown_at"] == _T1
     finally:
         upgraded.close()
 
@@ -3242,13 +3242,13 @@ def test_card_marks_survive_a_rebuild_from_a_newer_store(tmp_path) -> None:
         reopened.close()
 
 
-def test_a_card_marks_basis_survives_a_rebuild_from_a_newer_store(tmp_path) -> None:
+def test_a_card_marks_priced_on_survives_a_rebuild_from_a_newer_store(tmp_path) -> None:
     from claudeglass.service import schema
 
     db_path = tmp_path / "newer-basis.db"
     store = Store(str(db_path))
     store.open()
-    store.mark_cards([_card(saving_basis=54_020.0)], mark="shown", project="proj-a", folders=["proj-a"], now=_T1)
+    store.mark_cards([_card(priced_on=54_020.0)], mark="shown", project="proj-a", folders=["proj-a"], now=_T1)
     store.close()
     conn = sqlite3.connect(str(db_path))
     conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(schema.SCHEMA_VERSION + 1),))
@@ -3259,12 +3259,12 @@ def test_a_card_marks_basis_survives_a_rebuild_from_a_newer_store(tmp_path) -> N
     reopened.open()
     try:
         (row,) = reopened.card_marks()
-        assert row["saving_basis"] == 54_020.0
+        assert row["priced_on"] == 54_020.0
     finally:
         reopened.close()
 
     # A newer store whose card_marks lacks the column (an earlier build of this release) rebuilds too.
-    _without_column(db_path, "card_marks", "saving_basis")
+    _without_column(db_path, "card_marks", "priced_on")
     conn = sqlite3.connect(str(db_path))
     conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(schema.SCHEMA_VERSION + 1),))
     conn.commit()
@@ -3273,7 +3273,7 @@ def test_a_card_marks_basis_survives_a_rebuild_from_a_newer_store(tmp_path) -> N
     again.open()
     try:
         (row,) = again.card_marks()
-        assert row["saving_basis"] is None and row["card_key"] == "spawn-tools-list:x"
+        assert row["priced_on"] is None and row["card_key"] == "spawn-tools-list:x"
     finally:
         again.close()
 
