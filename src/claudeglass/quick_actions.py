@@ -305,7 +305,13 @@ def _models(ctx: Context) -> dict:
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_main_left_out(rows) + _models_set_elsewhere(rows)
-    blocked = _main_model_left_to_env(ctx)
+    unblocked = _models_draft_without_env(ctx)
+    blocked = (
+        next((c for c in unblocked["candidates"] if c["agent"] is None and c["key"] == "model"), None)
+        if unblocked is not None
+        else None
+    )
+    removed = (unblocked or draft)["removed"]
     main_picked = _models_main_picked(ctx, rows)
     if blocked is not None or (ctx.model_env_set and main_picked):
         from .advice import MODEL_ENV_WINS
@@ -326,7 +332,7 @@ def _models(ctx: Context) -> dict:
         return _result(
             "ok",
             _IGNORED_ONLY
-            if draft["removed"]
+            if removed
             else picked
             or (_MAIN_MODEL_LEFT_TO_ENV.format(model=blocked["value"]) if blocked is not None else "")
             or "Every agent is already on the cheapest model that priced lower by a useful margin"
@@ -341,7 +347,7 @@ def _models(ctx: Context) -> dict:
             "act",
             (
                 f"{flagged_text} The only other change this check would suggest is on a card you ignored."
-                if draft["removed"]
+                if removed
                 else f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount."
             )
             + (f" {picked}" if picked else ""),
@@ -510,14 +516,14 @@ def _models_main_said(rows: list[dict]) -> str:
     return " ".join(sentences)
 
 
-def _main_model_left_to_env(ctx: Context) -> dict | None:
-    """The main-session model change the models goal would draft were
-    ANTHROPIC_MODEL not set, or ``None``. The variable picks the model,
-    so the check offers no setting for it and says so."""
+def _models_draft_without_env(ctx: Context) -> dict | None:
+    """The models goal's draft as it would be were ANTHROPIC_MODEL not
+    set, or ``None`` while it is not set. The variable picks the main
+    session's model, so the check offers no setting for it; this is what
+    it would have offered, and what an ignored card took out of that."""
     if not ctx.model_env_set:
         return None
-    draft = _goal(replace(ctx, model_env_set=False), "models")
-    return next((c for c in draft["candidates"] if c["agent"] is None and c["key"] == "model"), None)
+    return _goal(replace(ctx, model_env_set=False), "models")
 
 
 def _models_main_picked(ctx: Context, rows: list[dict]) -> str:

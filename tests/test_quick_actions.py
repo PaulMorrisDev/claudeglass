@@ -310,9 +310,18 @@ def test_the_models_check_adds_no_variable_tip_for_an_ignored_main_model_card(tm
                                    skip_keys=frozenset({"model-tier-main"}), model_env_set=True))
     assert result["status"] == "ok" and result["fixes"] == []
     assert _env_tip(result) == []
-    # The goal's draft under the variable never holds the ignored change, so it
-    # counts nothing as removed and the summary is the plain "every agent" one.
-    assert result["summary"].startswith("Every agent is already")
+    assert [f for f in result["fixes"] if "Main session" in f["title"]] == []
+    # What the variable blocks, an ignored card takes out of too: the check says
+    # what it says without the variable.
+    assert result["summary"] == qa._IGNORED_ONLY
+    # The same with an agent-model card flagged: the "act" branch's sentence.
+    model.recommendations.append(_agent_model_rec("agent-model-inherited", "advice", _INHERITED, prompt="Set the model.",
+                                                  key="agent-model-inherited:workflow-subagent"))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}},
+                                   skip_keys=frozenset({"model-tier-main"}), model_env_set=True))
+    assert result["status"] == "act"
+    assert "The only other change this check would suggest is on a card you ignored." in result["summary"]
+    assert _env_tip(result) == []
 
 
 def test_models_check_says_where_each_agents_model_is_set(tmp_path):
