@@ -141,6 +141,8 @@ Capture and dashboard:
   about such an agent offers no prompt, and a writer with such a name is
   left out and counted, never named. Agent names in copied prompts are in
   quotes. A saved profile that breaks the rule says why when you open it.
+- **An id, model id or card key with a line break at its end is
+  refused.** A profile id like that gave an error 500 on Windows.
 
 Cards and checks:
 

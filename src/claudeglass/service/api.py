@@ -409,17 +409,17 @@ def _report_json_commands(text: str) -> str:
     return invocation.rewrite_rendered(text, "json")
 
 
-_SESSION_ID_RE = re.compile(r"^/api/session/([^/]+)$")
-_SESSION_TAGS_RE = re.compile(r"^/api/sessions/([^/]+)/tags$")
-_SESSION_FEEDBACK_RE = re.compile(r"^/api/sessions/([^/]+)/feedback$")
-_PROFILE_DIFF_RE = re.compile(r"^/api/profiles/([^/]+)/diff$")
-_PROFILE_RE = re.compile(r"^/api/profiles/([^/]+)$")
-_SESSION_EXPLAIN_RE = re.compile(r"^/api/session/([^/]+)/explain$")
-_CLAUDE_MD_RE = re.compile(r"^/api/claude-md/([0-9a-f]{16})$")
-_QUICK_ACTION_RE = re.compile(r"^/api/quick-actions/([a-z0-9-]+)$")
+_SESSION_ID_RE = re.compile(r"^/api/session/([^/]+)\Z")
+_SESSION_TAGS_RE = re.compile(r"^/api/sessions/([^/]+)/tags\Z")
+_SESSION_FEEDBACK_RE = re.compile(r"^/api/sessions/([^/]+)/feedback\Z")
+_PROFILE_DIFF_RE = re.compile(r"^/api/profiles/([^/]+)/diff\Z")
+_PROFILE_RE = re.compile(r"^/api/profiles/([^/]+)\Z")
+_SESSION_EXPLAIN_RE = re.compile(r"^/api/session/([^/]+)/explain\Z")
+_CLAUDE_MD_RE = re.compile(r"^/api/claude-md/([0-9a-f]{16})\Z")
+_QUICK_ACTION_RE = re.compile(r"^/api/quick-actions/([a-z0-9-]+)\Z")
 #: A recommendation's key (``Recommendation.key``), as the ignore route
 #: accepts it.
-_REC_KEY_RE = re.compile(r"^[a-z0-9._:-]{1,200}$")
+_REC_KEY_RE = re.compile(r"^[a-z0-9._:-]{1,200}\Z")
 #: At most this many keys in one ignore request (a rule for many agent
 #: types is one item on the dashboard, and one request).
 _MAX_IGNORE_KEYS = 100

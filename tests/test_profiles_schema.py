@@ -716,3 +716,25 @@ def test_a_plugin_agent_is_refused_in_a_profile_and_accepted_for_a_card():
         assert agent_name_problem(name, plugin=True) is None
     for name in ("p:../x", ":x", "p:", "p::x", "p:x\n", "p:a b", "p:" + "x" * 127):
         assert agent_name_problem(name, plugin=True) == _AGENT_NAME_RULE, name
+
+
+@pytest.mark.parametrize(
+    "doc,problem_start",
+    [
+        ({"id": "abc\n"}, "id: must match"),
+        (
+            {"id": "x", "settings": {"modelSettings": {"opus\n": {"effortLevel": "low"}}}},
+            "settings.modelSettings: model id",
+        ),
+        ({"id": "x", "agents": {"impl\n": {"model": "sonnet"}}}, "agents.'impl\\n': "),
+    ],
+)
+def test_a_trailing_line_break_is_refused(doc, problem_start):
+    [problem] = validate(doc)
+    assert problem.startswith(problem_start)
+
+
+def test_the_toml_writer_quotes_a_key_with_a_trailing_line_break():
+    from claudeglass.profiles import schema
+
+    assert schema._toml_key("abc\n") == '"abc\\n"'

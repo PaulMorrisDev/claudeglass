@@ -8236,3 +8236,15 @@ def test_a_saved_profile_that_breaks_the_name_rule_says_why_and_the_others_still
             f"agents.'../../CLAUDE': {_AGENT_NAME_RULE}. Fix or delete old.toml in ClaudeGlass's profiles folder."
         )
     assert server.get_json("/api/profiles/good")[0].status == 200
+
+
+def test_the_routes_refuse_an_id_or_key_with_a_trailing_line_break(server):
+    resp, _raw = server.request("POST", "/api/profiles", body={"id": "abc\n", "settings": {"effortLevel": "low"}})
+    assert resp.status == 400
+    resp, _raw = server.request(
+        "POST", "/api/tip-feedback", body={"kind": "recommendation", "item": "model-tier\n", "answer": "trying"}
+    )
+    assert resp.status == 400
+    assert server.store.tip_feedback() == {}
+    resp, _raw = server.request("GET", "/api/profiles/implementation-heavy%0A")
+    assert resp.status == 404

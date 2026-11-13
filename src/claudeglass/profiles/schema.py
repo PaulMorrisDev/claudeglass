@@ -296,11 +296,13 @@ ARCHETYPES: tuple[str, ...] = (
     "mixed",
 )
 
-_ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+# ``\Z``, not ``$``: ``$`` also matches before a final line break, so
+# ``"abc\n"`` would pass.
+_ID_RE = re.compile(r"^[a-z0-9-]{1,40}\Z")
 #: A ``modelSettings`` model id. No dot, so a diff row's dotted key
 #: (``settings.modelSettings.<id>.<sub-key>``) splits cleanly.
-_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_\-\[\]]{1,64}$")
-_BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_\-\[\]]{1,64}\Z")
+_BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 
 #: One part of an agent name: a letter or digit, then letters, digits,
 #: ``_``, ``.`` and ``-`` (any script's letters and digits), 128 at most.
