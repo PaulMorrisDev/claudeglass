@@ -451,6 +451,23 @@ def test_a_main_session_start_context_basis_under_the_floor_is_not_measured(stub
     assert reading.note == "the basis is too small a share of the start to tell from noise"
 
 
+def test_the_main_path_floor_reads_the_median_before_the_change(stub_carry, monkeypatch):
+    monkeypatch.setattr(counterfactual, "without_change", lambda *a: pytest.fail("under the floor"))
+    # After starts far below the before ones: 25,000 is 41.7% of the 60,000 before (under), 125% of the 20,000 after.
+    shrank = _read(
+        _point("effective.enabledPlugins"), None, "enabledPlugins", outcomes.Prediction(None, 25_000),
+        _main_world([60_000] * 6, [20_000] * 6),
+    )
+    assert shrank.verdict == "not_measured" and shrank.note == outcomes.NOTE_BASIS_TOO_SMALL
+    # After starts far above: 28,000 is 46.7% of the 60,000 before (read), 28% of the 100,000 after.
+    monkeypatch.setattr(counterfactual, "without_change", lambda *a: _approximate(10.0, 6 * 160.0))
+    grew = _read(
+        _point("effective.enabledPlugins"), None, "enabledPlugins", outcomes.Prediction(None, 28_000),
+        _main_world([60_000] * 6, [100_000] * 6),
+    )
+    assert grew.verdict in ("half_or_more", "under_half") and grew.note == ""
+
+
 def test_a_main_session_start_context_fix_without_enough_sessions_on_a_family_is_too_little_data(monkeypatch):
     monkeypatch.setattr(counterfactual, "without_change", lambda *a: pytest.fail("no sessions to read"))
     world = _main_world([60_000] * 6, [20_000] * 4)

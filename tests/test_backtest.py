@@ -647,6 +647,16 @@ def test_a_not_measured_reading_more_sessions_could_change_waits_out_thirty_days
     assert backtest.present([row], UNITS)[0]["verdict_text"] == "Not judged yet."
 
 
+@pytest.mark.parametrize(
+    "note", [outcomes.NOTE_BASIS_TOO_SMALL, outcomes.NOTE_NO_EXACT_PRICE, outcomes.NOTE_PRICES_TO_NOTHING]
+)
+@pytest.mark.parametrize(("days", "closed"), [(14.5, False), (29.9, False), (30.0, True)])
+def test_a_not_measured_reading_sessions_could_change_is_open_until_day_thirty(tmp_path, monkeypatch, note, days, closed):
+    store, judged = _not_measured_world(tmp_path, monkeypatch, note, days)
+    assert judged == int(closed)
+    assert len(store.predictions(judged=closed)) == 1
+
+
 def test_a_prediction_closed_as_not_measured_says_it_cant_be_checked():
     rows = [{"id": "p", "verdict": "not_measured", "predicted_usd": 1.0, "measured_usd": None}]
     [shown] = backtest.present(rows, UNITS)
