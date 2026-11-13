@@ -3313,6 +3313,51 @@ def test_effort_mismatch_reads_easy_work_at_high_effort_directly():
     assert rec.title == "High effort is being spent on easy work"
 
 
+def _easy_cycles_on(day: str, n: int, effort: str = "high"):
+    from datetime import datetime, timezone
+
+    from claudeglass.habits import CycleFact
+    from claudeglass.model import CaptureTag
+
+    return [
+        CycleFact(session_id="s", ts=datetime.fromisoformat(day).replace(tzinfo=timezone.utc), week="", cost=1.0,
+                  turns=1, tag=CaptureTag(level="easy"), effort=effort, output_cost=1.0, thinking_cost=0.6)
+        for _ in range(n)
+    ]
+
+
+def test_effort_mismatch_cites_the_newest_tag_when_old():
+    from datetime import datetime, timezone
+
+    from claudeglass import habits
+    from claudeglass.habits import CycleFact, Habits
+
+    def section(newest_message: str):
+        cycles = _easy_cycles_on("2026-10-23", 5) + _easy_cycles_on("2026-10-22", 5, effort="xhigh")
+        cycles.append(CycleFact(session_id="s", ts=datetime.fromisoformat(newest_message).replace(tzinfo=timezone.utc),
+                                week="", cost=1.0, turns=1))
+        return habits.section_from(Habits(cycles=cycles, tz="UTC"))
+
+    table = next(t for t in section("2026-11-08").tables if t.name == "habits_effort_fit")
+    assert table.columns[-1].key == "newest_tag" and table.columns[-1].label == "Newest tag"
+    assert {row[0]: row[-1] for row in table.rows} == {"easy:high": "2026-10-23", "easy:xhigh": "2026-10-22"}
+
+    r = _add_section(_base_report(), section("2026-11-08"))
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    # Once, for the first cited row, however many rows are cited.
+    assert [e for e in rec.evidence if e[0] == "Newest tag behind this"] == [
+        ("Newest tag behind this", "2026-10-23", "habits.habits_effort_fit", "easy:high"),
+    ]
+    assert len(rec.evidence) == 5
+
+    # While the tags are fresh the cells are empty and there is no row.
+    fresh = next(t for t in section("2026-10-25").tables if t.name == "habits_effort_fit")
+    assert {row[-1] for row in fresh.rows} == {""}
+    r = _add_section(_base_report(), section("2026-10-25"))
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    assert not any(e[0] == "Newest tag behind this" for e in rec.evidence)
+
+
 @pytest.mark.parametrize("cycles", [
     _easy_cycles(4),
     _easy_cycles(5, thinking=0.2),

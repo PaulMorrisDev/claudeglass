@@ -1576,6 +1576,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "redo_pct": ("Redone", "Messages whose work was redone, fixed or corrected next."),
             "met_pct": ("Met the goal", "From your feedback."),
             "saving": ("Lower effort would save, about", "Half the thinking on easy work at high effort or above."),
+            "newest_tag": (
+                "Newest tag",
+                "The date of Claude's newest tag in this row, when it is a week or more older than your newest message.",
+            ),
         },
         value_labels={
             f"{level}:{effort}": f"{level.capitalize()} work, {effort_label}"

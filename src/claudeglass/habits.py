@@ -4189,9 +4189,12 @@ def _effort_table(h: Habits) -> Table:
         if c.tag is not None and c.tag.level:
             groups.setdefault(f"{c.tag.level}:{c.effort or 'default'}", []).append(c)
     order = {w: n for n, w in enumerate(catalogue.TAG_VOCAB["level"])}
+    latest = max((c.ts for c in h.cycles if c.ts is not None), default=None)
     rows = []
     for key, cycles in sorted(groups.items(), key=lambda kv: (order.get(kv[0].split(":")[0], 9), kv[0])):
         rated = [c for c in cycles if c.outcome]
+        newest = max((c.ts for c in cycles if c.ts is not None), default=None)
+        stale = newest is not None and latest is not None and latest - newest >= timedelta(days=TAG_AGE_DAYS)
         output = sum(c.output_cost for c in cycles)
         rows.append([
             key,
@@ -4201,6 +4204,7 @@ def _effort_table(h: Habits) -> Table:
             _pct(sum(c.redone for c in cycles), len(cycles)),
             _pct(sum(c.outcome == "met" for c in rated), len(rated)),
             sum(_effort_waste(c) for c in cycles) if key.split(":")[0] == "easy" and key.split(":")[1] in _HIGH_EFFORT else None,
+            local_day(newest, h.tz) if stale else "",
         ])
     return Table(
         name="habits_effort_fit",
@@ -4213,6 +4217,7 @@ def _effort_table(h: Habits) -> Table:
             Column(key="redo_pct", label="Redone", kind="pct"),
             Column(key="met_pct", label="Met the goal", kind="pct"),
             Column(key="saving", label="Lower effort would save, about", kind="money"),
+            Column(key="newest_tag", label="Newest tag", kind="str"),
         ],
         rows=rows,
     )

@@ -2737,6 +2737,7 @@ def _effort_mismatch_reported(
     cycles_idx = _col_index(table, "cycles")
     share_idx = _col_index(table, "thinking_pct")
     saving_idx = _col_index(table, "saving")
+    newest_idx = _col_index(table, "newest_tag")
     if None in (cycles_idx, share_idx, saving_idx):
         return []
     rows = [
@@ -2760,6 +2761,11 @@ def _effort_mismatch_reported(
         evidence.append(
             _evidence(f"Easy work at {effort} effort, thinking share of output", row[share_idx], "habits", "habits_effort_fit", row[0])
         )
+    # Tags this old are a week or more behind your newest message: say when the newest was written, once.
+    if newest_idx is not None:
+        old = next((row for row in rows if newest_idx < len(row) and row[newest_idx]), None)
+        if old is not None:
+            evidence.append(_evidence("Newest tag behind this", old[newest_idx], "habits", "habits_effort_fit", old[0]))
     saving = sum(row[saving_idx] for row in rows if isinstance(row[saving_idx], (int, float)))
     lever, scope = _lever_scope("effortLevel", snapshot)
     return [
