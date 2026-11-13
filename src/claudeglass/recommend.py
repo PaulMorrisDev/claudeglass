@@ -2774,11 +2774,11 @@ def _effort_mismatch_reported(
         evidence.append(
             _evidence(f"Easy work at {effort} effort, thinking share of output", row[share_idx], "habits", "habits_effort_fit", row[0])
         )
-    # Tags this old are a week or more behind your newest message: say when the newest was written, once.
-    if newest_idx is not None:
-        old = next((row for row in rows if newest_idx < len(row) and row[newest_idx]), None)
-        if old is not None:
-            evidence.append(_evidence("Newest tag behind this", old[newest_idx], "habits", "habits_effort_fit", old[0]))
+    # Say when the newest tag was written, once, only if every cited row's tags are a week or more behind your
+    # newest message (a filled cell): one fresh row means the evidence is not old. Dates are ISO, so max is latest.
+    if newest_idx is not None and all(newest_idx < len(row) and row[newest_idx] for row in rows):
+        latest = max(rows, key=lambda row: row[newest_idx])
+        evidence.append(_evidence("Newest tag behind this", latest[newest_idx], "habits", "habits_effort_fit", latest[0]))
     saving = sum(row[saving_idx] for row in rows if isinstance(row[saving_idx], (int, float)))
     lever, scope = _lever_scope("effortLevel", snapshot)
     return [

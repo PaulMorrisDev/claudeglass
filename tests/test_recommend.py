@@ -3413,6 +3413,29 @@ def test_effort_mismatch_cites_the_newest_tag_when_old():
     assert not any(e[0] == "Newest tag behind this" for e in rec.evidence)
 
 
+def test_effort_mismatch_names_no_old_date_when_a_cited_row_is_fresh():
+    from datetime import datetime, timezone
+
+    from claudeglass import habits
+    from claudeglass.habits import CycleFact, Habits
+
+    def card(second_row_day: str):
+        cycles = _easy_cycles_on("2026-10-23", 5) + _easy_cycles_on(second_row_day, 5, effort="xhigh")
+        cycles.append(CycleFact(session_id="s", ts=datetime(2026, 11, 8, tzinfo=timezone.utc), week="", cost=1.0, turns=1))
+        r = _add_section(_base_report(), habits.section_from(Habits(cycles=cycles, tz="UTC")))
+        return next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+
+    # Both rows are cited, and half the evidence was tagged the day before the newest message.
+    fresh = card("2026-11-07")
+    assert {e[3] for e in fresh.evidence} == {"easy:high", "easy:xhigh"}
+    assert not any(e[0] == "Newest tag behind this" for e in fresh.evidence)
+    # When every cited row is old the row cites the latest of their dates.
+    old = card("2026-10-25")
+    assert [e for e in old.evidence if e[0] == "Newest tag behind this"] == [
+        ("Newest tag behind this", "2026-10-25", "habits.habits_effort_fit", "easy:xhigh"),
+    ]
+
+
 @pytest.mark.parametrize("cycles", [
     _easy_cycles(4),
     _easy_cycles(5, thinking=0.2),
