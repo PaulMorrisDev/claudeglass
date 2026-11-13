@@ -2361,7 +2361,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         _total, rare_rows = acc.removable_chars(family)
         builtin = [row for row in rare_rows if not row[0].startswith("mcp__")]
         keep = acc.kept_tools(family)
-        called ={key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
+        called = {key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
         builtin = [row for row in builtin if row[0] not in called]
         rule_kept = sorted(called - set(keep))
         keep = sorted(set(keep) | called, key=lambda key: (key.startswith("mcp__"), key))
