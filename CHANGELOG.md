@@ -130,6 +130,8 @@ Capture and dashboard:
 - **docs/capture.md names the question Deep asks after a summary**
   (`lost=yes|no`), and the note after a compaction is given its own size:
   about 709 tokens at Deep. `capture status` and Setup › Capture say so too.
+- **Parallel sessions and agents no longer lose signal or tag lines on
+  Windows.** Each line is now added in one step the system keeps whole.
 
 Cards and checks:
 

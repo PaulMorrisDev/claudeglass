@@ -1795,3 +1795,59 @@ def test_the_hook_adds_the_reminder_note_while_the_mod_runs(tmp_path):
     heartbeat.write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now.timestamp()}), encoding="utf-8")
     rc, out, err = _run(config_dir, payload)
     assert rc == 0 and err == "" and _hint(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "rating_reminder"
+
+
+# -- parallel appends and the job's pipe -------------------------------------------------------
+
+
+def test_parallel_signal_writes_keep_every_line(tmp_path):
+    """Eight hooks append 300 signal lines each to one month's file at once, as parallel sessions and
+    agents do: every line is there once, whole."""
+    code = (
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import capture_hook as h; "
+        "cat = h.load_catalogue(); d = Path(sys.argv[2]); "
+        "[h.write_signal(d, cat, {'ts': '2026-11-13T12:00:00Z', 'sid': sys.argv[3], 'e': 'perm', 'n': i}) "
+        "for i in range(300)]"
+    )
+    workers = [
+        subprocess.Popen([sys.executable, "-I", "-S", "-c", code, str(MODULE.parent), str(tmp_path), f"p{k}"])
+        for k in range(8)
+    ]
+    for worker in workers:
+        assert worker.wait(timeout=120) == 0
+    lines = (tmp_path / CATALOGUE["signals_dir"] / "2026-11.jsonl").read_bytes().split(b"\n")
+    assert lines[-1] == b""
+    records = [json.loads(line) for line in lines[:-1]]
+    assert len(records) == 2400
+    assert len({(r["sid"], r["n"]) for r in records}) == 2400
+
+
+def test_the_tag_file_and_the_signal_file_append_the_same_way(tmp_path, monkeypatch):
+    appended = []
+    monkeypatch.setattr(HOOK, "append_line", lambda path, line: appended.append((path.parent.name, line)))
+    HOOK.write_signal(tmp_path, CATALOGUE, {"ts": "2026-11-13T12:00:00Z", "sid": "s", "e": "perm"})
+    job = {"ts": "2026-11-13T12:00:00Z", "reply": "msg_1", "keys": ["task"], "system": "s", "excerpt": "e", "facts": {}}
+    HOOK.run_judge(tmp_path, CATALOGUE, job, ask=lambda *a: {"result": "[cg: task=bugfix]"}, now=0.0)
+    assert [folder for folder, _line in appended] == [CATALOGUE["signals_dir"], CATALOGUE["judge"]["dir"]]
+    assert all(line.endswith("\n") and line.count("\n") == 1 for _folder, line in appended)
+
+
+def test_an_append_falls_back_to_open_only_when_nothing_was_written(tmp_path, monkeypatch):
+    path = tmp_path / "a.jsonl"
+    monkeypatch.setattr(HOOK, "_WINDOWS", True)
+    monkeypatch.setattr(HOOK, "_append_windows", lambda p, data: False)
+    HOOK.append_line(path, '{"n":1}\n')
+    assert path.read_text(encoding="utf-8") == '{"n":1}\n'
+    # Written through the append-only handle: never written again.
+    monkeypatch.setattr(HOOK, "_append_windows", lambda p, data: True)
+    HOOK.append_line(path, '{"n":2}\n')
+    assert path.read_text(encoding="utf-8") == '{"n":1}\n'
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the append-only handle is Windows's own")
+def test_the_append_only_handle_makes_the_file_and_writes_at_its_end(tmp_path):
+    path = tmp_path / "dir with spaces ÄÖü 日本" / "2026-11.jsonl"
+    path.parent.mkdir()
+    assert HOOK._append_windows(path, b"a\n") and HOOK._append_windows(path, b"b\n")
+    assert path.read_bytes() == b"a\nb\n"
+    assert HOOK._append_windows(tmp_path / "missing" / "2026-11.jsonl", b"x\n") is False
