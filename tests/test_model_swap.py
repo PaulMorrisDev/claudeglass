@@ -845,6 +845,27 @@ def test_picks_and_own_model_sessions_count_on_the_row_and_are_said_on_the_card(
     _assert_evidence_resolves(report, rec)
 
 
+def test_the_tier_cards_cost_evidence_is_named_for_the_runs_it_prices():
+    picked, counted = (_run(OPUS, "", kind="top-level") for _ in range(2))
+    reasons = {id(picked): model_swap.PICKED}
+    stats = model_swap.compute_model_swap([picked, counted], PRICING, main_lever=lambda tr: reasons.get(id(tr)))
+    section = model_swap.build_section(stats)
+    cells = _row_cells(section, "top-level")
+    # The row's own "Observed cost" column holds every run's cost, the lever's column the runs the change reaches.
+    assert cells["lever_cost"] < cells["observed_cost"]
+    _report, (rec,) = _main_rule(section)
+    label, value, *_rest = rec.evidence[0]
+    assert (label, value) == ("Cost of the runs this change reaches", cells["lever_cost"])
+    # A table from before the lever columns existed falls back to the whole row's cost, under its own name.
+    table = next(t for t in section.tables if t.name == "model_swap_by_agent_type")
+    keep = [i for i, column in enumerate(table.columns) if not column.key.startswith("lever_")]
+    table.columns = [table.columns[i] for i in keep]
+    table.rows = [[row[i] for i in keep] for row in table.rows]
+    _report, (older,) = _main_rule(section)
+    label, value, *_rest = older.evidence[0]
+    assert (label, value) == ("Observed cost", cells["observed_cost"])
+
+
 def test_above_main_floor_is_a_known_larger_model():
     for model in ("opus", "claude-opus-5-5", "fable", "claude-fable-5-1"):
         assert model_swap.above_main_floor(model), model
