@@ -381,10 +381,11 @@ there is nothing to count, and a file from before them never had them.
 | `cost_centres` | Where the window's spend went: for the main session, direct agents, workflow agents and each session's first call, the list-price amount in each of base read, above-base read, growth write, rewrite, post-compaction and output. A row or cell with no spend is left out. Amounts only: the parts of the base read are not in it |
 | `project_files` | The files that go into agents' runs: the CLAUDE.md files Claude Code loads, the files they import and the files agents read by habit. For each of the 40 that cost most: its extension class (`md`, `txt`, `json`, `config`, `code`, `other`, or `unknown` for a file this machine could not find), how it arrives (`auto`, `import` or `read`), its size now and each recent week's as a bucket (up to 1k, 2k, 5k, 10k and 20k tokens, or over), and, for the main session and each agent type, the share of its runs that had the file. A custom agent's runs count as `custom`. No name, path, hash or cost; `total` counts every file |
 | `compactions` | The conversation summaries Claude Code made. The main sessions, how many of them summarised and the summaries in them, by what triggered each (`auto`, `manual` or `other`); those made inside subagent and workflow runs; the tokens they dropped. With a rate card, at list prices: the cache write on the reply after each summary, the estimated cost of writing them, and, for the sessions that summarised 3 times or more, how many there were, what their main conversations cost and what that was in all main-session cost. Counts and amounts: no session, no summary text |
+| `cards` | Only when the dashboard has a database: what became of the recommendation cards it showed, by rule and kind of agent (the rule as its fixed id, the agent as `none`, `main`, a built-in agent type or `custom`), most-shown 40 rows. For each: how many were shown, how many you copied (and how many of those only in the prompt for every open fix), how many are ignored now, how many name a setting to change, how many landed, how many of those landed to the card's own value, the middle number of days from first shown to landed, and how you rated them. A card has **landed** when it left the list and every setting it names moved since it was first shown and stayed moved; it needs the dashboard to have drawn its list again after the change. Counts and fixed words: no card, project, agent or setting name, and no time |
 
-Your session ratings and tip-card answers on the dashboard count as they do
-there. They are read from its database without writing to it, and only their
-counts reach the file.
+Your session ratings, tip-card answers and card marks on the dashboard count
+as they do there. They are read from its database without writing to it, and
+only their counts reach the file.
 
 ### What it never holds
 

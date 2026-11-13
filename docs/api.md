@@ -321,8 +321,8 @@ can still include a session whose transcript file Claude Code's own
 `cleanupPeriodDays` retention has already removed — see "Store rebuild"
 below.
 
-`schema_version` is the store's schema: 11 since the ClaudeGlass mod's
-tweaks. Version 10 added the `mod_events` table: one row per event the mod
+`schema_version` is the store's schema: 12 since the dashboard began
+keeping what it showed of the recommendation cards. Version 10 added the `mod_events` table: one row per event the mod
 wrote to `mod/sensor/<session id>.json` (the session's id, the time, the
 event word, the closed words `kind`, `surface` and `outcome` that event
 takes, and for a compaction review the counts `kept`, `missing` and
@@ -332,7 +332,18 @@ takes, and for a compaction review the counts `kept`, `missing` and
 it changes and replaces that session's rows from the file's first event
 on, so reading it again changes nothing, and rows older than
 `retention_days` (180 by default) are removed with their files. A store at
-9 gains the table in place, and one at 10 gains the columns. Version 9,
+9 gains the table in place, and one at 10 gains the columns. Version 12
+adds the `card_marks` table: one row per card per view of the dashboard (the
+project it was shown in, or every project), holding the card's key, the rule
+and agent it is about, the settings it asked you to change, its estimated
+saving, and when it was first shown, first copied (its own prompt), first
+copied in the project's all-fixes prompt, and, once that view is drawn again,
+when it left the list with every setting it names moved (`landed_at`, and
+whether the settings hold the card's own values). It is written by
+`POST /api/recommendations/marks`, stays on this machine and is returned by
+no route; only counts and fixed words from it reach a tuning export. Rows
+older than `retention_days` (180 by default) are removed. A store at 11 gains
+the table in place. Version 9,
 from the /cg-feedback
 redesign, added the rating's `why`, `missed_in`, `tip` and
 `tip_hint` columns and the `session_plan_feedback` and `tip_feedback`
@@ -343,7 +354,7 @@ day in your own zone. A store at 7 gains the column in place and every
 transcript is read once more to fill it in (a transcript whose file is
 gone keeps its UTC day). An older version that opens a newer store
 rebuilds it from the transcripts, after setting a copy aside; your
-session tags, session ratings and card ratings are put back.
+session tags, session ratings, card ratings and card marks are put back.
 
 `watcher` (S1-perf) additionally carries a per-tick timing breakdown of
 its own `duration_s`: `discovery_s` (filesystem walk + diffing against
@@ -900,7 +911,7 @@ One prompt for a project's open fixes. Query: the same window as
 it is missing or matches no project).
 
 `data`: `{"prompt", "files": [{"file", "fixes"}, ...], "several", "other",
-"cards", "left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
+"cards", "keys", "left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
 one opening line, then each fix's own `prompt` (as in
 `/api/recommendations`) minus its own closing (the "show me the diff"
 and restart lines, or the question about where a standing rule applies)
@@ -917,7 +928,9 @@ files (a kind of file, such as the hook scripts) or set a standing rule
 (the CLAUDE.md that Claude asks about); `other` counts the fixes under
 the group with no file to edit. The three do not overlap: every fix in
 the prompt is in exactly one of them. `cards` counts the cards that
-contributed.
+contributed, and `keys` names them (their `key`, in the order they came), so a
+copy of the prompt can be recorded against them (`POST
+/api/recommendations/marks`, mark `bundle`).
 `left_out` counts the cards with at least one fix left out for each
 reason, so a card can count in both `cards` and `left_out`: its fix has
 landed (the `fixed` variant, which the browser never sees), it is shown
@@ -948,6 +961,37 @@ Stored in `<config_dir>/ignored-recommendations.json`.
 
 `data`: `{"keys", "ignored", "active_profile_id"}` (`null` when no
 profile has been applied).
+
+### `POST /api/recommendations/marks`
+
+Records what the dashboard did with recommendation cards, so a tuning export
+can say how the advice was used. Query: the same window and `project` as
+`GET /api/recommendations`; the marks are kept for that view (the project, or
+every project).
+
+Body: `{"mark": "shown" | "copied" | "bundle", "keys": [str, ...]}`; both are
+required and no other field is accepted. `shown`: the cards' titles were drawn
+on a page that was open, while its tab was visible (the To do list on Actions
+› Recommendations, and the lead card of an Overview row). `copied`: a button
+copied the card's own prompt or command, and the copy worked. `bundle`: the
+project's all-fixes prompt (`GET /api/recommendations/prompt`, whose `keys`
+name the cards it holds) was copied. A copy marks the card shown too. `keys`
+holds up to 100 recommendation `key`s (`[a-z0-9._:-]`), and at least one
+unless `mark` is `shown`. `400` when the body isn't that shape. A key that
+this window's list does not hold is skipped, not an error: the page sends what
+it drew, and the report may have been rebuilt since.
+
+A `shown` mark then checks the view's other cards: one marked before that the
+list no longer holds, whose settings the store has a record of, has
+**landed** when every setting it names has moved since it was first shown and
+stayed moved in the view's config snapshots. The result (`landed_at`, and
+whether the settings hold the card's own values) is kept with the card; a
+card marked again, or whose setting moves back, is no longer landed. The
+check runs again only when the store or the list has changed.
+
+`data`: `{"mark", "recorded"}` (how many of the keys were recorded). The
+route writes the dashboard's store and nothing else: no file in
+`<config_dir>`, no Claude Code setting. No route returns what it stored.
 
 ### `GET /api/diagnostics`
 
@@ -2124,7 +2168,8 @@ already-calibrated number never compounds. The dashboard sets this
 only for a change you mean to track, not for interactive "what if"
 exploration. A logged row reaches `GET /api/backtest` once the file
 watcher's next tick ingests it (`service.watcher._scan_predictions`)
-and `POST /api/predictions/seen` marks it shown.
+and `POST /api/predictions/seen` can mark it shown (the route is there;
+no dashboard page calls it).
 
 ### `POST /api/predictions/seen`
 

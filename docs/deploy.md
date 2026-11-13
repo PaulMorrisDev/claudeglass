@@ -458,7 +458,9 @@ that actually delete a row.
   background telemetry, not report data, so every tick prunes them
   regardless of whether `--retention-days`/`config.toml` set anything —
   at `N` when one is set, or a 180-day default
-  (`config.SIGNAL_RETENTION_DEFAULT_DAYS`) otherwise.
+  (`config.SIGNAL_RETENTION_DEFAULT_DAYS`) otherwise. The dashboard's card
+  marks (`card_marks`) and the mod's sensor events are pruned on the same
+  schedule: a card is kept until 180 days after it was last shown or copied.
   `claudeglass capture prune [--dry-run]` runs the identical
   cleanup by hand for anyone not running `serve`.
 - **`serve --purge`** (deliverable 2.e): deletes `<config-dir>/service.db`
@@ -552,7 +554,12 @@ says what to do.
 ## The store's schema version
 
 `service.db` records the schema version it was written under
-(`meta.schema_version`). Version 11 adds four nullable counts to
+(`meta.schema_version`). Version 12 adds the `card_marks` table, which holds
+what the dashboard showed of each recommendation card (the card, the view it
+was shown in, the settings it named, and when it was first shown, copied and
+landed); it stays on this machine, and `serve --purge` deletes it with the
+rest of `service.db`. Upgrading from 11 creates it in place, and a rebuild
+puts its rows back. Version 11 adds four nullable counts to
 `mod_events` for the mod's tweaks; upgrading from 10 adds the columns in
 place. Version 10 adds the `mod_events` table, which
 holds what the ClaudeGlass mod showed (closed words and counts, read from
