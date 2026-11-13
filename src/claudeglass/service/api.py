@@ -2297,19 +2297,6 @@ def make_handler(
             for row in store.profiles()
         ]
 
-        # PF1: the suggestion is worked out live from the report for the
-        # picked window and project (the build the page already asked for),
-        # not read from the record `init` stored once. Nothing is shown
-        # for a view with too few sessions.
-        window, err = _window_query(query)
-        if err is not None:
-            return err
-        project, err = _project_query(query)
-        if err is not None:
-            return err
-        suggestion = baseline_mod.suggest_for_model(_get_report_model(*window, project))
-        suggested_profile_id, suggested_reason = suggestion if suggestion is not None else (None, None)
-
         # The profile `apply <profile>` last marked active: ignored
         # recommendations are kept per profile.
         active_id = ignores.active_profile(options.config_dir)
@@ -2320,12 +2307,26 @@ def make_handler(
         return _ok(
             {
                 "profiles": catalogue_entries + user_entries,
-                "suggested_profile_id": suggested_profile_id,
-                "suggested_reason": suggested_reason,
                 "active_profile_id": None if active_id == ignores.NO_PROFILE else active_id,
                 "active_profile_name": active_name,
             }
         )
+
+    def route_profile_suggestion(store, query, body):
+        # PF1: the suggestion is worked out live from the report for the
+        # picked window and project, not read from the record `init` stored
+        # once. It is a route of its own because the report can take a while
+        # to build and the profile list must not wait for it. Nothing is
+        # suggested for a view with too few sessions.
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        suggestion = baseline_mod.suggest_for_model(_get_report_model(*window, project))
+        suggested_profile_id, suggested_reason = suggestion if suggestion is not None else (None, None)
+        return _ok({"suggested_profile_id": suggested_profile_id, "suggested_reason": suggested_reason})
 
     def route_baseline(store, query, body):
         # v0.3: pair the latest capture with the onboarding capture
@@ -3889,6 +3890,7 @@ def make_handler(
         "/api/recache": route_recache,
         "/api/compactions": route_compactions,
         "/api/profiles": route_profiles,
+        "/api/profiles/suggestion": route_profile_suggestion,
         "/api/baseline": route_baseline,
         "/api/daily-usage": route_daily_usage,
         "/api/ttl": route_ttl,

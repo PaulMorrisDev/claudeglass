@@ -624,21 +624,24 @@ def test_profile_copy_names_a_section_not_a_direction() -> None:
 
 
 def test_profiles_list_and_drawer_follow_the_window_and_project() -> None:
-    """PF1 part 2: the list (and its suggestion) and each profile's drawer ask
-    for the picked window and project, the suggestion line gives the live
-    reason, and a row's "Set in" cell adds what wins over the change."""
+    """PF1 part 2: the list draws at once, with no window (it needs no report). The suggestion is
+    fetched after it, for the picked window and project, and adds the chip and the reason line; each
+    profile's drawer asks for the picked project; a row's "Set in" cell adds what wins over the change."""
     source = _app_js()
     profiles = _function_source(source, "renderProfiles")
-    assert 'withWindow("/api/profiles")' in profiles and 'loadInto(listContainer, "/api/profiles"' not in profiles
+    assert 'loadInto(listContainer, "/api/profiles", ' in profiles and 'withWindow("/api/profiles")' not in profiles
+    assert 'withWindow("/api/profiles/suggestion")' in profiles
     detail = _function_source(source, "renderProfileDetail")
     squeezed = re.sub(r"\s+", "", detail)
     assert re.sub(
         r"\s+", "", 'withWindow("/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value))'
     ) in squeezed
     listing = _function_source(source, "renderProfilesList")
-    assert '"Suggested for you: " + data.suggested_reason' in listing
-    assert "the profile your latest baseline matches best" not in listing
-    assert 'chip("Suggested for you"' in listing
+    assert "suggest" not in listing and "Suggested for you" not in listing
+    applied = _function_source(source, "applySuggestion")
+    assert '"Suggested for you: " + suggestion.suggested_reason' in applied
+    assert 'chip("Suggested for you"' in applied
+    assert "the profile your latest baseline matches best" not in source
     table = _function_source(source, "renderDiffRowsTable")
     assert 'row.overridden_by ? where + ". " + row.overridden_by : where' in table
 

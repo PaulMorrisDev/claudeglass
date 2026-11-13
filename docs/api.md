@@ -640,8 +640,9 @@ with no params it means all time rather than a 30-day default.
 `/api/sessions`, `/api/compactions`, `/api/impact` and `/api/backtest`
 accept them all but, unlike the report routes, list everything (all time)
 when none is given. Every other route (`/api/health`, `/api/session/<id>`,
-`/api/recache`, `/api/baseline`, `/api/profiles*`, `/api/setup`,
-`/api/setup/status`, `/api/capture`) ignores them.
+`/api/recache`, `/api/baseline`, `/api/profiles`, `/api/profiles/<id>`, `/api/setup`,
+`/api/setup/status`, `/api/capture`) ignores them; `/api/profiles/suggestion`
+takes `window` and `project`, and `/api/profiles/<id>/diff` takes `project`.
 
 **Caching.** The service builds each window's report once per store
 change (`Store.change_token()`) or `config.toml` change (its
@@ -996,10 +997,10 @@ the store) plus every user profile written under
 watcher's `_scan_profiles`), each tagged with which of the two it came
 from.
 
-`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "suggested_profile_id": str|null, "suggested_reason": str|null, "active_profile_id": str|null, "active_profile_name": str|null}`.
+`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "active_profile_id": str|null, "active_profile_name": str|null}`.
 
-Query: the usual `window` and `project` (see "Filtering by project"); an
-unknown project or window is a `400`.
+The list needs no report, so it answers at once and ignores `window` and
+`project`. The suggestion has its own route, below.
 
 A catalogue entry's `archetype`/`for` come straight from its shipped
 TOML document; `tasks` is `for` normalised to the capture task
@@ -1009,19 +1010,28 @@ none), the form `POST /api/whatif`'s `task` takes. A user entry never
 carries them (the `profiles` table
 only indexes `id`/`name`/`updated_at` — no `toml_path`, never
 API-returned). `updated_at` is `null` for a catalogue entry (nothing to
-timestamp). `suggested_profile_id` is worked out live for the window and
-project asked for, from the same report the page already builds
-(`baseline.suggest_for_model`: the rule `init` and `baseline` store, run on
-that report's tables), and `suggested_reason` is the one plain sentence
-saying what decided it (for example "19 of 78 sessions in this window ran a
-workflow script."); the UI marks that entry in the list and shows the
-sentence under it. Both are `null` when the view has fewer than
-`baseline.SUGGEST_MIN_SESSIONS` (5) sessions. The stored baseline record is
-not read here: `/api/baseline` still returns it.
-`active_profile_id` is the profile `apply <profile>` last marked active
+timestamp). `active_profile_id` is the profile `apply <profile>` last marked active
 (`<config_dir>/active-profile`), `null` when none has been; ignored
 recommendations are kept under it. `active_profile_name` is its name
 (its id when it's no longer in the list).
+
+### `GET /api/profiles/suggestion`
+
+The profile to suggest for a window and project, and why. Worked out live
+from the report for that window and project (`baseline.suggest_for_model`: the
+rule `init` and `baseline` store, run on that report's tables), so a cold call
+waits for the report build the page asks for anyway; the profile list is a
+route of its own so it never waits.
+
+Query: the usual `window` and `project` (see "Filtering by project"); an
+unknown project or window is a `400`.
+
+`data`: `{"suggested_profile_id": str|null, "suggested_reason": str|null}`.
+`suggested_reason` is the one plain sentence saying what decided it (for
+example "19 of 78 sessions in this window ran a workflow script."); the UI
+marks that entry in the list and shows the sentence under it. Both are `null`
+when the view has fewer than `baseline.SUGGEST_MIN_SESSIONS` (5) sessions. The
+stored baseline record is not read here: `/api/baseline` still returns it.
 
 ### `GET /api/profile-schema`
 

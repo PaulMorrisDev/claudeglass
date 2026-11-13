@@ -1116,7 +1116,25 @@ def test_profiles_listing_includes_the_catalogue(server):
     assert_privacy(body)
 
 
-def test_profiles_route_suggests_for_the_window_and_project_not_the_stored_baseline(
+def test_profiles_list_needs_no_report_and_carries_no_suggestion(server, monkeypatch):
+    """The list draws at once: it is the profiles alone, so no report is built to answer it
+    (the suggestion has a route of its own)."""
+    calls = _spy_corpus_reads(monkeypatch)
+    resp, body = server.get_json("/api/profiles")
+    assert resp.status == 200
+    assert {p["id"] for p in body["data"]["profiles"]} >= set(profile_catalogue.CATALOGUE_IDS)
+    assert "suggested_profile_id" not in body["data"] and "suggested_reason" not in body["data"]
+    assert {"active_profile_id", "active_profile_name"} <= set(body["data"])
+    assert calls == []
+    # With the window and project named it is still just the list.
+    assert server.get_json("/api/profiles?window=all&project=not-a-project")[0].status == 200
+    assert calls == []
+    # The suggestion is the route that builds one.
+    assert server.get_json("/api/profiles/suggestion")[0].status == 200
+    assert _report_builds(calls)
+
+
+def test_profiles_suggestion_route_suggests_for_the_window_and_project_not_the_stored_baseline(
     two_project_server, monkeypatch
 ):
     handle = two_project_server
@@ -1139,32 +1157,32 @@ def test_profiles_route_suggests_for_the_window_and_project_not_the_stored_basel
 
     monkeypatch.setattr(service_api.baseline_mod, "suggest_for_model", fake_suggest)
 
-    resp, body = handle.get_json("/api/profiles")
+    resp, body = handle.get_json("/api/profiles/suggestion")
     assert resp.status == 200
     assert body["data"]["suggested_profile_id"] == "workflow-ultracode"  # not the stored "implementation-heavy"
     assert body["data"]["suggested_reason"] == "2 sessions read."
     # The picked project's own report is the one read.
-    resp, body = handle.get_json("/api/profiles?project=proj-alpha")
+    resp, body = handle.get_json("/api/profiles/suggestion?project=proj-alpha")
     assert resp.status == 200
     assert body["data"]["suggested_reason"] == "1 sessions read."
-    resp, body = handle.get_json("/api/profiles?project=proj-beta&window=all")
+    resp, body = handle.get_json("/api/profiles/suggestion?project=proj-beta&window=all")
     assert body["data"]["suggested_reason"] == "1 sessions read."
     assert seen == [2, 1, 1]
     # An unknown project or window is the usual 400, not a silent fall-back.
-    assert handle.get_json("/api/profiles?project=not-a-project")[0].status == 400
-    assert handle.get_json("/api/profiles?window=bogus")[0].status == 400
+    assert handle.get_json("/api/profiles/suggestion?project=not-a-project")[0].status == 400
+    assert handle.get_json("/api/profiles/suggestion?window=bogus")[0].status == 400
 
 
-def test_profiles_route_gives_the_live_suggestion_only_from_the_floor_of_sessions(server, monkeypatch):
+def test_profiles_suggestion_route_gives_the_live_suggestion_only_from_the_floor_of_sessions(server, monkeypatch):
     # The stored record ("implementation-heavy") is not what comes back; the
     # one-session view is under the floor, so nothing is suggested at all.
-    resp, body = server.get_json("/api/profiles")
+    resp, body = server.get_json("/api/profiles/suggestion")
     assert resp.status == 200
     assert body["data"]["suggested_profile_id"] is None
     assert body["data"]["suggested_reason"] is None
     # With the floor lowered the same view speaks, in a plain sentence.
     monkeypatch.setattr(service_api.baseline_mod, "SUGGEST_MIN_SESSIONS", 1)
-    resp, body = server.get_json("/api/profiles")
+    resp, body = server.get_json("/api/profiles/suggestion")
     assert body["data"]["suggested_profile_id"] in profile_catalogue.CATALOGUE_IDS
     assert body["data"]["suggested_profile_id"] != "implementation-heavy"
     assert body["data"]["suggested_reason"].endswith(".")
@@ -1172,7 +1190,7 @@ def test_profiles_route_gives_the_live_suggestion_only_from_the_floor_of_session
     assert_privacy(body)
 
 
-def test_profiles_route_shows_no_suggestion_for_a_window_without_sessions(tmp_path, monkeypatch):
+def test_profiles_suggestion_route_shows_none_for_a_window_without_sessions(tmp_path, monkeypatch):
     empty = corpus_mod.Corpus(sessions=[], total_files=0, total_bytes=0, cache_hits=0, cache_misses=0, elapsed_s=0.0)
     _install_fake_rebuild(monkeypatch, empty)
     store = Store(tmp_path / "empty.db")
@@ -1194,7 +1212,7 @@ def test_profiles_route_shows_no_suggestion_for_a_window_without_sessions(tmp_pa
     thread.start()
     handle = _ServerHandle(httpd, thread, corpus=empty, store=store, options=options)
     try:
-        resp, body = handle.get_json("/api/profiles")
+        resp, body = handle.get_json("/api/profiles/suggestion")
         assert resp.status == 200
         assert body["data"]["suggested_profile_id"] is None
         assert body["data"]["suggested_reason"] is None

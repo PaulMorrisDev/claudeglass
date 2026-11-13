@@ -158,8 +158,8 @@ function renderBaseline(data, container) {
 // ======================================================================
 //
 // v0.3: GET /api/profiles now returns {"profiles": [...each tagged
-// source: "catalogue"|"user"...], "suggested_profile_id",
-// "suggested_reason"} (docs/api.md)
+// source: "catalogue"|"user"...]} (docs/api.md); the suggestion is its own
+// route, GET /api/profiles/suggestion, so the list never waits for a report
 // rather than a bare list of indexed (user-only) profiles, and GET
 // /api/profiles/<id>/diff is a real computation (profiles/diff.py)
 // rather than a 501 stub -- see that route's own docstring in api.py.
@@ -213,15 +213,29 @@ export function renderProfiles(panel) {
   panel.appendChild(editorDetails);
 
   var editorShown = false;
+  // What GET /api/profiles/suggestion answered, or null (not answered yet, failed, or none).
+  var suggestion = null;
 
   function refreshList() {
-    loadInto(listContainer, withWindow("/api/profiles"), function (data, container) {
+    loadInto(listContainer, "/api/profiles", function (data, container) {
       renderProfilesList(data, container);
+      applySuggestion(container, suggestion);
       // Built once, so a save's status line stays on screen.
       if (!editorShown) {
         editorShown = true;
         renderProfileEditor(formContainer, (data && data.profiles) || [], refreshList);
       }
+    });
+  }
+
+  // The suggestion is worked out from the report for the picked window and project, which can take a
+  // while, so the list draws first and this adds the chip and the line when it answers. If it fails or
+  // has none, nothing is added. A new window or project draws this view again, which asks again.
+  function loadSuggestion() {
+    fetchJson(withWindow("/api/profiles/suggestion")).then(function (result) {
+      var body = result.body;
+      suggestion = body && body.ok === true ? body.data : null;
+      applySuggestion(listContainer, suggestion);
     });
   }
 
@@ -267,21 +281,19 @@ export function renderProfiles(panel) {
 
   renderProfileCreator(creatorContainer, refreshList);
   refreshList();
+  loadSuggestion();
 }
 
 function renderProfilesList(data, container) {
   var profiles = (data && data.profiles) || [];
-  var suggestedId = data && data.suggested_profile_id;
   if (!profiles.length) {
     container.appendChild(emptyState("No profiles yet.", null, "Save your current settings above, or create one from a goal."));
     return;
   }
   var cards = el("div", { class: "profile-cards" });
   profiles.forEach(function (profile) {
-    var isSuggested = Boolean(suggestedId) && profile.id === suggestedId;
-    var card = el("article", { class: "profile-card" + (isSuggested ? " profile-card-suggested" : "") });
+    var card = el("article", { class: "profile-card", "data-profile-id": profile.id });
     var head = el("div", { class: "profile-card-head" }, [el("h3", { text: profile.name || profile.id })]);
-    if (isSuggested) head.appendChild(chip("Suggested for you", { tone: "accent", icon: "check" }));
     card.appendChild(head);
 
     var meta = [profile.source === "catalogue" ? "Built in" : "Yours"];
@@ -334,8 +346,29 @@ function renderProfilesList(data, container) {
     cards.appendChild(card);
   });
   container.appendChild(cards);
-  if (suggestedId && data.suggested_reason) {
-    container.appendChild(el("p", { class: "notes", text: "Suggested for you: " + data.suggested_reason }));
+}
+
+// Marks the suggested profile's card and says why under the cards, replacing any earlier mark.
+// ``suggestion`` is GET /api/profiles/suggestion's answer; with none, or a profile the list
+// doesn't have, the list is left as it is.
+function applySuggestion(container, suggestion) {
+  Array.prototype.forEach.call(container.querySelectorAll(".profile-suggested-chip, .profile-suggestion-note"), function (node) {
+    node.remove();
+  });
+  Array.prototype.forEach.call(container.querySelectorAll(".profile-card-suggested"), function (card) {
+    card.classList.remove("profile-card-suggested");
+  });
+  var suggestedId = suggestion && suggestion.suggested_profile_id;
+  if (!suggestedId) return;
+  var cards = Array.prototype.slice.call(container.querySelectorAll(".profile-card"));
+  var card = cards.filter(function (candidate) {
+    return candidate.getAttribute("data-profile-id") === suggestedId;
+  })[0];
+  if (!card) return;
+  card.classList.add("profile-card-suggested");
+  card.querySelector(".profile-card-head").appendChild(chip("Suggested for you", { tone: "accent", icon: "check", class: "profile-suggested-chip" }));
+  if (suggestion.suggested_reason) {
+    container.appendChild(el("p", { class: "notes profile-suggestion-note", text: "Suggested for you: " + suggestion.suggested_reason }));
   }
 }
 
