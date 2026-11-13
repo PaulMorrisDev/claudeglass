@@ -202,7 +202,10 @@ applies a matching multiplier to that row's `saving_usd`, and its
 `fidelity` becomes `"calibrated"`. The prior is implicitly 1.0: a key
 with fewer than 3 judged points is estimated exactly as before.
 Only predictions that say what they were priced on count: an older row's ratio carries the
-bias of how it was measured (a window of another length), not the estimate's.
+bias of how it was measured (a window of another length), not the estimate's. For a
+counted row the ratio is the one the table shows: the share of the estimate that came
+true on the work after the change, on the estimate's own scale, so the length of the
+after-window does not bias it.
 
 The pre-calibration value and fidelity survive in every row as
 `uncalibrated_usd`/`uncalibrated_fidelity` (`null` when calibration

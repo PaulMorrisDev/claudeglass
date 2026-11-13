@@ -1570,13 +1570,17 @@ same count is used on both sides of a comparison.
 
 `without` is what the sessions after the change would have cost
 without it (`counterfactual.py`), or `null` with fewer than
-`min_sessions` sessions after it. `fidelity` says how:
+`min_sessions` sessions after it. It is also `null` for an agent's
+start-context keys (see below) when the agent has fewer than 5 spawns on
+one model family on a side, or when the change names any other key.
+`fidelity` says how:
 
 | `fidelity` | For | How |
 |---|---|---|
-| `repriced` | `model`, `fastMode` | The same replies at the old model's prices, or with fast mode the other way. An old model that wasn't set is the one the sessions before ran on. |
+| `repriced` | `model`, `fastMode` | The same replies at the old model's prices, or with fast mode the other way. An old model that wasn't set is the one the sessions before ran on. An agent's `model` is priced only on the runs of that agent its agent file decides: a run a spawn or a workflow script gave a model is in neither figure, and `basis` says how many of the agent's runs were read. With none left the row is zero and says the change has not changed what you paid. |
 | `simulated` | cache lifetime keys; an `autoCompactWindow` the change raised | The same replies replayed under the old lifetime, or the old, smaller window. A lowered window can't be undone: its compactions happened. |
 | `approximate` | a CLAUDE.md size change, MCP servers, plugins, skills | The context the change removed or added, carried on every main-session reply. |
+| `approximate` | an agent's `tools`, `disallowedTools`, `omitClaudeMd`, `skills`, `mcpServers` | The drop in median context at the start of that agent's own spawns, from before the change to after it, on the one model family both sides ran on, carried on every reply of each spawn after the change. `null` with under 5 spawns on that family on a side, and when the change names any other key. |
 | `before` | anything else, and any change to several settings at once | Each session after the change at the cost per reply of the sessions before it that did the same kind of work. |
 
 `paid_usd` and `without_usd` are list prices over the whole of each
@@ -1662,7 +1666,9 @@ judged; for a row with a `priced_on` the measured figure is the share of the
 estimate that came true on the work after the change, on the estimate's own
 scale. `priced_on` is the number the estimate was a share of when it was logged
 (the observed cost it repriced, or the tokens per start it takes out), `null`
-when the estimate named none; no verdict reads it yet. `judged_just_now` is how many predictions this call judged for
+when the estimate named none. A row with one is judged on the work after the
+change by `outcomes.read_fix`, and calibration learns only from such rows
+([backtest](backtest.md#an-estimate-that-says-what-it-was-priced-on)). `judged_just_now` is how many predictions this call judged for
 the first time (a stale answer can be served while a change is worked
 out in the background, as with `/api/impact`).
 
