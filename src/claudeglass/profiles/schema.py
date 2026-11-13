@@ -316,6 +316,8 @@ AGENT_NAME_RULE = (
 )
 #: Why a plugin's agent (``plugin:agent``) is refused in a profile.
 AGENT_NAME_PLUGIN = "this is a plugin's agent, and a profile can change only your own agent files"
+#: The rule in the words a rename hint uses ("Rename it to <this> ...").
+AGENT_RENAME_WORDS = "one word of letters, digits, dots, underscores and hyphens"
 
 
 def _agent_name_part_ok(part: str) -> bool:

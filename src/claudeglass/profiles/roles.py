@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 
 from .. import agent_roles
 from ..recommend import _FILE_TOOLS, _NOT_OVERRIDABLE, read_agent_tools
-from .schema import ROLES, Profile, agent_name_problem
+from .schema import AGENT_RENAME_WORDS, ROLES, Profile, agent_name_problem
 
 __all__ = [
     "ROLE_WORDS",
@@ -98,8 +98,14 @@ def unusable_writers(agents: Mapping[str, Mapping]) -> int:
 def unusable_writers_note(count: int) -> str:
     """The sentence for :func:`unusable_writers` (``count`` is 1 or more)."""
     if count == 1:
-        return "One agent that writes code has a name ClaudeGlass can't use, so it is left out."
-    return f"{count} agents that write code have names ClaudeGlass can't use, so they are left out."
+        return (
+            "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
+            f"Rename it to {AGENT_RENAME_WORDS} to include it."
+        )
+    return (
+        f"{count} agents that write code have names ClaudeGlass can't use, so they are left out. "
+        f"Rename each to {AGENT_RENAME_WORDS} to include it."
+    )
 
 
 def writers(agents: Mapping[str, Mapping]) -> tuple[str, ...]:

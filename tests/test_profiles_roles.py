@@ -128,3 +128,15 @@ def test_an_empty_role_table_matches_nothing_to_change():
 
 def test_role_words_name_the_writer():
     assert roles.ROLE_WORDS == {"writer": "agent that writes code"}
+
+
+def test_the_unusable_writers_note_says_how_to_rename_in_the_singular_and_the_plural():
+    words = "one word of letters, digits, dots, underscores and hyphens"
+    assert roles.unusable_writers_note(1) == (
+        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
+        f"Rename it to {words} to include it."
+    )
+    assert roles.unusable_writers_note(3) == (
+        "3 agents that write code have names ClaudeGlass can't use, so they are left out. "
+        f"Rename each to {words} to include it."
+    )

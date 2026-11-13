@@ -4618,3 +4618,12 @@ def test_the_estimate_is_drawn_from_the_changes_the_chosen_target_makes() -> Non
     change = re.sub(r"\s+", " ", _function_source(source, "profileChangeFromDiff"))
     assert "if (row.managed || diffRowSame(row)) return;" in change
     assert "change.settings.modelSettings[row.model]" in change
+
+
+def test_save_current_settings_says_how_many_agents_were_left_out_for_their_names():
+    js = _app_js()
+    assert "body.data.skipped_name_agents" in js
+    assert (" Left out, because of its name: one agent. Rename it to one word of letters, digits, dots, "
+            "underscores and hyphens to include it.") in js
+    assert '" Left out, because of their names: " + nameAgents + " agents. Rename each to one word of letters, ' \
+           'digits, dots, underscores and hyphens to include it."' in js

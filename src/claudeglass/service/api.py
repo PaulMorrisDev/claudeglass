@@ -2987,20 +2987,28 @@ def make_handler(
                 settings["modelSettings"] = kept_models
         agents: dict = {}
         skipped_project_agents: list[str] = []
+        # Agents left out because the agent-name rule refuses their names:
+        # counted, never named.
+        skipped_name_agents = 0
         for name, fields in effective_agents.items():
             if not isinstance(fields, dict):
                 continue
+            refused = profile_schema.agent_name_problem(name) is not None
             if fields.get("source") != "user":
-                if fields.get("source") == "project":
+                if fields.get("source") == "project" and not refused:
                     skipped_project_agents.append(str(name))
                 continue
             # effective_agents names a few fields its own way (max_turns).
             kept = {}
             for key in profile_schema.AGENT_ALLOWLIST:
                 value = fields.get(profile_diff_mod._EFFECTIVE_AGENT_FIELD.get(key, key))
-                if value is not None and _valid({"agents": {str(name): {key: value}}}):
+                # A refused name is tried as a stand-in, to count only an
+                # agent that would otherwise have been saved.
+                if value is not None and _valid({"agents": {"agent" if refused else str(name): {key: value}}}):
                     kept[key] = value
-            if kept:
+            if kept and refused:
+                skipped_name_agents += 1
+            elif kept:
                 agents[str(name)] = kept
         doc = {
             "id": body.get("id") or "my-current-settings",
@@ -3013,6 +3021,7 @@ def make_handler(
         if status == 201:
             payload["data"]["skipped_managed"] = sorted(k for k in profile_schema.SETTINGS_ALLOWLIST if k in managed)
             payload["data"]["skipped_project_agents"] = sorted(skipped_project_agents)
+            payload["data"]["skipped_name_agents"] = skipped_name_agents
         return status, payload
 
     def route_profiles_post(store, query, body):

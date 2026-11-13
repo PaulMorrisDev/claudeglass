@@ -1396,7 +1396,11 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
 
 #: The explainer row of a fix left out because its agent's name fails
 #: ``schema.agent_name_problem`` (plugin agents allowed).
-NO_FIX_FOR_NAME = ("No fix to copy", "This agent's name has characters ClaudeGlass can't put in a prompt or a command.")
+NO_FIX_FOR_NAME = (
+    "No fix to copy",
+    "This agent's name has characters ClaudeGlass can't put in a prompt or a command. Rename it to one word of "
+    "letters, digits, dots, underscores and hyphens, and cards about its later runs can offer a fix.",
+)
 
 
 def _unusable_agent(*names: str | None) -> bool:

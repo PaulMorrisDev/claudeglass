@@ -1455,7 +1455,10 @@ def test_apply_leaves_out_a_writer_file_with_an_unusable_name(tmp_path):
         claude_root=root,
     )
     assert not [a for a in plan.actions if a.kind == "agent_frontmatter"]
-    assert "One agent that writes code has a name ClaudeGlass can't use, so it is left out." in plan.role_notes
+    assert (
+        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. Rename it to one word of "
+        "letters, digits, dots, underscores and hyphens to include it."
+    ) in plan.role_notes
 
 
 def test_a_per_model_effort_level_merges_and_is_explained_like_the_flat_one(tmp_path):

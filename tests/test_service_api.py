@@ -8240,7 +8240,10 @@ def test_a_recorded_writer_with_an_unusable_name_is_left_out_and_not_named(serve
     data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
     assert {r["agent"] for r in data["agents"]} == {"fixer"}
     assert "bypassPermissions" not in data["prompt"] and "bypassPermissions" not in json.dumps(data["notes"])
-    assert "One agent that writes code has a name ClaudeGlass can't use, so it is left out." in data["notes"]
+    assert (
+        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. Rename it to one word of "
+        "letters, digits, dots, underscores and hyphens to include it."
+    ) in data["notes"]
     _seed_agents(
         server,
         {_HOSTILE_WRITER: ("user", "Read, Edit"), "fixer\x00": ("user", "Read, Edit")},
@@ -8248,7 +8251,10 @@ def test_a_recorded_writer_with_an_unusable_name_is_left_out_and_not_named(serve
     )
     data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
     assert data["agents"] == []
-    assert "2 agents that write code have names ClaudeGlass can't use, so they are left out." in data["notes"]
+    assert (
+        "2 agents that write code have names ClaudeGlass can't use, so they are left out. Rename each to one word of "
+        "letters, digits, dots, underscores and hyphens to include it."
+    ) in data["notes"]
     card = server.get_json("/api/profiles/implementation-heavy")[1]["data"]
     assert card["agents"] == {}
 
@@ -8282,3 +8288,38 @@ def test_the_routes_refuse_an_id_or_key_with_a_trailing_line_break(server):
     assert server.store.tip_feedback() == {}
     resp, _raw = server.request("GET", "/api/profiles/implementation-heavy%0A")
     assert resp.status == 404
+
+
+def _seed_effective(handle, agents: dict) -> None:
+    """One snapshot whose effective_agents are ``agents`` (name -> (source, model))."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    handle.store.upsert_snapshot(
+        project_slug="proj-a", project_root_path=_FAKE_ROOT, ts="2026-10-01T12:00:00Z", schema_version=2,
+        digest_json=json.dumps({
+            "project_slug": snapshot_project_key("proj-a"),
+            "effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "user"}, "managed_keys": [],
+            "agents": {},
+            "effective_agents": {name: {"source": source, "model": model, "effort": None, "max_turns": None}
+                                 for name, (source, model) in agents.items()},
+        }),
+    )
+
+
+def test_save_current_settings_counts_agents_left_out_for_their_names_and_never_names_them(server):
+    _seed_effective(server, {
+        "reviewer": ("user", "sonnet"),
+        "Code Reviewer": ("user", "sonnet"),
+        "Code Fixer": ("user", "haiku"),
+        "nothing to save": ("user", None),  # nothing would be saved: not counted
+        "Project Agent": ("project", "sonnet"),  # left out for its scope: not named, not counted
+        "builder": ("project", "sonnet"),
+    })
+    resp, body = server.post_json("/api/profiles/from-current", {})
+    assert resp.status == 201, body
+    data = body["data"]
+    assert data["skipped_name_agents"] == 2
+    assert data["skipped_project_agents"] == ["builder"]
+    text = (server.options.config_dir / "profiles" / "my-current-settings.toml").read_text(encoding="utf-8")
+    assert "reviewer" in text and "Code" not in text
+    assert "Project Agent" not in json.dumps(body)

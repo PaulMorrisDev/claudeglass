@@ -277,10 +277,17 @@ export function renderProfiles(panel) {
       }
       var skipped = body.data.skipped_managed || [];
       var projectAgents = body.data.skipped_project_agents || [];
+      // Agents whose names ClaudeGlass can't use: counted, never named.
+      var nameAgents = body.data.skipped_name_agents || 0;
       saveCurrentStatus.textContent =
         'Saved as "' + (body.data.name || body.data.id) + '".' +
         (skipped.length ? " Left out, because your organisation's policy sets them: " + skipped.join(", ") + "." : "") +
-        (projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "");
+        (projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "") +
+        (nameAgents === 1
+          ? " Left out, because of its name: one agent. Rename it to one word of letters, digits, dots, underscores and hyphens to include it."
+          : nameAgents > 1
+            ? " Left out, because of their names: " + nameAgents + " agents. Rename each to one word of letters, digits, dots, underscores and hyphens to include it."
+            : "");
       toast("Your current settings are saved as a profile.");
       refreshList();
     });

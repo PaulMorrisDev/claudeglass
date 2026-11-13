@@ -2258,7 +2258,10 @@ Without it, a second save is `409` (`error.code: "conflict"`, message
 allowlisted setting names left out because managed settings control
 them, and `skipped_project_agents`: the names of agents that belong to one
 project (`effective_agents` source `project`), sorted, left out (`[]` when
-there are none). Only the user's own agents (source `user`) are saved,
+there are none), and `skipped_name_agents`: how many of the user's own
+agents with something to save were left out because the agent-name rule
+refuses their names (`0` when none; counted, never named, and a project
+agent with such a name is in neither field). Only the user's own agents (source `user`) are saved,
 each with the `model`, `effort`, `maxTurns` and `experimental.cacheTtl` it
 sets (`effective_agents` calls the last two `max_turns` and
 `experimental_cache_ttl`): `apply` looks for an agent's file in the user's
