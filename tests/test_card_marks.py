@@ -223,6 +223,144 @@ def test_an_agent_that_was_absent_when_the_card_was_shown_can_still_move_once_it
     assert _land([_agent_model("x", "sonnet")], snaps, _day(1)) is None
 
 
+def _landing_by_remerging(changes, snaps, canonical, first_shown):
+    """The rule as it was first written, and as the spec words it: the merged
+    snapshot at each step is made again from every snapshot up to it. Slow
+    (quadratic in the snapshots), kept as the reference the walk is held to."""
+    if not changes:
+        return None
+    stamps = [snapshots_mod._parse_ts(s.ts) for s in snaps]
+
+    def merged(i):
+        return snapshots_mod.with_every_project_agents(snaps[: i + 1], canonical)
+
+    start = None
+    for i, when in enumerate(stamps):
+        if when is not None and when <= first_shown:
+            start = i
+    if start is None:
+        start = next((i for i, when in enumerate(stamps) if when is not None), None)
+    if start is None:
+        return None
+    base = next((s for s in reversed(snaps[: start + 1]) if isinstance(s.data.get("effective"), dict)), snaps[start])
+    label = snapshots_mod._canonical_label(base, canonical)
+    newest, own = None, []
+    for snap in snaps:
+        if isinstance(snap.data.get("effective"), dict) and snapshots_mod._canonical_label(snap, canonical) == label:
+            newest = snap
+        own.append(newest)
+
+    def read(i, change):
+        snap = own[i] if change["target"] != "agent" and own[i] is not None else merged(i)
+        return card_marks.value_in(snap, change)
+
+    def gone(i, change):
+        agents = merged(i).data.get("agents")
+        return change["target"] == "agent" and not (isinstance(agents, dict) and change["agent"] in agents)
+
+    before = [read(start, c) for c in changes]
+    run = None
+    for i in range(start + 1, len(snaps)):
+        if stamps[i] is None:
+            continue
+        moved = all(
+            not gone(i, c) and not snapshots_mod.same_value(card_marks.flat_key(c), old, read(i, c))
+            for c, old in zip(changes, before)
+        )
+        if not moved:
+            run = None
+        elif run is None:
+            run = stamps[i]
+    if run is None:
+        return None
+    last = len(snaps) - 1
+    return run, all(card_marks.already_set(c["key"], c["value"], read(last, c)) for c in changes)
+
+
+def _history(rng):
+    """A random view: snapshots of up to three projects, a day or so apart (some with a
+    time that does not read, some without settings), each with a setting and two
+    agents that come and go and change value."""
+    slugs = ["proj-a", "proj-b", "proj-c"][: rng.randint(1, 3)]
+    snaps, day = [], 0
+    for _ in range(rng.randint(2, 14)):
+        day += rng.choice([0, 1, 1, 2])  # now and then two snapshots at the same time
+        agents = {}
+        for name in ("x", "y"):
+            if rng.random() < 0.8:
+                agents[name] = {
+                    "model": rng.choice(["opus", "sonnet", "haiku", None]),
+                    "tools": rng.choice(["Read, Grep", "Grep, Read", "Read", None]),
+                    "source": rng.choice(["user", "project"]),
+                }
+                agents[name] = {k: v for k, v in agents[name].items() if v is not None}
+        snap = _snap(
+            day,
+            slug=rng.choice(slugs),
+            effective={"model": rng.choice(["opus", "sonnet", "haiku"])},
+            agents=agents,
+            ts="not a time" if rng.random() < 0.08 else None,
+        )
+        if rng.random() < 0.1:
+            del snap.data["effective"]
+        snaps.append(snap)
+    snaps.sort(key=lambda s: (s.ts == "not a time", s.ts))
+    return snaps, slugs
+
+
+def _a_card(rng):
+    pool = [
+        _model("sonnet"),
+        _model("haiku"),
+        _agent_model("x", "sonnet"),
+        _agent_model("y", "haiku"),
+        _tools("x", ["Read", "Grep"]),
+        _tools("y", ["Read"]),
+    ]
+    return rng.sample(pool, rng.randint(1, 2))
+
+
+def test_the_walk_gives_the_answers_the_remerged_rule_gives():
+    import random
+
+    rng = random.Random(20261113)
+    landed = 0
+    for _ in range(600):
+        snaps, slugs = _history(rng)
+        snapshots_mod._normalise_tool_lines(snaps)
+        canonical = snapshots_mod.canonical_project_keys(slugs)
+        cache: dict = {}  # shared by the cards of the view, as the route shares it
+        for _card in range(4):
+            changes = _a_card(rng)
+            shown = _day(rng.randint(-1, 14)) + timedelta(hours=rng.randint(0, 20))
+            expected = _landing_by_remerging(changes, snaps, canonical, shown)
+            assert card_marks.landing(changes, snaps, canonical, shown, cache) == expected, (changes, shown)
+            assert card_marks.landing(changes, snaps, canonical, shown) == expected
+            landed += expected is not None
+    assert landed > 100  # the cases are not all "has not landed"
+
+
+def test_the_walk_does_not_merge_the_snapshots_again_at_every_step(monkeypatch):
+    snaps = [_snap(day, slug=f"proj-{day % 4}", effective={"model": f"m{day // 3}"}, agents={"x": {"model": "opus"}})
+             for day in range(400)]
+    canonical = snapshots_mod.canonical_project_keys([f"proj-{n}" for n in range(4)])
+    handed = []
+    for name in ("with_every_project_agents", "latest_snapshot_per_project"):
+        real = getattr(snapshots_mod, name)
+
+        def counting(snapshots, *args, _real=real, **kwargs):
+            handed.append(len(snapshots))
+            return _real(snapshots, *args, **kwargs)
+
+        monkeypatch.setattr(snapshots_mod, name, counting)
+    cache: dict = {}
+    for n in range(20):  # twenty cards of one view
+        change = [_agent_model("x", f"m{n}")] if n % 2 else [_model("m9")]
+        card_marks.landing(change, snaps, canonical, _day(n), cache)
+    # Re-merging every prefix would hand over about 400 * 200 snapshots per card.
+    assert sum(handed) <= 4 * len(snaps)
+
+
 def test_a_shared_cache_gives_the_same_answer():
     snaps = [_snap(0, effective={"model": "opus"}), _snap(3, effective={"model": "sonnet"})]
     shown = _day(0) + timedelta(hours=1)
