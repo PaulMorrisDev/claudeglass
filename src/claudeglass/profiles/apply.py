@@ -114,6 +114,7 @@ from pathlib import Path
 
 from .. import snapshots as snapshots_mod
 from . import roles as roles_mod
+from . import schema as schema_mod
 from .frontmatter import FrontmatterError, parse_frontmatter, patch_frontmatter
 from .schema import SETTINGS_ALLOWLIST, Profile
 
@@ -643,7 +644,20 @@ def plan_apply(
             role_left = tuple(n for n in roles_mod.writers(agent_files) if n not in patchable)
             role_patched = resolved.matched.get("writer", ())
             role_notes = _role_notes(role_patched, role_left, role_label)
+        unusable = roles_mod.unusable_writers(agent_files)
+        if unusable:
+            role_notes = (*role_notes, roles_mod.unusable_writers_note(unusable))
         profile = resolved.profile
+    # Every agent name becomes a path below; one that is not one file name
+    # inside the agents folder is refused before any path is built (a
+    # loaded profile was checked already; this covers one built in code).
+    bad_names = [
+        f"agent {schema_mod.shown_name(name)}: {problem}"
+        for name in sorted(profile.agents)
+        if (problem := schema_mod.agent_name_problem(name)) is not None
+    ]
+    if bad_names:
+        raise ApplyError(bad_names)
     # An agent the profile names whose file is not <agents folder>/<name>.md but
     # is elsewhere under the folder: the user has it, apply cannot patch it.
     left_elsewhere: list[str] = []

@@ -381,6 +381,13 @@ modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWi
 
 ### `agents.<name>` (per-agent frontmatter overrides)
 
+`<name>` is the agent's name as Claude Code knows it. It holds only
+letters, digits, single dots, underscores and hyphens, starts with a
+letter or digit, and has at most 128 characters. Any other name is
+refused, so the name is always one file in the agents folder and one word
+in a prompt. A plugin's agent (`my-plugin:reviewer`) is refused: it has no
+file in your agents folders.
+
 | Key | Type | Allowed values | Doc reference |
 |---|---|---|---|
 | `model` | string | any | `docs/config-layers.md#effective_agents` |
@@ -428,6 +435,9 @@ goes to. An agent is a writer when both hold:
   `disallowedTools` line) offers `Edit`, `Write`, `MultiEdit` or
   `NotebookEdit`. A tools line that is not known (no line, cut off, or no
   config snapshot) counts as every tool.
+
+An agent whose name breaks that rule is never a writer. It is left out and
+counted, never named, in the drawer and in `apply`'s output.
 
 `roles.resolve(profile, agents)` copies the role's keys onto every writer
 it finds. An agent the profile also names in `[agents.<name>]` keeps its

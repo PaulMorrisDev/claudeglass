@@ -1124,7 +1124,9 @@ names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
 ### `GET /api/profiles/<id>`
 
 One profile's contents. `404` if `<id>` names neither a catalogue id
-nor an existing `<config_dir>/profiles/<id>.toml`.
+nor an existing `<config_dir>/profiles/<id>.toml`. `409` (`conflict`) when
+the profile's saved file exists but no longer passes the checks; the
+message says why and names the file to fix or delete.
 
 `data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "own_agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
 `roles` is the profile's `[roles.<role>]` tables as written (the only
@@ -1150,7 +1152,9 @@ service never calls `apply`; it renders the diff and the command"). A
 store with no snapshot at all diffs against an empty effective config
 (nothing currently set, nothing managed) and says so in `notes`, rather
 than erroring. `404` if `<id>` names neither a catalogue id nor an
-existing `<config_dir>/profiles/<id>.toml`.
+existing `<config_dir>/profiles/<id>.toml`. `409` (`conflict`) when the
+profile's saved file exists but no longer passes the checks; the message
+says why and names the file to fix or delete.
 
 Query: `scope` — one of `user` (default), `project-local`, `repo` (same
 three scopes `profiles.diff`/`apply` use); `400` for anything else.
@@ -2196,7 +2200,8 @@ cross-site checks above run first (`403 forbidden` for a cross-site
 request, `400 bad_request` for a wrong `Content-Type` — see "Cross-site
 protection"). `400` (`error.code: "bad_request"`) if the body is not a
 JSON object, or if the schema rejects an unknown key or
-an out-of-range value — the schema's own problem text, joined with
+an out-of-range value or an agent name that breaks the rule in
+docs/profiles.md — the schema's own problem text, joined with
 `"; "` (plan: "the schema rejects anything else so a profile can never
 promise an effect the harness cannot deliver"). `409`
 (`error.code: "conflict"`) if `id` names one of the eight shipped

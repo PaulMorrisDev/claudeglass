@@ -2740,3 +2740,37 @@ def test_review_claude_md_reads_the_projects_roots_it_was_given(tmp_path, capsys
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
     assert str(project / "CLAUDE.md") in out, out
+
+
+def test_apply_agent_refuses_a_name_that_leaves_the_agents_folder(tmp_path, capsys):
+    rule = (
+        "an agent name holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters"
+    )
+    plugin = "this is a plugin's agent, and a profile can change only your own agent files"
+    root = tmp_path / "root"
+    (root / "skills" / "x").mkdir(parents=True)
+    skill = root / "skills" / "x" / "SKILL.md"
+    skill.write_text("---\nname: x\n---\nbody\n", encoding="utf-8")
+    for name in ("../skills/x/SKILL", "..\\skills\\x\\SKILL", "plugin:agent"):
+        code = cli.main(
+            [
+                "apply",
+                "--set",
+                "model=haiku",
+                "--agent",
+                name,
+                "--scope",
+                "user",
+                "--yes",
+                "--claude-root",
+                str(root),
+                "--config-dir",
+                str(tmp_path / "cfg"),
+            ]
+        )
+        err = capsys.readouterr().err
+        assert code == 2, name
+        expected = rule if ":" not in name else plugin
+        assert f"claudeglass apply: --agent {name!r}: {expected}" in err
+    assert skill.read_text(encoding="utf-8") == "---\nname: x\n---\nbody\n"

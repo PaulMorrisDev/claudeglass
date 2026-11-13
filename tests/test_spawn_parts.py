@@ -175,7 +175,7 @@ def test_large_claude_md_on_a_custom_agent_suggests_omit_claude_md():
     # The rules the agent needs are moved into its own prompt before the
     # flag is set; the command, which only sets the flag, says so.
     prompt = rec.fixes[0]["prompt"]
-    assert prompt.index("List the rules reviewer needs") < prompt.index("set omitClaudeMd to true")
+    assert prompt.index('List the rules "reviewer" needs') < prompt.index("set omitClaudeMd to true")
     assert "~/.claude/agents/reviewer.md" in prompt
     assert "only sets the flag" in rec.fixes[0]["command_warning"]
     # The generic spawn-cost advice is not repeated for a covered agent type.

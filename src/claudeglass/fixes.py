@@ -397,7 +397,7 @@ _WORKFLOW_PROMPTS = {
     ),
     "agent-report-size": (
         "{agent} sends back long final reports, and each one stays in my main session's context. Please "
-        "read {agent}'s agent file (~/.claude/agents/{agent}.md or .claude/agents/{agent}.md, or a folder inside them) and propose "
+        "read {agent}'s agent file (~/.claude/agents/{agent_file}.md or .claude/agents/{agent_file}.md, or a folder inside them) and propose "
         "one or two lines for its prompt asking for a short report: findings, file paths and next steps, "
         "not the working. If no file there names {agent} in its frontmatter, it is built into Claude Code: propose a sentence I "
         "can add to the task prompts I send it instead. Show me the diff before saving. Claude Code will ask "
@@ -489,7 +489,7 @@ _WORKFLOW_PROMPTS = {
         "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
         "is large, give it one part per run, and start a fresh {agent} for the next part with a short note of "
         "what's done, what's left and the files involved, rather than one long run. If {agent} has an agent file "
-        "(~/.claude/agents/{agent}.md or .claude/agents/{agent}.md, or a folder inside them), propose a line asking it to end each run with "
+        "(~/.claude/agents/{agent_file}.md or .claude/agents/{agent_file}.md, or a folder inside them), propose a line asking it to end each run with "
         "that note. Show me the diff before saving. Claude Code will ask my permission before editing files under "
         ".claude."
     ),
@@ -1172,13 +1172,15 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
             f"{rec.why or rec.title} Keep it under 120 words and don't change any files."
         )
     path, _ = _where(change, rec.scope)
-    subject = f"the {change.agent} agent" if change.target == "agent" else "my Claude Code settings"
-    prepare = _PREPARE.get(change.key, "").format(agent=change.agent, path=path)
+    # The agent's name is quoted where it stands as a word; inside a path it is bare.
+    named = json.dumps(change.agent) if change.agent else "this agent"
+    subject = f"the {named} agent" if change.target == "agent" else "my Claude Code settings"
+    prepare = _PREPARE.get(change.key, "").format(agent=named, path=path)
     if change.new_agent_file:
         # A tools list is the point of the file, so only another key keeps the tools.
         keep_tools = "" if change.key == "tools" else ", and keep its tools the same"
         ask = (
-            f"{change.agent} is a built-in Claude Code agent. Create {path}, a custom agent with the same "
+            f"{named} is a built-in Claude Code agent. Create {path}, a custom agent with the same "
             f"name, that does the same job as the built-in one and sets {change.key}: {_after(change)} in "
             f"its frontmatter. Write its prompt from what you know of the built-in agent{keep_tools}."
         )
@@ -1375,7 +1377,33 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
     return "\n".join(lines)
 
 
+#: The explainer row of a fix left out because its agent's name fails
+#: ``schema.agent_name_problem`` (plugin agents allowed).
+NO_FIX_FOR_NAME = ("No fix to copy", "This agent's name has characters ClaudeGlass can't put in a prompt or a command.")
+
+
+def _unusable_agent(*names: str | None) -> bool:
+    """Whether any of ``names`` (``None`` skipped) is an agent name no
+    prompt or command may hold. A plugin's agent (``plugin:agent``) passes."""
+    from .profiles.schema import agent_name_problem
+
+    return any(name is not None and agent_name_problem(name, plugin=True) is not None for name in names)
+
+
+def _no_fix(key: str | None, agent: str | None) -> dict:
+    return {
+        "key": key,
+        "agent": agent,
+        "explainer": [list(NO_FIX_FOR_NAME)],
+        "command": None,
+        "command_warning": "",
+        "prompt": "",
+    }
+
+
 def build_fix(rec: Recommendation, change: SettingChange) -> dict:
+    if _unusable_agent(rec.agent_type, change.agent if change.target == "agent" else None):
+        return _no_fix(change.key, change.agent)
     return {
         "key": change.key,
         "agent": change.agent,
@@ -1435,8 +1463,11 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     ``"id:variant"`` over plain ``id`` in both dicts, falling back to the
     plain id when there's no variant-specific entry (see
     :data:`Recommendation.variant`). A prompt template may use
-    ``{agent}`` (``rec.agent_type``) and ``{action}`` (``rec.action``,
-    for a card whose fix differs per item it lists). A purely informational id (no
+    ``{agent}`` (``rec.agent_type``, in quotes, for where the name stands
+    as a word), ``{agent_file}`` (the bare name, for a path) and
+    ``{action}`` (``rec.action``, for a card whose fix differs per item it
+    lists). A card whose agent's name fails ``agent_name_problem`` gets no
+    prompt and a "No fix to copy" explainer row instead. A purely informational id (no
     change proposed) has an explainer but no prompt: ``prompt`` is then
     ``""``, and the render layer (``render/markdown.py``,
     ``render/html.py``, the dashboard's ``ui.js`` and ``page-setup.js``) skips the "Ask Claude to do it"
@@ -1463,11 +1494,17 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     )
     if rec.why:
         explainer = [["Why it's suggested", rec.why]] + explainer
-    if template is not None:
+    if template is not None and _unusable_agent(rec.agent_type):
+        explainer = explainer + [list(NO_FIX_FOR_NAME)]
+        prompt = ""
+    elif template is not None:
         opening = _FINDING_OPEN.format(title=rec.title)
         if rec.why:
             opening = f"{opening} {rec.why}"
-        prompt = f"{opening} {template.format(agent=rec.agent_type or 'this agent', action=rec.action)}"
+        # The name is quoted where it stands as a word, bare inside a path.
+        agent = json.dumps(rec.agent_type) if rec.agent_type else "this agent"
+        agent_file = rec.agent_type or "this agent"
+        prompt = f"{opening} {template.format(agent=agent, agent_file=agent_file, action=rec.action)}"
     else:
         prompt = ""
     fix = {

@@ -133,6 +133,14 @@ Capture and dashboard:
 - **An agent whose name has a dot, such as `implementer.v2`, gets its own
   file and key** in a profile's prompt, table and file changes. Before,
   they named `implementer.md` and `v2.model`.
+- **Agent names are checked wherever ClaudeGlass takes one in.** A name
+  holds only letters, digits, single dots, underscores and hyphens, starts
+  with a letter or digit, and has at most 128 characters. A profile,
+  `POST /api/profiles` or `apply --agent` with another name is refused, so
+  `apply` can no longer write a file outside the agents folders. A card
+  about such an agent offers no prompt, and a writer with such a name is
+  left out and counted, never named. Agent names in copied prompts are in
+  quotes. A saved profile that breaks the rule says why when you open it.
 
 Cards and checks:
 

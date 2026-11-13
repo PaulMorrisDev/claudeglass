@@ -66,6 +66,10 @@ __all__ = [
     "ARCHETYPES",
     "RECOMMEND_LEVER_MAP",
     "validate",
+    "agent_name_problem",
+    "shown_name",
+    "AGENT_NAME_RULE",
+    "AGENT_NAME_PLUGIN",
     "load_profile",
     "loads_profile",
     "load_dict",
@@ -298,6 +302,55 @@ _ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_\-\[\]]{1,64}$")
 _BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
+#: One part of an agent name: a letter or digit, then letters, digits,
+#: ``_``, ``.`` and ``-`` (any script's letters and digits), 128 at most.
+_AGENT_NAME_PART_RE = re.compile(r"[^\W_][\w.-]{0,127}\Z")
+#: The most characters an agent name may have.
+AGENT_NAME_MAX = 128
+#: Why a name fails :func:`agent_name_problem`, as the clause after ``<where>: ``.
+AGENT_NAME_RULE = (
+    "an agent name holds only letters, digits, single dots, underscores and hyphens, "
+    "starts with a letter or digit, and is at most 128 characters"
+)
+#: Why a plugin's agent (``plugin:agent``) is refused in a profile.
+AGENT_NAME_PLUGIN = "this is a plugin's agent, and a profile can change only your own agent files"
+
+
+def _agent_name_part_ok(part: str) -> bool:
+    return _AGENT_NAME_PART_RE.match(part) is not None and ".." not in part
+
+
+def agent_name_problem(name, *, plugin: bool = False) -> str | None:
+    """``None`` when ``name`` is an agent name ClaudeGlass takes in, else
+    why not (:data:`AGENT_NAME_RULE` or :data:`AGENT_NAME_PLUGIN`).
+
+    Claude Code allows any name of up to 256 characters that holds no
+    ``:`` and does not start with ``-``. This rule is narrower, so a name
+    is always one file name inside the agents folder (no separator, no
+    ``..``, nothing Windows refuses) and one word in a copied prompt (no
+    space, line break or other control or format character).
+
+    ``plugin=True`` also takes a plugin's agent (``my-plugin:reviewer``,
+    ``my-plugin:review:security``): each part between colons follows the
+    rule on its own. A profile never names one: a plugin's agent has no
+    file in your agents folders, and on Windows ``a:b.md`` is no file name."""
+    if not isinstance(name, str) or not name or len(name) > AGENT_NAME_MAX:
+        return AGENT_NAME_RULE
+    parts = name.split(":")
+    if not all(_agent_name_part_ok(part) for part in parts):
+        return AGENT_NAME_RULE
+    if len(parts) > 1 and not plugin:
+        return AGENT_NAME_PLUGIN
+    return None
+
+
+def shown_name(name) -> str:
+    """``name`` as an error message shows it: ``repr`` (so a line break
+    reads ``\\n``), cut to 40 characters."""
+    text = str(name)
+    return repr(text if len(text) <= 40 else text[:40] + "...")
+
+
 _TOP_LEVEL_KEYS = {"id", "name", "for", "archetype", "settings", "agents", "roles", "env", "notes"}
 
 
@@ -511,6 +564,10 @@ def validate(d: dict) -> list[str]:
         problems.append(f"agents: must be a table/object, got {type(agents).__name__}")
     else:
         for agent_name, agent_dict in agents.items():
+            name_problem = agent_name_problem(agent_name)
+            if name_problem is not None:
+                problems.append(f"agents.{shown_name(agent_name)}: {name_problem}")
+                continue
             if not isinstance(agent_dict, dict):
                 problems.append(f"agents.{agent_name}: must be a table/object, got {type(agent_dict).__name__}")
                 continue

@@ -1419,3 +1419,40 @@ def test_map_settings_merge_by_name_and_revert_cleanly(tmp_path):
     assert data["enabledPlugins"] == {"a@m": True, "b@m": False}
     apply_mod.revert(result.ts, config_dir=config_dir)
     assert settings_path.read_bytes() == original
+
+
+def test_plan_apply_refuses_an_agent_name_nothing_checked(tmp_path):
+    from claudeglass.profiles.schema import Profile
+
+    rule = (
+        "an agent name holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters"
+    )
+    root = tmp_path / "root"
+    (root / "agents").mkdir(parents=True)
+    with pytest.raises(apply_mod.ApplyError) as raised:
+        apply_mod.plan_apply(
+            Profile(id="x", agents={"../x": {"model": "sonnet"}}),
+            scope="user",
+            project_path=None,
+            config_dir=tmp_path / "cfg",
+            claude_root=root,
+        )
+    assert raised.value.reasons == [f"agent '../x': {rule}"]
+
+
+def test_apply_leaves_out_a_writer_file_with_an_unusable_name(tmp_path):
+    from claudeglass.profiles import catalogue
+
+    root = tmp_path / "root"
+    (root / "agents").mkdir(parents=True)
+    (root / "agents" / "fixer x.md").write_text("---\nname: fixer x\ntools: Read, Edit\n---\n", encoding="utf-8")
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="user",
+        project_path=None,
+        config_dir=tmp_path / "cfg",
+        claude_root=root,
+    )
+    assert not [a for a in plan.actions if a.kind == "agent_frontmatter"]
+    assert "One agent that writes code has a name ClaudeGlass can't use, so it is left out." in plan.role_notes

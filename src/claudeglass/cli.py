@@ -5298,6 +5298,10 @@ def _one_off_profile(set_values: list[str], agent: str | None):
     ``--set`` invocation would be ambiguous about scope."""
     from .profiles import schema
 
+    if agent is not None:
+        name_problem = schema.agent_name_problem(agent)
+        if name_problem is not None:
+            return None, f"--agent {schema.shown_name(agent)}: {name_problem}"
     env_items = [item for item in set_values if item.partition("=")[0].strip().startswith("env.")]
     if env_items and len(env_items) != len(set_values):
         return None, "--set: env.NAME=value can't be mixed with a settings/agent --set in the same command"

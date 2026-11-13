@@ -2598,6 +2598,30 @@ def make_handler(
         except (OSError, profile_schema.ProfileError, ValueError):
             return None
 
+    def _broken_profile(profile_id: str):
+        """A 409 saying why, for a saved profile file that exists but no
+        longer passes the checks (a rule tightened since it was saved), so
+        its card's drawer says what to do instead of "unknown profile".
+        ``None`` for anything else."""
+        if not profile_schema._ID_RE.match(profile_id) or profile_id in profile_catalogue.CATALOGUE_IDS:
+            return None
+        path = Path(options.config_dir) / "profiles" / f"{profile_id}.toml"
+        if not path.is_file():
+            return None
+        try:
+            profile_schema.load_profile(path)
+        except profile_schema.ProfileError as exc:
+            return _error(
+                409,
+                "conflict",
+                "This profile's file no longer passes ClaudeGlass's checks, so it can't be shown. "
+                + "; ".join(exc.problems)
+                + f". Fix or delete {profile_id}.toml in ClaudeGlass's profiles folder.",
+            )
+        except (OSError, ValueError):
+            return None
+        return None
+
     def _recorded_agents(snapshot):
         """The snapshot's ``agents`` map (name -> entry), or ``None`` when
         there is no snapshot or it records no agents list: the dashboard
@@ -2688,10 +2712,13 @@ def make_handler(
         found = resolved.matched.get("writer")
         if found is None:
             return resolved.profile, (), ()
+        # A writer whose name fails the agent-name rule is counted, never named.
+        unusable = profile_roles.unusable_writers(here)
+        left_out = (profile_roles.unusable_writers_note(unusable),) if unusable else ()
         if len(found) > 1:
-            return resolved.profile, (profile_roles.several_writers_note(found),), found
+            return resolved.profile, (profile_roles.several_writers_note(found), *left_out), found
         if found:
-            return resolved.profile, (), found
+            return resolved.profile, left_out, found
         folder = "~/.claude/agents" if scope == "user" else ".claude/agents"
         whose = "your agents" if scope == "user" else "this project's agents"
         note = (
@@ -2703,13 +2730,13 @@ def make_handler(
         elsewhere = profile_roles.writers(there)
         if elsewhere:
             note += " " + _other_scope_note(elsewhere, scope)
-        return resolved.profile, (note,), ()
+        return resolved.profile, (note, *left_out), ()
 
     def route_profile_diff(store, query, body):
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
         if profile is None:
-            return _not_found(f"unknown profile: {profile_id!r}")
+            return _broken_profile(profile_id) or _not_found(f"unknown profile: {profile_id!r}")
 
         scope = query.get("scope") or "user"
         if scope not in _VALID_PROFILE_SCOPES:
@@ -2867,7 +2894,7 @@ def make_handler(
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
         if profile is None:
-            return _not_found(f"unknown profile: {profile_id!r}")
+            return _broken_profile(profile_id) or _not_found(f"unknown profile: {profile_id!r}")
         # PF1: the card, the estimate and "Start from" read the agents the
         # writer role goes to among the user's own (user and project).
         resolved, _notes, _writers = _resolve_roles(
