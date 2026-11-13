@@ -545,9 +545,10 @@ def test_capture_group_opens_for_a_metric_that_needs_you() -> None:
     sat in a closed group."""
     metrics = _function_source(_app_js(), "renderCaptureMetrics")
     assert "group.open = section.metrics.some(" in metrics
-    assert "return row.needs_hook || row.needs_install || row.statusline_note;" in metrics
+    assert "return row.needs_hook || row.needs_install || row.statusline_note || row.silent_note;" in metrics
     # The note it opens for is the one each row shows.
     assert "if (row.statusline_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
+    assert "if (row.silent_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
 
 
 def test_a_metric_row_that_needs_a_hook_entry_names_the_command_unless_a_policy_blocks_it() -> None:

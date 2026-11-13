@@ -956,6 +956,20 @@ found the parser was missing, all numbers and closed words:
   there is one (``detail["tools_source"] == "request"``): the snapshot's
   entries run about 1.6 times the definitions actually sent.
 
+Coaching-occasions addition (``PARSER_VERSION`` 52). Whether the status-check
+hint (``status_poll``) could have fired, for the tuning export and the Capture
+page (``hint_occasions``). A yes/no only:
+
+- ``Turn.background_waiting: bool = False`` -- when the message that opens
+  this turn was typed, a tool result before it had said that work went to
+  the background (the capture hook's ``BACKGROUND_LAUNCH_PATTERN``, read in
+  the result's first ``BACKGROUND_SCAN_CHARS`` characters and dropped), and no
+  task notification for that call had arrived since. A notification that names
+  no call ends every wait, and a subagent's own lines are not the session's
+  work. It is the hook's ``_background_pending`` kept as a flag and never as
+  text: the typed line's ``Event.detail["waiting"]`` is ``True`` and carries
+  it, and the key is left out otherwise.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -1466,6 +1480,10 @@ class Turn:
     #: only asked something, and whether it asked for a change.
     human_question: bool = False
     human_change: bool = False
+    #: Coaching-occasions addition (``PARSER_VERSION`` 52, see module
+    #: docstring): background work was out when the message that opened
+    #: this turn was typed.
+    background_waiting: bool = False
     #: A line you didn't type (a ``META`` event of subkind ``not_typed``)
     #: came between the previous reply and this one.
     preceding_not_typed: bool = False

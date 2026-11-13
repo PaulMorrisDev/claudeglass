@@ -538,6 +538,20 @@ million tokens. `capture status` says what the file holds. The service
 also writes the file for a survey item on your messages, with coaching
 notes off, since the facts line and the reminder read it too.
 
+The Capture page also says when a hint that can speak had its moment and
+gave no tip. A moment is a message of yours where the hint's own rule held:
+a small request that made `drip_count` in a row, a message of
+`big_paste_tokens` or more (typed text, not pictures), or a status check
+while a background run was still out and the cache was warm. It counts only
+in a session the hook would have run in, while coaching notes were on, and
+never for a message sent while Claude was working or a /cg-feedback run.
+Once two or more sessions had a moment for a hint and none of them got its
+note, the coaching notes row says so and points to `capture status`. It
+waits for a moment after the last time coaching notes were switched on or
+the hook entry or files changed, leaves out a hint you muted or one the mod
+showed itself, and stays away while the row already says a hook entry is
+missing. The tuning export holds the same counts as `hint_occasions`.
+
 ## The survey's notes
 
 The /cg-feedback survey (`capture feedback on`, or Deep) uses the same hook

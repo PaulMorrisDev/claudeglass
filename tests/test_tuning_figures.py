@@ -53,7 +53,7 @@ PRICING = load_pricing()
 def test_the_field_versions_hold_the_two_rows_the_summary_and_correction_figures_gate_on():
     assert measured.FIELD_VERSIONS["estimated"] == 45
     assert measured.FIELD_VERSIONS["queued_correction"] == 37
-    assert measured.NEWEST == 51
+    assert measured.NEWEST == 52
     assert not measured.measures(TranscriptResult(parser_version=44), "estimated")
     assert measured.measures(TranscriptResult(parser_version=45), "estimated")
     assert not measured.measures(TranscriptResult(parser_version=36), "queued_correction")

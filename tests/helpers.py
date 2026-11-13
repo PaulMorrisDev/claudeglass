@@ -519,8 +519,8 @@ def reminder_led_prompt(typed: str = "") -> str:
 
 # -- R10: digests an older parser wrote, whose transcripts are gone ------------
 
-#: The turn keys parsers 47 to 50 added: a 0.16.0 (parser 45) digest holds none.
-OLDER_TURN_KEYS = ("shell_code_write_count", "edit_code_count", "coach_tips", "coach_disowned")
+#: The turn keys parsers 47 to 52 added: a 0.16.0 (parser 45) digest holds none.
+OLDER_TURN_KEYS = ("shell_code_write_count", "edit_code_count", "coach_tips", "coach_disowned", "background_waiting")
 
 
 def to_older_digest(data: dict, *, reads_before_46: dict[int, int] | None = None) -> dict:

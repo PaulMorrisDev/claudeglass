@@ -501,7 +501,14 @@ __version__ = "0.16.0"
 #: ``measured.FIELD_VERSIONS``, on purpose: gating them would drop every
 #: older session whose transcript is gone from the agent-model cards for a
 #: difference no real data shows (0 of 37,438 real write targets moved).
-PARSER_VERSION = 51
+#: Bumped to 52: ``Turn.background_waiting``, whether a tool result before
+#: the message that opened the turn had said that work went to the
+#: background with no task notification for it since (the capture hook's
+#: ``status_poll`` condition, kept as a flag), for the coaching moments of
+#: the tuning export and the Capture page. A pre-52 digest has none; a
+#: transcript still on disk is re-read, and one Claude Code deleted keeps its
+#: old digest, which those figures leave out.
+PARSER_VERSION = 52
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

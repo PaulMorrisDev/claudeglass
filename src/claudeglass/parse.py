@@ -314,7 +314,18 @@ from . import prompt_shape
 from . import shell_reads
 from . import shell_writes
 from . import testrun
-from .capture_catalogue import DOC_SUFFIXES, ERROR_BLOCKED_PATTERN, REPORT_THRESHOLDS, TIP_TEXT_MARKER, tips_in
+from .capture_catalogue import (
+    BACKGROUND_LAUNCH_PATTERN,
+    BACKGROUND_SCAN_CHARS,
+    DOC_SUFFIXES,
+    ERROR_BLOCKED_PATTERN,
+    REPORT_THRESHOLDS,
+    TASK_NOTIFICATION_CALL_PATTERN,
+    TASK_NOTIFICATION_PREFIX,
+    TIP_TEXT_MARKER,
+    tips_in,
+)
+from .hooks import capture_hook
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -2419,6 +2430,64 @@ class _PlanWatch:
             self.mode = mode
 
 
+#: What a tool result says when its work went to the background, and how a
+#: task's finishing message names the call that started it: the capture
+#: hook's own patterns (``capture_catalogue``), compiled once.
+_BACKGROUND_LAUNCH_RE = re.compile(BACKGROUND_LAUNCH_PATTERN)
+_TASK_NOTIFICATION_CALL_RE = re.compile(TASK_NOTIFICATION_CALL_PATTERN)
+
+
+@dataclass(slots=True)
+class _BackgroundWatch:
+    """Which background work is still out, in memory only: the calls whose
+    tool result said the work went to the background, with no task
+    notification for the call since, each with where in the file its result
+    line began. ``capture_hook._background_pending`` line by line, with the
+    hook's own helpers; a message you typed while :meth:`waiting` has
+    ``Turn.background_waiting``.
+
+    The hook reads only the last ``capture_hook._COACH_PROMPT_TAIL_BYTES`` of
+    the file, so a launch that never got a notification (a dev server) stops
+    being seen once more than that lies between its line and the end of the
+    message: :meth:`waiting` drops it then. The distance is the file's bytes
+    as ``jsonl.LineStats`` counts them (exact for ASCII white space and valid
+    UTF-8), copied and replayed lines the parser skips included, as the hook
+    reads them too."""
+
+    pending: dict[str, int] = field(default_factory=dict)
+
+    def waiting(self, end: int) -> bool:
+        """Whether a launch is still within the hook's tail of a message
+        whose line ends ``end`` bytes into the file. A launch beyond it never
+        comes back, so it is forgotten."""
+        floor = end - capture_hook._COACH_PROMPT_TAIL_BYTES
+        if self.pending and any(start < floor for start in self.pending.values()):
+            self.pending = {call: start for call, start in self.pending.items() if start >= floor}
+        return bool(self.pending)
+
+    def see(self, d: dict, start: int = 0) -> None:
+        """One line of the transcript, in order, which began ``start`` bytes
+        into the file. A subagent's own line is not the session's work. A
+        notification ends the wait for the calls it names, or every wait when
+        it names none."""
+        if d.get("isSidechain"):
+            return
+        text = capture_hook._notification_text(d, TASK_NOTIFICATION_PREFIX)
+        if text is not None:
+            called = set(_TASK_NOTIFICATION_CALL_RE.findall(text))
+            self.pending = {call: at for call, at in self.pending.items() if call not in called} if called else {}
+            return
+        if d.get("type") != "user":
+            return
+        for block in capture_hook._blocks(d):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_result"
+                and _BACKGROUND_LAUNCH_RE.search(capture_hook._result_head(block, BACKGROUND_SCAN_CHARS))
+            ):
+                self.pending[str(block.get("tool_use_id") or "")] = start
+
+
 def _denial_before(events: list[Event]) -> str | None:
     """The bucket of the denial an interrupt follows, among the events
     since the last reply: a call you turned down first, then a dialog you
@@ -2552,6 +2621,7 @@ def _finalize_turn(
     human_acks: list[bool] = []
     # Parser-signals addition (see model.py's module docstring).
     human_adjust = human_remind = human_change = preceding_not_typed = False
+    background_waiting = False
     human_gos: list[bool] = []
     human_statuses: list[bool] = []
     human_handoffs: list[bool] = []
@@ -2618,6 +2688,7 @@ def _finalize_turn(
         human_adjust = human_adjust or bool(pending_event.detail.get("adjust"))
         human_remind = human_remind or bool(pending_event.detail.get("remind"))
         human_change = human_change or bool(pending_event.detail.get("change"))
+        background_waiting = background_waiting or bool(pending_event.detail.get("waiting"))
         human_gos.append(bool(pending_event.detail.get("go")))
         human_statuses.append(bool(pending_event.detail.get("status")))
         human_handoffs.append(bool(pending_event.detail.get("plan_handoff")))
@@ -2748,6 +2819,7 @@ def _finalize_turn(
         human_plan_handoff=any(human_handoffs),
         human_question=bool(human_questions) and all(human_questions),
         human_change=human_change,
+        background_waiting=background_waiting,
         preceding_not_typed=preceding_not_typed,
         human_remind=human_remind,
         queued_prompts=queued_prompts,
@@ -3269,6 +3341,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     current: _PendingTurn | None = None
     current_key: str | None = None
     plan_watch = _PlanWatch()
+    background = _BackgroundWatch()
     previous_turn: Turn | None = None
     previous_non_synthetic_ts: datetime | None = None
     priced_turn_count = 0
@@ -3292,6 +3365,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             seen_uuids.add(uuid_val)
 
         line_type = d.get("type")
+        # Coaching-occasions addition: a typed line never changes what is
+        # pending, so every line is seen before it is classified.
+        background.see(d, line_stats.line_start)
 
         line_ts = d.get("timestamp")
         plan_watch.at = line_ts if isinstance(line_ts, str) else ""
@@ -3498,6 +3574,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                 event.detail["after"] = after
         elif event.kind in (EventKind.HUMAN_TEXT, EventKind.QUEUE_OPERATION) and event.detail.get("go"):
             plan_watch.approve()
+        if event.kind == EventKind.HUMAN_TEXT and background.waiting(line_stats.bytes_read):
+            # Coaching-occasions addition (see model.py's module docstring):
+            # a flag only, never the result text it was worked out from.
+            event.detail["waiting"] = True
         events.append(event)
         events_since_current.append(event)
         if notes.plan_feedback is not None:

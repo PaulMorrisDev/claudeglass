@@ -460,7 +460,7 @@ function renderCaptureMetrics(data, container) {
     }).length;
     var group = el("details", { class: "disclosure capture-group" });
     group.open = section.metrics.some(function (row) {
-      return row.needs_hook || row.needs_install || row.statusline_note;
+      return row.needs_hook || row.needs_install || row.statusline_note || row.silent_note;
     });
     group.appendChild(el("summary", { text: section.title + " (" + on + " of " + section.metrics.length + " on)" }));
     var list = el("div", { class: "capture-metric-list" });
@@ -526,6 +526,7 @@ function renderMetricRow(row, data, container) {
     box.appendChild(codeBlockWithCopy(row.install_command, "Command"));
   }
   if (row.statusline_note) box.appendChild(el("p", { class: "notes" }, prose(row.statusline_note)));
+  if (row.silent_note) box.appendChild(el("p", { class: "notes" }, prose(row.silent_note)));
 
   toggle.addEventListener("change", function () {
     var turningOn = toggle.checked;

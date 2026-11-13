@@ -2759,6 +2759,7 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
             tip_feedback=_dashboard_tip_feedback(config_dir),
             coverage=coverage,
             projects_roots=_read_where(args, config_dir)[1],
+            mod_events=_dashboard_mod_events(config_dir),
         )
         text = tuning_mod.dumps(doc)
     except tuning_mod.TuningError as exc:
