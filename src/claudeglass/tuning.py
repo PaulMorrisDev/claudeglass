@@ -1922,7 +1922,7 @@ _STRETCH_BOUNDS = (9, 29, 99)
 #: What the reply before a cold return left in the context: under 150,000 and up.
 RETURN_SIZES = ("under_150k", "to_200k", "to_300k", "to_500k", "over_500k")
 _RETURN_BOUNDS = (149_999, 200_000, 300_000, 500_000)
-#: The weeks the models part keeps amounts for: the latest weeks with any spend, the same weeks for
+#: The weeks the models part keeps amounts for: the latest weeks with any reply, the same weeks for
 #: every model.
 FIGURE_WEEKS = 8
 #: The most models the models part names: the dearest ``MODELS_KEPT - 1``, and ``other`` for the rest.
@@ -2390,7 +2390,7 @@ def _figures_lines(block: dict) -> list[str]:
     if replies:
         tokens = sum(cell["tokens"] for cell in growth["by_reply"].values())
         lines.append(
-            f"Context grew by {round(tokens / replies):,} tokens a reply on average in the main session, "
+            f"Context grew by {_n(round(tokens / replies), 'token')} a reply on average in the main session, "
             f"over {_n(replies, 'reply', 'replies')}."
         )
         fast = sum(growth["by_session"].get(word, {}).get("sessions", 0) for word in _FAST_GROWTH)
@@ -2411,9 +2411,10 @@ def _figures_lines(block: dict) -> list[str]:
             f"so it paid back after about {_n(round(cost / saved), 'reply', 'replies')}."
         )
         if "paid_back" in summaries:
+            many = summaries["summaries"]
             lines.append(
-                f"{summaries['paid_back']:,} of {_n(summaries['summaries'], 'summary', 'summaries')} "
-                "were followed by that many replies."
+                f"{summaries['paid_back']:,} of {_n(many, 'summary', 'summaries')} "
+                f"{'was' if many == 1 else 'were'} followed by that many replies."
             )
     if summaries.get("unmeasured"):
         lines.append(

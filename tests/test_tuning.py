@@ -732,7 +732,19 @@ def test_the_summary_counts_one_in_the_singular_and_the_rest_in_the_plural():
     assert "Words were put right 1 time by the hook and 0 times by the transcript." in text
     assert "Claude admitted 1 mistake: you caught 1 and it caught 0. 1 more reply read like" in text
     assert "Rework: 1 follow-up after delivery" in text
-    for line in text.splitlines():
+    # The figures lines agree at one: a token, a reply, a summary that was followed.
+    figures = doc["figures"]
+    figures["growth"] = {"by_reply": {"to_500": {"replies": 1, "tokens": 1}}, "by_session": {}, "shrinks": 0}
+    figures["summaries"].update(summaries=1, paid_back=1)
+    lines = tuning.summary_text(doc).splitlines()
+    assert "Context grew by 1 token a reply on average in the main session, over 1 reply." in lines
+    assert "1 of 1 summary was followed by that many replies." in lines
+    figures["growth"]["by_reply"]["to_500"].update(replies=2, tokens=3)
+    figures["summaries"].update(summaries=6, paid_back=5)
+    lines = tuning.summary_text(doc).splitlines()
+    assert "Context grew by 2 tokens a reply on average in the main session, over 2 replies." in lines
+    assert "5 of 6 summaries were followed by that many replies." in lines
+    for line in tuning.summary_text(doc).splitlines():
         _plain(line)
 
 
