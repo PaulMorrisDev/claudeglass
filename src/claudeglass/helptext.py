@@ -1006,8 +1006,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "notes": ("Notes", "How many times the hint's note was added."),
             "shown": (
                 "Passed on by Claude",
-                "How many of those replies held that note's own tip. A note that came alone with its message also "
-                "counts the bare ClaudeGlass tip label.",
+                "How many of those replies held that note's own tip. If the note came alone with its message, a "
+                "reply with only the \"ClaudeGlass tip:\" label counts too.",
             ),
             "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip, in sessions this version read."),
             "relay": (
@@ -4886,7 +4886,7 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Finding",
                 "No model set means the agent ran on your main session's model. Asked for a larger model means "
                 "the call named Opus or Fable. Decided and changed code means a review or judging agent also "
-                "changed code on a larger model. Writing its report, a plan or a ledger doesn't count.",
+                "changed code on a larger model. Writing its report, a plan or a log doesn't count.",
             ),
             "runs": ("Agents", "How many agents this row counts, one per run."),
             "roles": (

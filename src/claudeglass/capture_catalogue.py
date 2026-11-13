@@ -3462,7 +3462,8 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     background one when ``turn_signals`` hasn't (a Custom pick of tag
     metrics alone). Coaching notes also add a background ``Stop`` entry
     (unless one of those already runs it), which prints nothing: it only
-    keeps the newest reply's time and size for the cold-return receipt."""
+    keeps the newest reply's time and size, which the hints about small
+    requests, checks on background work and cold returns read."""
     wanted = set(ids)
     haiku = HAIKU_TAGGER_HOOK in wanted and bool(tagged_keys(wanted))
     main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
