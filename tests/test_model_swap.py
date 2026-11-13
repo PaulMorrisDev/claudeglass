@@ -411,6 +411,9 @@ def test_at_main_floor_is_sonnet_or_smaller():
         assert model_swap.at_main_floor(setting), setting
     for setting in ("opus", "opusplan", "fable[1m]", "default", None, "", "a-model-nobody-knows"):
         assert not model_swap.at_main_floor(setting), setting
+    # A damaged value (a list, a number, a dict) is no model name: it reads as no model set.
+    for setting in (["sonnet"], 5, {"model": "haiku"}, True):
+        assert not model_swap.at_main_floor(setting), setting
 
 
 def test_workflow_subagents_have_no_agent_file_lever():

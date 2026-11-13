@@ -62,6 +62,23 @@ def test_models_goal_reads_the_cheapest_alternative_per_agent():
     assert explore["evidence"] == "Explore's replies in this window would have cost 80% less on claude-haiku-4-5-20251001."
 
 
+def test_models_goal_never_offers_to_raise_a_main_setting_at_sonnet_or_smaller():
+    model = _report()
+    [table] = model.sections[0].tables
+    table.columns.append(NS(key="best_cheaper_alternative_model"))
+    table.columns.append(NS(key="saving_pct"))
+    table.rows[0] += ["claude-sonnet-4-5", 40.0]
+    table.rows[1] += ["claude-haiku-4-5-20251001", 80.0]
+
+    def main_models(now):
+        out = goals.draft("models", model, UNITS, effective={"model": now})
+        return [c["value"] for c in out["candidates"] if c["key"] == "model" and c["agent"] is None]
+
+    for now in ("haiku", "claude-haiku-4-5-20251001", "sonnet"):
+        assert main_models(now) == [], now
+    assert main_models("opus") == ["sonnet"]
+
+
 def test_models_goal_evidence_names_the_runs_the_agent_file_decides():
     model = _report()
     [table] = model.sections[0].tables

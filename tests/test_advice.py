@@ -142,16 +142,19 @@ def test_in_a_view_of_several_projects_the_main_card_stays_when_the_setting_alre
     def main_cards():
         return [r for r in advice.finish([_tier("top-level")], report, snap(model), Units()) if r.id == "model-tier-main"]
 
-    model = "sonnet"
-    (card,) = main_cards()
-    assert card.changes == [] and card.saving_usd == 30.0
-    assert (
-        "Your model setting already says Sonnet, and these sessions still ran on a larger model."
-    ) in card.why
-    assert card.action == "Pick Sonnet with /model sonnet or the model picker for routine work, and compare the results."
-    # One project's view is unchanged: the card goes.
-    report.meta.projects = ("C--Dev-a",)
-    assert main_cards() == []
+    keep = "Keep routine work on your setting. Pick a larger model only for work that needs it."
+    for model, named in (("sonnet", "Sonnet"), ("haiku", "Haiku"), ("claude-haiku-4-5-20251001", "Haiku")):
+        report.meta.projects = ("C--Dev-a", "C--Dev-b")
+        (card,) = main_cards()
+        # A setting at Sonnet or smaller is already there: nothing raises it.
+        assert card.changes == [] and card.saving_usd == 30.0, model
+        assert (
+            f"Your model setting already says {named}, and the sessions it counts still ran on a larger model."
+        ) in card.why, model
+        assert card.action == keep and "/model" not in card.action, model
+        # One project's view is unchanged: the card goes.
+        report.meta.projects = ("C--Dev-a",)
+        assert main_cards() == [], model
     # A setting that does not say Sonnet gets the card as before.
     report.meta.projects = ("C--Dev-a", "C--Dev-b")
     model = "opus"

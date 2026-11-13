@@ -22,7 +22,7 @@ from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import Diagnostics
 from claudeglass.pricing import load_pricing
-from claudeglass.report import _SECTION_ORDER, _apply_autocompact_pct_override, _main_model_lever, build_report
+from claudeglass.report import _SECTION_ORDER, _apply_autocompact_pct_override, _cut_time, _main_model_lever, build_report
 from claudeglass.render.csv_out import write_csv_dir
 from claudeglass.render.html import render_html
 from claudeglass.render.json_out import render_json
@@ -1711,12 +1711,13 @@ _R11_DAY0 = datetime(2026, 10, 1, 9, 0, 0, tzinfo=timezone.utc)
 
 def _main_sessions(root: Path, folder: str, sessions) -> None:
     """Main sessions in ``root / "projects" / folder``: each a (day, model,
-    replies, entrypoint), its first reply at 09:00 UTC on 1 Oct 2026 plus
+    replies, entrypoint) or (day, model, replies, entrypoint, effort level on
+    every reply), its first reply at 09:00 UTC on 1 Oct 2026 plus
     ``day`` days (a float: 10.1 is two hours and 24 minutes later), its
     replies four seconds apart."""
     project = root / "projects" / folder
     project.mkdir(parents=True, exist_ok=True)
-    for i, (day, model_id, replies, entrypoint) in enumerate(sessions):
+    for i, (day, model_id, replies, entrypoint, *effort) in enumerate(sessions):
         start = _R11_DAY0 + timedelta(days=day)
 
         def stamp(at):
@@ -1725,7 +1726,8 @@ def _main_sessions(root: Path, folder: str, sessions) -> None:
         lines = [user_str_line("do the work", timestamp=stamp(start - timedelta(seconds=5)))]
         for n in range(replies):
             lines.append(turn_line(model=model_id, input_tokens=50, output_tokens=1500, cache_read_input_tokens=30_000,
-                                   timestamp=stamp(start + timedelta(seconds=4 * n))))
+                                   timestamp=stamp(start + timedelta(seconds=4 * n)),
+                                   **({"effort": effort[0]} if effort else {})))
         for line in lines:
             line["sessionId"] = f"{folder}-{i:02d}"
             line["entrypoint"] = entrypoint
@@ -1910,10 +1912,12 @@ def test_an_apply_counts_once_the_next_snapshot_shows_it(tmp_path):
     assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [None] * 3
 
 
-def test_of_a_settings_move_and_a_transcript_move_at_the_same_time_the_settings_move_counts(tmp_path):
+def test_a_settings_move_down_keeps_an_earlier_transcript_move_and_comes_before_one_at_its_time(tmp_path):
     """Alpha's sessions: Opus, a Sonnet run by the picker, then Opus again from
     7 Oct 09:00. Alpha's own snapshot at that moment shows your user settings
-    on Sonnet (beta's saw the edit first, on 4 Oct)."""
+    on Sonnet (beta's saw the edit first, on 4 Oct). The picker's move to
+    Sonnet still stands, and the Opus run after it was picked against a
+    Sonnet setting: it counts."""
     _main_sessions(tmp_path, "C--Dev-alpha",
                    _opus_days(3) + _days(_R11_SONNET, (3, 4, 5)) + _days(_R11_OPUS, (6, 7, 8)))
     config_dir = tmp_path / "tl"
@@ -1923,7 +1927,7 @@ def test_of_a_settings_move_and_a_transcript_move_at_the_same_time_the_settings_
     moment = datetime(2026, 10, 7, 9, tzinfo=timezone.utc)
     assert any(p.source == "transcript" and p.ts == moment and "model" in p.keys
                for p in change_points.change_points(config_dir, corpus))
-    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 6 + [None] * 3
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [None] * 6
 
 
 def test_a_move_made_by_sessions_of_nine_replies_cuts_nothing_and_of_ten_cuts(tmp_path):
@@ -1957,3 +1961,179 @@ def test_a_setting_that_goes_from_sonnet_to_haiku_cuts_only_from_the_first_move(
             ("20261007T090000Z", "opus", "haiku"))
     _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
     assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 3 + [None]
+
+
+# -- R11 v2.2: one timeline per project (report._cut_time) ----------------------
+
+
+def _t(day: float, seconds: int = 0) -> datetime:
+    return _R11_DAY0 + timedelta(days=day, seconds=seconds)
+
+
+def _down(day: float) -> tuple:
+    """A transcript move down: the session before it a day earlier."""
+    return (_t(day - 1), _t(day), True)
+
+
+def _up(day: float) -> tuple:
+    return (_t(day - 1), _t(day), False)
+
+
+def test_before_the_first_snapshot_the_transcripts_decide():
+    assert _cut_time(None, [], [_down(1)]) == _t(1)
+    assert _cut_time(None, [], [_down(1), _up(5)]) is None
+    assert _cut_time(None, [], [_down(1), _up(5), _down(9)]) == _t(9)
+    # A move up the tracker passed over leaves two moves down: the first stands.
+    assert _cut_time(None, [], [_down(1), _down(9)]) == _t(1)
+
+
+def test_the_first_snapshot_sets_and_undoes_nothing():
+    assert _cut_time((_t(0), True), [], []) is None
+    assert _cut_time((_t(0), False), [], []) is None
+    assert _cut_time((_t(3), True), [], [_down(1)]) == _t(1)
+    assert _cut_time((_t(3), False), [], [_down(1)]) == _t(1)
+    # A second snapshot of the same second is read after the first, as the snapshots were.
+    assert _cut_time((_t(3), False), [(_t(3), True)], [_up(5)]) == _t(3)
+
+
+def test_with_the_setting_above_the_line_the_transcripts_decide():
+    assert _cut_time((_t(-1), False), [], [_down(1)]) == _t(1)
+    assert _cut_time((_t(-1), False), [], [_down(1), _up(5)]) is None
+
+
+def test_with_the_setting_at_or_below_the_line_the_transcripts_move_nothing():
+    assert _cut_time((_t(-1), True), [], [_up(1)]) is None
+    assert _cut_time((_t(-1), True), [], [_up(1), _down(5)]) is None
+    # A move down the setting made stays when the sessions are picked up and back.
+    assert _cut_time((_t(-1), False), [(_t(3), True)], [_up(5), _down(9)]) == _t(3)
+
+
+def test_a_settings_move_down_sets_the_time_and_keeps_an_earlier_one():
+    assert _cut_time((_t(-1), False), [(_t(3), True)], []) == _t(3)
+    assert _cut_time((_t(-1), False), [(_t(3), True)], [_down(1)]) == _t(1)
+
+
+def test_a_settings_move_up_undoes_everything_and_the_transcripts_decide_again():
+    assert _cut_time((_t(-1), True), [(_t(3), False)], []) is None
+    assert _cut_time((_t(-1), False), [(_t(3), True), (_t(5), False)], [_down(1)]) is None
+    assert _cut_time((_t(-1), False), [(_t(3), True), (_t(5), False)], [_down(8)]) == _t(8)
+
+
+def test_of_a_settings_move_and_a_transcript_move_at_the_same_time_the_settings_move_is_read_first():
+    # The setting moves down as the sessions go back up: the earlier move down stands.
+    assert _cut_time((_t(-1), False), [(_t(6), True)], [_down(1), _up(6)]) == _t(1)
+
+
+def test_two_crossings_at_the_same_time_are_read_in_the_order_given():
+    """Two snapshots of the same second are read as they were taken, never
+    by which way they moved."""
+    assert _cut_time((_t(-1), False), [(_t(3), True), (_t(3), False)], []) is None
+    assert _cut_time((_t(-1), False), [(_t(3), False), (_t(3), True)], []) == _t(3)
+
+
+def test_a_first_snapshot_between_a_transcript_moves_two_times_comes_after_it():
+    """The snapshot hook runs as a session starts: the first session on the
+    new model takes the first snapshot seconds before its first reply."""
+    move = [_down(10)]
+    assert _cut_time((_t(10, -3), True), [], move) == _t(10)
+    assert _cut_time((_t(10), True), [], move) == _t(10)
+    # Taken by the last session on the old model, or before it: the move came after.
+    assert _cut_time((_t(9), True), [], move) is None
+    assert _cut_time((_t(5), True), [], move) is None
+    # Taken after both: the move came before.
+    assert _cut_time((_t(12), True), [], move) == _t(10)
+
+
+def test_a_project_that_moved_to_sonnet_before_the_first_snapshot_is_cut_from_its_move(tmp_path):
+    """new_install_moved_before: Opus on days 0 to 9, Sonnet on 10 to 14, the
+    first snapshot on day 12 says Sonnet."""
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(10) + _days(_R11_SONNET, range(10, 15)))
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20261013T080000Z", "sonnet", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 10 + [None] * 5
+
+
+def test_a_first_snapshot_taken_by_the_first_sonnet_session_comes_after_the_move(tmp_path):
+    """new_install_same_moment: the day 10 session's own start takes the first
+    snapshot, 3 seconds before its first reply. Taken by the day 9 Opus
+    session instead, the setting already said Sonnet while it ran."""
+    for name, ts, expected in (
+        ("same", "20261011T085957Z", [model_swap.BEFORE_CHANGE] * 10 + [None] * 5),
+        ("last_opus", "20261010T085957Z", [None] * 15),
+    ):
+        root = tmp_path / name
+        _main_sessions(root, "C--Dev-alpha", _opus_days(10) + _days(_R11_SONNET, range(10, 15)))
+        _layers(root / "tl", "C--Dev-alpha", (ts, "sonnet", None))
+        _corpus, _keys, lever, sessions = _r11_lever(root, ["C--Dev-alpha"], root / "tl")
+        assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == expected, name
+
+
+def test_larger_model_sessions_under_a_known_sonnet_setting_all_count(tmp_path):
+    """new_install_still_picking and new_install_picks_then_sonnet_after: the
+    first snapshot on day 5 says Sonnet; Opus on days 0 to 9, then Sonnet or
+    nothing. The return to Sonnet came after the setting was known."""
+    for name, later in (("still", []), ("then_sonnet", _days(_R11_SONNET, range(10, 15)))):
+        root = tmp_path / name
+        _main_sessions(root, "C--Dev-alpha", _opus_days(10) + later)
+        _layers(root / "tl", "C--Dev-alpha", ("20261006T080000Z", "sonnet", None))
+        _corpus, _keys, lever, sessions = _r11_lever(root, ["C--Dev-alpha"], root / "tl")
+        assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * (10 + len(later)), name
+        stats = model_swap.compute_model_swap(sessions["C--Dev-alpha"], PRICING, main_lever=lever)
+        assert stats.by_key["top-level"].lever.spawns == 10, name
+
+
+def test_opus_picked_after_the_setting_moved_down_counts(tmp_path):
+    """first_snapshot_opus_then_settings_down: the first snapshot says opus;
+    Opus on days 0 to 4; the setting moves to Sonnet on day 5; Opus picked on
+    days 6 to 8; Sonnet after."""
+    _main_sessions(tmp_path, "C--Dev-alpha",
+                   _opus_days(5) + _days(_R11_OPUS, (6, 7, 8)) + _days(_R11_SONNET, range(9, 14)))
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20261001T080000Z", "opus", None), ("20261006T080000Z", "sonnet", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 5 + [None] * 8
+
+
+def test_a_setting_removed_and_set_to_sonnet_again_cuts_from_the_latest_move(tmp_path):
+    """sonnet_then_unset_then_sonnet_with_picks: Opus picked on days 2 and 3
+    under a Sonnet setting; the setting removed on day 4 and set to Sonnet
+    again on day 6."""
+    _main_sessions(tmp_path, "C--Dev-alpha",
+                   [(day, _R11_OPUS if day in (2, 3) else _R11_SONNET, 40, "claude-desktop") for day in range(10)])
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "sonnet", None), ("20261005T200000Z", None, None),
+            ("20261007T200000Z", "sonnet", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 7 + [None] * 3
+
+
+def test_a_move_to_sonnet_beside_a_setting_edit_on_the_larger_side_still_cuts(tmp_path):
+    """The setting went opus to fable the evening the sessions moved to Sonnet:
+    the Changes page lists the edit once, and the sessions' move still counts."""
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(10) + _days(_R11_SONNET, range(10, 15)))
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", None), ("20261010T200000Z", "fable", None))
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 10 + [None] * 5
+
+
+def test_a_move_back_up_that_comes_with_an_effort_change_still_undoes_the_move_down(tmp_path):
+    """model_back_up_with_an_effort_change: Opus on days 0 to 9, effort high on
+    days 0 to 2 and none recorded after; the first snapshot on day 5 says
+    opus; Sonnet on days 10 to 19; Opus with effort max from day 20. The day
+    20 point holds the model and the effort level, and the effort's session
+    before is day 2: the move back up is still read after the move down."""
+    sessions = (
+        [(day, _R11_OPUS, 40, "claude-desktop", "high") for day in range(3)]
+        + _days(_R11_OPUS, range(3, 10))
+        + _days(_R11_SONNET, range(10, 20))
+        + [(day, _R11_OPUS, 40, "claude-desktop", "max") for day in range(20, 25)]
+    )
+    _main_sessions(tmp_path, "C--Dev-alpha", sessions)
+    config_dir = tmp_path / "tl"
+    _layers(config_dir, "C--Dev-alpha", ("20261006T080000Z", "opus", None))
+    corpus, _keys, lever, by_folder = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir)
+    [(since, back)] = [(s, p) for s, p in change_points._transcript_points(corpus) if p.ts == _t(20)]
+    assert back.keys == ["model", "effortLevel"] and since == _t(2)
+    assert [lever(tr) for tr in by_folder["C--Dev-alpha"]] == [None] * 25

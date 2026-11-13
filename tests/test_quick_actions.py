@@ -461,12 +461,15 @@ def test_models_check_offers_no_opusplan_beside_no_main_session_counted(tmp_path
 
 
 def test_models_check_says_what_ran_when_the_setting_already_has_the_cheaper_model(tmp_path):
-    def summary(main):
+    def run(main, now="sonnet"):
         model = _full_model()
         swap = model.sections[0].tables[0]
         swap.rows[1][-3], swap.rows[1][-2] = None, 0
         _with_session_counts(model, main, (10, 10, 0, 0))
-        return qa.run("models", _ctx(tmp_path, model=model, effective={"model": "sonnet"}))["summary"]
+        return qa.run("models", _ctx(tmp_path, model=model, effective={"model": now}))
+
+    def summary(main, now="sonnet"):
+        return run(main, now)["summary"]
 
     assert summary((29, 24, 0, 5)) == (
         "Your model setting already says sonnet. 24 main sessions in this window still ran on a larger model."
@@ -474,6 +477,11 @@ def test_models_check_says_what_ran_when_the_setting_already_has_the_cheaper_mod
     assert summary((2, 1, 0, 1)) == (
         "Your model setting already says sonnet. 1 main session in this window still ran on a larger model."
     )
+    # A setting below the suggested model is already there too, and is named as it is set.
+    assert summary((29, 24, 0, 5), "haiku") == (
+        "Your model setting already says haiku. 24 main sessions in this window still ran on a larger model."
+    )
+    assert all("Main session" not in fix["title"] for fix in run((29, 24, 0, 5), "haiku")["fixes"])
 
 
 def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
