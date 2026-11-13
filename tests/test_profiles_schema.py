@@ -146,6 +146,19 @@ def test_validate_rejects_unknown_agent_key():
     assert any(p == "agents.claude-implementer.notARealKey: unknown key" for p in problems)
 
 
+def test_unknown_role_is_rejected():
+    problems = validate(_valid_doc(roles={"reviewer": {"model": "sonnet"}}))
+    assert "roles.reviewer: unknown role (expected one of writer)" in problems
+    problems = validate(_valid_doc(roles={"writer": {"notARealKey": 1}}))
+    assert "roles.writer.notARealKey: unknown key" in problems
+    problems = validate(_valid_doc(roles="nope"))
+    assert any(p.startswith("roles: must be a table/object, got str") for p in problems)
+    problems = validate(_valid_doc(roles={"writer": "nope"}))
+    assert any(p.startswith("roles.writer: must be a table/object, got str") for p in problems)
+    problems = validate(_valid_doc(roles={"writer": {"maxTurns": 0}}))
+    assert any(p.startswith("roles.writer.maxTurns:") for p in problems)
+
+
 def test_validate_rejects_unknown_env_name():
     problems = validate(_valid_doc(env={"RANDOM_VAR": "x"}))
     assert any(p == "env.RANDOM_VAR: not an allowed environment variable name" for p in problems)
@@ -373,6 +386,36 @@ def test_dump_profile_round_trips_every_field_kind():
     dumped = dump_profile(profile)
     reloaded = loads_profile(dumped)
     assert reloaded == profile
+
+
+def test_roles_table_validates_and_round_trips():
+    doc = _valid_doc(
+        roles={
+            "writer": {
+                "model": "sonnet",
+                "effort": "medium",
+                "maxTurns": 60,
+                "experimental": {"cacheTtl": "1h"},
+            }
+        },
+        agents={"claude-implementer": {"model": "haiku"}},
+    )
+    assert validate(doc) == []
+    profile = load_dict(doc)
+    # normalised like an agent: the nested table becomes the dotted key
+    assert profile.roles == {
+        "writer": {"model": "sonnet", "effort": "medium", "maxTurns": 60, "experimental.cacheTtl": "1h"}
+    }
+    text = dump_profile(profile)
+    assert "[roles.writer]" in text
+    assert text.index("[agents.claude-implementer]") < text.index("[roles.writer]")
+    # keys in AGENT_ALLOWLIST order
+    assert text.index("model = \"sonnet\"") < text.index("effort = ") < text.index("maxTurns = ")
+    assert loads_profile(text) == profile
+    # an empty role table is not written
+    assert "[roles" not in dump_profile(load_dict(_valid_doc(roles={"writer": {}})))
+    # a profile with no roles has an empty roles dict
+    assert load_dict(_valid_doc()).roles == {}
 
 
 def test_dump_profile_omits_empty_sections():

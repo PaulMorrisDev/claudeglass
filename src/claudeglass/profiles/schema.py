@@ -61,6 +61,7 @@ __all__ = [
     "SETTINGS_ALLOWLIST",
     "AGENT_ALLOWLIST",
     "ENV_ALLOWLIST",
+    "ROLES",
     "ARCHETYPES",
     "RECOMMEND_LEVER_MAP",
     "validate",
@@ -216,6 +217,11 @@ AGENT_ALLOWLIST: dict[str, LeverSpec] = {
     ),
 }
 
+#: The roles a profile may name in place of an agent (``[roles.<name>]``).
+#: A role holds the same keys as an agent (:data:`AGENT_ALLOWLIST`);
+#: ``profiles/roles.py`` says which of the user's own agents it goes to.
+ROLES: tuple[str, ...] = ("writer",)
+
 #: Environment variable *names* a profile may mention (the value is
 #: always a free-form string supplied at apply time -- see
 #: ``LeverSpec``'s docstring).
@@ -266,7 +272,7 @@ ARCHETYPES: tuple[str, ...] = (
 _ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
 _BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-_TOP_LEVEL_KEYS = {"id", "name", "for", "archetype", "settings", "agents", "env", "notes"}
+_TOP_LEVEL_KEYS = {"id", "name", "for", "archetype", "settings", "agents", "roles", "env", "notes"}
 
 
 # -- Profile dataclass -------------------------------------------------
@@ -287,6 +293,9 @@ class Profile:
     #: agent name -> {allowlisted key: value}, keys already normalised to
     #: the dotted ``"experimental.cacheTtl"`` form.
     agents: dict = field(default_factory=dict)
+    #: role name -> {allowlisted key: value}, normalised like ``agents``;
+    #: ``profiles/roles.py`` folds it into the user's own agents.
+    roles: dict = field(default_factory=dict)
     env: dict = field(default_factory=dict)
     notes: str = ""
     #: Where this profile was loaded from, if it was loaded from a file
@@ -347,7 +356,7 @@ def _describe_expected(spec: LeverSpec) -> str:
     return "a string"
 
 
-def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str]) -> dict:
+def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str], table: str = "agents") -> dict:
     """Returns ``raw`` with a nested ``experimental = {cacheTtl = ...}``
     table folded into the dotted ``"experimental.cacheTtl"`` key (plan:
     "accept both the dotted key and a nested ``experimental = { cacheTtl
@@ -359,12 +368,12 @@ def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str]) -> di
     if nested is None:
         return out
     if not isinstance(nested, dict):
-        problems.append(f"agents.{agent_name}.experimental: must be a table, got {type(nested).__name__}")
+        problems.append(f"{table}.{agent_name}.experimental: must be a table, got {type(nested).__name__}")
         return out
     extra_keys = set(nested) - {"cacheTtl"}
     if extra_keys:
         problems.append(
-            f"agents.{agent_name}.experimental: unknown key(s) {sorted(extra_keys)} "
+            f"{table}.{agent_name}.experimental: unknown key(s) {sorted(extra_keys)} "
             "(only 'cacheTtl' is allowlisted under a nested experimental table)"
         )
     if "cacheTtl" not in nested:
@@ -373,7 +382,7 @@ def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str]) -> di
     nested_value = nested["cacheTtl"]
     if "experimental.cacheTtl" in out and dotted_value != nested_value:
         problems.append(
-            f"agents.{agent_name}: both 'experimental.cacheTtl' ({dotted_value!r}) and a nested "
+            f"{table}.{agent_name}: both 'experimental.cacheTtl' ({dotted_value!r}) and a nested "
             f"experimental.cacheTtl ({nested_value!r}) were given with different values"
         )
     else:
@@ -450,6 +459,26 @@ def validate(d: dict) -> list[str]:
                 if not _type_ok(value, spec):
                     problems.append(f"agents.{agent_name}.{key}: must be {_describe_expected(spec)}, got {value!r}")
 
+    roles = d.get("roles", {})
+    if not isinstance(roles, dict):
+        problems.append(f"roles: must be a table/object, got {type(roles).__name__}")
+    else:
+        for role_name, role_dict in roles.items():
+            if role_name not in ROLES:
+                problems.append(f"roles.{role_name}: unknown role (expected one of {', '.join(ROLES)})")
+                continue
+            if not isinstance(role_dict, dict):
+                problems.append(f"roles.{role_name}: must be a table/object, got {type(role_dict).__name__}")
+                continue
+            normalised = _normalise_agent_dict(role_name, role_dict, problems, "roles")
+            for key, value in normalised.items():
+                spec = AGENT_ALLOWLIST.get(key)
+                if spec is None:
+                    problems.append(f"roles.{role_name}.{key}: unknown key")
+                    continue
+                if not _type_ok(value, spec):
+                    problems.append(f"roles.{role_name}.{key}: must be {_describe_expected(spec)}, got {value!r}")
+
     env = d.get("env", {})
     if not isinstance(env, dict):
         problems.append(f"env: must be a table/object, got {type(env).__name__}")
@@ -488,6 +517,13 @@ def load_dict(d: dict, *, source_path: str | None = None) -> Profile:
         # drift is caught immediately instead of shipping a bad Profile.
         assert not normalised_problems, normalised_problems
 
+    roles_raw = d.get("roles", {}) or {}
+    roles: dict = {}
+    for role_name, role_dict in roles_raw.items():
+        role_problems: list[str] = []
+        roles[role_name] = _normalise_agent_dict(role_name, role_dict, role_problems, "roles")
+        assert not role_problems, role_problems
+
     return Profile(
         id=d["id"],
         name=d.get("name", ""),
@@ -495,6 +531,7 @@ def load_dict(d: dict, *, source_path: str | None = None) -> Profile:
         archetype=d.get("archetype"),
         settings=dict(d.get("settings", {}) or {}),
         agents=agents,
+        roles=roles,
         env=dict(d.get("env", {}) or {}),
         notes=d.get("notes", ""),
         source_path=source_path,
@@ -607,6 +644,16 @@ def dump_profile(profile: Profile) -> str:
         for key in AGENT_ALLOWLIST:
             if key in agent_dict:
                 lines.append(f"{_toml_key(key)} = {_toml_value(agent_dict[key])}")
+
+    for role_name in ROLES:
+        role_dict = profile.roles.get(role_name)
+        if not role_dict:
+            continue
+        lines.append("")
+        lines.append(f"[roles.{_toml_key(role_name)}]")
+        for key in AGENT_ALLOWLIST:
+            if key in role_dict:
+                lines.append(f"{_toml_key(key)} = {_toml_value(role_dict[key])}")
 
     if profile.env:
         lines.append("")
