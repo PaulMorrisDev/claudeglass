@@ -168,6 +168,47 @@ def test_a_tagger_or_toggle_change_does_not_revive_capture_that_ended(tmp_path):
         assert after.expired(LATER), change
 
 
+def test_after_defaults_to_stop_and_takes_light(tmp_path):
+    assert CaptureConfig().after == "stop"
+    assert load_config(config_dir=tmp_path).capture.after == "stop"
+    # A file written before the key: a missing key reads stop.
+    _write(tmp_path / "older", '[capture]\nlevel = "deep"\n')
+    assert load_config(config_dir=tmp_path / "older").capture.after == "stop"
+    on = set_capture(tmp_path, level="deep", now=NOW)
+    assert on.after == "stop"
+    chosen = set_capture(tmp_path, after="light", now=NOW)
+    assert chosen.after == "light" and (chosen.level, chosen.until) == (on.level, on.until)
+    assert load_config(config_dir=tmp_path).capture == chosen
+    assert 'after = "light"' in (tmp_path / "config.toml").read_text(encoding="utf-8")
+    # Logged like every change.
+    assert load_capture_log(tmp_path)[-1]["changed"] == {"after": {"from": "stop", "to": "light"}}
+    assert set_capture(tmp_path, after="stop", now=NOW).after == "stop"
+    assert 'after = "stop"' in (tmp_path / "config.toml").read_text(encoding="utf-8")
+    for bad in ("never", "", "Light", 1):
+        with pytest.raises(ConfigError, match="'capture.after'"):
+            set_capture(tmp_path, after=bad, now=NOW)
+    _write(tmp_path / "hand", '[capture]\nlevel = "deep"\nafter = "forever"\n')
+    with pytest.raises(ConfigError, match="'capture.after'"):
+        load_config(config_dir=tmp_path / "hand")
+
+
+def test_a_light_sample_runs_only_once_capture_has_ended_and_light_was_chosen(tmp_path):
+    ended = set_capture(tmp_path, level="deep", after="light", now=NOW)
+    assert not ended.light(NOW) and not ended.expired(NOW)
+    assert ended.light(LATER) and ended.expired(LATER)
+    stopped = set_capture(tmp_path, after="stop", now=NOW)
+    assert not stopped.light(LATER)
+    assert not set_capture(tmp_path, level="off", now=NOW).light(LATER)
+    # Capture with no end never reaches it, and choosing light after the end does not start a new span.
+    set_capture(tmp_path, level="deep", until="", now=NOW)
+    assert not set_capture(tmp_path, after="light", now=NOW).light(LATER)
+    set_capture(tmp_path, level="deep", until="2026-10-01T00:00:00+00:00", now=NOW)
+    late = set_capture(tmp_path, after="light", now=LATER)
+    assert late.light(LATER) and late.until == "2026-10-01T00:00:00+00:00"
+    assert set_capture(tmp_path, level="deep", now=LATER).light(LATER) is False  # `capture on` starts full capture again
+    assert (capture_catalogue.LIGHT_METRICS, capture_catalogue.LIGHT_SAMPLE) == (("task", "level", "size", "shift"), 20)
+
+
 def test_capture_still_running_keeps_its_span_when_the_level_is_named_again(tmp_path):
     first = set_capture(tmp_path, level="essentials", now=NOW)
     soon = NOW + timedelta(days=2)

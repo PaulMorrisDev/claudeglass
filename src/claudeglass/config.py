@@ -157,6 +157,10 @@ class CaptureConfig:
     sample: int = 100
     #: ISO-8601 time capture stops by itself, or ``""`` for never.
     until: str = ""
+    #: What happens at ``until``, one of ``capture_catalogue.AFTER_CHOICES``:
+    #: capture stops, or a light sample of it goes on (:meth:`light`). A
+    #: missing key reads ``"stop"``.
+    after: str = "stop"
     #: Project slug regexes (``re.search``, case-insensitive) capture runs
     #: in; one starting ``!`` leaves matching projects out. Empty means
     #: every project.
@@ -224,6 +228,13 @@ class CaptureConfig:
         if stop is None:
             return False
         return (now or datetime.now(timezone.utc)) >= stop
+
+    def light(self, now: datetime | None = None) -> bool:
+        """Whether a light sample is what runs now: capture is on, its end
+        has passed and ``after`` says to keep a sample
+        (``capture_catalogue.LIGHT_METRICS`` in
+        ``capture_catalogue.LIGHT_SAMPLE`` percent of sessions)."""
+        return self.is_on and self.expired(now) and self.after == "light"
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -663,6 +674,12 @@ def _build_capture_config(table: dict, path: Path) -> CaptureConfig:
         if not isinstance(value, str) or (value and _parse_iso(value) is None):
             raise ConfigError(f"config file {path}: 'capture.{key}' must be an ISO-8601 date or time, got {value!r}")
         setattr(capture, key, value)
+    after = table.get("after", capture.after)
+    if not isinstance(after, str) or after not in capture_catalogue.AFTER_CHOICES:
+        raise ConfigError(
+            f"config file {path}: 'capture.after' must be one of {list(capture_catalogue.AFTER_CHOICES)}, got {after!r}"
+        )
+    capture.after = after
     capture.projects = _capture_list(table, "projects", path)
     for pattern in capture.projects:
         try:
@@ -1140,6 +1157,7 @@ def _capture_table(capture: CaptureConfig) -> dict:
         "metrics": list(capture.metrics),
         "sample": capture.sample,
         "until": capture.until,
+        "after": capture.after,
         "projects": list(capture.projects),
         "feedback": list(capture.feedback),
         "coaching": list(capture.coaching),
@@ -1179,6 +1197,7 @@ def set_capture(
     metrics: list[str] | None = None,
     sample: int | None = None,
     until: str | None = None,
+    after: str | None = None,
     projects: list[str] | None = None,
     feedback: list[str] | None = None,
     coaching: list[str] | None = None,
@@ -1196,8 +1215,9 @@ def set_capture(
     way when the call names a level, a set of metrics or a new ``until``
     (``capture on``, a level or a new end picked on the Capture page): a
     fresh ``enabled_at``, and the default time-box when ``until`` is unsaid.
-    A change to the tagger, the sample, the project filter or the feedback
-    and coaching toggles leaves it ended. A switch from off to on that
+    A change to the tagger, the sample, the project filter, what happens at
+    the end (``after``) or the feedback and coaching toggles leaves it
+    ended. A switch from off to on that
     leaves ``until`` unsaid (``None``) gets
     :data:`~claudeglass.capture_catalogue.DEFAULT_CAPTURE_TIMEBOX_DAYS`
     days by default (CAP-8), so capture can't run forever unnoticed --
@@ -1233,6 +1253,8 @@ def set_capture(
         table["sample"] = sample
     if until is not None:
         table["until"] = until
+    if after is not None:
+        table["after"] = after
     if projects is not None:
         table["projects"] = list(projects)
     if feedback is not None:

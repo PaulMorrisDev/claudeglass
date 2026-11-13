@@ -216,6 +216,15 @@ CUSTOM_LEVEL = "custom"
 #: already depend on this module.
 DEFAULT_CAPTURE_TIMEBOX_DAYS = 14
 
+#: What happens when the time-box ends (``[capture] after``): capture stops
+#: (the default), or a light sample goes on: only :data:`LIGHT_METRICS`, in
+#: at most :data:`LIGHT_SAMPLE` percent of sessions. The four are the keys
+#: most cards read and the ones the joins match sessions by. The hook keeps
+#: a copy of both (``hooks/capture_hook.py``), held to these by a test.
+AFTER_CHOICES = ("stop", "light")
+LIGHT_METRICS = ("task", "level", "size", "shift")
+LIGHT_SAMPLE = 20
+
 #: Display names for the levels, as the dashboard and CLI show them.
 LEVEL_TITLES = {
     "off": "Off",
