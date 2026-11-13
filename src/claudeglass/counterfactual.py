@@ -47,7 +47,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from statistics import median
 
-from . import compaction_sim, impact, model_swap, ttl
+from . import compaction_sim, impact, model_swap, snapshots, ttl
 from .calibration import FALLBACK
 from .change_points import ChangePoint
 from .context_files import _Carry
@@ -191,6 +191,39 @@ def agent_file_runs(bundles, agent: str) -> tuple[list, int]:
     return [run for run in every if model_swap.model_set_by(run) == "agent file"], len(every)
 
 
+def main_setting_runs(change: dict, before_facts, after_facts, bundles: dict, pricing: Pricing) -> tuple[list, int]:
+    """``(runs, all)`` for the main sessions in ``after_facts``: the main
+    transcripts whose model the main session's ``model`` setting decided
+    after ``change``, and how many main transcripts there are. A session
+    counts when the model it ran on is the one the change sets; a project
+    whose sessions before the change ran none on the old setting's model is
+    left out whole. The one place a main model change says which sessions it
+    can have changed; ``outcomes`` counts its units here."""
+    every = [
+        (s, bundles[s.session_id].top)
+        for s in after_facts
+        if s.session_id in bundles and bundles[s.session_id].top is not None
+    ]
+    new = change.get("new")
+    if not (isinstance(new, str) and new.strip()):
+        # The new value names no model (``default``, unset): nothing is left out.
+        return [top for _s, top in every], len(every)
+    old = change.get("old") or _dominant_model([bundles[s.session_id] for s in before_facts if s.session_id in bundles])
+
+    def agrees(value, top) -> bool:
+        return snapshots._settings_model_agrees(value, model_swap._session_model(top), pricing.resolve_model)
+
+    left_out: set[str] = set()
+    if isinstance(old, str) and old.strip():
+        by_project: dict[str, list] = {}
+        for s in before_facts:
+            bundle = bundles.get(s.session_id)
+            if bundle is not None and bundle.top is not None:
+                by_project.setdefault(s.project, []).append(bundle.top)
+        left_out = {project for project, tops in by_project.items() if not any(agrees(old, top) for top in tops)}
+    return [top for s, top in every if s.project not in left_out and agrees(new, top)], len(every)
+
+
 def _priced(result) -> list:
     return [turn for turn in result.turns if turn.turn_index > 0]
 
@@ -211,7 +244,9 @@ def _dominant_model(bundles) -> str:
 # -- one method per kind of key -------------------------------------------------
 
 
-def _repriced_model(change: dict, after, before, pricing: Pricing) -> KeyResult | None:
+def _repriced_model(
+    change: dict, after, before, pricing: Pricing, before_facts=(), after_facts=(), bundles=None
+) -> KeyResult | None:
     agent = change.get("agent")
     old = change.get("old") or (None if agent else _dominant_model(before))
     rates = pricing.resolve_model(old) if old else None
@@ -232,7 +267,16 @@ def _repriced_model(change: dict, after, before, pricing: Pricing) -> KeyResult 
         if len(results) < every:
             left = f", in the {len(results)} of {every} runs that left the model to its agent file"
     else:
-        results, whose, left = _mains(after), "Main-session replies", ""
+        results, every = main_setting_runs(change, before_facts, after_facts, bundles or {}, pricing)
+        if not results:
+            basis = (
+                "No main session since this change ran on the model it sets, "
+                "so the change has not changed what you paid."
+            )
+            return KeyResult(change["key"], None, "repriced", 0.0, 0.0, basis)
+        whose, left = "Main-session replies", ""
+        if len(results) < every:
+            left = f", in the {len(results)} of {every} sessions that ran on the model the change sets"
     paid = _cost(results, pricing)
     without = sum(price_turn(turn, rates).total for result in results for turn in _priced(result))
     return KeyResult(change["key"], agent, "repriced", paid, without, f"{whose} priced at {old}{left}.")
@@ -414,13 +458,15 @@ def _from_before(before_facts, after_facts) -> tuple[float, float, str] | None:
     return paid, without, basis
 
 
-def _key_result(key: str, change: dict | None, before_facts, after_facts, before, after, pricing: Pricing) -> KeyResult | None:
+def _key_result(
+    key: str, change: dict | None, before_facts, after_facts, before, after, pricing: Pricing, bundles=None
+) -> KeyResult | None:
     if key in CARRIED_KEYS or key.startswith(_CARRIED_PREFIXES):
         return _carried(key, change, before_facts, after_facts, after, pricing)
     if change is None:
         return None
     if key == "model":
-        return _repriced_model(change, after, before, pricing)
+        return _repriced_model(change, after, before, pricing, before_facts, after_facts, bundles)
     if key == "fastMode":
         return _repriced_fast(change, after, pricing)
     if key in _TTL_KEYS:
@@ -476,7 +522,7 @@ def without_change(
         )
     per_key: list[KeyResult] = []
     for agent, key in wanted:
-        result = _key_result(key, changes.get((agent, key)), before_facts, after_facts, before, after, pricing)
+        result = _key_result(key, changes.get((agent, key)), before_facts, after_facts, before, after, pricing, bundles)
         if result is not None:
             per_key.append(result)
     paid = sum(s.cost for s in after_facts)

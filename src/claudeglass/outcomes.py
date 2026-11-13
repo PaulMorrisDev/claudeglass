@@ -281,6 +281,23 @@ def _units(sessions: list[impact.SessionFacts], agent: str | None, bundles: dict
     return len(counterfactual.agent_file_runs(mine, agent)[0])
 
 
+def _after_units(point, agent: str | None, key: str, before, after, bundles: dict, pricing) -> int:
+    """The units after ``point`` an exact reading of ``(agent, key)`` counts:
+    for the main session's model, the sessions the setting decided
+    (``counterfactual.main_setting_runs``); otherwise :func:`_units`."""
+    change = next(
+        (
+            c
+            for c in point.changes
+            if isinstance(c, dict) and "old" in c and c.get("key") == key and (c.get("agent") or None) == agent
+        ),
+        None,
+    )
+    if agent is None and key == "model" and change is not None:
+        return len(counterfactual.main_setting_runs(change, before, after, bundles, pricing)[0])
+    return _units(after, agent, bundles)
+
+
 def _carry_on_mains(after: list[impact.SessionFacts], tokens: float, bundles: dict, pricing) -> float:
     """What carrying ``tokens`` of context on every reply of the main
     sessions in ``after`` costs: the carry ``counterfactual._carried`` prices
@@ -452,7 +469,7 @@ def _measure(
     else:
         before = [s for b, _a in sides for s in b]
         after = [s for _b, a in sides for s in a]
-        if _units(after, agent, bundles) >= MIN_UNITS:
+        if _after_units(point, agent, key, before, after, bundles, pricing) >= MIN_UNITS:
             result = counterfactual.without_change(point, before, after, bundles, pricing)
             row = next(
                 (
@@ -467,12 +484,14 @@ def _measure(
                 # The card's saving as a share of the cost it repriced, applied to what the units
                 # after the change would have cost without it.
                 predicted = saving / basis * row.without_usd
-                before_n, after_n, counted = _units(before, agent, bundles), _units(after, agent, bundles), 1
+                before_n, counted = _units(before, agent, bundles), 1
+                after_n = _after_units(point, agent, key, before, after, bundles, pricing)
             elif len(after) >= impact.MIN_SESSIONS:
                 # Units and sessions enough to ask, and no price: the change itself decides that (a lowered
                 # or unset old value, a mixed change), so more sessions would not give one.
                 unpriced = True
-                before_n, after_n = _units(before, agent, bundles), _units(after, agent, bundles)
+                before_n = _units(before, agent, bundles)
+                after_n = _after_units(point, agent, key, before, after, bundles, pricing)
 
     reading.before_units, reading.after_units, reading.projects = before_n, after_n, counted
     if unpriced:

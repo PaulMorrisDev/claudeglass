@@ -15,7 +15,14 @@ from claudeglass import counterfactual, impact, model_swap, outcomes, quality
 from claudeglass.change_points import ChangePoint
 from claudeglass.pricing import load_pricing
 
-from test_counterfactual import _agent_model_point, _agent_model_world, _agent_run
+from test_counterfactual import (
+    _agent_model_point,
+    _agent_model_world,
+    _agent_run,
+    _main_model_point,
+    _main_model_world,
+    _read_main_model,
+)
 
 PRICING = load_pricing()
 OPUS, SONNET, HAIKU = "claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5"
@@ -590,6 +597,32 @@ def test_an_agents_model_fix_with_every_run_given_a_model_by_its_spawn_is_too_li
     # Four that the file decides are fewer than the five a reading needs.
     four = _read_agent_model([_agent_run(SONNET) for _ in range(4)] + [_agent_run(OPUS, "opus") for _ in range(8)])
     assert four.verdict == "too_little_data" and four.measured_usd is None
+
+
+def test_an_every_project_model_change_leaves_out_a_project_that_keeps_its_own_model():
+    world = _main_model_world({"p": ([OPUS] * 6, [SONNET] * 6), "q": ([OPUS] * 6, [OPUS] * 6)})
+    reading = _read_main_model(_main_model_point(), world)
+    assert (reading.verdict, reading.after_units) == ("half_or_more", 6)
+    assert reading.measured_usd / reading.predicted_usd == pytest.approx(1.0)
+
+
+def test_sessions_from_before_a_project_moved_are_left_out():
+    world = _main_model_world({"p": ([OPUS] * 6, [SONNET] * 6), "s": ([OPUS] * 6, [OPUS] * 3 + [SONNET] * 6)})
+    reading = _read_main_model(_main_model_point(), world)
+    assert (reading.after_units, reading.verdict) == (12, "half_or_more")
+    assert reading.measured_usd / reading.predicted_usd == pytest.approx(1.0)
+
+
+def test_picks_of_a_smaller_model_after_the_change_are_left_out_too():
+    reading = _read_main_model(_main_model_point("p"), _main_model_world({"p": ([OPUS] * 6, [SONNET] * 6 + [HAIKU] * 3)}))
+    assert reading.after_units == 6
+    assert reading.measured_usd / reading.predicted_usd == pytest.approx(1.0)
+
+
+def test_a_main_model_change_that_names_no_model_counts_every_main_session():
+    # Green before the change was built: "default" (and an unset value) names no model, so nothing is left out.
+    reading = _read_main_model(_main_model_point("p", new="default"), _main_model_world({"p": ([OPUS] * 6, [SONNET] * 6)}))
+    assert reading.after_units == 6 and reading.verdict == "half_or_more"
 
 
 def test_a_fix_with_no_basis_is_not_measured(stub_carry, monkeypatch):

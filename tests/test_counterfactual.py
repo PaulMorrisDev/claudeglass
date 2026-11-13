@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudeglass import compaction_sim, counterfactual, impact, ttl
+from claudeglass import compaction_sim, counterfactual, impact, outcomes, ttl
 from claudeglass.change_points import ChangePoint
 from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing, price_turn
@@ -71,7 +71,7 @@ def _point(key, old, new, agent=None):
 
 
 def test_a_model_change_prices_the_same_replies_at_the_old_model(tmp_path):
-    before, after, bundles = _setup(tmp_path)
+    before, after, bundles = _setup(tmp_path, before_model="claude-opus-5-5")
     result = counterfactual.without_change(
         _point("model", "claude-opus-5-5", "claude-sonnet-5"), before, after, bundles, PRICING
     )
@@ -169,6 +169,98 @@ def test_an_agents_model_change_no_run_left_to_its_file_has_not_changed_what_you
         "No run of gp since this change left the model to its agent file, so the change has not changed what you paid."
     )
     assert result.without_usd == pytest.approx(result.paid_usd)
+
+
+def _main_run(model):
+    """One main session: a single reply of 100,000 tokens in and 10,000 out on ``model``."""
+    from test_model_swap import _transcript, _turn
+
+    return _transcript([_turn(model=model, input_tokens=100_000, output_tokens=10_000, turn_index=1)], kind="top-level")
+
+
+def _main_model_world(sides):
+    """``sides`` maps a project to ``(models before, models after)``, one main session each;
+    returns ``(sessions, bundles)``. Real transcripts, so the real pricing prices them."""
+    sessions, bundles = [], {}
+    for project, (before, after) in sides.items():
+        for side, models, first in (("b", before, -5), ("a", after, 0.2)):
+            for n, model in enumerate(models):
+                sid = f"{project}-{side}{n}"
+                top = _main_run(model)
+                sessions.append(
+                    impact.SessionFacts(
+                        start=CHANGE + timedelta(days=first + n * 0.3),
+                        main=impact._Transcript(cost=_run_cost(top), turns=1, model=model),
+                        session_id=sid,
+                        spawns=[],
+                        project=project,
+                    )
+                )
+                bundles[sid] = SimpleNamespace(top=top, subs=[])
+    return sessions, bundles
+
+
+#: The card's share for an Opus to Sonnet move on one such reply (0.6), priced on 100.
+SHARE = 1 - _run_cost(_main_run(SONNET)) / _run_cost(_main_run(OPUS))
+
+
+def _main_model_point(project="", new=SONNET, keys=("effective.model",)):
+    change = {"key": "model", "agent": None, "old": OPUS, "new": new}
+    return ChangePoint(CHANGE, "config", "x", keys=list(keys), changes=[change], project=project)
+
+
+def _read_main_model(point, world):
+    sessions, bundles = world
+    return outcomes.read_fix(
+        point, None, "model", outcomes.Prediction(SHARE * 100, 100.0), sessions, [point], bundles, PRICING,
+        CHANGE + timedelta(days=20), CHANGE - timedelta(days=30),
+    )
+
+
+def _main_model_card(point, world):
+    sessions, bundles = world
+    before = [s for s in sessions if "-b" in s.session_id]
+    after = [s for s in sessions if "-a" in s.session_id]
+    return counterfactual.without_change(point, before, after, bundles, PRICING)
+
+
+def test_a_main_model_change_counts_only_the_sessions_that_ran_on_the_model_it_sets():
+    # 4 on Sonnet, then 8 picks of Opus: 4 units, under 5.
+    few = _read_main_model(_main_model_point("p"), _main_model_world({"p": ([OPUS] * 6, [SONNET] * 4 + [OPUS] * 8)}))
+    assert few.verdict == "too_little_data" and few.measured_usd is None
+    # 5 on Sonnet, then 8 picks: the 5 are read, exactly as the card said.
+    world = _main_model_world({"p": ([OPUS] * 6, [SONNET] * 5 + [OPUS] * 8)})
+    five = _read_main_model(_main_model_point("p"), world)
+    assert (five.verdict, five.after_units) == ("half_or_more", 5)
+    assert five.measured_usd / five.predicted_usd == pytest.approx(1.0)
+    row = _main_model_card(_main_model_point("p"), world).per_key[0]
+    assert (row.paid_usd, row.without_usd) == (pytest.approx(1.5), pytest.approx(3.75))
+    assert row.basis == (
+        "Main-session replies priced at claude-opus-5, in the 5 of 13 sessions that ran on the model the change sets."
+    )
+
+
+def test_a_project_already_on_the_new_model_before_the_change_is_left_out():
+    world = _main_model_world({"p": ([OPUS] * 6, [SONNET] * 6), "r": ([SONNET] * 6, [SONNET] * 6)})
+    reading = _read_main_model(_main_model_point(), world)
+    assert reading.after_units == 6 and reading.measured_usd == pytest.approx(2.7)
+    card = _main_model_card(_main_model_point(), world)
+    assert card.saved_usd == pytest.approx(2.7)
+    assert card.per_key[0].basis.endswith("in the 6 of 12 sessions that ran on the model the change sets.")
+
+
+def test_no_main_session_on_the_model_a_change_sets_gives_a_zero_row():
+    world = _main_model_world({"p": ([OPUS] * 6, [OPUS] * 6)})
+    card = _main_model_card(_main_model_point("p"), world)
+    row = card.per_key[0]
+    assert (row.fidelity, row.paid_usd, row.without_usd) == ("repriced", 0.0, 0.0)
+    assert row.basis == (
+        "No main session since this change ran on the model it sets, so the change has not changed what you paid."
+    )
+    assert counterfactual.headline(card, UNITS) == (
+        "Without this change: about 4.50 USD. You paid 4.50 USD, about the same."
+    )
+    assert _read_main_model(_main_model_point("p"), world).verdict == "too_little_data"
 
 
 def test_fast_mode_is_repriced_the_other_way(tmp_path):

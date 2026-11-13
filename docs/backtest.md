@@ -113,7 +113,9 @@ setting.
 - **A model, fast mode, cache lifetime or raised compaction window** is
   measured by pricing the same replies both ways. The estimate is its saving as a
   share of the cost it repriced, applied to what the replies after the change would
-  have cost without it.
+  have cost without it. A model change is read only on the runs it decided: an
+  agent's runs its agent file decides, and main sessions that ran on the model
+  the change sets.
 - **An agent's tools, disallowed tools, CLAUDE.md, skills or MCP servers**
   is measured on the context at the start of each agent run, on the one model
   family both sides share, carried over every reply of the runs after the
