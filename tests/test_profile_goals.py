@@ -63,6 +63,30 @@ def test_models_goal_reads_the_cheapest_alternative_per_agent():
     assert explore["evidence"] == "Explore's replies in this window would have cost 80% less on claude-haiku-4-5-20251001."
 
 
+def test_models_goal_never_offers_to_raise_a_main_setting_at_sonnet_or_smaller():
+    model = _report()
+    [table] = model.sections[0].tables
+    table.columns.append(NS(key="best_cheaper_alternative_model"))
+    table.columns.append(NS(key="saving_pct"))
+    table.rows[0] += ["claude-sonnet-4-5", 40.0]
+    table.rows[1] += ["claude-haiku-4-5-20251001", 80.0]
+
+    def main_models(now):
+        out = goals.draft("models", model, UNITS, effective={"model": now})
+        return [c["value"] for c in out["candidates"] if c["key"] == "model" and c["agent"] is None]
+
+    for now in ("haiku", "claude-haiku-4-5-20251001", "sonnet"):
+        assert main_models(now) == [], now
+    assert main_models("opus") == ["sonnet"]
+    # The setting the saving reads wins over the view's own (ReportMeta.main_model_setting).
+    model.meta = NS(main_model_setting={"value": "opus", "scope": "user"})
+    assert main_models("sonnet") == ["sonnet"]
+    out = goals.draft("models", model, UNITS, effective={"model": "sonnet"})
+    assert [c["now"] for c in out["candidates"] if c["key"] == "model" and c["agent"] is None] == ["opus"]
+    model.meta = NS(main_model_setting={"value": "sonnet", "scope": "user"})
+    assert main_models("opus") == []
+
+
 def test_models_goal_evidence_names_the_runs_the_agent_file_decides():
     model = _report()
     [table] = model.sections[0].tables
@@ -76,6 +100,24 @@ def test_models_goal_evidence_names_the_runs_the_agent_file_decides():
         "The replies of Explore's runs started without a model of their own would have cost 80% less on "
         "claude-haiku-4-5-20251001 in this window."
     )
+
+
+def test_the_main_session_evidence_says_how_many_sessions_its_share_is_of():
+    def main_evidence(lever_runs: int) -> str:
+        model = _report()
+        [table] = model.sections[0].tables
+        for key in ("best_cheaper_alternative_model", "saving_pct", "lever_runs", "spawns"):
+            table.columns.append(NS(key=key))
+        table.rows[0] += ["claude-sonnet-4-5", 40.0, lever_runs, 29]
+        table.rows[1] += ["claude-haiku-4-5-20251001", 80.0, 10, 10]
+        out = goals.draft("models", model, UNITS)
+        return next(c for c in out["candidates"] if c["agent"] is None)["evidence"]
+
+    assert main_evidence(24) == (
+        "The replies of 24 of the main session's 29 sessions in this window would have cost 40% less on "
+        "claude-sonnet-4-5."
+    )
+    assert main_evidence(29) == "the main session's replies in this window would have cost 40% less on claude-sonnet-4-5."
 
 
 def _with_plans(observed="claude-opus-5-5", build=100.0, sonnet=60.0):
@@ -637,3 +679,16 @@ def test_managed_claude_md_is_excluded_and_cited_separately():
 def test_omit_claude_md_not_offered_when_only_managed_claude_md_is_seen():
     out = goals.draft("subagents", _with_agent_reports(1, 3, claude_md=1500, claude_md_managed=1500), UNITS)
     assert not [c for c in out["candidates"] if c["key"] == "omitClaudeMd"]
+
+
+def test_opusplan_is_not_offered_when_no_main_session_is_counted():
+    def candidates(lever_runs):
+        model = _with_plans()
+        table = model.sections[0].tables[0]
+        table.columns += [NS(key="lever_runs"), NS(key="spawns")]
+        table.rows[0] += [lever_runs, 20]
+        table.rows[1] += [10, 10]
+        return goals.draft("models", model, UNITS, effective={"model": "opus"})["candidates"]
+
+    assert all(c["value"] != "opusplan" for c in candidates(0))
+    assert any(c["value"] == "opusplan" for c in candidates(5))

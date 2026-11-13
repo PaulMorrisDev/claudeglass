@@ -203,7 +203,10 @@ tables), so it changes with the pick; it is not the record `init` stored. A
 view with fewer than 5 sessions (`baseline.SUGGEST_MIN_SESSIONS`) gets no
 suggestion at all. Opening a card shows a table of Setting /
 Now / After / Set in for the scope you pick, read from the picked project's
-own newest settings (the machine's newest with none picked). "Set in" names
+own newest settings. With none picked they are the machine's newest, and on
+a machine with more than one project a setting that the newest project's own
+files set reads as your user settings set it: a project's own setting holds
+in that project alone. "Set in" names
 the file the change is written to and, when something wins over it, says so
 in the same cell: a project file that sets the key too (only when a project
 is picked, since otherwise the settings are whichever project's were

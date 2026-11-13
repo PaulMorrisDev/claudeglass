@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .. import habits, model_gate, whatif
+from .. import habits, model_gate, model_swap, whatif
 from ..capture_catalogue import TASK_LABELS, task_words
 from ..compaction_sim import CompactionSimThresholds
 from ..fixes import LEVER_LABELS, SETTING_TEXT, already_set
@@ -193,23 +193,35 @@ def _models(draft: _Draft, tables, *, subagents_only: bool) -> None:
         pct = whatif._num(row.get("saving_pct")) or 0.0
         if not best or pct < MIN_SHARE_PCT or (subagents_only and agent == TOP):
             continue
+        if agent == TOP and model_swap.at_main_floor(draft.now("model", None)):
+            # A main-session setting at Sonnet or smaller is already there:
+            # never offer to raise it.
+            continue
         if gate.vetoed(agent, _alias(best)):
             # The quality check found this agent did worse on that model,
             # or its runs on it were often retried on a larger one; or
             # its work was mostly reported hard.
             continue
         who = "the main session" if agent == TOP else agent
+        counted, total = whatif._num(row.get("lever_runs")), whatif._num(row.get("spawns"))
+        if agent == TOP and counted is not None and total is not None and counted < total:
+            evidence = (
+                f"The replies of {int(counted):,} of the main session's {int(total):,} sessions in this window "
+                f"would have cost {pct:.0f}% less on {best}."
+            )
+        elif agent == TOP or not _set_elsewhere(row):
+            evidence = f"{who}'s replies in this window would have cost {pct:.0f}% less on {best}."
+        else:
+            evidence = (
+                f"The replies of {agent}'s runs started without a model of their own would have cost "
+                f"{pct:.0f}% less on {best} in this window."
+            )
         draft.add(
             "model",
             None if agent == TOP else agent,
             _alias(best),
             ticked=agent != TOP and pct >= 20.0,
-            evidence=(
-                f"{who}'s replies in this window would have cost {pct:.0f}% less on {best}."
-                if agent == TOP or not _set_elsewhere(row)
-                else f"The replies of {agent}'s runs started without a model of their own would have cost "
-                f"{pct:.0f}% less on {best} in this window."
-            ),
+            evidence=evidence,
         )
 
 
@@ -234,6 +246,11 @@ def _opusplan(draft: _Draft, tables) -> None:
     settings file, so the evidence says to choose it there."""
     top = tables.row("model_swap", "model_swap_by_agent_type", TOP)
     if top is None or _alias(str(top.get("observed_model") or "")) != "opus":
+        return
+    # With no main session counted (each already on Sonnet or smaller, or
+    # from before their project moved there), the check says nothing is left
+    # to price, so it offers no opusplan beside that.
+    if "lever_runs" in top and not whatif._num(top.get("lever_runs")) and whatif._num(top.get("spawns")):
         return
     row = next(iter(tables.rows("plan_handoff", "plan_handoff_summary")), None) or {}
     build = row.get("build_usd")
@@ -730,6 +747,11 @@ def draft(
         raise KeyError(goal_id)
     tables = whatif._Tables(model)
     d = _Draft(goal, dict(effective or {}), dict(effective_agents or {}), [], effort_level_env_set)
+    reading = model_swap.main_setting(model)
+    if reading is not None:
+        # The main session's model setting as the saving reads it, so a
+        # candidate never names a current value the saving disagrees with.
+        d.effective["model"] = reading[0]
     recommendations = getattr(model, "recommendations", ()) or ()
     tasks: list[str] = []
     note = None

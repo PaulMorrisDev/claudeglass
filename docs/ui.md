@@ -1225,7 +1225,8 @@ the one suggested for the window and project picked
 (`/api/profile-suggestion`, which fills in once the report is ready).
 **Show what it changes** opens a
 drawer (`/api/profiles/<id>/diff`, against the settings of the project
-picked, or your newest from any project with none picked) with a Setting / Now / After / Set in
+picked, or your newest from any project with none picked, where with more than one project a
+setting that project's own files set reads as your user settings set it) with a Setting / Now / After / Set in
 table (a model's own setting has the model in its name, "Effort level for
 one model (claude-opus-5-5)"; a value the settings snapshot does not keep
 reads "not recorded" under Now (as does a user agent hidden behind a project agent of

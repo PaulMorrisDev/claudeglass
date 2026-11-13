@@ -170,7 +170,7 @@ def test_check_6_reports_a_text_that_names_a_hint_that_is_off(monkeypatch):
 
 
 def test_check_7_reports_a_card_whose_current_value_is_not_the_changes_pages(profile, monkeypatch):
-    inp = profile("api")[1]
+    inp = profile("bare")[1]
     assert agreement.check_same_setting(inp) == []
     point = change_points.ChangePoint(
         ts=datetime(2030, 1, 1, tzinfo=timezone.utc),

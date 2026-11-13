@@ -1343,9 +1343,10 @@ def test_profile_diff_rows_say_where_each_change_lands_and_come_with_a_prompt(se
 
 
 def _seed_settings_snapshot(handle, slug, ts, *, effort, layer, agents=(), env_names=(), effort_env_set=False,
-                            model_settings=None, extra=None) -> None:
+                            model_settings=None, extra=None, user_settings=None) -> None:
     """One config snapshot of ``slug``: its effective effort level and the layer that set it, its agents
-    (name -> tools, or name -> (source, tools)), the env var names it saw and what else is in force."""
+    (name -> tools, or name -> (source, tools)), the env var names it saw, what else is in force and,
+    when given, what your user settings file itself holds."""
     from claudeglass.snapshots import snapshot_project_key
 
     def _agent(value):
@@ -1354,6 +1355,7 @@ def _seed_settings_snapshot(handle, slug, ts, *, effort, layer, agents=(), env_n
     effective = {"effortLevel": effort, **(extra or {})}
     if model_settings:
         effective["modelSettings"] = model_settings
+    recorded_user = {} if user_settings is None else {"user_settings": dict(user_settings)}
     handle.store.upsert_snapshot(
         project_slug=slug,
         project_root_path=rf"C:\Users\definitely-not-a-real-person\.claude\projects\{slug}",
@@ -1362,6 +1364,7 @@ def _seed_settings_snapshot(handle, slug, ts, *, effort, layer, agents=(), env_n
         digest_json=json.dumps(
             {
                 "project_slug": snapshot_project_key(slug),
+                **recorded_user,
                 "effective": effective,
                 "effective_provenance": {key: (layer if key == "effortLevel" else "user") for key in effective},
                 "managed_keys": [],
@@ -1386,16 +1389,17 @@ def test_profile_diff_reads_the_picked_projects_snapshot(two_project_server):
     _seed_settings_snapshot(handle, "proj-beta", "2026-10-01T12:00:00Z", effort="low", layer="user",
                             agents={"researcher": "Read, Grep", "builder": ("project", "Read, Edit")})
     _seed_settings_snapshot(handle, "proj-alpha", "2026-10-02T12:00:00Z", effort="high", layer="project_shared",
-                            agents={"implementer": "Read, Edit"})
+                            agents={"implementer": "Read, Edit"}, user_settings={"effortLevel": "medium"})
 
     def effort_row(query):
         data = handle.get_json(f"/api/profiles/implementation-heavy/diff{query}")[1]["data"]
         return data, next(r for r in data["settings"] if r["setting"] == "effortLevel")
 
-    # No project picked: the newest snapshot of any project. It names no project file: which project's
-    # file it would be is not something the reader chose.
+    # No project picked, on a machine with two projects: the newest snapshot of any project, but alpha's
+    # own file holds in alpha alone, so the effort level reads as your user settings set it. It names no
+    # project file: which project's file it would be is not something the reader chose.
     data, row = effort_row("")
-    assert (row["current_value"], row["overridden_by"]) == ("high", None)
+    assert (row["current_value"], row["overridden_by"]) == ("medium", None)
     assert [r["agent"] for r in data["agents"]] == ["implementer"] * 3
     # What the agent notes say follows the pick too: with none picked a project target lists no agent
     # (which project's agents the command will see is not known); with alpha picked, alpha's own do.
