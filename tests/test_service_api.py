@@ -1130,7 +1130,7 @@ def test_profiles_list_needs_no_report_and_carries_no_suggestion(server, monkeyp
     assert server.get_json("/api/profiles?window=all&project=not-a-project")[0].status == 200
     assert calls == []
     # The suggestion is the route that builds one.
-    assert server.get_json("/api/profiles/suggestion")[0].status == 200
+    assert server.get_json("/api/profile-suggestion")[0].status == 200
     assert _report_builds(calls)
 
 
@@ -1157,32 +1157,49 @@ def test_profiles_suggestion_route_suggests_for_the_window_and_project_not_the_s
 
     monkeypatch.setattr(service_api.baseline_mod, "suggest_for_model", fake_suggest)
 
-    resp, body = handle.get_json("/api/profiles/suggestion")
+    resp, body = handle.get_json("/api/profile-suggestion")
     assert resp.status == 200
     assert body["data"]["suggested_profile_id"] == "workflow-ultracode"  # not the stored "implementation-heavy"
     assert body["data"]["suggested_reason"] == "2 sessions read."
     # The picked project's own report is the one read.
-    resp, body = handle.get_json("/api/profiles/suggestion?project=proj-alpha")
+    resp, body = handle.get_json("/api/profile-suggestion?project=proj-alpha")
     assert resp.status == 200
     assert body["data"]["suggested_reason"] == "1 sessions read."
-    resp, body = handle.get_json("/api/profiles/suggestion?project=proj-beta&window=all")
+    resp, body = handle.get_json("/api/profile-suggestion?project=proj-beta&window=all")
     assert body["data"]["suggested_reason"] == "1 sessions read."
     assert seen == [2, 1, 1]
     # An unknown project or window is the usual 400, not a silent fall-back.
-    assert handle.get_json("/api/profiles/suggestion?project=not-a-project")[0].status == 400
-    assert handle.get_json("/api/profiles/suggestion?window=bogus")[0].status == 400
+    assert handle.get_json("/api/profile-suggestion?project=not-a-project")[0].status == 400
+    assert handle.get_json("/api/profile-suggestion?window=bogus")[0].status == 400
+
+
+def test_a_user_profile_with_the_id_suggestion_is_served_like_any_profile(server):
+    """The suggestion route used to sit at /api/profiles/suggestion, where a
+    user profile with that id would be read."""
+    (server.options.config_dir / "profiles").mkdir(exist_ok=True)
+    (server.options.config_dir / "profiles" / "suggestion.toml").write_text(
+        'id = "suggestion"\nname = "Mine"\n[settings]\neffortLevel = "low"\n', encoding="utf-8"
+    )
+    resp, body = server.get_json("/api/profiles/suggestion")
+    assert resp.status == 200
+    assert body["data"]["id"] == "suggestion" and body["data"]["settings"] == {"effortLevel": "low"}
+    resp, body = server.get_json("/api/profiles/suggestion/diff")
+    assert resp.status == 200 and body["data"]["profile_id"] == "suggestion"
+    # the suggestion is its own route
+    resp, body = server.get_json("/api/profile-suggestion")
+    assert resp.status == 200 and "suggested_profile_id" in body["data"]
 
 
 def test_profiles_suggestion_route_gives_the_live_suggestion_only_from_the_floor_of_sessions(server, monkeypatch):
     # The stored record ("implementation-heavy") is not what comes back; the
     # one-session view is under the floor, so nothing is suggested at all.
-    resp, body = server.get_json("/api/profiles/suggestion")
+    resp, body = server.get_json("/api/profile-suggestion")
     assert resp.status == 200
     assert body["data"]["suggested_profile_id"] is None
     assert body["data"]["suggested_reason"] is None
     # With the floor lowered the same view speaks, in a plain sentence.
     monkeypatch.setattr(service_api.baseline_mod, "SUGGEST_MIN_SESSIONS", 1)
-    resp, body = server.get_json("/api/profiles/suggestion")
+    resp, body = server.get_json("/api/profile-suggestion")
     assert body["data"]["suggested_profile_id"] in profile_catalogue.CATALOGUE_IDS
     assert body["data"]["suggested_profile_id"] != "implementation-heavy"
     assert body["data"]["suggested_reason"].endswith(".")
@@ -1212,7 +1229,7 @@ def test_profiles_suggestion_route_shows_none_for_a_window_without_sessions(tmp_
     thread.start()
     handle = _ServerHandle(httpd, thread, corpus=empty, store=store, options=options)
     try:
-        resp, body = handle.get_json("/api/profiles/suggestion")
+        resp, body = handle.get_json("/api/profile-suggestion")
         assert resp.status == 200
         assert body["data"]["suggested_profile_id"] is None
         assert body["data"]["suggested_reason"] is None

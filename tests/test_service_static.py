@@ -630,7 +630,7 @@ def test_profiles_list_and_drawer_follow_the_window_and_project() -> None:
     source = _app_js()
     profiles = _function_source(source, "renderProfiles")
     assert 'loadInto(listContainer, "/api/profiles", ' in profiles and 'withWindow("/api/profiles")' not in profiles
-    assert 'withWindow("/api/profiles/suggestion")' in profiles
+    assert 'withWindow("/api/profile-suggestion")' in profiles
     detail = _function_source(source, "renderProfileDetail")
     squeezed = re.sub(r"\s+", "", detail)
     assert re.sub(
@@ -1403,7 +1403,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
         model=report, units=units, period=period, config_dir=config_dir, effective={}, effective_agents={}
     )
     canned["/api/quick-actions"] = {"period": period, "checks": quick_actions.run_all(ctx)}
-    canned["/api/profiles/suggestion"] = {"suggested_profile_id": None, "suggested_reason": None}
+    canned["/api/profile-suggestion"] = {"suggested_profile_id": None, "suggested_reason": None}
     canned["/api/profile-goals"] = {"goals": goals.goals_list()}
     canned["/api/skills"] = skills_review.review(config_dir, report.context_files or {}, units, period, projects=[])
     canned["/api/claude-md"] = {"period": period, "transcripts": 0, "files": []}

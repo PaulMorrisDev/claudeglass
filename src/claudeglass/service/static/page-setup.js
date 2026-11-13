@@ -159,7 +159,7 @@ function renderBaseline(data, container) {
 //
 // v0.3: GET /api/profiles now returns {"profiles": [...each tagged
 // source: "catalogue"|"user"...]} (docs/api.md); the suggestion is its own
-// route, GET /api/profiles/suggestion, so the list never waits for a report
+// route, GET /api/profile-suggestion, so the list never waits for a report
 // rather than a bare list of indexed (user-only) profiles, and GET
 // /api/profiles/<id>/diff is a real computation (profiles/diff.py)
 // rather than a 501 stub -- see that route's own docstring in api.py.
@@ -213,7 +213,7 @@ export function renderProfiles(panel) {
   panel.appendChild(editorDetails);
 
   var editorShown = false;
-  // What GET /api/profiles/suggestion answered, or null (not answered yet, failed, or none).
+  // What GET /api/profile-suggestion answered, or null (not answered yet, failed, or none).
   var suggestion = null;
 
   function refreshList() {
@@ -232,7 +232,7 @@ export function renderProfiles(panel) {
   // while, so the list draws first and this adds the chip and the line when it answers. If it fails or
   // has none, nothing is added. A new window or project draws this view again, which asks again.
   function loadSuggestion() {
-    fetchJson(withWindow("/api/profiles/suggestion")).then(function (result) {
+    fetchJson(withWindow("/api/profile-suggestion")).then(function (result) {
       var body = result.body;
       suggestion = body && body.ok === true ? body.data : null;
       applySuggestion(listContainer, suggestion);
@@ -349,7 +349,7 @@ function renderProfilesList(data, container) {
 }
 
 // Marks the suggested profile's card and says why under the cards, replacing any earlier mark.
-// ``suggestion`` is GET /api/profiles/suggestion's answer; with none, or a profile the list
+// ``suggestion`` is GET /api/profile-suggestion's answer; with none, or a profile the list
 // doesn't have, the list is left as it is.
 function applySuggestion(container, suggestion) {
   Array.prototype.forEach.call(container.querySelectorAll(".profile-suggested-chip, .profile-suggestion-note"), function (node) {

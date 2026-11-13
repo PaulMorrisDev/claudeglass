@@ -641,7 +641,7 @@ with no params it means all time rather than a 30-day default.
 accept them all but, unlike the report routes, list everything (all time)
 when none is given. Every other route (`/api/health`, `/api/session/<id>`,
 `/api/recache`, `/api/baseline`, `/api/profiles`, `/api/profiles/<id>`, `/api/setup`,
-`/api/setup/status`, `/api/capture`) ignores them; `/api/profiles/suggestion`
+`/api/setup/status`, `/api/capture`) ignores them; `/api/profile-suggestion`
 takes `window` and `project`, and `/api/profiles/<id>/diff` takes `project`.
 
 **Caching.** The service builds each window's report once per store
@@ -1015,7 +1015,7 @@ timestamp). `active_profile_id` is the profile `apply <profile>` last marked act
 recommendations are kept under it. `active_profile_name` is its name
 (its id when it's no longer in the list).
 
-### `GET /api/profiles/suggestion`
+### `GET /api/profile-suggestion`
 
 The profile to suggest for a window and project, and why. Worked out live
 from the report for that window and project (`baseline.suggest_for_model`: the

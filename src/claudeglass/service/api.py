@@ -3936,7 +3936,7 @@ def make_handler(
         "/api/recache": route_recache,
         "/api/compactions": route_compactions,
         "/api/profiles": route_profiles,
-        "/api/profiles/suggestion": route_profile_suggestion,
+        "/api/profile-suggestion": route_profile_suggestion,
         "/api/baseline": route_baseline,
         "/api/daily-usage": route_daily_usage,
         "/api/ttl": route_ttl,

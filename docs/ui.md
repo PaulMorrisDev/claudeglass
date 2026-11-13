@@ -1218,7 +1218,7 @@ with the ones your data supports ticked; each tick asks
 estimate use the window and project picked. **Your profiles and the
 built-in ones** marks
 the one suggested for the window and project picked
-(`/api/profiles/suggestion`, which fills in once the report is ready).
+(`/api/profile-suggestion`, which fills in once the report is ready).
 **Show what it changes** opens a
 drawer (`/api/profiles/<id>/diff`, against the settings of the project
 picked, or your newest from any project with none picked) with a Setting / Now / After / Set in
