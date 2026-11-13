@@ -322,7 +322,7 @@ def render_unified_diff(profile_diff: ProfileDiff, *, scope: str) -> str:
         lines.append(f"+++ {path}")
         for r in active:
             bare = _bare_key(r.key, prefix_parts)
-            lines.append(f"-{bare}: {_fmt(r.current_value)}")
+            lines.append(f"-{bare}: {_fmt(r.current_value) if r.recorded else 'not recorded'}")
             lines.append(f"+{bare}: {_fmt(r.proposed_value)}")
         lines.append("")
 

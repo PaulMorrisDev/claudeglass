@@ -1263,7 +1263,7 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
             field = ".".join(parts[1:])
         lines.append(
             f"- In {where}, set {field} to {json.dumps(row.get('proposed_value'))} "
-            f"(now: {_human(row.get('current_value'))})."
+            f"(now: {_human(row.get('current_value')) if row.get('recorded') is not False else 'not recorded'})."
         )
     if len(lines) == 1:
         return f'The settings profile "{name}" matches your current settings; there is nothing to change.'

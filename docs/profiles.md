@@ -362,7 +362,9 @@ modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWi
 - The diff has one row per model and key. The snapshot keeps a model's
   `effortLevel` and nothing else of its entry, so a row for a model's
   window whose model has an entry reads "not recorded" under "Now": the
-  window may be set, this tool just cannot see it. The estimate does not
+  window may be set, this tool just cannot see it. The prompt says "(now: not
+  recorded)" and "Show the file changes" "not recorded" for it, in place of
+  "not set" and "(unset)". The estimate does not
   simulate it ("This change isn't simulated."). To set one from the
   command line: `claudeglass apply --set
   modelSettings.claude-opus-5-5.effortLevel=medium --dry-run`; the value

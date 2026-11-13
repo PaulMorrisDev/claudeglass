@@ -123,6 +123,22 @@ def test_diff_rows_per_model_and_not_recorded_window():
     assert all(r.managed for r in locked.rows)
 
 
+def test_unified_diff_says_not_recorded_where_the_snapshot_does_not_keep_the_value():
+    profile = _profile(
+        settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 400_000}}},
+        agents={},
+        env={},
+    )
+    diff = diff_against_effective(
+        profile, {"modelSettings": {"claude-opus-5-5": {"effortLevel": None}}}, {}, {}, set()
+    )
+    text = render_unified_diff(diff, scope="user")
+    assert "-modelSettings.claude-opus-5-5.autoCompactWindow: not recorded\n" in text
+    assert "+modelSettings.claude-opus-5-5.autoCompactWindow: 400000" in text
+    # a recorded value that is unset still reads (unset)
+    assert "-modelSettings.claude-opus-5-5.effortLevel: (unset)\n" in text
+
+
 @pytest.mark.parametrize(
     ("provenance_layer", "expected_target_file"),
     [

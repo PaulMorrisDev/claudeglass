@@ -1113,7 +1113,8 @@ and `label`/`description` are the "for one model" texts. `recorded` is
 `current_value` `null` does not mean "not set": the config snapshot keeps a
 model's `effortLevel` and nothing else of its entry, so this is every
 `modelSettings.autoCompactWindow` row of a model that has an entry. The
-dashboard writes "not recorded" under "Now" for such a row. It is `true` for
+dashboard writes "not recorded" under "Now" for such a row, and `prompt`
+says "(now: not recorded)" and `diff` "not recorded" for it. It is `true` for
 every other row, including a model with no entry at all (nothing is set
 there). `label`/`description` its plain name and what it controls, and
 `where` the file the change is written to under the chosen `scope`

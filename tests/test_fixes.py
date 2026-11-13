@@ -58,6 +58,28 @@ def test_prompt_names_the_model_for_a_per_model_row():
     )
 
 
+def test_prompt_says_not_recorded_for_a_value_the_snapshot_does_not_keep():
+    from claudeglass.fixes import profile_prompt
+
+    rows = [
+        {
+            "key": "settings.modelSettings.claude-opus-5-5.autoCompactWindow",
+            "current_value": None,
+            "proposed_value": 400000,
+            "recorded": False,
+        },
+        {
+            "key": "settings.modelSettings.claude-opus-5-5.effortLevel",
+            "current_value": None,
+            "proposed_value": "low",
+            "recorded": True,
+        },
+    ]
+    text = profile_prompt("Lean", rows, "user")
+    assert 'to 400000 (now: not recorded).' in text
+    assert '"low" (now: not set).' in text
+
+
 def test_the_flat_effort_level_says_claude_code_keeps_no_max_in_settings():
     from claudeglass.fixes import LEVER_LABELS, SETTING_TEXT
 
