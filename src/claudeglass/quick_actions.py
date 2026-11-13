@@ -22,11 +22,11 @@ from typing import Callable
 
 from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
-from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, _OVERRIDING_PROJECT_FILE, already_set, build_fix, build_fixes, fix_note, plugin_of
+from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note, plugin_of
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
-from .snapshots import MODEL_ENV
+from .snapshots import MODEL_ENV, view_settings, view_spans_projects
 from .units import Units
 
 TOP = whatif.TOP
@@ -216,6 +216,14 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
     agent = candidate["agent"]
     estimate = candidate.get("estimate") or {}
     fields = ctx.effective_agents.get(agent) if agent else None
+    # A project's own agent file, not one in ~/.claude/agents; the main
+    # model's change goes where the setting the saving reads lives; any other
+    # setting to the file that decides it (the view rule).
+    scope = (
+        "repo" if isinstance(fields, dict) and fields.get("source") == "project"
+        else _main_scope(ctx) if not agent and candidate["key"] == "model"
+        else _settings_scope(ctx, candidate["key"]) if not agent else ""
+    )
     change = SettingChange(
         target="agent" if agent else "settings",
         key=candidate["key"],
@@ -223,13 +231,7 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
         value=candidate["value"],
         current=candidate["now"],
         new_agent_file=bool(agent) and agent in _BUILTIN_AGENT_TYPES and agent not in ctx.effective_agents,
-        # A project's own agent file, not one in ~/.claude/agents; the main
-        # model's change goes where the setting the saving reads lives, and
-        # the main session's flat effortLevel (drafted only when a project
-        # file decides it, which needs a view of one project) to that file.
-        scope="repo" if isinstance(fields, dict) and fields.get("source") == "project"
-        else _main_scope(ctx) if not agent and candidate["key"] == "model"
-        else _main_effort_scope(ctx) if not agent and candidate["key"] == "effortLevel" else "",
+        scope=scope,
     )
     effect = estimate.get("effect_text") or ""
     rec = Recommendation(
@@ -473,15 +475,15 @@ def _main_scope(ctx: Context) -> str:
     return _main_setting(ctx)[1]
 
 
-def _main_effort_scope(ctx: Context) -> str:
-    """The scope of the project file whose flat ``effortLevel`` decides the main
-    session's level, or ``""`` (the user file) when no project file sets it.
-    Also ``""`` in a view of several projects: the snapshot is one project's,
-    and a model id with no canonical form gets the flat level there too."""
-    if _several_projects(ctx):
-        return ""
-    layer = ctx.effective_provenance.get("effortLevel")
-    return model_swap.layer_scope(layer) if layer in _OVERRIDING_PROJECT_FILE else ""
+def _settings_scope(ctx: Context, key: str) -> str:
+    """The scope of the file that decides settings key ``key`` (its
+    top-level key's layer in ``effective_provenance``; ``modelSettings`` is
+    one file's block): a project, local or managed file, or ``""`` (your
+    user file) when none of those sets it. In a view of several projects
+    :func:`run` has applied the view rule, so no project's file is among
+    them (R2-1, R3-3)."""
+    layer = ctx.effective_provenance.get(key.split(".", 1)[0])
+    return model_swap.layer_scope(layer) if layer in ("project_shared", "project_local", "managed") else ""
 
 
 def _models_main_left_out(rows: list[dict]) -> list[dict]:
@@ -747,8 +749,8 @@ _EFFORT_ALREADY_SET = (
 
 
 def _several_projects(ctx: Context) -> bool:
-    """Whether the report covers more than one project (``advice._several_projects``)."""
-    return len(getattr(getattr(ctx.model, "meta", None), "projects", ()) or ()) > 1
+    """Whether the report covers more than one project (``snapshots.view_spans_projects``)."""
+    return view_spans_projects(ctx.model)
 
 
 def _main_effort_already_set(ctx: Context) -> str:
@@ -771,9 +773,7 @@ def _main_effort_already_set(ctx: Context) -> str:
         (r.get("observed_model") for r in tables.rows("model_swap", "model_swap_by_agent_type") if r.get("agent_type") == goals.TOP),
         None,
     )
-    level = goals.main_effort_in_force(
-        ctx.effective, ctx.effective_provenance, observed, project_layers=not _several_projects(ctx)
-    )
+    level = goals.main_effort_in_force(ctx.effective, ctx.effective_provenance, observed)
     if level not in goals.EFFORT_DONE:
         return ""
     return _EFFORT_ALREADY_SET.format(
@@ -2726,11 +2726,23 @@ CHECKS: tuple[Check, ...] = (
 CHECK_IDS = tuple(check.id for check in CHECKS)
 
 
+def _in_view(ctx: Context) -> Context:
+    """``ctx`` with the view rule (``snapshots.view_settings``) applied to its
+    settings: in a view of several projects a key one project's file sets is
+    not read. The CLI and the dashboard already pass settings built for the
+    view; this keeps any other caller to the same rule."""
+    if not view_spans_projects(ctx.model):
+        return ctx
+    effective, provenance = view_settings(ctx.effective, ctx.effective_provenance, True)
+    return replace(ctx, effective=effective, effective_provenance=provenance)
+
+
 def run(check_id: str, ctx: Context) -> dict:
     """One check's full answer. Raises ``KeyError`` for an unknown id."""
     check = next((c for c in CHECKS if c.id == check_id), None)
     if check is None:
         raise KeyError(check_id)
+    ctx = _in_view(ctx)
     return {
         "id": check.id,
         "question": check.question,

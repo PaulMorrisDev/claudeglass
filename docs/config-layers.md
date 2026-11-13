@@ -70,7 +70,12 @@ one project's file, and no fix names a project's file. `snapshots.view_settings`
 is the rule, applied once when the settings are built for the view
 (`with_every_project_agents(..., several_projects=)`, by the report, the
 CLI `check` and the dashboard; a user-scope `apply` with no project folder
-applies it when the snapshots span projects). The main-session model lever keeps its own per-project
+applies it when the snapshots span projects), and again on entry to
+`recommend()`, `advice.finish()`, `quick_actions.run()` and `goals.draft()`
+for a caller that passed settings not built for the view
+(`snapshots.view_spans_projects`, the report's `meta.projects`). The dict
+form those two last take has no `user_settings`, so there a project file's
+key reads as unset. The main-session model lever keeps its own per-project
 reading (`model_swap.main_setting`, `own_model_runs`), which prices each
 session against its own project's setting.
 

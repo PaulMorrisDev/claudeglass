@@ -240,7 +240,10 @@ Cards and checks:
   auto-compact cards name a model whose own window wins. The card goes once
   the main session's model already has low or medium from the file that
   decides it, and the effort check says the level is already set. In a view
-  of several projects only your own and managed settings count.
+  of several projects only your own and managed settings count, on the card
+  as on the check and the goal: a project's medium no longer closes the card
+  and its high no longer sends the fix to that project's file. A project
+  file's own entry for the model gets the change there.
 - **The thinking goal and the Overview effort check set the main session's
   effort for the model it ran on, as /effort does.** A user-level
   effortLevel did nothing on Opus 5.5 and later. The entry goes under the

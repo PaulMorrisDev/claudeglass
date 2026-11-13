@@ -3284,3 +3284,63 @@ def test_in_a_view_of_several_projects_the_flat_level_fix_goes_to_no_projects_fi
     assert fix["key"] == "effortLevel"
     assert fix["command"] == expected["command"]
     assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+
+
+# -- R3-VIEW-RULE: a check's fix goes to the file that decides, read only in a view of one project ---
+
+
+def _window_model(projects=("alpha",)):
+    return NS(sections=[NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+        {"window": 200000, "compactions_per_session": 2.0, "cost": 70.0, "delta_pct": -30.0},
+        {"window": 300000, "compactions_per_session": 1.5, "cost": 90.0, "delta_pct": -10.0},
+        {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
+    ])])], context_files={}, recommendations=[], meta=NS(projects=tuple(projects)))
+
+
+def _window_fix(tmp_path, effective, provenance, projects=("alpha",)):
+    result = qa.run("compaction", _ctx(tmp_path, model=_window_model(projects), effective=effective,
+                                       effective_provenance=provenance))
+    [fix] = result["fixes"]
+    return fix
+
+
+@pytest.mark.parametrize("layer, scope, file", [
+    ("project_shared", "repo", ".claude/settings.json"),
+    ("project_local", "project-local", ".claude/settings.local.json"),
+])
+def test_the_compaction_checks_fix_goes_to_the_project_file_that_sets_the_window(tmp_path, layer, scope, file):
+    """R3-3, the reviewer's input: the project file's window outranks your user file."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": layer})
+    assert f"--scope {scope}" in fix["command"]
+    assert fix["prompt"].splitlines()[0].endswith(f"In {file}, set autoCompactWindow to 200000.")
+
+
+def test_the_compaction_checks_fix_under_a_project_window_says_nothing_of_your_own_window(tmp_path):
+    """R3-2's case on the check: the project file's flat window beats your user file's own window."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}},
+                      {"autoCompactWindow": "project_shared", "modelSettings": "user"})
+    assert "--scope repo" in fix["command"] and "own auto-compact window" not in fix["prompt"]
+
+
+def test_in_a_view_of_several_projects_the_compaction_checks_fix_goes_to_your_user_file(tmp_path):
+    """Guard: one project's file is not where a fix for every project goes."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": "project_shared"}, ("alpha", "beta"))
+    assert "--scope user" in fix["command"]
+
+
+def test_the_compaction_check_under_a_managed_window_asks_your_administrator(tmp_path):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": "managed"})
+    assert fix["command"] is None
+    assert "administrator" in fix["prompt"]
+
+
+def test_the_effort_checks_fix_goes_to_a_project_files_own_entry_for_the_model(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model,
+                                   effective={"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+                                   effective_provenance={"modelSettings": "project_shared"}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    assert fix["command"] == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope repo --project-dir . --dry-run"
+    )

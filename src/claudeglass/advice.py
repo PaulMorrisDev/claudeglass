@@ -65,6 +65,8 @@ from .snapshots import (
     effective_provenance,
     effort_level_env_set,
     env_var_set,
+    for_view,
+    view_spans_projects,
 )
 from .units import NO_LIMIT_SHARE_HINT, Units
 
@@ -247,8 +249,8 @@ def _left_out_note(left_out: list[tuple[str, str]]) -> str:
 
 
 def _several_projects(ctx: _Context) -> bool:
-    """Whether the report covers more than one project."""
-    return len(getattr(getattr(ctx.report, "meta", None), "projects", ()) or ()) > 1
+    """Whether the report covers more than one project (``snapshots.view_spans_projects``)."""
+    return view_spans_projects(ctx.report)
 
 
 def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recommendation]:
@@ -895,7 +897,6 @@ def _effort_lever(rec: Recommendation, ctx: _Context, note: str) -> None:
         effective_config_in_force(snapshot) if snapshot is not None else {},
         effective_provenance(snapshot) if snapshot is not None else {},
         ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model"),
-        project_layers=not _several_projects(ctx),
     )
     if level in goals.EFFORT_DONE:
         # N2: the main session's model already gets medium or lower, from
@@ -1657,7 +1658,9 @@ def finish(
 ) -> list[Recommendation]:
     """Consolidate, reword and order ``recs`` (see the module docstring).
     Returns a new list; the recommendations in it are changed in place."""
-    ctx = _Context(report=report, snapshot=snapshot, units=units)
+    # The view rule (snapshots.view_settings), for a caller that did not
+    # build ``snapshot`` for the view.
+    ctx = _Context(report=report, snapshot=for_view(snapshot, view_spans_projects(report)), units=units)
     recs = _merge_model_tier(list(recs), ctx)
     recs = _consolidate_compaction(recs, ctx)
     # Nothing in an agent file can change how Claude Code starts these.

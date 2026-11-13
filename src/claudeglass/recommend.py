@@ -180,9 +180,11 @@ from .snapshots import (
     cut_off_name,
     effective_config,
     effective_provenance,
+    for_view,
     list_text,
     managed_keys,
     split_tool_line,
+    view_spans_projects,
 )
 from .units import NO_LIMIT_SHARE_HINT, Units
 
@@ -3227,6 +3229,9 @@ def recommend(
 
     if not _meets_min_sample(report, th):
         return []
+    # The view rule (snapshots.view_settings): every rule's scope and "now"
+    # reads the file that decides, never one project's in a view of several.
+    snapshot = for_view(snapshot, view_spans_projects(report))
 
     # v4 wiring round: each of these four modules carries its own RULES
     # (and its own from_config-built thresholds) rather than a native
