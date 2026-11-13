@@ -1624,11 +1624,14 @@ class FileWatcher:
         folder's ``profiles`` (the dashboard tells a person to fix or delete
         a file that fails the checks), so it leaves no card. A row whose file
         is elsewhere (a fixture, a store moved between config folders) is
-        kept: it is not this scan's to drop."""
+        kept: it is not this scan's to drop. Folders are compared resolved,
+        so a row stored under a relative config folder is still this
+        folder's under the absolute one (what is stored does not change)."""
         try:
+            folder = profiles_dir.resolve()
             for profile_id, toml_path in self.store.profile_files().items():
-                path = Path(toml_path)
-                if path.parent == profiles_dir and not path.is_file():
+                path = Path(toml_path).resolve()
+                if path.parent == folder and not path.is_file():
                     self._time_store(stats, self.store.forget_profile, profile_id)
         except Exception as exc:
             stats.errors += 1
