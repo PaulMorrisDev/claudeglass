@@ -1490,7 +1490,9 @@ that task's own share of the window (`habits_by_task`, or the agent's
 task share of its own cost for an agent candidate) — `saving_usd` is
 `null` and `basis` says why when there's no clean share to scale by.
 When the model the cheaper setup ran on already has its own effort level
-in `modelSettings` (matched by its family, and unless
+in `modelSettings` (matched by its canonical id, so a dated, `[1m]`, Bedrock or
+Vertex spelling of either is the same model, or by a bare family alias; a key
+the profile schema refuses is never reused; and unless
 `CLAUDE_CODE_EFFORT_LEVEL` is set, which beats every model's entry), `tasks`
 drafts a `modelSettings` candidate in place of the `effortLevel` one: `key`
 `"modelSettings"`, `agent` `null`, `label` "Per-model settings", and a
@@ -1501,6 +1503,15 @@ current `effortLevel` (not every model's entry), and its `estimate` is a row
 that is not simulated ("This change isn't simulated."). Its `tradeoff` is the
 `effortLevel` one's. In `profile`, the
 ticked `modelSettings` candidates are merged model by model.
+The `thinking` goal drafts the main session's level the same way for the
+model it ran on (`model_swap_by_agent_type`'s observed model, the first one
+of a mixed row), keyed by that model's canonical id (`claude-opus-5-5` for
+`us.anthropic.claude-opus-5-5-v1:0`, `claude-opus-5-5@20260101` or
+`claude-opus-5-5[1m]`; `claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
+or by the model's existing entry as written. `now` is that model's own level,
+so a top-level `effortLevel` does not count as already in effect. Without a
+recorded model, with a name that has no canonical id (a gateway's own name),
+or while `CLAUDE_CODE_EFFORT_LEVEL` is set, it drafts `effortLevel`.
 `profile` holds the ticked changes and `whatif` their combined
 estimate, scaled the same way for `tasks`. `current` returns no
 candidates (`from_current: true`): the dashboard saves your current

@@ -564,6 +564,48 @@ def _models_left_out(ctx: Context, rows: list[dict]) -> list[dict]:
     return tips
 
 
+def _main_effort_card_leads(ctx: Context) -> bool:
+    """Whether the main session's effort card, rather than the thinking
+    goal, decides the main session's effort fix. It does when the card is
+    ignored, when CLAUDE_CODE_EFFORT_LEVEL is set (no settings file can
+    win), and when the card changes a project, local or managed file,
+    whose effortLevel outranks a user-level entry. The goal's candidate and
+    the card's change differ in key, so matching by change can't see this."""
+    for rec in getattr(ctx.model, "recommendations", ()) or ():
+        if rec.id != "effort-mismatch" or getattr(rec, "agent_type", None):
+            continue
+        if rec.key in ctx.skip_keys or rec.variant == "env":
+            return True
+        if any(change.agent is None for change in rec.changes or ()):
+            return True
+    return False
+
+
+def _without_main_effort(ctx: Context, draft: dict) -> dict:
+    """The thinking goal's draft without its main-session candidate while
+    the effort card leads; ``removed`` counts it, so the check can say an
+    ignored card is why it has nothing left."""
+    if not _main_effort_card_leads(ctx):
+        return draft
+    main = [c for c in draft["candidates"] if c["agent"] is None]
+    if not main:
+        return draft
+    kept = [c for c in draft["candidates"] if c["agent"] is not None]
+    return {**draft, "candidates": kept, "removed": draft["removed"] + len(main), "ignored": draft["ignored"] + main}
+
+
+def _effort_title(candidate: dict) -> str:
+    """"Main session: effort medium", and the model for a per-model level."""
+    value = candidate["value"]
+    if candidate["key"] == "modelSettings" and isinstance(value, dict):
+        return "; ".join(
+            f"{_who(candidate['agent'])}: effort {entry.get('effortLevel')} on "
+            f"{goals._canonical_model(model_id) or model_id}"
+            for model_id, entry in value.items() if isinstance(entry, dict)
+        )
+    return f"{_who(candidate['agent'])}: effort {value}"
+
+
 def _effort(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = [r for r in tables.rows("agents", "topology_effort_by_agent_type") if whatif._num(r.get("output_tokens"))]
@@ -575,10 +617,10 @@ def _effort(ctx: Context) -> dict:
         [[_who(r.get("agent_type")), f"{int(whatif._num(r.get('output_tokens')) or 0):,}",
           _pct(r.get("thinking_share"))] for r in rows],
     )
-    draft = _goal(ctx, "thinking")
+    draft = _without_main_effort(ctx, _goal(ctx, "thinking"))
     fixes = _merge_fixes(
         _rec_fixes(_recommendations(ctx, {"effort-mismatch"})),
-        _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: effort {c['value']}"),
+        _goal_fixes(ctx, draft, _effort_title),
     )
     if not fixes:
         return _result(

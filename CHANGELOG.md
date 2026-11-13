@@ -187,6 +187,24 @@ Cards and checks:
   asks for /effort medium, which Claude Code saves per model. While
   CLAUDE_CODE_EFFORT_LEVEL is set, it says the variable wins. The
   auto-compact cards name a model whose own window wins.
+- **The thinking goal and the Overview effort check now set the main
+  session's effort for the model it ran on, as /effort does.** A user-level
+  effortLevel did nothing on Opus 5.5 and later.
+- **Ignoring the effort card now also removes the effort check's
+  main-session change.**
+- **The effort check no longer offers a user-level effort command while
+  CLAUDE_CODE_EFFORT_LEVEL is set, or while a project effort card is open.**
+- **When CLAUDE_CODE_EFFORT_LEVEL is set, a goal's effort change now says to
+  change or remove the variable.** It used to suggest --effort, which the
+  variable beats.
+- **The apply preview now explains a per-model effort level or window the
+  way it explains the flat setting.**
+- **A model's own effort entry is now matched by its canonical id, so
+  dated, [1m], Bedrock and Vertex spellings count.** An entry for another
+  version of the family is no longer changed in its place.
+- **On Bedrock, Vertex or a dated model id, the thinking goal now writes
+  the model's canonical id, which apply accepts.** A model name it cannot
+  read gets the plain effort level.
 - **The Overview's headline saving leaves out cards you ignored.** An
   ignored model card takes out its main session or agent row, and an
   ignored auto-compact, tool-output or wasted-replies card takes out its

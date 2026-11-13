@@ -1419,3 +1419,24 @@ def test_map_settings_merge_by_name_and_revert_cleanly(tmp_path):
     assert data["enabledPlugins"] == {"a@m": True, "b@m": False}
     apply_mod.revert(result.ts, config_dir=config_dir)
     assert settings_path.read_bytes() == original
+
+
+def test_a_per_model_effort_level_merges_and_is_explained_like_the_flat_one(tmp_path):
+    # The thinking goal's main-session change, applied over a file that already has modelSettings.
+    from claudeglass.fixes import SETTING_TEXT
+
+    claude_root = tmp_path / ".claude"
+    claude_root.mkdir()
+    (claude_root / "settings.json").write_text(json.dumps({"modelSettings": {
+        "claude-opus-5-5": {"autoCompactWindow": 500000}, "claude-fable-5-2": {"effortLevel": "high"}}}), encoding="utf-8")
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass", claude_root=claude_root,
+    )
+    action = next(a for a in plan.actions if a.kind == "settings")
+    assert json.loads(action.new_bytes)["modelSettings"] == {
+        "claude-opus-5-5": {"autoCompactWindow": 500000, "effortLevel": "medium"}, "claude-fable-5-2": {"effortLevel": "high"}}
+    lines = apply_mod.explain_plan(plan)
+    assert "Change: modelSettings.claude-opus-5-5.effortLevel" in lines
+    assert f"  What it controls: {SETTING_TEXT['modelSettings.effortLevel'][0]}" in lines
+    assert any(line.startswith("  Trade-off: Lower effort can miss things") for line in lines)

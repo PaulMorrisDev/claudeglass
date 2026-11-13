@@ -26,7 +26,7 @@ from ..snapshots import AUTO_COMPACT_WINDOW_ENV
 from ..units import Units
 from . import catalogue
 from .diff import _EFFECTIVE_AGENT_FIELD
-from .schema import _EFFORT_LEVELS
+from .schema import _EFFORT_LEVELS, _MODEL_ID_RE
 
 TOP = whatif.TOP
 
@@ -386,16 +386,53 @@ def _thinking(draft: _Draft, tables, *, subagents_only: bool) -> None:
             "nothing here; effort is the lever that still works."
             if _thinking_always_on(observed_models.get(agent)) else ""
         )
+        evidence = (
+            f"Thinking was {share:.0f}% of {'the main session' if is_top else agent}'s output. How much less "
+            "a lower effort thinks isn't measured, so this isn't ticked for you." + always_on
+        )
+        # The main session's level is set for the model it ran on, the way
+        # /effort saves it (v2.1.251 on). That entry works at every scope,
+        # where Opus 5.5 and later ignore a user-level effortLevel. A
+        # "(+N more)" label names its most-used model first. The entry is
+        # keyed by the canonical id (Claude Code matches its dated, [1m],
+        # Bedrock and Vertex spellings to it); a name that has none, such as
+        # a gateway's own, gets the flat effortLevel, as with no model.
+        observed = _main_model_id(observed_models.get(agent)) if is_top else None
+        model_id = _canonical_model(observed)
+        if model_id and not draft.effort_level_env_set:
+            entry = _model_with_own_effort(draft, model_id) or model_id
+            draft.add(
+                "modelSettings", None, {entry: {"effortLevel": "medium"}}, ticked=False,
+                evidence=evidence + f" It is set for {model_id}, the model this ran on, the way /effort saves it.",
+            )
+            continue
         draft.add(
             "effortLevel" if is_top else "effort",
             None if is_top else agent,
             "medium",
             ticked=False,
-            evidence=(
-                f"Thinking was {share:.0f}% of {'the main session' if is_top else agent}'s output. How much less "
-                "a lower effort thinks isn't measured, so this isn't ticked for you." + always_on
-            ),
+            evidence=evidence + _effort_override_note(draft, observed),
         )
+
+
+def _main_model_id(observed: str | None) -> str | None:
+    """The model id at the front of a model_swap "observed model" cell
+    ("claude-opus-5 (+1 more)" gives "claude-opus-5"), or ``None``."""
+    model_id = str(observed or "").split(" (+")[0].strip()
+    return model_id or None
+
+
+def _canonical_model(model: str | None) -> str | None:
+    """``model`` as the canonical id a ``modelSettings`` key is written in:
+    without its ``[1m]`` tag and date suffix (``calibration.model_family``)
+    and its Bedrock or Vertex wrapping (``pricing._strip_cloud_provider``),
+    lower case. ``None`` when that is not a Claude model id the profile
+    schema accepts (an alias, a gateway's own name)."""
+    from ..calibration import model_family
+    from ..pricing import _strip_cloud_provider
+
+    name = model_family(_strip_cloud_provider(model_family(model)))
+    return name if name.startswith("claude-") and _MODEL_ID_RE.match(name) else None
 
 
 def _omit_claude_md(draft: _Draft, tables) -> None:
@@ -449,14 +486,19 @@ def _effort_override_note(draft: _Draft, model_id: str | None) -> str:
     would set, for every model. A candidate for it says so plainly rather
     than implying the profile alone will move it: applying it still
     writes the setting (it's a legitimate default for every other model),
-    but this one needs ``--effort`` instead. (A model's own
+    but this one needs the variable changed: it beats ``--effort`` and
+    ``/effort`` too (model-config docs). (A model's own
     ``modelSettings`` effort also beats the scalar, for that one model;
     :func:`_model_with_own_effort` finds it and the draft offers that
     entry instead.)"""
     if not model_id:
         return ""
     if draft.effort_level_env_set:
-        return f" Won't apply to {model_id}: CLAUDE_CODE_EFFORT_LEVEL is set for this session; use --effort instead."
+        model_id = _canonical_model(model_id) or model_id
+        return (
+            f" Won't apply to {model_id}: CLAUDE_CODE_EFFORT_LEVEL is set and wins over every effort setting. "
+            "Set it to medium or remove it."
+        )
     return ""
 
 
@@ -470,9 +512,23 @@ def _model_with_own_effort(draft: _Draft, model_id: str | None) -> str | None:
     model_settings = draft.effective.get("modelSettings")
     if isinstance(model_settings, dict):
         for key, entry in model_settings.items():
-            if isinstance(entry, dict) and entry.get("effortLevel") and _alias(str(key)) == _alias(model_id):
+            # A key the profile schema refuses could not be saved or applied.
+            if (isinstance(entry, dict) and entry.get("effortLevel") and _MODEL_ID_RE.match(str(key))
+                    and _same_model(str(key), model_id)):
                 return str(key)
     return None
+
+
+def _same_model(key: str, model_id: str) -> bool:
+    """Whether a ``modelSettings`` key names ``model_id``'s model: the same
+    canonical id (:func:`_canonical_model`, so a dated or ``[1m]`` spelling
+    of either matches), or a bare family alias ("opus"). Another version
+    of the family is a different entry."""
+    canonical = _canonical_model(key)
+    if canonical is not None and canonical == _canonical_model(model_id):
+        return True
+    key, model_id = key.strip().lower(), model_id.strip().lower()
+    return key == _alias(model_id) or model_id == _alias(key)
 
 
 def _tasks(draft: _Draft, tables, task: str | None) -> tuple[list[str], str | None, str]:
