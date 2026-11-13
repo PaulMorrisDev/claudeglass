@@ -2808,14 +2808,14 @@ def test_the_project_picker_says_what_follows_it_and_what_covers_every_project()
     still cover every project, each with its own chip or row group: the
     picker's note names both, never the old "Settings always cover every
     project". Profiles follows the pick (its suggestion and its drawer), and the
-    note says so."""
+    note's list says so."""
     picker = _function_source(_app_js(), "initProjectPicker")
-    assert "Your changes, settings and CLAUDE.md files follow the pick too." in picker
+    assert "Your changes, settings, profiles and CLAUDE.md files follow the pick too." in picker
     assert (
         "The latest baseline, whether your estimates came true, and the hook and statusline checks always cover "
         "every project." in picker
     )
-    assert "Profiles follows the project you pick." in picker
+    assert "Profiles follows the project you pick." not in picker
     assert "Profiles uses your newest settings from any project." not in picker
     assert "Settings and Data quality always cover every project" not in picker
     # Each part named as covering every project says so where it shows.

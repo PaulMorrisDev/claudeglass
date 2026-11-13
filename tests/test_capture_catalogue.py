@@ -709,6 +709,32 @@ def test_the_tag_wording_keeps_to_the_help_rules_where_the_capture_page_shows_it
         assert " -- " not in what and not re.search(r"\b(just|simply)\b", what, re.I), what
 
 
+def test_the_live_hints_are_the_three_that_speak():
+    assert cat.live_coaching_hints() == ["drip_feed", "big_paste", "status_poll"], (
+        "The hints that speak changed. Regenerate docs/capture.md. README.md, docs/coaching.md, docs/mod.md and "
+        "docs/hooks.md point to 'claudeglass capture status' and docs/capture.md instead of listing them: check "
+        "that no sentence there lists the hints that speak."
+    )
+
+
+def test_the_coaching_notes_text_names_the_hints_that_speak_and_follows_the_list(monkeypatch):
+    titles = {**cat.TIP_HINT_TITLES, **cat.CLAUDE_ONLY_HINT_TITLES}
+    metric = cat.METRICS_BY_ID["coaching_notes"]
+    live = cat.live_coaching_hints()
+    for hint in cat.COACHING_HINTS:
+        assert (titles[hint] in metric.what) == (hint in live), hint
+    assert "ended too big" not in metric.why and "cache check" not in metric.why
+    for text in (metric.what, metric.why):
+        for sentence in re.split(r"(?<=[.!?])\s+", text):
+            assert len(sentence.split()) <= 25, sentence
+    # Open the switch: the text follows the list, the retired hint stays out.
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", ())
+    what, why = cat._coaching_notes_what(), cat._coaching_notes_why()
+    for hint in cat.COACHING_HINTS:
+        assert (titles[hint] in what) == (hint not in cat.NO_TRIGGER_HINTS), hint
+    assert "ended too big" in why and "cache check" in why
+
+
 def test_a_tag_is_described_by_the_work_on_one_message_not_a_piece_of_work():
     """A piece of work is a glossary term for a job of many messages; a tag covers one message's work."""
     assert "piece of work" not in cat.METRICS_BY_ID["size"].what

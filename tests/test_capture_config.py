@@ -209,6 +209,23 @@ def test_a_light_sample_runs_only_once_capture_has_ended_and_light_was_chosen(tm
     assert (capture_catalogue.LIGHT_METRICS, capture_catalogue.LIGHT_SAMPLE) == (("task", "level", "size", "shift"), 20)
 
 
+def test_a_light_sample_needs_only_its_own_hook_entries(tmp_path):
+    _write(tmp_path / "light", '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n')
+    capture = load_config(config_dir=tmp_path / "light").capture
+    assert capture.light()
+    assert capture.hook_metrics() == capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
+    events = {spec[1] for spec in capture_catalogue.hook_specs(capture.hook_metrics())}
+    assert "PostToolUse" not in events and "SubagentStop" not in events
+    # Coaching notes run at any level, so their entries stay.
+    _write(tmp_path / "coach", '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n'
+           'coaching = ["coaching_notes"]\n')
+    assert load_config(config_dir=tmp_path / "coach").capture.hook_metrics()[-1] == "coaching_notes"
+    # Before the end, the level's own entries.
+    _write(tmp_path / "full", '[capture]\nlevel = "deep"\nuntil = "2099-01-01T00:00:00+00:00"\nafter = "light"\n')
+    full = load_config(config_dir=tmp_path / "full").capture
+    assert full.hook_metrics() == full.active_metrics()
+
+
 def test_capture_still_running_keeps_its_span_when_the_level_is_named_again(tmp_path):
     first = set_capture(tmp_path, level="essentials", now=NOW)
     soon = NOW + timedelta(days=2)

@@ -365,6 +365,15 @@ def test_the_coaching_tips_help_names_the_sessions_an_older_version_read_are_lef
         _plain(text, "prompting_tips")
 
 
+def test_every_hint_with_a_tips_row_has_a_label():
+    from claudeglass import capture_catalogue
+
+    labels = helptext.TABLE_COPY["prompting_tips"].value_labels
+    for hint in (*capture_catalogue.TIP_HINT_TITLES, *capture_catalogue.CLAUDE_ONLY_HINTS):
+        assert hint in labels, hint
+        _plain(labels[hint], "prompting_tips")
+
+
 def test_usage_log_tables_have_help_and_measured_causes_sit_on_the_cache_tab(tmp_path):
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
