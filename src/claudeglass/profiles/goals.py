@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .. import habits, model_gate, whatif
+from .. import habits, model_gate, model_swap, whatif
 from ..capture_catalogue import TASK_LABELS, task_words
 from ..compaction_sim import CompactionSimThresholds
 from ..fixes import LEVER_LABELS, SETTING_TEXT, already_set
@@ -180,6 +180,10 @@ def _models(draft: _Draft, tables, *, subagents_only: bool) -> None:
         best = row.get("best_cheaper_alternative_model")
         pct = whatif._num(row.get("saving_pct")) or 0.0
         if not best or pct < MIN_SHARE_PCT or (subagents_only and agent == TOP):
+            continue
+        if agent == TOP and model_swap.at_main_floor(draft.now("model", None)):
+            # A main-session setting at Sonnet or smaller is already there:
+            # never offer to raise it.
             continue
         if gate.vetoed(agent, _alias(best)):
             # The quality check found this agent did worse on that model,

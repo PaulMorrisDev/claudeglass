@@ -275,7 +275,10 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         if not alt:
             continue
         now = ctx.setting_now("model") if agent == "top-level" else ctx.agent_now(agent, "model")
-        if already_set("model", _family_alias(alt), now) and not (agent == "top-level" and _several_projects(ctx)):
+        main_there = agent == "top-level" and model_swap.at_main_floor(now)
+        if (already_set("model", _family_alias(alt), now) or main_there) and not (
+            agent == "top-level" and _several_projects(ctx)
+        ):
             # Already on the cheaper model. In a view of several projects one
             # setting can't say what every project ran, so the main card
             # stays while its saving counts.
@@ -344,9 +347,12 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         since = ""
     # In a view of several projects the setting may already say the cheaper
     # model, because one project's sessions ran on a larger one anyway.
-    set_already = already_set("model", _family_alias(alt), current)
+    # A setting at Sonnet or smaller is already there: the card never raises it.
+    at_floor = model_swap.at_main_floor(current)
+    set_already = already_set("model", _family_alias(alt), current) or at_floor
     if set_already:
-        since += f" Your model setting already says {family}, and these sessions still ran on a larger model."
+        named = _family_alias(str(current)).capitalize() if at_floor else family
+        since += f" Your model setting already says {named}, and the sessions it counts still ran on a larger model."
     change = SettingChange(
         target="settings",
         key="model",
@@ -368,8 +374,7 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         )
         + _left_out_note(left_out),
         action=(
-            f"Pick {family} with /model {_family_alias(alt)} or the model picker for routine work, and compare "
-            "the results."
+            "Keep routine work on your setting. Pick a larger model only for work that needs it."
             if set_already
             else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
             "the results before making it your default."

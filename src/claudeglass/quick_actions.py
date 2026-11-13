@@ -439,12 +439,16 @@ def _models_main_picked(ctx: Context, rows: list[dict]) -> str:
     if not best or (whatif._num(main.get("saving_pct")) or 0.0) < goals.MIN_SHARE_PCT:
         return ""
     alias = goals._alias(best)
-    if not already_set("model", alias, ctx.effective.get("model")):
+    now = ctx.effective.get("model")
+    # A setting at Sonnet or smaller is already there: it is never raised.
+    at_floor = model_swap.at_main_floor(now)
+    if not (already_set("model", alias, now) or at_floor):
         return ""
     if model_gate.build(whatif._Tables(ctx.model)).vetoed("top-level", alias):
         return ""
     count = _count(main.get("lever_runs")) or _count(main.get("spawns"))
-    return f"Your model setting already says {alias}. {_sessions(count)} in this window still ran on a larger model."
+    named = goals._alias(str(now)) if at_floor else alias
+    return f"Your model setting already says {named}. {_sessions(count)} in this window still ran on a larger model."
 
 
 def _models_set_elsewhere(rows: list[dict]) -> list[dict]:
