@@ -661,9 +661,12 @@ def test_calibration_learns_nothing_from_a_prediction_closed_as_not_measured():
     assert backtest.calibration_multipliers(store) == {}
 
 
-@pytest.mark.parametrize(("bounded", "judged_as"), [(False, None), (True, "too_little_data")])
-def test_a_prediction_with_too_little_data_after_waits_until_a_later_change_closes_its_window(
-    tmp_path, monkeypatch, bounded, judged_as
+@pytest.mark.parametrize(
+    ("bounded", "days", "judged_as"),
+    [(False, 1, None), (True, 1, None), (True, 6, None), (False, 31, "too_little_data"), (True, 31, "too_little_data")],
+)
+def test_a_priced_prediction_with_too_little_data_after_waits_until_its_window_has_run_out(
+    tmp_path, monkeypatch, bounded, days, judged_as
 ):
     t0 = datetime.now(timezone.utc)
     config_dir, result = _apply(tmp_path, {"model": "sonnet"})
@@ -679,10 +682,11 @@ def test_a_prediction_with_too_little_data_after_waits_until_a_later_change_clos
     _priced_prediction(store, "model", t0)
     _no_rate_path(monkeypatch)
     if bounded:
-        _snapshot(config_dir, point_ts + timedelta(hours=5), {"customKey": "a"})
-        _snapshot(config_dir, point_ts + timedelta(hours=6), {"customKey": "b"})
+        # A later change, five days on: it no longer closes the row, since the reading cuts its own after side.
+        _snapshot(config_dir, point_ts + timedelta(days=5), {"customKey": "a"})
+        _snapshot(config_dir, point_ts + timedelta(days=5, hours=1), {"customKey": "b"})
     judged = backtest.judge_predictions(
-        store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=1)
+        store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=days)
     )
     if judged_as is None:
         assert judged == 0 and len(store.predictions(judged=False)) == 1
@@ -690,6 +694,28 @@ def test_a_prediction_with_too_little_data_after_waits_until_a_later_change_clos
     assert judged == 1
     [row] = store.predictions(judged=True)
     assert (row["verdict"], row["measured_usd"]) == ("too_little_data", None)
+
+
+def test_a_prediction_with_no_figure_it_was_priced_on_still_closes_on_a_later_change(tmp_path):
+    t0 = datetime.now(timezone.utc)
+    config_dir, result = _apply(tmp_path, {"effortLevel": "medium"})
+    point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    # Sessions after the change but none before it: too little data, and three between the two changes bound it.
+    for i, hours in enumerate((1, 2, 3), start=1):
+        _session_file(project_dir, f"after-{i}", point_ts + timedelta(hours=hours), input_tokens=10_000)
+    store = Store(":memory:")
+    store.open()
+    _priced_prediction(store, "effortLevel", t0, predicted=0.01, priced_on=None)
+    _snapshot(config_dir, point_ts + timedelta(days=5), {"customKey": "a"})
+    _snapshot(config_dir, point_ts + timedelta(days=5, hours=1), {"customKey": "b"})
+    judged = backtest.judge_predictions(
+        store, load_corpus([project_dir]), load_pricing(), UNITS, config_dir, now=point_ts + timedelta(days=6)
+    )
+    assert judged == 1
+    [row] = store.predictions(judged=True)
+    assert row["verdict"] == "too_little_data"
 
 
 def test_a_prediction_without_a_figure_it_was_priced_on_is_judged_as_before(tmp_path):

@@ -284,12 +284,16 @@ def judge_predictions(
     """Match and judge every unjudged prediction that can be, persisting
     each verdict via ``Store.judge_prediction``. Returns how many were
     judged. A prediction that matched a change point but still has too
-    little data, and whose after-window is still open (no later change
-    point bounds it yet; for a change to every project, no later change to
-    every project: :func:`impact.bounds`'s ``following``), is left for a
-    later call rather than forced to ``too_little_data`` early. The first
+    little data, and whose after-window is still open, is left for a later
+    call rather than forced to ``too_little_data`` early. For one that says
+    what it was priced on the window is open until 30 days after the change
+    (:data:`outcomes.AFTER_MAX`); for any other, until a later change point
+    bounds it (for a change to every project, a later change to every
+    project: :func:`impact.bounds`'s ``following``). The first
     call on a store also judges again every prediction an earlier version
     closed out as ``too_little_data`` (:func:`_reopen_too_little_data`)."""
+    from . import outcomes  # outcomes reads this module's change-point matching
+
     now = now or datetime.now(timezone.utc)
     _reopen_too_little_data(store)
     points = change_points_mod.change_points(config_dir, corpus)
@@ -312,7 +316,10 @@ def judge_predictions(
                 # A reading more sessions could still change: try again next time.
                 continue
             if not result.enough:
-                if following is None:
+                # The reading cuts its own after side (the same lever, what every start carries, the
+                # agent's own keys), which a later change in the project need not do: its window is
+                # closed only once it has run its 30 days.
+                if now < point.ts + outcomes.AFTER_MAX:
                     continue
                 result = _Judgement("too_little_data", None, None, True)
         else:

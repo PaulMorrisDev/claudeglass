@@ -124,8 +124,9 @@ setting.
   out as `not_measured` ("Can't be checked from your sessions."), the same day
   it is matched. Waiting does not change that.
 - **Fewer than 5 runs after the change** (5 on each side for the start-context
-  measure) waits, then closes out as `too_little_data` once a later change
-  bounds it, as above.
+  measure) waits, then closes out as `too_little_data` once the 30 days the
+  reading looks at after the change have run out. A later change in the project
+  does not close it sooner, since the reading cuts its own sides.
 
 Otherwise the reading's own measured and estimated amounts go through the
 same verdict test as below (there is no percentage). For these rows
@@ -143,7 +144,7 @@ steps 2 to 4, unchanged.
 | `smaller` | The measured effect is under half the predicted one, or the before/after difference wasn't statistically significant. |
 | `larger` | The measured effect is more than double the predicted one. |
 | `opposite` | The measured direction is statistically significant and the opposite sign from the prediction (a predicted saving that cost more instead, or vice versa). |
-| `too_little_data` | Too few sessions on one side to tell, and the window has since closed (a later change point bounds it), so no more sessions can ever arrive to help. |
+| `too_little_data` | Too few sessions on one side to tell, and the window has since closed, so no more sessions can ever arrive to help: a later change point bounds it, or for an estimate that says what it was priced on, 30 days have passed since the change. |
 | `not_measured` | Nothing in your sessions can check this estimate: the setting has no honest measure, the estimate is too small a share of the start, or nothing prices the change exactly. It is closed at once when the setting or the estimate decides it, otherwise 30 days after the change. It has no measured amount and teaches calibration nothing. |
 
 A predicted amount under $0.01 (either way) is treated as "predicted no
@@ -163,6 +164,8 @@ change point already bounds the after-window (so no more sessions can
 ever arrive for it). Otherwise the prediction is left unjudged and
 retried on a future call, so a change you just made isn't prematurely
 locked into a permanent negative verdict while data is still coming in.
+An estimate that says what it was priced on is not closed by a later change: it waits out
+the 30 days its reading looks at after the change.
 For a change to every project, only a later change to every project
 closes the window: a change made in one project bounds that project's
 after-window alone, and another project, or one not seen yet, can still
