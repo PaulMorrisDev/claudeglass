@@ -1187,6 +1187,18 @@ def transcript_model_crossings(
     return sorted(crossings)
 
 
+def model_env_set(snapshots: list[snapshots_mod.Snapshot], keys: Collection[str]) -> bool:
+    """N5: whether ANTHROPIC_MODEL was set (``snapshots.env_var_set``, by
+    name only) in the latest snapshot of the project that goes by ``keys``,
+    else in the newest snapshot. Then the variable, not the model setting,
+    picks that project's main-session model (model-config docs: /model,
+    --model, then the variable, then the setting)."""
+    wanted = set(keys)
+    own = [snap for snap in snapshots if str(snap.data.get("project_slug") or "") in wanted]
+    pool = own or snapshots
+    return bool(pool) and snapshots_mod.env_var_set(pool[-1], snapshots_mod.MODEL_ENV)
+
+
 def sets_own_model(snapshots: list[snapshots_mod.Snapshot], keys: Collection[str]) -> bool:
     """Whether the project that goes by ``keys`` sets its main session's
     ``model`` in its own files: the provenance of ``model`` in its latest

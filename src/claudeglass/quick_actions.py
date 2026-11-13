@@ -26,6 +26,7 @@ from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, bui
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
+from .snapshots import MODEL_ENV
 from .units import Units
 
 TOP = whatif.TOP
@@ -313,7 +314,7 @@ def _models(ctx: Context) -> dict:
          ("cheaper", "Cheapest alternative"), ("saving", "Would save")],
         [
             [_who(r.get("agent_type")), r.get("observed_model") or "", _cell(ctx, r.get("observed_cost")),
-             _model_set_by(r), r.get("best_cheaper_alternative_model") or _no_cheaper(r), _models_saving(ctx, r)]
+             _model_set_by(r, ctx), r.get("best_cheaper_alternative_model") or _no_cheaper(r), _models_saving(ctx, r)]
             for r in rows
         ],
     )
@@ -329,7 +330,9 @@ def _models(ctx: Context) -> dict:
     )
     removed = (unblocked or draft)["removed"]
     main_picked = _models_main_picked(ctx, rows)
-    if blocked is not None or (ctx.model_env_set and main_picked):
+    # N5: the cheaper model the main session would take, but the variable picks it.
+    env_model = blocked["value"] if blocked is not None else _models_env_main(ctx, rows)
+    if env_model is not None or (ctx.model_env_set and main_picked):
         from .advice import MODEL_ENV_WINS
 
         tips.append({"title": "ANTHROPIC_MODEL picks your main session's model", "text": MODEL_ENV_WINS})
@@ -350,7 +353,7 @@ def _models(ctx: Context) -> dict:
             _IGNORED_ONLY
             if removed
             else picked
-            or (_MAIN_MODEL_LEFT_TO_ENV.format(model=blocked["value"]) if blocked is not None else "")
+            or (_MAIN_MODEL_LEFT_TO_ENV.format(model=env_model) if env_model is not None else "")
             or "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
@@ -404,12 +407,14 @@ def _count(value) -> int:
     return int(whatif._num(value) or 0)
 
 
-def _model_set_by(row: dict) -> str:
+def _model_set_by(row: dict, ctx: Context | None = None) -> str:
     """Where each run's model came from, per model-swap row: the settings
-    for the main session; for a subagent, its agent file, workflow scripts
-    and a model named when the run started, with how many runs each."""
+    for the main session, or ANTHROPIC_MODEL while it is set (N5: it wins
+    over the setting; its value is never recorded); for a subagent, its
+    agent file, workflow scripts and a model named when the run started,
+    with how many runs each."""
     if row.get("agent_type") == "top-level":
-        return "settings"
+        return MODEL_ENV if ctx is not None and ctx.model_env_set else "settings"
     parts = [
         f"{words} ({count:,})"
         for words, count in (
@@ -530,6 +535,24 @@ def _models_main_said(rows: list[dict]) -> str:
             f"{_sessions(own)} ran in projects that set their own model. Pick one of those projects to see them."
         )
     return " ".join(sentences)
+
+
+def _models_env_main(ctx: Context, rows: list[dict]) -> str | None:
+    """N5: while ANTHROPIC_MODEL is set, the cheaper model the main session's
+    row priced by a useful margin (its family alias), or ``None``. The model
+    setting may already say it; the variable picks the model anyway. ``None``
+    while the main model card is ignored: it then adds nothing to the check."""
+    if not ctx.model_env_set:
+        return None
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "model-tier-main" and rec.key in ctx.skip_keys for rec in recs):
+        return None
+    main = next((r for r in rows if r.get("agent_type") == "top-level"), None)
+    best = main.get("best_cheaper_alternative_model") if main else None
+    if not best or not whatif._num(main.get("saving_usd")) or (whatif._num(main.get("saving_pct")) or 0.0) < goals.MIN_SHARE_PCT:
+        return None
+    alias = goals._alias(best)
+    return None if model_gate.build(whatif._Tables(ctx.model)).vetoed("top-level", alias) else alias
 
 
 def _models_draft_without_env(ctx: Context) -> dict | None:

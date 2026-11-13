@@ -1323,3 +1323,20 @@ def _user(effective):
 )
 def test_the_effort_card_closes_once_the_main_sessions_model_gets_medium_or_lower(model_cell, snapshot_data, closed):
     assert (_effort_on(model_cell, snapshot_data) == []) is closed
+
+
+# -- N5: with ANTHROPIC_MODEL set, a setting already on Sonnet keeps the card ----
+
+
+def test_the_main_model_card_stays_while_the_variable_picks_a_larger_model_over_a_sonnet_setting():
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 11.09]])
+    data = {"effective": {"model": "sonnet"}, "effective_provenance": {"model": "user"}, "env_names": ["ANTHROPIC_MODEL"]}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    (card,) = [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"]
+    assert card.changes == []
+    assert card.action == advice.MODEL_ENV_WINS
+    assert "Your model setting already says Sonnet" in card.why
+    # Without the variable the setting already says Sonnet: no card, as before.
+    data.pop("env_names")
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    assert [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"] == []

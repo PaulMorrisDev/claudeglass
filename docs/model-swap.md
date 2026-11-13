@@ -155,7 +155,14 @@ though its project's setting said Sonnet or smaller when it started
 (`picked_runs`), and, in a view of several projects, one in a project
 whose own settings file sets `model` (`own_model_runs`), which a change to
 your user settings can't reach. A project that follows your user settings
-reads them from every snapshot after its own latest one. The main-model
+reads them from every snapshot after its own latest one. While
+`ANTHROPIC_MODEL` is set in a project's latest snapshot (by name only,
+`change_points.model_env_set`), its setting picks no session's model, so no
+session counts as picked against it or as from before a move of it; the
+transcripts decide alone, and the Models check says "The main session
+would have cost less on <model>, but ANTHROPIC_MODEL picks its model, so
+there is no setting to change." The Changes page's outcome rows still
+read whether the setting agreed, as they did. The main-model
 card, the Models check, the what-if and the profile goal read the same
 setting, so none of them offers a change the saving doesn't count.
 

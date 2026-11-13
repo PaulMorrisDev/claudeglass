@@ -3218,3 +3218,21 @@ def test_the_effort_check_is_what_it_was_with_the_variable_unset(tmp_path):
         "a lower effort thinks less, but how much less isn't measured, so check {{page:changes}} after a few sessions."
     )
     assert [f["title"] for f in result["fixes"]] == ["Main session: effort medium on claude-opus-5-5"]
+
+
+# -- N5: the variable, not the setting, picks the main session's model ---------
+
+
+def test_the_models_check_names_the_variable_when_the_setting_already_says_sonnet(tmp_path):
+    from claudeglass import advice
+
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(), effective={"model": "sonnet"},
+                                   effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["summary"] == qa._MAIN_MODEL_LEFT_TO_ENV.format(model="sonnet")
+    assert len(_env_tip(result)) == 1
+    main = next(row for row in result["table"]["rows"] if row[0] == "Main session")
+    assert main[3] == "ANTHROPIC_MODEL"
+    # Without the variable the settings set it, and nothing is said of one.
+    plain = qa.run("models", _ctx(tmp_path, model=_env_model(), effective={"model": "sonnet"}, effective_agents={"Explore": {}}))
+    assert next(row for row in plain["table"]["rows"] if row[0] == "Main session")[3] == "settings"
+    assert _env_tip(plain) == [] and advice.MODEL_ENV_WINS not in plain["summary"]

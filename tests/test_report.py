@@ -2316,3 +2316,24 @@ def test_the_main_card_offers_no_setting_while_anthropic_model_is_set(tmp_path, 
         "the variable where you set it: your shell profile or a settings file's env block."
     )
     assert set_card.saving_usd == plain.saving_usd
+
+
+# -- N5: while ANTHROPIC_MODEL is set, no session is a pick against the setting --
+
+
+def test_no_main_session_is_a_pick_while_the_model_variable_is_set(tmp_path):
+    from test_change_points import _snapshot
+
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(6))
+    _snapshot(tmp_path / "tl", "20260930T090000Z", {"model": "sonnet"}, {"model": "user"},
+              slug=snapshot_project_key("C--Dev-alpha"), user_settings={"model": "sonnet"}, env_names=["ANTHROPIC_MODEL"])
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], tmp_path / "tl")
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 6
+    stats = model_swap.compute_model_swap(sessions["C--Dev-alpha"], PRICING, main_lever=lever)
+    assert stats.by_key["top-level"].picked_runs == 0
+    # The same setting without the variable: every Opus session was picked against it.
+    plain = tmp_path / "tl2"
+    _snapshot(plain, "20260930T090000Z", {"model": "sonnet"}, {"model": "user"},
+              slug=snapshot_project_key("C--Dev-alpha"), user_settings={"model": "sonnet"})
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], plain)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.PICKED] * 6

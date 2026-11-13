@@ -285,11 +285,14 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         if not alt:
             continue
         now = _main_setting(ctx)[0] if agent == "top-level" else ctx.agent_now(agent, "model")
+        # N5: while ANTHROPIC_MODEL is set the setting picks no session's model,
+        # so one that already says the cheaper model is no reason to drop the card.
+        model_env = agent == "top-level" and env_var_set(ctx.snapshot, MODEL_ENV)
         # A main-session setting at Sonnet or smaller is never raised (G3).
         # The saving reads the same setting, so it prices nothing then.
-        main_there = agent == "top-level" and model_swap.at_main_floor(now)
+        main_there = agent == "top-level" and model_swap.at_main_floor(now) and not model_env
         if main_there or already_set("model", _family_alias(alt), now) and not (
-            agent == "top-level" and _several_projects(ctx)
+            agent == "top-level" and (_several_projects(ctx) or model_env)
         ):
             # Already on the cheaper model. In a view of several projects one
             # setting can't say what every project ran, so the main card
@@ -455,12 +458,17 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         )
         + _left_out_note(left_out),
         action=(
-            "Keep routine work on your setting. Pick a larger model only for work that needs it."
-            if set_already
-            else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
-            "the results before making it your default."
-        )
-        + (" " + MODEL_ENV_WINS if model_env else ""),
+            # N5: the setting already says it, so the variable is the one plain action.
+            MODEL_ENV_WINS
+            if set_already and model_env
+            else (
+                "Keep routine work on your setting. Pick a larger model only for work that needs it."
+                if set_already
+                else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
+                "the results before making it your default."
+            )
+            + (" " + MODEL_ENV_WINS if model_env else "")
+        ),
         lever="model",
         scope=rec.scope,
         evidence=list(rec.evidence),

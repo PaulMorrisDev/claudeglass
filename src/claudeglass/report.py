@@ -1420,7 +1420,9 @@ def _main_model_lever(
     of the run that made it is headless or has fewer than
     :data:`MOVE_MIN_REPLIES` priced replies. ``None`` without a config
     folder, so every main session counts. ``loaded``: the config folder's
-    snapshots when the caller has read them already."""
+    snapshots when the caller has read them already. While ANTHROPIC_MODEL
+    is set for a project (:func:`change_points.model_env_set`) its setting is
+    not read: the variable picks the model, so the transcripts decide alone."""
     if config_dir is None:
         return None
     points = change_points_mod.transcript_points(corpus)
@@ -1436,8 +1438,12 @@ def _main_model_lever(
         keys = tuple(keys_by_session.get(session_id) or ())
         if keys not in projects:
             first, settings = change_points_mod.settings_model_crossings(snapshots, keys, model_swap.at_main_floor)
+            # N5: while ANTHROPIC_MODEL is set the setting picks no session's
+            # model, so none is a pick against it or from before a move of
+            # it; the transcripts decide alone, as with no setting recorded.
+            env = change_points_mod.model_env_set(snapshots, keys)
             projects[keys] = (
-                ([first] if first else []) + settings,
+                [] if env else ([first] if first else []) + settings,
                 _cut_time(change_points_mod.transcript_model_crossings(points, keys, model_swap.at_main_floor)),
                 several and change_points_mod.sets_own_model(snapshots, keys),
             )
