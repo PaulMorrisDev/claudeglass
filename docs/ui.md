@@ -438,8 +438,8 @@ all-projects report, `loadProjects()`).
 - The menu's note says what follows the pick: your changes, settings and
   CLAUDE.md files, as well as the window's figures. The latest baseline,
   whether your estimates came true, and the hook and statusline checks
-  always cover every project, and Profiles uses your newest settings
-  from any project. In the page:
+  always cover every project. Profiles follows the project you pick.
+  In the page:
   - Your changes lists the changes that apply in the project (those for
     every project and its own), each judged on that project's sessions.
   - Setup › Settings shows only that project's settings and changes,
@@ -1217,9 +1217,11 @@ with the ones your data supports ticked; each tick asks
 `POST /api/whatif` again. The table's "now" values and each tick's
 estimate use the window and project picked. **Your profiles and the
 built-in ones** marks
-the one the latest baseline suggests. **Show what it changes** opens a
-drawer (`/api/profiles/<id>/diff`, against your newest settings from any
-project, whichever is picked) with a Setting / Now / After / Set in
+the one suggested for the window and project picked
+(`/api/profiles/suggestion`, which fills in once the report is ready).
+**Show what it changes** opens a
+drawer (`/api/profiles/<id>/diff`, against the settings of the project
+picked, or your newest from any project with none picked) with a Setting / Now / After / Set in
 table, **Estimated effect**, and "Ask Claude to do it", "Or run this
 command" and "Or try it for one session", each with Copy. Then **Best
 setup for each kind of task** (`habits.habits_setups`) and, folded,
