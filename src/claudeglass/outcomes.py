@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from . import backtest, change_points, counterfactual, impact
+from .calibration import FALLBACK
 from .change_points import ChangePoint
 
 #: Units needed on each side (``start_context``) or after (``exact``).
@@ -178,3 +179,201 @@ def fix_key(rule_or_lever: str, agent_type: str | None, point: ChangePoint) -> t
     """What makes rows one fix: the rule (or lever), the agent, the change
     point and its project."""
     return rule_or_lever, agent_type, point.iso(), point.project
+
+
+# -- the sessions each side of a change point ---------------------------------------------
+
+
+def _sensitive(point: ChangePoint) -> bool:
+    """Whether ``point`` changes what every start carries."""
+    return any(label.startswith(START_SENSITIVE) for label in point.keys)
+
+
+def _bounds(
+    project_keys: set[str], point: ChangePoint, agent: str | None, key: str, method: str,
+    points: list[ChangePoint], now: datetime,
+) -> tuple[datetime, datetime]:
+    """Where the sides of ``point`` stop in one project: a lookback before it
+    and :data:`AFTER_MAX` after it (or now), each cut by another change that
+    applies there and names the same lever. For ``start_context`` also by one
+    that changes what every start carries, or any other setting of the same
+    agent. Other changes do not cut: the method does not read cost, so a
+    change elsewhere cannot move it."""
+    start, end = point.ts - LOOKBACK, min(point.ts + AFTER_MAX, now)
+    for other in points:
+        if other is point or not change_points.applies_to(other, project_keys):
+            continue
+        cuts = names(other, agent, key) or (
+            method == "start_context"
+            and (_sensitive(other) or (agent and any(label.startswith(f"agents.{agent}.") for label in other.keys)))
+        )
+        if not cuts:
+            continue
+        if other.ts < point.ts:
+            start = max(start, other.ts)
+        elif other.ts > point.ts:
+            end = min(end, other.ts)
+    return start, end
+
+
+def _sides(
+    point: ChangePoint, agent: str | None, key: str, method: str, sessions: list[impact.SessionFacts],
+    points: list[ChangePoint], now: datetime,
+) -> list[tuple[list[impact.SessionFacts], list[impact.SessionFacts]]]:
+    """``(before, after)`` per project the point applies to: the point's own
+    project, or for a change to every project each project alone (as
+    ``impact.bounds`` reads it)."""
+    if point.project:
+        mine = [s for s in sessions if point.project in impact._session_keys(s)]
+        groups = [({point.project, *(k for s in mine for k in impact._session_keys(s))}, mine)]
+    else:
+        by_project: dict[str, list[impact.SessionFacts]] = {}
+        for s in sessions:
+            if s.project:
+                by_project.setdefault(s.project, []).append(s)
+        groups = [
+            ({k for s in mine for k in impact._session_keys(s)} or {project}, mine)
+            for project, mine in sorted(by_project.items())
+        ]
+    out = []
+    for keys, mine in groups:
+        start, end = _bounds(keys, point, agent, key, method, points, now)
+        out.append(
+            (
+                [s for s in mine if start <= s.start < point.ts],
+                [s for s in mine if point.ts <= s.start < end],
+            )
+        )
+    return out
+
+
+def _main_units(sessions: list[impact.SessionFacts]) -> list[impact.SessionFacts]:
+    """The main sessions that count as units: those no scheduled task started."""
+    return [s for s in sessions if not s.scheduled]
+
+
+def _units(sessions: list[impact.SessionFacts], agent: str | None) -> int:
+    """How many units ``sessions`` hold: spawns of ``agent``, or main sessions."""
+    if agent is None:
+        return len(_main_units(sessions))
+    return sum(1 for s in sessions for name, _facts in s.spawns if name == agent)
+
+
+def _carry_on_mains(after: list[impact.SessionFacts], tokens: float, bundles: dict, pricing) -> float:
+    """What carrying ``tokens`` of context on every reply of the main
+    sessions in ``after`` costs: the carry ``counterfactual._carried`` prices
+    a start-context change with."""
+    chars = int(round(tokens * FALLBACK))
+    total = 0.0
+    for s in after:
+        top = bundles[s.session_id].top
+        total += counterfactual._Carry(top, pricing).cost(chars, 0, len(counterfactual._priced(top)))
+    return total
+
+
+def _usable(number: float | None) -> bool:
+    return isinstance(number, (int, float)) and not isinstance(number, bool) and number > 0
+
+
+def read_fix(
+    point: ChangePoint,
+    agent: str | None,
+    key: str,
+    prediction: Prediction | None,
+    sessions: list[impact.SessionFacts],
+    points: list[ChangePoint],
+    bundles: dict,
+    pricing,
+    now: datetime,
+    corpus_start: datetime,
+) -> Reading:
+    """Read one fix: the change ``point`` that landed the lever ``(agent,
+    key)``, against the ``prediction`` its card or profile made.
+
+    ``sessions`` is ``impact.session_facts(corpus, pricing)``; ``points`` every
+    change point (to cut the sides); ``bundles`` maps a session id to its
+    ``corpus.SessionBundle`` (a spawn's transcript is ``bundles[id].subs[i]``,
+    ``i`` its index in the session's ``spawns``); ``now`` is when the sides
+    end at the latest; ``corpus_start`` is the corpus's first session."""
+    method = method_for(agent, key)
+    reading = Reading(method=method, verdict="not_measured")
+    if method == "none":
+        reading.note = "lever has no honest measure"
+        return reading
+    basis = prediction.basis if prediction is not None else None
+    saving = prediction.saving_usd if prediction is not None else None
+    if not _usable(basis):
+        reading.note = "the card or profile names no basis"
+        return reading
+    if method == "exact" and not _usable(saving):
+        reading.note = "no saving to take a share of"
+        return reading
+
+    sides = _sides(point, agent, key, method, sessions, points, now)
+    measured = predicted = 0.0
+    before_n = after_n = counted = 0
+    if method == "start_context" and agent is not None:
+        for before, after in sides:
+            start = counterfactual.agent_start_reading(agent, before, after)
+            if start is None:
+                continue
+            measured += counterfactual.carry_on(start, start.drop_tokens, bundles, pricing)
+            predicted += counterfactual.carry_on(start, basis, bundles, pricing)
+            before_n += start.before_n
+            after_n += start.after_n
+            counted += 1
+    elif method == "start_context":
+        for before, after in sides:
+            before, after = _main_units(before), _main_units(after)
+            family = impact._held_model(impact._STARTUP, before, after)
+            held_before = sum(1 for s in before if s.main.model == family and s.main.startup_tokens)
+            held_after = sum(1 for s in after if s.main.model == family and s.main.startup_tokens)
+            if family is None or held_before < MIN_UNITS or held_after < MIN_UNITS:
+                continue
+            result = counterfactual.without_change(point, before, after, bundles, pricing)
+            row = next(
+                (
+                    r
+                    for r in (result.per_key if result else [])
+                    if (r.agent or None, r.key) == (None, key) and r.fidelity == "approximate"
+                ),
+                None,
+            )
+            if row is None:
+                continue
+            measured += row.without_usd - row.paid_usd
+            predicted += _carry_on_mains(after, basis, bundles, pricing)
+            before_n += held_before
+            after_n += held_after
+            counted += 1
+    else:
+        before = [s for b, _a in sides for s in b]
+        after = [s for _b, a in sides for s in a]
+        if _units(after, agent) >= MIN_UNITS:
+            result = counterfactual.without_change(point, before, after, bundles, pricing)
+            row = next(
+                (
+                    r
+                    for r in (result.per_key if result else [])
+                    if (r.agent or None, r.key) == (agent, key) and r.fidelity in ("repriced", "simulated")
+                ),
+                None,
+            )
+            if row is not None:
+                measured = row.without_usd - row.paid_usd
+                # The card's saving as a share of the cost it repriced, applied to what the units
+                # after the change would have cost without it.
+                predicted = saving / basis * row.without_usd
+                before_n, after_n, counted = _units(before, agent), _units(after, agent), 1
+
+    reading.before_units, reading.after_units, reading.projects = before_n, after_n, counted
+    if counted == 0:
+        reading.verdict = "too_little_data"
+        reading.short_export = method == "start_context" and point.ts - LOOKBACK < corpus_start
+        return reading
+    if predicted <= 0:
+        reading.note = "the basis prices to nothing on these units"
+        return reading
+    reading.measured_usd, reading.predicted_usd = measured, predicted
+    reading.verdict = "half_or_more" if measured / predicted >= 0.5 else "under_half"
+    return reading
