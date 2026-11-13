@@ -1557,8 +1557,8 @@ def project_file_fixes(row: dict, units: Units) -> list[dict]:
                     [
                         opening,
                         f"For each of these agents ({who}), find the few lines it really uses and copy them into "
-                        "its definition (~/.claude/agents/<name>.md or .claude/agents/<name>.md, or a folder inside them). "
-                        "Then remove the instruction to read the file "
+                        "its definition. Its definition is ~/.claude/agents/<name>.md or .claude/agents/<name>.md, or a folder "
+                        "inside them. Then remove the instruction to read the file "
                         "from that definition. Keep the file for people.",
                         _PROMPT_TAIL,
                     ]

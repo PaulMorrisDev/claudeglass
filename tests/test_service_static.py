@@ -735,10 +735,12 @@ def test_habits_playbook_caps_featured_cards_and_collapses_the_rest() -> None:
     assert "appendHabitCards" in body
 
 
-def test_the_empty_habits_state_names_every_habit_the_notes_still_warn_about() -> None:
-    """The coaching notes still warn about small requests (drip_feed), huge pastes (big_paste) and
-    checks on a background task (status_poll), so the empty state names all three."""
-    assert "small requests, huge pastes" in _static_text("page-habits.js")
+def test_the_empty_habits_state_does_not_list_the_hints_that_speak() -> None:
+    """Which hints speak changes by one line in the catalogue, so the empty state says only that coaching
+    notes flag some of these habits."""
+    page = _static_text("page-habits.js")
+    assert "Coaching notes flag some of these as they happen." in page
+    assert "small requests, huge pastes" not in page
 
 
 def test_habits_digest_money_cards_follow_the_billing_mode() -> None:
