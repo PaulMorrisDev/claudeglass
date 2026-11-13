@@ -467,6 +467,98 @@ def test_a_saved_current_profile_applies_at_user_scope(tmp_path, monkeypatch):
     assert b"maxTurns: 40" in helper.new_bytes and b"effort: low" in helper.new_bytes
 
 
+def test_a_saved_current_profile_is_not_refused_for_an_agent_kept_in_a_subfolder(tmp_path, monkeypatch):
+    """The config hook reads the agents folder recursively and names an agent by its frontmatter, so
+    "Save my current settings" saves an agent apply finds only elsewhere under the folder. The saved
+    profile must still apply: the settings and the other agents are written."""
+    from claudeglass.profiles.schema import load_profile
+    from test_service_api import _start_server
+
+    handle = _start_server(tmp_path, monkeypatch)
+    try:
+        handle.store.upsert_snapshot(
+            project_slug="proj-a",
+            project_root_path=r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-a",
+            ts="2026-09-19T12:00:00Z",
+            schema_version=2,
+            digest_json=json.dumps(
+                {
+                    "effective": {"effortLevel": "high"},
+                    "managed_keys": [],
+                    "effective_agents": {
+                        name: {"source": "user", "model": "sonnet", "max_turns": 30}
+                        for name in ("helper", "nested", "implementer")
+                    },
+                }
+            ),
+        )
+        assert handle.post_json("/api/profiles/from-current", {})[0].status == 201
+        saved_path = handle.options.config_dir / "profiles" / "my-current-settings.toml"
+    finally:
+        handle.close()
+        handle.store.close()
+
+    profile = load_profile(saved_path)
+    claude_root, config_dir, agents_dir = _role_world(tmp_path / "w", {"helper": _agent_text("helper", "Read")})
+    _put(agents_dir, "team/nested.md", _agent_text("nested", "Read"))
+    _put(agents_dir, "impl.md", _agent_text("implementer", "Read, Edit"))
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert plan.role_notes == (_LEFT_AS_THEY_ARE + "implementer and nested.",)
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))["effortLevel"] == "high"
+    assert "maxTurns: 30" in (agents_dir / "helper.md").read_text(encoding="utf-8")
+
+
+_LEFT_AS_THEY_ARE = "Left as they are, because the file is in a subfolder or not named after the agent: "
+
+
+def test_an_explicit_agent_whose_file_is_elsewhere_is_left_as_it_is_and_named_not_refused(tmp_path):
+    """Claude Code reads the agents folder recursively and names an agent by its frontmatter, so an
+    agent kept in a subfolder, or in a file not named after it, is the user's own. apply patches
+    <agents folder>/<name>.md only: it leaves those, says so, and applies the rest."""
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"helper": _agent_text("helper", "Read")})
+    _put(agents_dir, "team/nested.md", _agent_text("nested", "Read"))
+    _put(agents_dir, "impl.md", _agent_text("implementer", "Read, Edit"))
+    profile = _profile(
+        settings={"effortLevel": "low"},
+        agents={"helper": {"model": "sonnet"}, "implementer": {"model": "sonnet"}, "nested": {"model": "sonnet"}},
+    )
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert sorted(a.agent_name for a in plan.actions if a.kind == "agent_frontmatter") == ["helper"]
+    assert plan.role_notes == (_LEFT_AS_THEY_ARE + "implementer and nested.",)
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert json.loads((claude_root / "settings.json").read_text(encoding="utf-8")) == {"effortLevel": "low"}
+    assert "model: sonnet" in (agents_dir / "helper.md").read_text(encoding="utf-8")
+    assert (agents_dir / "impl.md").read_text(encoding="utf-8") == _agent_text("implementer", "Read, Edit")
+    # one name reads in the singular; --force creates no second file for an agent that exists
+    one = _profile(settings={}, agents={"nested": {"model": "sonnet"}})
+    plan = apply_mod.plan_apply(
+        one, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root, force=True
+    )
+    assert plan.blocked == () and plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: nested.",
+    )
+    assert not (agents_dir / "nested.md").exists()
+    # an agent found nowhere is refused as before, and a role's writers join the same note
+    ghost = _profile(settings={}, agents={"ghost": {"model": "sonnet"}, "nested": {"model": "sonnet"}})
+    plan = apply_mod.plan_apply(
+        ghost, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert len(plan.blocked) == 1 and "no agent file found for 'ghost'" in plan.blocked[0]
+    both = _profile(settings={}, agents={"nested": {"model": "sonnet"}}, roles={"writer": {"model": "sonnet"}})
+    plan = apply_mod.plan_apply(
+        both, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert plan.role_notes == (_LEFT_AS_THEY_ARE + "implementer and nested.",)
+
+
 def test_apply_of_discovery_scrape_without_an_explore_file_writes_the_settings(tmp_path):
     """Explore is built into Claude Code, so nearly no user has an
     Explore.md: a shipped profile must not name it, or the whole apply

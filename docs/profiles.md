@@ -1032,7 +1032,7 @@ file holding exactly the keys the profile sets. `--force` controls only
 this behaviour — it has no effect on the git-tracked-file refusal
 above, which is `--allow-tracked`'s job specifically.
 
-This applies to an agent a profile **names** (`[agents.<name>]`). A
+This applies to an agent a profile **names** (`[agents.<name>]`) whose file is found nowhere under the agents folder. A
 profile's `[roles.writer]` is resolved first (see "`roles.<role>`"
 above) against the agent files that exist at the scope, so a role is
 never refused for a missing agent and `--force` never creates a file for
@@ -1050,3 +1050,13 @@ named in "Left as it is, because the file is in a subfolder or not named
 after the agent: `<name>`." (or "Left as they are, ...: `<a>` and `<b>`."),
 and the no-writer sentence is printed only when no such agent exists at
 all.
+
+An agent a profile **names** gets the same treatment when its file is not
+`<agents folder>/<name>.md` but is found elsewhere under the folder
+(Claude Code reads the folder recursively and names an agent by its
+frontmatter, as the config hook does): it is the user's own agent, so it is
+never refused and `--force` makes no second file for it. It is left as it
+is and named in the same sentence, and the settings and the other agents
+still apply. Only an agent found nowhere is refused. This is what lets a
+profile from "Save my current settings" apply when one of the agents it
+saved lives in a subfolder.

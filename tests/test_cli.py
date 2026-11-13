@@ -283,6 +283,31 @@ def test_cmd_apply_prints_the_no_writer_note_and_exits_0_on_dry_run(tmp_path, ca
     assert written["effortLevel"] == "medium"
 
 
+def test_cmd_apply_of_a_profile_naming_an_agent_kept_in_a_subfolder_leaves_it_and_exits_0(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    (claude_root / "agents" / "team").mkdir(parents=True)
+    (claude_root / "agents" / "team" / "nested.md").write_text(
+        "---\nname: nested\nmodel: opus\n---\n\nBody.\n", encoding="utf-8"
+    )
+    profile_path = tmp_path / "sample.toml"
+    _write_profile_toml(profile_path, settings={"effortLevel": "low"}, agents={"nested": {"model": "sonnet"}})
+    note = "Left as it is, because the file is in a subfolder or not named after the agent: nested."
+
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--dry-run"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines() and "would be refused" not in captured.err
+
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    assert json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))["effortLevel"] == "low"
+    assert "model: opus" in (claude_root / "agents" / "team" / "nested.md").read_text(encoding="utf-8")
+    assert not (claude_root / "agents" / "nested.md").exists()
+
+
 def test_cmd_apply_of_a_role_profile_patches_the_users_writer_and_prints_no_note(tmp_path, capsys):
     claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
     config_dir = tmp_path / "claudeglass"

@@ -410,13 +410,28 @@ def _agent_files(agents_dir: Path) -> tuple[dict[str, dict], frozenset[str]]:
     return found, frozenset(patchable)
 
 
-def _role_notes(patched: tuple[str, ...], left: tuple[str, ...], label: str) -> tuple[str, ...]:
+def _left_note(left: tuple[str, ...]) -> str:
+    """The sentence naming agents that were found but ``apply`` cannot patch
+    (the file is in a subfolder or not named after the agent)."""
+    if len(left) == 1:
+        return f"Left as it is, because the file is in a subfolder or not named after the agent: {left[0]}."
+    return (
+        "Left as they are, because the file is in a subfolder or not named after the agent: "
+        f"{roles_mod.join_names(left)}."
+    )
+
+
+def _role_notes(
+    patched: tuple[str, ...], left: tuple[str, ...], label: str, also_left: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     """What a ``[roles.writer]`` table did not do, in one plain sentence
     each (``label`` is the agents folder as the refusal line names paths):
     no agent is named like a writer and can edit files; several are, and each
     gets the changes; or writers that were found but ``apply`` cannot patch
     (``left``) are named. The no-writer sentence is printed only when no
-    such agent exists at all."""
+    such agent exists at all. ``also_left`` are explicitly named agents left
+    for the same reason: they join the same sentence but say nothing about
+    writers."""
     notes: list[str] = []
     if not patched and not left:
         notes.append(
@@ -425,16 +440,9 @@ def _role_notes(patched: tuple[str, ...], left: tuple[str, ...], label: str) -> 
         )
     if len(patched) > 1:
         notes.append(roles_mod.several_writers_note(patched))
-    if left:
-        if len(left) == 1:
-            notes.append(
-                f"Left as it is, because the file is in a subfolder or not named after the agent: {left[0]}."
-            )
-        else:
-            notes.append(
-                "Left as they are, because the file is in a subfolder or not named after the agent: "
-                f"{roles_mod.join_names(left)}."
-            )
+    everyone = tuple(sorted(set(left) | set(also_left)))
+    if everyone:
+        notes.append(_left_note(everyone))
     return tuple(notes)
 
 
@@ -624,15 +632,21 @@ def plan_apply(
     # that names real agent files, so a role never lands in ``blocked`` and
     # ``force`` never creates a file for one.
     role_notes: tuple[str, ...] = ()
+    role_patched: tuple[str, ...] = ()
+    role_left: tuple[str, ...] = ()
+    role_label = _relative_label(agents_dir, claude_root_or_project)
+    agent_files: dict[str, dict] | None = None
     if profile.roles:
         agent_files, patchable = _agent_files(agents_dir)
         resolved = roles_mod.resolve(profile, {n: f for n, f in agent_files.items() if n in patchable})
         if resolved.matched:
-            left = tuple(n for n in roles_mod.writers(agent_files) if n not in patchable)
-            role_notes = _role_notes(
-                resolved.matched.get("writer", ()), left, _relative_label(agents_dir, claude_root_or_project)
-            )
+            role_left = tuple(n for n in roles_mod.writers(agent_files) if n not in patchable)
+            role_patched = resolved.matched.get("writer", ())
+            role_notes = _role_notes(role_patched, role_left, role_label)
         profile = resolved.profile
+    # An agent the profile names whose file is not <agents folder>/<name>.md but
+    # is elsewhere under the folder: the user has it, apply cannot patch it.
+    left_elsewhere: list[str] = []
 
     # -- settings overlay --
     settings_changes = {k: v for k, v in profile.settings.items() if k not in managed_keys}
@@ -711,6 +725,12 @@ def plan_apply(
         agent_path = agents_dir / f"{agent_name}.md"
         old_bytes = _read_bytes_or_none(agent_path)
         if old_bytes is None:
+            if agent_files is None:
+                agent_files, _ = _agent_files(agents_dir)
+            if agent_name in agent_files:
+                # Never refused, and --force makes no second file for it.
+                left_elsewhere.append(agent_name)
+                continue
             if not force:
                 blocked.append(
                     f"no agent file found for {agent_name!r} at "
@@ -748,6 +768,12 @@ def plan_apply(
                 agent_name=agent_name,
             )
         )
+
+    if left_elsewhere:
+        if role_patched or role_left:
+            role_notes = _role_notes(role_patched, role_left, role_label, tuple(left_elsewhere))
+        else:
+            role_notes = (*role_notes, _left_note(tuple(sorted(left_elsewhere))))
 
     # -- active-profile marker (config_dir is this tool's own directory,
     # never git-tracked in practice, so no tracked-file check applies) --
