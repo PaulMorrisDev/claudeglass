@@ -107,6 +107,17 @@ class _Session:
         self.lines = [_head(session_id)]
         self.at = 0
         self.uses = 0
+        #: The context every reply from here on read.
+        self.ctx = 0
+
+    def context(self, tokens: int) -> "_Session":
+        self.ctx = tokens
+        return self
+
+    def later(self, seconds: int) -> "_Session":
+        """Let ``seconds`` pass before the next line."""
+        self.at += seconds
+        return self
 
     def _stamp(self) -> dict:
         self.at += 1
@@ -118,7 +129,9 @@ class _Session:
 
     def say(self, text: str, tag: str = "") -> "_Session":
         body = f"{text}\n{tag}" if tag else text
-        self.lines.append(turn_line(content=[{"type": "text", "text": body}], **self._stamp()))
+        self.lines.append(
+            turn_line(content=[{"type": "text", "text": body}], cache_read_input_tokens=self.ctx, **self._stamp())
+        )
         return self
 
     def use(self, tool: str, path: str) -> "_Session":
@@ -127,7 +140,11 @@ class _Session:
         target = {"file_path": f"C:/work/proj/{path}"}
         if tool == "Edit":
             target.update(old_string="x", new_string="y")
-        self.lines.append(turn_line(content=[tool_use_block(tool, use_id, target)], **self._stamp()))
+        self.lines.append(
+            turn_line(
+                content=[tool_use_block(tool, use_id, target)], cache_read_input_tokens=self.ctx, **self._stamp()
+            )
+        )
         self.lines.append(user_block_line([tool_result_block(use_id, "ok")], **self._stamp()))
         return self
 
@@ -264,6 +281,62 @@ def test_lost_check_needs_ten_each_half_and_a_twenty_point_margin():
     assert lost_check(answers(10, 5, 10, 0)).passed is True
     assert lost_check([SummaryAnswer(None, True)] * 50) == LostCheck(0, 0, 0, 0, False)
     assert lost_check([]).passed is False
+
+
+# -- the break question: the prior word at each break of an hour on a context of 20,000 -------------------------
+
+TAG = "[cg: task=bugfix shift=new prior={}]"
+
+
+def _break_session(session_id: str = "brk") -> _Session:
+    """One break of each kind, then the gaps that are no break: ``prior`` answered ``needed`` with a file
+    read again, ``some`` with a new file, ``none``, and not answered; then a gap under the hour, a break
+    after a small context, and a break across a summary."""
+    return (
+        _Session(session_id).context(30_000)
+        .typed("start").use("Read", "a.py").say("one", TAG.format("needed"))
+        .later(4_000).typed("again").use("Read", "a.py").say("two", TAG.format("needed"))
+        .later(4_000).typed("other").use("Read", "c.py").say("three", TAG.format("some"))
+        .later(4_000).typed("fresh").say("four", TAG.format("none"))
+        .later(4_000).typed("quiet").say("five")
+        .later(1_800).typed("soon").say("six", TAG.format("needed"))
+        .context(5_000).typed("small").say("seven", TAG.format("needed"))
+        .later(4_000).typed("after small").say("eight", TAG.format("needed"))
+        .context(30_000).typed("big again").say("nine", TAG.format("needed"))
+        .later(4_000).boundary().typed("after a summary").say("ten", TAG.format("needed"))
+    )  # fmt: skip
+
+
+def _breaks(top):
+    from claudeglass import capture, capture_checks
+
+    return capture_checks.break_answers(top, capture.prompt_cycles(top))
+
+
+def test_break_answers_take_the_prior_word_at_each_break_and_whether_a_file_came_back(tmp_path):
+    from claudeglass.capture_checks import BreakAnswer
+
+    answers = _breaks(_parsed(tmp_path, _break_session()))
+    # The gap of 1,800 s, the break after 5,000 tokens and the break across a summary are no breaks.
+    assert answers == [
+        BreakAnswer("needed", True),
+        BreakAnswer("some", False),
+        BreakAnswer("none", False),
+        BreakAnswer(None, False),
+    ]
+    assert _breaks(_parsed(tmp_path, _Session("calm").typed("start").say("one").typed("more").say("two"))) == []
+
+
+def test_break_answers_leave_out_a_wait_for_a_usage_limit_and_a_message_you_did_not_type(tmp_path):
+    top = _parsed(tmp_path, _break_session("flags"))
+    wanted = len(_breaks(top))
+    opened = [t for t in top.turns if t.gap_s is not None and t.gap_s >= 3_600 and not t.is_synthetic]
+    assert len(opened) >= wanted
+    # The first break's reply marked as the end of a wait for a limit, then the second's as not typed.
+    opened[0].gap_cause = "limit"
+    assert len(_breaks(top)) == wanted - 1
+    opened[1].preceding_not_typed = True
+    assert len(_breaks(top)) == wanted - 2
 
 
 def test_habits_collect_gathers_the_answers_of_every_main_session(tmp_path):

@@ -20,7 +20,7 @@ from fractions import Fraction
 
 from . import capture as capture_mod
 from . import compaction
-from .model import TranscriptResult, Turn
+from .model import EventKind, TranscriptResult, Turn
 
 #: ``yes`` answers and ``no`` answers it takes before the check can pass.
 LOST_MIN_ANSWERS = 10
@@ -40,6 +40,16 @@ class SummaryAnswer:
     #: A file the work read or edited after the summary was read or edited
     #: before it, or the work was corrected.
     evidence: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BreakAnswer:
+    """The message that came back after a long break: the ``prior`` word its
+    tag settled on (``None`` when it gave none) and whether the work read or
+    edited a file touched before the break."""
+
+    prior: str | None
+    reused: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +112,47 @@ def summary_answers(top: TranscriptResult, cycles) -> list[SummaryAnswer]:
         reread = bool(_touched(after) & _touched(replies[:at]))
         settled = cycle.settled
         out.append(SummaryAnswer(settled.lost if settled is not None else None, reread or _corrected(cycles, n)))
+    return out
+
+
+def break_answers(top: TranscriptResult, cycles) -> list[BreakAnswer]:
+    """One :class:`BreakAnswer` for each prompt cycle (``cycles``, from
+    ``capture.prompt_cycles(top)``) that opens a break: a message you typed
+    at least :data:`habits.LONG_BREAK_S` seconds after a reply whose context
+    and output came to :data:`habits.STALE_TOKENS` or more (the reader
+    ``_item_clear_between`` uses), not a wait for a usage limit and not a
+    gap across a summary."""
+    from . import habits  # habits imports this module
+
+    replies = capture_mod._priced(top)
+    position = {id(turn): n for n, turn in enumerate(replies)}
+    opening = {id(cycle.turns[0]): cycle for cycle in cycles}
+    compacted = {EventKind.COMPACT_BOUNDARY, EventKind.COMPACT_SUMMARY}
+    out: list[BreakAnswer] = []
+    before: list[Turn] = []
+    for turn in replies:
+        if turn.is_synthetic or turn.estimated:
+            continue
+        last = before[-1] if before else None
+        cycle = opening.get(id(turn))
+        if (
+            cycle is not None
+            and last is not None
+            and not turn.preceding_not_typed
+            and turn.gap_cause != "limit"
+            and not compacted.intersection(turn.preceding_event_kinds)
+        ):
+            at, last_at = capture_mod._moment(turn.ts), capture_mod._moment(last.ts)
+            if (
+                at is not None
+                and last_at is not None
+                and (at - last_at).total_seconds() >= habits.LONG_BREAK_S
+                and last.ctx + last.output_tokens >= habits.STALE_TOKENS
+            ):
+                reused = bool(_touched(cycle.turns) & _touched(replies[: position[id(turn)]]))
+                settled = cycle.settled
+                out.append(BreakAnswer(settled.prior if settled is not None else None, reused))
+        before.append(turn)
     return out
 
 
