@@ -36,34 +36,33 @@ a command or your words: only token counts, an idle time and a count.
 
 | Hint | When | What the note asks of Claude |
 |---|---|---|
-| `plan_fresh` | Off: the blinded replay found it more often wrong than right (under half of its tips judged right), so it no longer speaks. Its rule, when it spoke: You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. You approve it in the dialog, by typing a go-ahead after the dialog sent it back, or by leaving plan mode. | Tell you in a tip that building it in a fresh session would carry that much less on every reply of the build: next time, pick the approval option that clears the context first (the desktop), or run `/clear`, then ask Claude to carry out the plan file. Then carry on. |
-| `plan_fresh_early` | Off: the blinded replay found it more often wrong than right (under half of its tips judged right), so it no longer speaks. Its rule, when it spoke: You send a message in plan mode, which Claude Code reports with the message, with at least 40,000 tokens of planning chat in the session since it started: the plan isn't written yet. Not for a message sent while Claude is working, for a session that was compacted since it started, or when the session's start can't be told. It shares its rest with `plan_fresh`, so one plan gets one of the two. | Nothing about the work. End the plan Claude submits for approval with a tip to approve it with a clear context: on the desktop, the approval option that clears the context first (or `/clear`, then asking Claude to carry out the plan in its file, if the dialog has none); in the terminal, `/clear` first, then the same. If the reply doesn't end in a plan, the tip goes on the plan submitted later. |
-| `split_run` | Off: the blinded replay found it more often wrong than right (under half of its tips judged right), so it no longer speaks. Its rule, when it spoke: A subagent run ended showing signs of being too big for one task: Claude Code summarised its context part-way through, or it began from a brief of 6,000 characters or more (`coaching_split_brief_chars`). The brief clause is for plain agent runs only: a workflow agent's brief is the task its script computed, not something you wrote, so it never counts. The hook notes this when the run stops and says it at the next call in the main session: after the agent or workflow call returns, for a run that was in the foreground, or with the message that reports a background run. It never counts numbered lines or replies. | Nothing about the work. End the reply with a tip that an agent run in this session had to summarise its context or began from a long brief, that each reply of a run reads everything the run holds again, and that giving the next agent a smaller piece of the work keeps each run short. |
-| `quiet_output` | Off: the blinded replay found it more often wrong than right (under half of its tips judged right), so it no longer speaks. Its rule, when it spoke: You read a saved output whole: a `Read` with no `limit` or `offset` of a file under the session's `tool-results` or `scratchpad` folder, or a background task's output file, about 8,000 tokens or more, [as measured below](#how-a-results-size-is-measured). Never inside an agent or a workflow, and no other result gets it: a search, a fetch, a read of a file of your project or a read of part of a file are left alone. Only Claude sees it (no tip, no notice), and Claude calling it a misfire twice mutes it. | Next time, grep the saved output, or read part of it with an offset and a limit. |
+| `plan_fresh` | You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. You approve it in the dialog, by typing a go-ahead after the dialog sent it back, or by leaving plan mode. | Tell you in a tip that building it in a fresh session would carry that much less on every reply of the build: next time, pick the approval option that clears the context first (the desktop), or run `/clear`, then ask Claude to carry out the plan file. Then carry on. |
+| `plan_fresh_early` | You send a message in plan mode, which Claude Code reports with the message, with at least 40,000 tokens of planning chat in the session since it started: the plan isn't written yet. Not for a message sent while Claude is working, for a session that was compacted since it started, or when the session's start can't be told. It shares its rest with `plan_fresh`, so one plan gets one of the two. | Nothing about the work. End the plan Claude submits for approval with a tip to approve it with a clear context: on the desktop, the approval option that clears the context first (or `/clear`, then asking Claude to carry out the plan in its file, if the dialog has none); in the terminal, `/clear` first, then the same. If the reply doesn't end in a plan, the tip goes on the plan submitted later. |
+| `split_run` | A subagent run ended showing signs of being too big for one task: Claude Code summarised its context part-way through, or it began from a brief of 6,000 characters or more (`coaching_split_brief_chars`). The brief clause is for plain agent runs only: a workflow agent's brief is the task its script computed, not something you wrote, so it never counts. The hook notes this when the run stops and says it at the next call in the main session: after the agent or workflow call returns, for a run that was in the foreground, or with the message that reports a background run. It never counts numbered lines or replies. | Nothing about the work. End the reply with a tip that an agent run in this session had to summarise its context or began from a long brief, that each reply of a run reads everything the run holds again, and that giving the next agent a smaller piece of the work keeps each run short. |
+| `quiet_output` | You read a saved output whole: a `Read` with no `limit` or `offset` of a file under the session's `tool-results` or `scratchpad` folder, or a background task's output file, about 8,000 tokens or more, [as measured below](#how-a-results-size-is-measured). Never inside an agent or a workflow, and no other result gets it: a search, a fetch, a read of a file of your project or a read of part of a file are left alone. Only Claude sees it (no tip, no notice), and Claude calling it a misfire twice mutes it. | Next time, grep the saved output, or read part of it with an offset and a limit. |
 | `report_reread` | Retired: it no longer speaks. Its figure was a worse guide than the cases it left out (10% of its tips were judged right, against 30% of the controls). Old tags of it are still read, and `coaching_report_reread_tokens` has no effect. | |
 | `drip_feed` | You send your third small change request in a row: short messages, each asking for a change (a change verb opens one of its sentences) and sent within 20 minutes of your message before it, the earlier ones each answered with a change to a file of yours in the reply they started ("make the button bigger", "now move the logo", "and make the footer grey"). A go-ahead, a thank-you, a status check, a question, a statement, an explain request and an answer to Claude's question ask for no change: they neither count nor end the run. A detailed message, a reply that changed nothing, or a longer gap starts the count again. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
 | `big_paste` | You send a message of 10,000 tokens or more, such as a pasted log or file. | If most of it is a log, a file or output, suggest in a tip pasting only the part that matters, or saving it to a file and giving the path. |
 | `status_poll` | You send a message that only asks how the work is going ("how is it going?", "any updates?", "is it done yet?"), while a tool result said work went to the background and no message from that task has arrived since, and the prompt cache is still warm. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that each check makes Claude read the whole session, about that many tokens, to say little that is new, and where to look instead: the task panel on the desktop, `/tasks` in the terminal. It never says a notification will come. |
-| `cold_return` | Off: the blinded replay found it more often wrong than right (under half of its tips judged right), so it no longer speaks. Its rule, when it spoke: You send a message after the prompt cache expired (5 minutes idle, or an hour when the session uses the 1-hour cache), and the last reply left 100,000 tokens of context or more. A receipt for the break. Not after a compaction since that reply, for a message sent while Claude is still working, for one with no typed text (a hook, system or task notification, or a `<system-reminder>` block alone: a reminder in front of text you typed is looked past), for a go-ahead ("yes", "continue", "yes, fix the wrapper", "you may merge all the PRs"), a retry ("try again"), an answer to a question Claude's last reply ended on, or when a usage limit stopped Claude and you come back within a cache lifetime of its reset (or the reset is unknown). It rests 12 hours. | Nothing about the work. End the reply with a tip saying how long the session sat idle, that the reply wrote about that many tokens of context again (the context less the 42,000 tokens every session starts with, and "in a session already compacted twice" when it was), that the last reply already says whether the work is done (or the task panel on the desktop, `/tasks` in the terminal), and that `/clear` first skips the rewrite for new work. |
+| `cold_return` | You send a message after the prompt cache expired (5 minutes idle, or an hour when the session uses the 1-hour cache), and the last reply left 100,000 tokens of context or more. A receipt for the break. Not after a compaction since that reply, for a message sent while Claude is still working, for one with no typed text (a hook, system or task notification, or a `<system-reminder>` block alone: a reminder in front of text you typed is looked past), for a go-ahead ("yes", "continue", "yes, fix the wrapper", "you may merge all the PRs"), a retry ("try again"), an answer to a question Claude's last reply ended on, or when a usage limit stopped Claude and you come back within a cache lifetime of its reset (or the reset is unknown). It rests 12 hours. | Nothing about the work. End the reply with a tip saying how long the session sat idle, that the reply wrote about that many tokens of context again (the context less the 42,000 tokens every session starts with, and "in a session already compacted twice" when it was), that the last reply already says whether the work is done (or the task panel on the desktop, `/tasks` in the terminal), and that `/clear` first skips the rewrite for new work. |
 
-Five hints are off: `plan_fresh`, `plan_fresh_early`, `split_run`,
-`quiet_output` and `cold_return` (`LIVE_OFF_HINTS` in `capture_catalogue.py`,
-read by the hook and by the mod). Replaying 30 days of sessions blind, the
-tips of each were judged right less than half the time, so each was more
-often wrong than right. Their rules and the figures read from transcripts
-stay (the prompting page still counts cold returns), while `split_run` is
-off `SubagentStop` keeps no counts (nothing would read them), so switching it
-back on reports only runs that end after that. Taking a name out of the list
-switches its note back on. Where a rule below is described in the present
-tense, it is the rule the note followed when it was on.
+Some hints are off until a blind replay of real sessions finds their tips
+right more often than wrong (`LIVE_OFF_HINTS` in `capture_catalogue.py`,
+read by the hook and by the mod). An off hint says nothing live, and the
+rule given for it here is the one it follows once it is back on. Its rule
+and the figures read from transcripts stay (the prompting page still
+counts cold returns). While `split_run` is off, `SubagentStop` keeps no
+counts (nothing would read them), so switching it back on reports only
+runs that end after that. Taking a name out of the list switches its note
+back on. `claudeglass capture status` names the hints that are off, and
+[capture.md](capture.md#live-coaching) the ones that speak.
 
 One note at most per message: the first hint in the table that applies.
-The hints that speak are the ones about how you prompt: `drip_feed`,
-`big_paste` and `status_poll`, all on the message you send. They show only
-in the main session, and they are about how you prompt or what a way of
-working costs, not about the work, so they never change what Claude does:
-it handles the message as it would have and only ends its reply with the
-tip. The hints marked Off in the table say nothing live.
+The hints about how you prompt (`drip_feed`, `big_paste` and
+`status_poll`, all on the message you send) show only in the main session.
+They are about how you prompt or what a way of working costs, not about
+the work, so they never change what Claude does: it handles the message as
+it would have and only ends its reply with the tip.
 A message you didn't type gets no hint: a background agent's report
 (which Claude Code hands to Claude as the next message), a scheduled
 task, a slash command's output, another session's message, the desktop
@@ -620,8 +619,9 @@ in its own panes instead of through Claude, so they cost no context and
 Claude never has to remember to pass them on. For a session the mod is
 running in (it says so in `mod/present/<session id>.json`; see
 [Your hooks](hooks.md#with-the-claudeglass-mod)), the hook leaves out
-`status_poll`, `drip_feed` and `big_paste` (and the off `cold_return` and
-`plan_fresh`), but only for what that file lists under `shows`: the first
+`cold_return`, `status_poll`, `drip_feed`, `big_paste` and `plan_fresh`
+(a hint that is off says nothing either way), but only for what that file
+lists under `shows`: the first
 four when it lists `"hint"` (the mod writes it once the hint line has been
 drawn, and the desktop app never draws it), `plan_fresh` when it lists
 `"status"` (the status line). A file with no `shows` (an older mod) keeps
@@ -629,9 +629,10 @@ today's rule, and one with an empty `shows` leaves all of them with the
 hook. The plan check, the facts line, the capture note and the rating
 reminder stay with the hook, since those steer Claude or feed a skill.
 
-The mod decides three of them from your draft, before you send it, and shows
-one at a time on the hint line under the prompt: `drip_feed`, `big_paste`,
-then `status_poll`, the first that applies and isn't muted or resting. Same thresholds, rest rules and `muted` and `once` lists as above;
+The mod decides the hint-line ones from your draft, before you send it, and
+shows one at a time on the hint line under the prompt: `drip_feed`,
+`big_paste`, `status_poll`, then `cold_return`, the first that applies and
+isn't off, muted or resting. Same thresholds, rest rules and `muted` and `once` lists as above;
 a draft's length counts in tokens at the rate your sessions measured, 4
 characters to a token before any. It keeps a draft's length and word shape,
 never its words. `status_poll` also needs background work still running,

@@ -149,18 +149,20 @@ applies:
 With `/glass detail` on, a warm send says what it costs ("Sending costs
 about $0.07") when nothing else needs saying.
 
-The first four are the coaching hints the capture hook used to give after
+The first three are the coaching hints the capture hook used to give after
 you sent the message, when the cost was already paid. They use the same
 thresholds, wording, rest rules and `muted` and `once` lists as the hook
 ([Coaching notes](coaching.md#when-the-claudeglass-mod-is-running)). The last
 three are the draft checks, which only the mod makes. All of them need
 **coaching notes** turned on, in a project the coaching setting covers
-(`claudeglass capture enable coaching_notes`).
+(`claudeglass capture enable coaching_notes`). Coaching hints that are off
+until they pass the replay don't show here. `claudeglass capture status`
+names them.
 
 A hint rests after it shows: 30 minutes, doubling each time it returns, up
-to 3 times. It comes back early only if what is at stake grows by half. A
-cache-expired hint rests 12 hours. While it applies, the hint stays on
-screen without asking the rest rule again.
+to 3 times. It comes back early only if what is at stake grows by half.
+While it applies, the hint stays on screen without asking the rest rule
+again.
 
 The mod looks at your draft's length and shape. It keeps the words of a draft
 in memory only, to compare them with the session's, and never writes them
@@ -189,10 +191,10 @@ before Claude summarises. It is cleared when neither holds, when the session
 ends and on `/clear`. While the limit forecast is on the line it is looked at
 again every minute, so the minutes follow the clock even when you are idle.
 
-Approving a plan puts nothing on the status line. The tip that a fresh
-session would save tokens, and the cache-expired warning on the hint line,
-are off: the replay found them more often wrong than right (see
-[coaching](coaching.md#the-hints)).
+When it is on, the tip that a fresh session would save tokens shows on the
+status line as you approve a plan. A coaching hint that is off until it
+passes the replay shows nowhere, and `claudeglass capture status` names
+those.
 
 ## The Checkpoint pane
 
@@ -517,8 +519,7 @@ none of them changes what you do at the moment of a summary:
 - Spend and the 5-hour limit on the band.
 - The notes at the end of a reply, and the cache-rebuild line.
 
-The capture hook gives the tips for agent reports and split runs, and the
-rating reminder, itself again ([With and without the mod](#with-and-without-the-mod)).
+The capture hook gives the rating reminder itself again ([With and without the mod](#with-and-without-the-mod)).
 
 ## What it reads and writes
 
@@ -586,8 +587,8 @@ wording and rest rules:
 | Large paste | After you send | The hint line, where you judge whether it is a log |
 
 The hints that stay with the hook are the plan check, the facts line, the
-capture note and the rating reminder. The others are off or retired; see
-[coaching](coaching.md) for which.
+capture note and the rating reminder. Some coaching hints stay off until
+they pass the replay, and `claudeglass capture status` names them.
 
 A hint the hook leaves out is not marked as shown. If the mod closes, goes
 stale or can't be read, the hint returns at once. Nothing changes without

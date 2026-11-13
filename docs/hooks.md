@@ -107,12 +107,13 @@ sessions no `Glob` result passed 18,200, so neither could reach the size a
 note applies to, yet `Grep` was the call the hook most often made Claude
 wait on. With coaching
 notes on, it is also registered for the `Agent` and `Workflow` tools, so
-it can keep the newest reply's time and, when `split_run` is on (it is
-off now), say that an agent run was too big for one task. It reads no size
+it can keep the newest reply's time and, when `split_run` is on, say that
+an agent run was too big for one task. It reads no size
 from their results and never says a large result is large. It is also registered
-for SubagentStop, where it prints nothing: it only notes that an agent
-run ended too big for one task, so the main session's next hook can say
-so. How long a call takes depends on the machine, and Python's own start
+for SubagentStop, where it prints nothing: when `split_run` is on, it notes
+that an agent run ended too big for one task, so the main session's next
+hook can say so, and while it is off it notes nothing. How long a call
+takes depends on the machine, and Python's own start
 is part of it. Setup > Capture and `claudeglass capture status` show the
 measured figure from your own sessions, which Claude Code times (about 124
 milliseconds a run on the author's Windows machine). The hook returns
@@ -147,8 +148,8 @@ The hook reads the session's own file on a call that could draw a note
 session counts as having the mod when the file's `session_id` is its own
 name, its schema is 1 and `seen` is within the last 10 minutes; a session
 id that isn't letters, digits and `-` never counts. Then the hook leaves
-out the hints the mod shows (when `shows` allows it), and doesn't note that it did: `status_poll`,
-`drip_feed` and `big_paste` (`cold_return` and `plan_fresh` are off for everyone). It doesn't work
+out the hints the mod shows (when `shows` allows it), and doesn't note that it did: `cold_return`,
+`status_poll`, `drip_feed`, `big_paste` and `plan_fresh`, less any that are off for everyone. It doesn't work
 them out either, so
 a call with the mod present is a little quicker (about 39 milliseconds
 against 43 on the author's machine, with a hint due). A hint the hook
