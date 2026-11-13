@@ -4124,6 +4124,28 @@ def test_capture_segment_ends_with_the_tuning_block_of_copyable_commands() -> No
         assert forbidden not in tuning, forbidden
 
 
+def test_data_quality_links_to_the_figures_behind_the_advice() -> None:
+    """K1: some advice rests on figures no page shows; the tuning file holds them. Data quality says so in
+    one line and links to the Capture block that writes the file (scrolled to and pulsed as an evidence
+    link's table is)."""
+    data_js, links_js, capture_js = _static_text("page-data.js"), _static_text("links.js"), _static_text("page-capture.js")
+    quality = _function_source(data_js, "renderDataQuality")
+    assert 'tuningLink("Figures behind the advice")' in quality
+    assert (
+        '"Some advice rests on figures no page shows, such as cost per reply and what a summary saves. '
+        'The tuning file holds them. "'
+    ) in quality
+    assert 'el("p", { class: "notes", id: "data-figures" }, [' in quality
+    assert re.search(r'import \{[^}]*\btuningLink\b[^}]*\} from "\./links\.js";', data_js)
+    assert 'export var TUNING_BLOCK = "capture.tuning";' in links_js
+    assert 'pageLink("setup/capture", text, { t: TUNING_BLOCK })' in _function_source(links_js, "tuningLink")
+    assert 'var TUNING_NAME = "tuning";' in capture_js
+    assert 'block.setAttribute("data-table-name", TUNING_NAME)' in _function_source(capture_js, "renderCaptureTuning")
+    # The link's table part is the name the block carries.
+    table = re.search(r'export var TUNING_BLOCK = "[^."]+\.([^"]+)";', links_js).group(1)
+    assert f'var TUNING_NAME = "{table}";' in capture_js
+
+
 def test_grid_words_an_empty_status_line_table_for_desktop_sessions() -> None:
     grid_js = _static_text("grid.js")
     assert (

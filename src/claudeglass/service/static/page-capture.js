@@ -15,6 +15,9 @@ import { capturePoll, showCaptureData } from "./shell.js";
 
 // -- Setup, Capture ---------------------------------------------------
 
+// The block links.js TUNING_BLOCK points at (evidence.js revealEvidence finds it by this name).
+var TUNING_NAME = "tuning";
+
 // The billing mode capture's amounts were phrased for (/api/capture's
 // billing.mode), set each time the page draws.
 var captureBilling = "";
@@ -296,6 +299,7 @@ function renderCaptureTuning(data, container) {
   var tuning = data.tuning;
   if (!tuning) return;
   var block = captureBlock(container, tuning.title);
+  block.setAttribute("data-table-name", TUNING_NAME);
   block.appendChild(el("p", { class: "notes", text: tuning.text }));
   block.appendChild(el("p", { class: "notes", text: "From a terminal on this machine, write the file:" }));
   block.appendChild(codeBlockWithCopy(tuning.export_command, "Command", "writing the file"));
