@@ -59,6 +59,7 @@ __all__ = [
     "Profile",
     "ProfileError",
     "SETTINGS_ALLOWLIST",
+    "MODEL_SETTINGS_ALLOWLIST",
     "AGENT_ALLOWLIST",
     "ENV_ALLOWLIST",
     "ROLES",
@@ -103,7 +104,7 @@ class LeverSpec:
       only here; values supplied at apply time" A7 comment).
     """
 
-    kind: str  # "str" | "enum" | "int" | "bool" | "list[str]" | "map[str,bool]" | "map[str,enum]"
+    kind: str  # "str" | "enum" | "int" | "int|auto" | "bool" | "list[str]" | "map[str,bool]" | "map[str,enum]" | "map[str,model]"
     scope_kind: str  # "settings" | "agent frontmatter" | "env"
     values: tuple[str, ...] | None = None
     min: int | None = None
@@ -190,6 +191,28 @@ SETTINGS_ALLOWLIST: dict[str, LeverSpec] = {
         "bool", "settings",
         doc_ref="docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike",
     ),
+    # PF1: per-model settings, keyed by model id. apply merges one model's
+    # entry key by key (see ``apply.plan_apply``); the sub-keys are
+    # :data:`MODEL_SETTINGS_ALLOWLIST`.
+    "modelSettings": LeverSpec(
+        "map[str,model]", "settings",
+        doc_ref="docs/profiles.md#settings-top-level-settingsjson-overlay-keys",
+    ),
+}
+
+#: ``modelSettings.<id>`` sub-keys a profile may set, both confirmed in
+#: Claude Code's own settings schema. ``effortLevel`` has no ``max`` there
+#: (Claude Code does not keep it per model); ``autoCompactWindow`` is
+#: ``"auto"`` or a token count from 100,000 to 1,000,000.
+MODEL_SETTINGS_ALLOWLIST: dict[str, LeverSpec] = {
+    "effortLevel": LeverSpec(
+        "enum", "settings", values=("low", "medium", "high", "xhigh"),
+        doc_ref="docs/profiles.md#settings-top-level-settingsjson-overlay-keys",
+    ),
+    "autoCompactWindow": LeverSpec(
+        "int|auto", "settings", values=("auto",), min=100_000, max=1_000_000,
+        doc_ref="docs/profiles.md#settings-top-level-settingsjson-overlay-keys",
+    ),
 }
 
 #: ``agents.<name>`` frontmatter patch keys a profile may set. The dotted
@@ -270,6 +293,9 @@ ARCHETYPES: tuple[str, ...] = (
 )
 
 _ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+#: A ``modelSettings`` model id. No dot, so a diff row's dotted key
+#: (``settings.modelSettings.<id>.<sub-key>``) splits cleanly.
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_\-\[\]]{1,64}$")
 _BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _TOP_LEVEL_KEYS = {"id", "name", "for", "archetype", "settings", "agents", "roles", "env", "notes"}
@@ -322,10 +348,16 @@ def _type_ok(value, spec: LeverSpec) -> bool:
         if spec.max is not None and value > spec.max:
             return False
         return True
+    if spec.kind == "int|auto":
+        if isinstance(value, str):
+            return value in (spec.values or ())
+        return _type_ok(value, LeverSpec("int", spec.scope_kind, min=spec.min, max=spec.max))
     if spec.kind == "bool":
         return isinstance(value, bool)
     if spec.kind == "list[str]":
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if spec.kind == "map[str,model]":
+        return not _model_settings_problems(value)
     if spec.kind == "map[str,bool]":
         return isinstance(value, dict) and all(
             isinstance(k, str) and isinstance(v, bool) for k, v in value.items()
@@ -345,15 +377,45 @@ def _describe_expected(spec: LeverSpec) -> str:
         if spec.min is not None or spec.max is not None:
             bounds = f" between {spec.min if spec.min is not None else '-inf'} and {spec.max if spec.max is not None else 'inf'}"
         return f"an int{bounds}"
+    if spec.kind == "int|auto":
+        quoted = " or ".join(repr(v) for v in spec.values or ())
+        return f"{quoted} or an int between {spec.min} and {spec.max}"
     if spec.kind == "bool":
         return "a bool"
     if spec.kind == "list[str]":
         return "a list of strings"
+    if spec.kind == "map[str,model]":
+        return "a table of model ids to their own settings"
     if spec.kind == "map[str,bool]":
         return "a table of names to true or false"
     if spec.kind == "map[str,enum]":
         return f"a table of names to one of {', '.join(spec.values or ())}"
     return "a string"
+
+
+def _model_settings_problems(value) -> list[str]:
+    """Every problem with a ``modelSettings`` value (``{model id: {sub-key:
+    value}}``): a bad id, an entry that is not a table, an unknown sub-key
+    or a value out of range. Messages are prefixed ``settings.modelSettings``."""
+    if not isinstance(value, dict):
+        return ["settings.modelSettings: expected a table of model ids to tables"]
+    problems: list[str] = []
+    for model_id, entry in value.items():
+        if not isinstance(model_id, str) or not _MODEL_ID_RE.match(model_id):
+            problems.append(
+                f"settings.modelSettings: model id {model_id!r} must be letters, digits, '-', '_' or brackets"
+            )
+            continue
+        if not isinstance(entry, dict):
+            problems.append(f"settings.modelSettings.{model_id}: expected a table")
+            continue
+        for key, sub_value in entry.items():
+            spec = MODEL_SETTINGS_ALLOWLIST.get(key)
+            if spec is None:
+                problems.append(f"settings.modelSettings.{model_id}.{key}: unknown key")
+            elif not _type_ok(sub_value, spec):
+                problems.append(f"settings.modelSettings.{model_id}.{key}: expected {_describe_expected(spec)}")
+    return problems
 
 
 def _normalise_agent_dict(agent_name: str, raw: dict, problems: list[str], table: str = "agents") -> dict:
@@ -439,7 +501,9 @@ def validate(d: dict) -> list[str]:
             if spec is None:
                 problems.append(f"settings.{key}: unknown key")
                 continue
-            if not _type_ok(value, spec):
+            if spec.kind == "map[str,model]":
+                problems.extend(_model_settings_problems(value))
+            elif not _type_ok(value, spec):
                 problems.append(f"settings.{key}: must be {_describe_expected(spec)}, got {value!r}")
 
     agents = d.get("agents", {})

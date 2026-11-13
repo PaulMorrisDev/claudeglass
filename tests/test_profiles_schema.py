@@ -63,6 +63,7 @@ def test_validate_accepts_minimal_profile():
         ("autoCompactEnabled", False),
         ("cleanupPeriodDays", 30),
         ("fastMode", False),  # PROF-08
+        ("modelSettings", {"claude-opus-5-5": {"effortLevel": "medium"}}),
     ],
 )
 def test_validate_accepts_every_settings_key(key, value):
@@ -157,6 +158,46 @@ def test_unknown_role_is_rejected():
     assert any(p.startswith("roles.writer: must be a table/object, got str") for p in problems)
     problems = validate(_valid_doc(roles={"writer": {"maxTurns": 0}}))
     assert any(p.startswith("roles.writer.maxTurns:") for p in problems)
+
+
+def test_model_settings_validates_ids_sub_keys_and_values():
+    good = {
+        "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300_000},
+        "claude-sonnet-4-6[1m]": {"autoCompactWindow": "auto"},
+        "my_model": {},
+    }
+    assert validate(_valid_doc(settings={"modelSettings": good})) == []
+    # "auto" stays the string "auto"; a number stays a number
+    kept = load_dict(_valid_doc(settings={"modelSettings": good})).settings["modelSettings"]
+    assert kept["claude-sonnet-4-6[1m]"]["autoCompactWindow"] == "auto"
+    assert kept["claude-opus-5-5"]["autoCompactWindow"] == 300_000
+
+    def problems_for(value):
+        return validate(_valid_doc(settings={"modelSettings": value}))
+
+    # the engine keeps no "max" for a model, so it is not accepted here
+    assert problems_for({"m": {"effortLevel": "max"}}) == [
+        "settings.modelSettings.m.effortLevel: expected one of low, medium, high, xhigh"
+    ]
+    assert problems_for({"m": {"autoCompactWindow": 99_999}}) == [
+        "settings.modelSettings.m.autoCompactWindow: expected 'auto' or an int between 100000 and 1000000"
+    ]
+    assert problems_for({"m": {"autoCompactWindow": 1_000_001}}) != []
+    assert problems_for({"m": {"autoCompactWindow": 100_000}}) == []
+    assert problems_for({"m": {"autoCompactWindow": 1_000_000}}) == []
+    assert problems_for({"m": {"autoCompactWindow": True}}) != []
+    assert problems_for({"m": {"autoCompactWindow": "soon"}}) != []
+    # an unknown sub-key
+    assert problems_for({"m": {"maxEffortLevel": "high"}}) == ["settings.modelSettings.m.maxEffortLevel: unknown key"]
+    # an id with a dot (row keys split on dots), a space or nothing
+    for bad in ("claude-opus-4.5", "a b", "", "x" * 65):
+        assert problems_for({bad: {"effortLevel": "low"}}) == [
+            f"settings.modelSettings: model id {bad!r} must be letters, digits, '-', '_' or brackets"
+        ]
+    # shapes
+    assert problems_for("high") != []
+    assert problems_for({"m": "high"}) != []
+    assert problems_for([]) != []
 
 
 def test_validate_rejects_unknown_env_name():
@@ -416,6 +457,25 @@ def test_roles_table_validates_and_round_trips():
     assert "[roles" not in dump_profile(load_dict(_valid_doc(roles={"writer": {}})))
     # a profile with no roles has an empty roles dict
     assert load_dict(_valid_doc()).roles == {}
+
+
+def test_model_settings_round_trips_through_dump_and_load():
+    doc = _valid_doc(
+        settings={
+            "effortLevel": "high",
+            "modelSettings": {
+                "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300_000},
+                "claude-sonnet-4-6[1m]": {"autoCompactWindow": "auto"},
+            },
+        }
+    )
+    profile = load_dict(doc)
+    text = dump_profile(profile)
+    assert "modelSettings" in text
+    reloaded = loads_profile(text)
+    assert reloaded == profile
+    assert reloaded.settings["modelSettings"]["claude-sonnet-4-6[1m]"]["autoCompactWindow"] == "auto"
+    assert dump_profile(reloaded) == text
 
 
 def test_dump_profile_omits_empty_sections():
