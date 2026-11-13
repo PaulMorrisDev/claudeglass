@@ -470,15 +470,11 @@ def _measure(
         before = [s for b, _a in sides for s in b]
         after = [s for _b, a in sides for s in a]
         if _after_units(point, agent, key, before, after, bundles, pricing) >= MIN_UNITS:
-            result = counterfactual.without_change(point, before, after, bundles, pricing)
-            row = next(
-                (
-                    r
-                    for r in (result.per_key if result else [])
-                    if (r.agent or None, r.key) == (agent, key) and r.fidelity in ("repriced", "simulated")
-                ),
-                None,
-            )
+            # The lever's own row, whatever else the point changed: the same replies are priced both ways,
+            # so another setting changed at the same moment is in both figures and cancels.
+            row = counterfactual.key_row(point, agent, key, before, after, bundles, pricing)
+            if row is not None and row.fidelity not in ("repriced", "simulated"):
+                row = None
             if row is not None:
                 measured = row.without_usd - row.paid_usd
                 # The card's saving as a share of the cost it repriced, applied to what the units

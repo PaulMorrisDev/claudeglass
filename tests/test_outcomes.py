@@ -483,11 +483,11 @@ def _repriced(paid=10.0, without=25.0):
 def test_a_model_change_is_read_exactly_on_the_same_replies(monkeypatch):
     seen = {}
 
-    def fake(point, before, after, bundles, pricing):
+    def fake(point, agent, key, before, after, bundles, pricing):
         seen["sides"] = (len(before), len(after))
-        return _repriced()
+        return _repriced().per_key[0]
 
-    monkeypatch.setattr(counterfactual, "without_change", fake)
+    monkeypatch.setattr(counterfactual, "key_row", fake)
     reading = _read(_point("effective.model"), None, "model", outcomes.Prediction(6.0, 12.0), _exact_world())
     assert reading.method == "exact"
     assert seen["sides"] == (3, 6)
@@ -500,7 +500,7 @@ def test_a_model_change_is_read_exactly_on_the_same_replies(monkeypatch):
 
 
 def test_an_exact_prediction_is_the_cards_share_of_its_cost_applied_to_the_units_without_the_change(monkeypatch):
-    monkeypatch.setattr(counterfactual, "without_change", lambda *a: _repriced())
+    monkeypatch.setattr(counterfactual, "key_row", lambda *a: _repriced().per_key[0])
     world = _exact_world()
     # Measured 15 against a prediction of 20 (8 of 10 repriced, on 25).
     close = _read(_point("effective.model"), None, "model", outcomes.Prediction(8.0, 10.0), world)
@@ -510,11 +510,11 @@ def test_an_exact_prediction_is_the_cards_share_of_its_cost_applied_to_the_units
 
 
 def test_an_exact_fix_needs_five_units_after_pooled_over_projects(monkeypatch):
-    monkeypatch.setattr(counterfactual, "without_change", lambda *a: pytest.fail("too few units"))
+    monkeypatch.setattr(counterfactual, "key_row", lambda *a: pytest.fail("too few units"))
     prediction = outcomes.Prediction(6.0, 12.0)
     assert _read(_point("effective.model"), None, "model", prediction, _exact_world(after=4)).verdict == "too_little_data"
     # Three in each of two projects: six after in all.
-    monkeypatch.setattr(counterfactual, "without_change", lambda *a: _repriced())
+    monkeypatch.setattr(counterfactual, "key_row", lambda *a: _repriced().per_key[0])
     world = _merged(_exact_world(after=3, project="proj-a"), _exact_world(after=3, project="proj-b"))
     reading = _read(_point("effective.model"), None, "model", prediction, world)
     assert reading.after_units == 6 and reading.projects == 1 and reading.verdict == "half_or_more"
@@ -623,6 +623,15 @@ def test_a_main_model_change_that_names_no_model_counts_every_main_session():
     # Green before the change was built: "default" (and an unset value) names no model, so nothing is left out.
     reading = _read_main_model(_main_model_point("p", new="default"), _main_model_world({"p": ([OPUS] * 6, [SONNET] * 6)}))
     assert reading.after_units == 6 and reading.verdict == "half_or_more"
+
+
+@pytest.mark.parametrize("keys", [("effective.model", "effective.effortLevel"), ("effective.model", "agents.gp.tools")])
+def test_a_model_change_made_with_other_settings_is_read_on_its_own_row(keys):
+    # 2 sessions before (too few for the cost-per-reply method), 6 after on Sonnet.
+    world = _main_model_world({"p": ([OPUS] * 2, [SONNET] * 6)})
+    reading = _read_main_model(_main_model_point(keys=keys), world)
+    assert reading.verdict == "half_or_more" and reading.note == ""
+    assert reading.measured_usd / reading.predicted_usd == pytest.approx(1.0)
 
 
 def test_a_fix_with_no_basis_is_not_measured(stub_carry, monkeypatch):

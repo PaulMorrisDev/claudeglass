@@ -542,6 +542,21 @@ def without_change(
     return Counterfactual(paid, without, "before", basis, len(after_facts), per_key)
 
 
+def key_row(
+    point: ChangePoint, agent: str | None, key: str, before_facts, after_facts, bundles: dict, pricing: Pricing
+) -> KeyResult | None:
+    """The row for one lever ``(agent, key)`` of ``point``, priced as
+    :func:`without_change` prices it, whatever else the point changed.
+    ``None`` with fewer than ``impact.MIN_SESSIONS`` sessions after, or when
+    the method has no row for this change."""
+    if len(after_facts) < impact.MIN_SESSIONS:
+        return None
+    after = [bundles[s.session_id] for s in after_facts if s.session_id in bundles]
+    before = [bundles[s.session_id] for s in before_facts if s.session_id in bundles]
+    changes = {(c.get("agent"), c.get("key")): c for c in point.changes if isinstance(c, dict) and "old" in c}
+    return _key_result(key, changes.get((agent, key)), before_facts, after_facts, before, after, pricing, bundles)
+
+
 def for_impact(corpus, pricing: Pricing, units: Units):
     """A ``without`` callback for :func:`impact.impact`: the
     counterfactual for a change point and its sessions, as a dict, or
@@ -569,6 +584,7 @@ __all__ = [
     "carry_on",
     "for_impact",
     "headline",
+    "key_row",
     "since_line",
     "without_change",
 ]
