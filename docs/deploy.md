@@ -478,11 +478,13 @@ that actually delete a row.
   # Deleted 1 file(s).
   ```
 
-  Safe at any time: the store is always a derived cache, never source
+  Safe at any time: the store is a derived cache, never source
   of truth (`service/store.py`'s module docstring) — the next `serve`
   run simply rebuilds it from the transcripts already on disk, the same
   way a downgrade's drop-and-rebuild (`Store.migrate()`, see "The store's
-  schema version" below) does.
+  schema version" below) does. The card marks (what the dashboard kept of
+  the recommendation cards it showed) cannot be rebuilt that way: they stay
+  on this machine, a rebuild keeps them, and `--purge` deletes them.
 
   If one of the files cannot be deleted (for example a `-wal` sidecar
   still held open by another process), `--purge` deletes everything it
@@ -586,8 +588,8 @@ than at UTC's.
   `migrate()` copies `service.db` aside as
   `service.db.bak-<version>-<timestamp>` (and prints where on stderr),
   drops every table and recreates them. The next watcher tick reads the
-  transcripts still on disk again. Your session tags, session ratings
-  and card ratings are put back. Logged "what if" predictions are
+  transcripts still on disk again. Your session tags, session ratings,
+  card ratings and card marks are put back. Logged "what if" predictions are
   re-read from `prediction-log.jsonl` and come back unjudged, so their
   verdicts and seen marks are lost until the dashboard judges them
   again. Transcripts Claude Code has already removed are not rebuilt;

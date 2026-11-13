@@ -155,9 +155,11 @@ below):
   never starts the watcher or the API, and refuses (exit `1`) while a
   `serve` holds the store. Always prints exactly which files it would delete first;
   only actually deletes them when `--yes` is also given. Safe at any
-  time: the store is always a derived cache (`service/store.py`'s module
+  time: the store is a derived cache (`service/store.py`'s module
   docstring), so the next `serve` run simply rebuilds it from the
-  transcripts already on disk. Exits `2` (and deletes nothing) if
+  transcripts already on disk. The card marks (what the dashboard kept of
+  the recommendation cards it showed) cannot be rebuilt that way: they stay
+  on this machine, a rebuild keeps them, and `--purge` deletes them. Exits `2` (and deletes nothing) if
   `--yes` is missing, `0` otherwise (including when there is nothing to
   delete).
 - **`--exit-on-code-change`** sets `ServeOptions.exit_on_code_change`.

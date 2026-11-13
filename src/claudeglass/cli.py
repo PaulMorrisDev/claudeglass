@@ -5477,7 +5477,9 @@ def _cmd_serve_purge(config_dir: Path, *, confirmed: bool, store_path: Path | No
     sidecars. The store is
     always a derived cache (never source of truth -- see
     ``service/store.py``'s module docstring), so this is safe: the next
-    ``serve`` run simply rebuilds it from the transcripts on disk.
+    ``serve`` run simply rebuilds it from the transcripts on disk. The
+    card marks (what the dashboard kept of the cards it showed) are the
+    exception: a rebuild keeps them, and this deletes them.
     Always prints exactly what it would delete; only actually deletes
     when ``confirmed`` (``--yes``) is set. Refuses while a running
     ``serve`` holds the store's lock (``service/storelock.py``): deleting

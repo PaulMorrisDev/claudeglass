@@ -168,6 +168,27 @@ def test_a_fix_made_in_that_project_lands_although_another_project_still_holds_t
     assert _land([_model("sonnet")], snaps, _day(1) + timedelta(hours=1)) == (_day(2), True)
 
 
+def test_every_place_that_says_the_store_can_be_purged_or_rebuilt_names_the_card_marks():
+    root = Path(__file__).resolve().parents[1]
+    places = {
+        "docs/api.md": ("derived cache",),
+        "docs/deploy.md": ("derived cache", "Downgrading rebuilds the store"),
+        "src/claudeglass/cli.py": ("always a derived cache",),
+    }
+    for name, anchors in places.items():
+        text = (root / name).read_text(encoding="utf-8").replace("\r\n", "\n")
+        for anchor in anchors:
+            assert anchor in text, (name, anchor)
+            start = 0
+            while (start := text.find(anchor, start)) != -1:
+                # The paragraph, list item or docstring the sentence is in.
+                begin = max(text.rfind("\n\n", 0, start) + 2, text.rfind("\n- ", 0, start) + 1)
+                ends = [i for i in (text.find("\n\n", start), text.find("\n- ", start)) if i != -1]
+                paragraph = " ".join(text[begin : min(ends) if ends else len(text)].split())
+                assert "card marks" in paragraph, (name, anchor, paragraph[:80])
+                start += len(anchor)
+
+
 def _agent_model(agent: str, value: str) -> dict:
     return {"target": "agent", "key": "model", "agent": agent, "value": value}
 
