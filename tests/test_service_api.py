@@ -1307,6 +1307,124 @@ def test_profile_diff_rows_say_where_each_change_lands_and_come_with_a_prompt(se
     assert "settings profile" in data["prompt"] and "show me the diff" in data["prompt"]
 
 
+def _seed_settings_snapshot(handle, slug, ts, *, effort, layer, agents=(), env_names=(), effort_env_set=False,
+                            model_settings=None, extra=None) -> None:
+    """One config snapshot of ``slug``: its effective effort level and the layer that set it, its agents
+    (name -> tools, or name -> (source, tools)), the env var names it saw and what else is in force."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    def _agent(value):
+        return value if isinstance(value, tuple) else ("user", value)
+
+    effective = {"effortLevel": effort, **(extra or {})}
+    if model_settings:
+        effective["modelSettings"] = model_settings
+    handle.store.upsert_snapshot(
+        project_slug=slug,
+        project_root_path=rf"C:\Users\definitely-not-a-real-person\.claude\projects\{slug}",
+        ts=ts,
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "project_slug": snapshot_project_key(slug),
+                "effective": effective,
+                "effective_provenance": {key: (layer if key == "effortLevel" else "user") for key in effective},
+                "managed_keys": [],
+                "env_names": list(env_names),
+                "content_layers": {"effort_level_env_set": effort_env_set},
+                "agents": {
+                    name: {"name": name, "source": _agent(v)[0], "tools": _agent(v)[1]} for name, v in dict(agents).items()
+                },
+                "effective_agents": {
+                    name: {"source": _agent(v)[0], "model": None, "effort": None, "max_turns": None}
+                    for name, v in dict(agents).items()
+                },
+            }
+        ),
+    )
+
+
+def test_profile_diff_reads_the_picked_projects_snapshot(two_project_server):
+    handle = two_project_server
+    # proj-beta is older and has no project file setting the effort level; proj-alpha is the newest
+    # snapshot, sets it in .claude/settings.json and has an agent that writes code.
+    _seed_settings_snapshot(handle, "proj-beta", "2026-10-01T12:00:00Z", effort="low", layer="user",
+                            agents={"researcher": "Read, Grep", "builder": ("project", "Read, Edit")})
+    _seed_settings_snapshot(handle, "proj-alpha", "2026-10-02T12:00:00Z", effort="high", layer="project_shared",
+                            agents={"implementer": "Read, Edit"})
+
+    def effort_row(query):
+        data = handle.get_json(f"/api/profiles/implementation-heavy/diff{query}")[1]["data"]
+        return data, next(r for r in data["settings"] if r["setting"] == "effortLevel")
+
+    # No project picked: the newest snapshot of any project. It names no project file: which project's
+    # file it would be is not something the reader chose.
+    data, row = effort_row("")
+    assert (row["current_value"], row["overridden_by"]) == ("high", None)
+    assert [r["agent"] for r in data["agents"]] == ["implementer"] * 3
+    # What the agent notes say follows the pick too: every project's project agents (here beta's builder)
+    # count with none picked; with alpha picked, only alpha's own do.
+    data, _ = effort_row("?scope=project-local")
+    assert [r["agent"] for r in data["agents"]] == ["builder"] * 3
+    data, _ = effort_row("?project=proj-alpha&scope=project-local")
+    assert data["agents"] == []
+    assert [n for n in data["notes"] if "agent that writes code" in n] == [
+        "This profile also changes the agent that writes code. None of this project's agents in .claude/agents "
+        "is named like implementer, fixer or builder and can edit files, so no agent file changes. "
+        'Your agent implementer in ~/.claude/agents writes code. '
+        'To change it, pick "Your user settings, every project" above.'
+    ]
+    # Project alpha picked: its own snapshot, so its project file and its agents.
+    data, row = effort_row("?project=proj-alpha")
+    assert (row["current_value"], row["overridden_by"]) == (
+        "high",
+        "This project's .claude/settings.json sets it too and wins.",
+    )
+    assert [r["agent"] for r in data["agents"]] == ["implementer"] * 3
+    # The target file's own layer is the project file: nothing above it.
+    data, row = effort_row("?project=proj-alpha&scope=repo")
+    assert row["overridden_by"] is None
+    # Project beta picked: its snapshot alone, so its value, no override and its (lack of a) writer.
+    data, row = effort_row("?project=proj-beta")
+    assert (row["current_value"], row["overridden_by"]) == ("low", None)
+    assert data["agents"] == []
+    assert any("None of your agents in ~/.claude/agents" in note for note in data["notes"])
+    # Rows that are not settings carry the key with no value.
+    assert all("overridden_by" in r and r["overridden_by"] is None for r in data["agents"] + data["env"])
+    # An unknown project is the usual 400.
+    assert handle.get_json("/api/profiles/implementation-heavy/diff?project=not-a-project")[0].status == 400
+
+
+def test_profile_diff_rows_say_what_wins_over_them_whatever_the_pick(two_project_server):
+    handle = two_project_server
+    _seed_settings_snapshot(
+        handle, "proj-alpha", "2026-10-02T12:00:00Z", effort="high", layer="user", effort_env_set=True,
+        model_settings={"claude-opus-5-5": {"effortLevel": "high"}},
+        env_names=["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], extra={"autoCompactWindow": 500000},
+    )
+
+    def row(profile, setting, query=""):
+        data = handle.get_json(f"/api/profiles/{profile}/diff{query}")[1]["data"]
+        return next(r for r in data["settings"] if r["setting"] == setting)
+
+    for query in ("", "?project=proj-alpha"):
+        assert row("implementation-heavy", "effortLevel", query)["overridden_by"] == (
+            "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
+        )
+        assert row("overnight-batch", "autoCompactWindow", query)["overridden_by"] == (
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW is set and wins over this setting."
+        )
+        assert row("overnight-batch", "cleanupPeriodDays", query)["overridden_by"] is None
+    # Without the effort env var, the model's own effort level is what wins.
+    _seed_settings_snapshot(
+        handle, "proj-alpha", "2026-10-03T12:00:00Z", effort="high", layer="user",
+        model_settings={"claude-opus-5-5": {"effortLevel": "high"}},
+    )
+    assert row("implementation-heavy", "effortLevel")["overridden_by"] == (
+        "claude-opus-5-5 has its own effort level, which wins for it."
+    )
+
+
 def test_profile_diff_notes_missing_snapshot_when_store_has_none(tmp_path, monkeypatch):
     corpus = _build_corpus(tmp_path)
     _install_fake_rebuild(monkeypatch, corpus)

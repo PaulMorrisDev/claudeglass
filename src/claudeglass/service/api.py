@@ -2635,12 +2635,26 @@ def make_handler(
         if scope not in _VALID_PROFILE_SCOPES:
             return _bad_request(f"'scope' must be one of {_VALID_PROFILE_SCOPES}")
 
+        # PF1: the drawer follows the project picker, so "now", the agents
+        # and what wins over a change are the picked project's own.
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+
         notes: list[str] = []
-        snapshot = _config_snapshot_with_every_project_agents()
+        snapshot = _config_snapshot_with_every_project_agents(project)
+        env_names: set[str] = set()
+        effort_env_set = False
         if snapshot is not None:
             effective = snapshots_mod.effective_config(snapshot)
             provenance = snapshots_mod.effective_provenance(snapshot)
             managed_keys = set(snapshots_mod.managed_keys(snapshot))
+            for field in ("env_names", "effective_env_names"):
+                names = snapshot.data.get(field)
+                if isinstance(names, list):
+                    env_names.update(str(n) for n in names)
+            content_layers = snapshot.data.get("content_layers")
+            effort_env_set = bool(isinstance(content_layers, dict) and content_layers.get("effort_level_env_set"))
             # Deviation (mirrors profiles/apply.py's own, documented
             # deviation note): snapshots.py has no effective_agents()
             # accessor, so the schema-2 field is read straight off the
@@ -2670,7 +2684,7 @@ def make_handler(
             notes.append("Run the command in the project's own folder: --project-dir . means the folder you run it from.")
         notes.extend(role_notes)
 
-        from ..fixes import LEVER_LABELS, SETTING_TEXT, profile_change_where, profile_prompt
+        from ..fixes import LEVER_LABELS, SETTING_TEXT, profile_change_where, profile_overridden_by, profile_prompt
 
         def _row(row) -> dict:
             parts = row.key.split(".")
@@ -2692,6 +2706,9 @@ def make_handler(
                 "label": LEVER_LABELS.get(name, name),
                 "description": SETTING_TEXT.get(name, ("", "", ""))[0],
                 "where": profile_change_where(row.key, scope),
+                "overridden_by": profile_overridden_by(
+                    row.key, scope, provenance, env_names, effort_env_set, effective.get("modelSettings"), project is not None
+                ),
                 "current_value": row.current_value,
                 "current_provenance": row.current_provenance,
                 "proposed_value": row.proposed_value,
