@@ -233,9 +233,16 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 #: ``card_marks``'s columns in the order the marks export reads them (the
 #: first two are its key).
 _CARD_MARK_COLUMNS = (
-    "card_key", "project", "folders", "rule_id", "agent_type", "changes", "saving_usd", "first_shown_at",
-    "copied_at", "bundled_at", "landed_at", "landed_exact", "updated_at",
+    "card_key", "project", "folders", "rule_id", "agent_type", "changes", "saving_usd", "saving_basis",
+    "first_shown_at", "copied_at", "bundled_at", "landed_at", "landed_exact", "updated_at",
 )
+
+
+def _card_mark_select(held: set[str]) -> str:
+    """``card_marks``'s columns for a ``SELECT``, a column the table does not
+    hold (``saving_basis`` in a store an earlier build of this release made,
+    before the column was added) read as ``NULL``."""
+    return ", ".join(column if column in held else f"NULL AS {column}" for column in _CARD_MARK_COLUMNS)
 
 #: ``session_feedback``'s columns in the order the marks export reads them,
 #: and what a store from before the column existed reads as.
@@ -348,6 +355,24 @@ def _migrate_11_to_12(conn: sqlite3.Connection) -> None:
     ``card_marks`` table. Unlike the mod's events it is not re-ingestible,
     so it is one of the protected tables (:meth:`Store._export_marks`)."""
     conn.execute(schema.CREATE_CARD_MARKS)
+    _add_v12_columns(conn)
+
+
+#: Columns added to a version-12 table after a build of this release first
+#: stamped 12 on a store (nothing bumps the version for them): ``(table,
+#: column, type)``. The version-12 statements create them; a store made
+#: before gains them in :func:`_add_v12_columns`, from the step out of 11 and
+#: whenever it is opened at 12.
+_V12_COLUMNS = (("card_marks", "saving_basis", "REAL"),)
+
+
+def _add_v12_columns(conn: sqlite3.Connection) -> None:
+    """Give a store whose version-12 tables predate :data:`_V12_COLUMNS` the
+    columns, ``NULL`` on every row already there. Idempotent; a table that is
+    not there is left alone."""
+    for table, column, ddl_type in _V12_COLUMNS:
+        if _table_columns(conn, table):
+            _add_column_if_missing(conn, table, column, ddl_type)
 
 
 #: Additive migration ladder for :meth:`Store.migrate`, keyed by the
@@ -663,7 +688,9 @@ class Store:
             else []
         )
         cards = (
-            conn.execute(f"SELECT {', '.join(_CARD_MARK_COLUMNS)} FROM card_marks").fetchall()
+            conn.execute(
+                f"SELECT {_card_mark_select(_table_columns(conn, 'card_marks'))} FROM card_marks"
+            ).fetchall()
             if "card_marks" in tables
             else []
         )
@@ -794,6 +821,7 @@ class Store:
         with conn:
             for statement in schema.ALL_STATEMENTS:
                 conn.executescript(statement)
+            _add_v12_columns(conn)
             if marks is not None:
                 self._reimport_marks(conn, *marks)
             conn.execute(
@@ -1501,10 +1529,12 @@ class Store:
         with _transaction(conn):
             conn.executemany(
                 "INSERT INTO card_marks (card_key, project, folders, rule_id, agent_type, changes, saving_usd, "
-                "first_shown_at, copied_at, bundled_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "saving_basis, first_shown_at, copied_at, bundled_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(card_key, project) DO UPDATE SET folders = excluded.folders, "
                 "rule_id = excluded.rule_id, agent_type = excluded.agent_type, changes = excluded.changes, "
-                "saving_usd = excluded.saving_usd, updated_at = excluded.updated_at, "
+                "saving_usd = excluded.saving_usd, saving_basis = excluded.saving_basis, "
+                "updated_at = excluded.updated_at, "
                 "copied_at = COALESCE(card_marks.copied_at, excluded.copied_at), "
                 "bundled_at = COALESCE(card_marks.bundled_at, excluded.bundled_at), "
                 "landed_at = NULL, landed_exact = NULL",
@@ -1512,7 +1542,7 @@ class Store:
                     (
                         card["key"], project, folders_json, card["rule_id"], card.get("agent_type"),
                         json.dumps(card.get("changes") or [], sort_keys=True, default=str), card.get("saving_usd"),
-                        stamp, copied_at, bundled_at, stamp,
+                        card.get("saving_basis"), stamp, copied_at, bundled_at, stamp,
                     )
                     for card in cards
                 ],
@@ -2801,7 +2831,8 @@ def read_card_marks(path: str | Path) -> list[dict] | None:
             if "card_marks" not in tables:
                 return None
             rows = conn.execute(
-                f"SELECT {', '.join(_CARD_MARK_COLUMNS)} FROM card_marks ORDER BY first_shown_at, project, card_key"
+                f"SELECT {_card_mark_select(_table_columns(conn, 'card_marks'))} FROM card_marks "
+                "ORDER BY first_shown_at, project, card_key"
             ).fetchall()
             return [_card_mark_row(row) for row in rows]
     except sqlite3.Error:

@@ -2905,11 +2905,17 @@ def test_a_moved_sessions_series_is_read_from_the_present_transcript(store: Stor
 # -- what the dashboard kept of the cards it showed (schema 12) ------------------------------
 
 
-def _card(key="spawn-tools-list:x", rule_id="spawn-tools-list", agent_type="x", changes=None, saving_usd=1.5):
+def _card(
+    key="spawn-tools-list:x", rule_id="spawn-tools-list", agent_type="x", changes=None, saving_usd=1.5,
+    saving_basis=None,
+):
     """A ``card_marks.card_row``-shaped dict."""
     if changes is None:
         changes = [{"target": "agent", "key": "tools", "agent": "x", "value": ["Read"]}]
-    return {"key": key, "rule_id": rule_id, "agent_type": agent_type, "changes": changes, "saving_usd": saving_usd}
+    return {
+        "key": key, "rule_id": rule_id, "agent_type": agent_type, "changes": changes, "saving_usd": saving_usd,
+        "saving_basis": saving_basis,
+    }
 
 
 _T1, _T2, _T3, _T4 = (f"2026-11-0{n}T09:00:00Z" for n in (1, 2, 3, 4))
@@ -2931,6 +2937,19 @@ def test_a_card_mark_keeps_when_it_was_first_shown_and_its_first_copy(store: Sto
     assert (row["card_key"], row["rule_id"], row["agent_type"], row["project"]) == (
         "spawn-tools-list:x", "spawn-tools-list", "x", "*",
     )
+
+
+def test_a_card_mark_keeps_the_cards_basis_with_its_estimate(store: Store) -> None:
+    store.mark_cards([_card(saving_basis=54_020.0)], mark="shown", project="*", folders=[], now=_T1)
+    (row,) = store.card_marks()
+    assert row["saving_basis"] == 54_020.0
+    # Rewritten with the saving at every mark; a card row with none writes none.
+    store.mark_cards([_card(saving_usd=2.5, saving_basis=61_000.0)], mark="shown", project="*", folders=[], now=_T2)
+    (row,) = store.card_marks()
+    assert (row["saving_usd"], row["saving_basis"]) == (2.5, 61_000.0)
+    store.mark_cards([_card(saving_usd=2.5)], mark="copied", project="*", folders=[], now=_T3)
+    (row,) = store.card_marks()
+    assert row["saving_basis"] is None
 
 
 def test_a_copy_of_a_card_never_shown_counts_it_shown_then(store: Store) -> None:
@@ -3019,6 +3038,67 @@ def test_migrate_upgrades_a_v11_store_with_the_card_marks_table(tmp_path) -> Non
         upgraded.close()
 
 
+def _without_column(path, table: str, column: str) -> None:
+    """Make ``path`` the store an earlier build of this release left: the
+    column is not there (the version stamp, 12, is as it was)."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    conn.commit()
+    conn.close()
+
+
+def test_a_store_already_at_12_without_the_basis_column_opens_and_reads_none(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v12-early.db"
+    store = Store(str(db_path))
+    store.open()
+    store.mark_cards([_card()], mark="shown", project="proj-a", folders=["proj-a"], now=_T1)
+    store.close()
+    _without_column(db_path, "card_marks", "saving_basis")
+
+    # The tuning export reads it without writing: the column reads as None.
+    (row,) = store_mod.read_card_marks(db_path)
+    assert row["saving_basis"] is None and row["card_key"] == "spawn-tools-list:x"
+
+    reopened = Store(str(db_path))
+    reopened.open()
+    try:
+        assert reopened.schema_version() == schema.SCHEMA_VERSION == 12
+        (row,) = reopened.card_marks()
+        assert row["saving_basis"] is None and row["saving_usd"] == 1.5
+        reopened.mark_cards([_card(saving_basis=54_020.0)], mark="shown", project="proj-a", folders=["proj-a"], now=_T2)
+        assert reopened.card_marks()[0]["saving_basis"] == 54_020.0
+    finally:
+        reopened.close()
+
+
+def test_migrate_adds_the_basis_column_to_a_v11_store_that_held_card_marks(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v11-marks.db"
+    store = Store(str(db_path))
+    store.open()
+    store.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T1)
+    store.close()
+    _without_column(db_path, "card_marks", "saving_basis")
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE meta SET value = '11' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    conn.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
+        (row,) = upgraded.card_marks()
+        assert row["saving_basis"] is None and row["first_shown_at"] == _T1
+    finally:
+        upgraded.close()
+
+
 def test_card_marks_survive_a_downgrade_and_the_upgrade_after_it(tmp_path, monkeypatch) -> None:
     from claudeglass.service import schema
     from claudeglass.service import store as store_mod
@@ -3082,6 +3162,42 @@ def test_card_marks_survive_a_rebuild_from_a_newer_store(tmp_path) -> None:
         assert row["changes"] == _card()["changes"] and row["saving_usd"] == 1.5
     finally:
         reopened.close()
+
+
+def test_a_card_marks_basis_survives_a_rebuild_from_a_newer_store(tmp_path) -> None:
+    from claudeglass.service import schema
+
+    db_path = tmp_path / "newer-basis.db"
+    store = Store(str(db_path))
+    store.open()
+    store.mark_cards([_card(saving_basis=54_020.0)], mark="shown", project="proj-a", folders=["proj-a"], now=_T1)
+    store.close()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(schema.SCHEMA_VERSION + 1),))
+    conn.commit()
+    conn.close()
+
+    reopened = Store(str(db_path))
+    reopened.open()
+    try:
+        (row,) = reopened.card_marks()
+        assert row["saving_basis"] == 54_020.0
+    finally:
+        reopened.close()
+
+    # A newer store whose card_marks lacks the column (an earlier build of this release) rebuilds too.
+    _without_column(db_path, "card_marks", "saving_basis")
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(schema.SCHEMA_VERSION + 1),))
+    conn.commit()
+    conn.close()
+    again = Store(str(db_path))
+    again.open()
+    try:
+        (row,) = again.card_marks()
+        assert row["saving_basis"] is None and row["card_key"] == "spawn-tools-list:x"
+    finally:
+        again.close()
 
 
 def test_prune_card_marks_drops_rows_not_marked_within_the_retention(store: Store) -> None:
