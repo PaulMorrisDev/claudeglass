@@ -3674,6 +3674,19 @@ def test_agent_verdicts_are_old_only_when_an_agent_run_since_has_none():
     assert card("2026-11-02").endswith(TAG_AGE_LINE.format("2026-10-23"))
 
 
+def test_the_effort_table_dates_a_row_a_week_old_to_the_day():
+    def cells(days_before: float) -> list:
+        newest = datetime(2026, 11, 8, tzinfo=timezone.utc)
+        row = _cycle("2026-11-01", tag=CaptureTag(level="easy"), effort="high")
+        row.ts = newest - timedelta(days=days_before)
+        h = Habits(tz="UTC", cycles=[row, _cycle("2026-11-08")])
+        return [r[-1] for r in _table(habits.section_from(h), "habits_effort_fit").rows]
+
+    assert cells(7) == ["2026-11-01"]
+    assert cells(6.99) == [""]
+    assert cells(8) == ["2026-10-31"]
+
+
 def _briefs_notes(h: Habits) -> list[str]:
     return _table(habits.section_from(h), "habits_briefs").notes
 
