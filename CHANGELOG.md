@@ -64,7 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The dashboard keeps a record of the cards it showed and copied, and of
   which fixes landed** (store version 12), for the tuning file's `cards`
   block. It stays on this machine, a rebuild keeps it, and `serve --purge`
-  deletes it.
+  deletes it. Going back to 0.16.0 rebuilds the store from the transcripts
+  still on disk, after copying the file to `service.db.bak-12-<time>`: a
+  session whose transcript is gone and the verdicts of judged estimates
+  drop out and stay only in that backup. Your tags, ratings and this
+  record are kept.
 - **Fable 5.2 and Mythos 5.2 have rate card rows, and `fable` and `best`
   now mean Fable 5.2.** Fable 5.1 keeps its row.
 - **`check` and `review` take `--claude-root`**, the folder that holds your
