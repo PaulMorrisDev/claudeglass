@@ -4657,14 +4657,39 @@ def agent_grounded(tag: str, facts: dict | None) -> str:
     return " ".join(words)
 
 
+#: The least buffer the pipe a worker reads its job from gets on Windows:
+#: the system's own is 4 KB, smaller than a turn's job, so the write would
+#: wait until the worker had started Python and read it.
+_JOB_PIPE_BYTES = 1 << 16
+
+
+def _job_pipe(size: int) -> tuple[int, int]:
+    """Windows: a pipe whose buffer holds ``size`` bytes, as ``(read file
+    descriptor, write handle)``. Raises when it can't be made."""
+    import _winapi
+    import msvcrt
+
+    read, write = _winapi.CreatePipe(None, max(_JOB_PIPE_BYTES, 2 * size))
+    try:
+        return msvcrt.open_osfhandle(read, os.O_RDONLY), write
+    except BaseException:
+        _winapi.CloseHandle(read)
+        _winapi.CloseHandle(write)
+        raise
+
+
 def spawn_judge(config_dir: Path, job: dict) -> None:
     """Hand ``job`` to a worker (the launcher with ``--judge``) that
     outlives this call, so the Stop hook returns at once and Haiku's
     answer still lands when Claude Code has moved on or, run with ``-p``,
-    exited."""
+    exited. The job goes through a pipe, never a file. On Windows the pipe
+    is made with a buffer that holds it (:func:`_job_pipe`), so the write
+    doesn't wait for the worker to start; the write still comes after the
+    worker has started, so a smaller buffer only waits as long as the
+    system's own would. A pipe that can't be made is the system's own."""
     import subprocess
 
-    options: dict = {"stdin": subprocess.PIPE, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    options: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
         options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -4672,9 +4697,32 @@ def spawn_judge(config_dir: Path, job: dict) -> None:
     # -I -S as the hook itself runs: no user site or PYTHON* settings.
     launcher = Path(__file__).resolve().with_name(LAUNCHER_FILE)
     command = [sys.executable, "-I", "-S", str(launcher), "--judge", "--config-dir", str(config_dir)]
-    worker = subprocess.Popen(command, **options)
-    worker.stdin.write(json.dumps(job).encode("utf-8"))
-    worker.stdin.close()
+    data = json.dumps(job).encode("utf-8")
+    pipe = None
+    if _WINDOWS:
+        try:
+            pipe = _job_pipe(len(data))
+        except Exception:  # noqa: BLE001 - the system's own pipe instead
+            pipe = None
+    if pipe is None:
+        worker = subprocess.Popen(command, stdin=subprocess.PIPE, **options)
+        worker.stdin.write(data)
+        worker.stdin.close()
+        return
+    import _winapi
+
+    read, write = pipe
+    try:
+        subprocess.Popen(command, stdin=read, **options)
+    except BaseException:
+        _winapi.CloseHandle(write)
+        raise
+    finally:
+        os.close(read)
+    try:
+        _winapi.WriteFile(write, data)
+    finally:
+        _winapi.CloseHandle(write)
 
 
 def _claude_command() -> str | None:

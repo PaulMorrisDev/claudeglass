@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1851,3 +1852,67 @@ def test_the_append_only_handle_makes_the_file_and_writes_at_its_end(tmp_path):
     assert HOOK._append_windows(path, b"a\n") and HOOK._append_windows(path, b"b\n")
     assert path.read_bytes() == b"a\nb\n"
     assert HOOK._append_windows(tmp_path / "missing" / "2026-11.jsonl", b"x\n") is False
+
+
+def _stand_in_worker(tmp_path: Path, delay_s: float) -> tuple[Path, Path]:
+    """A copy of the hook whose launcher is a stand-in worker: it waits ``delay_s`` seconds, as a worker
+    starting Python does, then keeps the length and hash of what it read. No model is called."""
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    shutil.copy(MODULE, hooks / cat.HOOK_MODULE)
+    got = tmp_path / "got.txt"
+    (hooks / cat.HOOK_SCRIPT).write_text(
+        "import hashlib, sys, time\n"
+        f"time.sleep({delay_s})\n"
+        "data = sys.stdin.buffer.read()\n"
+        f"open({str(got)!r}, 'w', encoding='utf-8').write(str(len(data)) + ' ' + hashlib.sha256(data).hexdigest())\n",
+        encoding="utf-8",
+    )
+    return hooks, got
+
+
+def _job_of(size: int) -> dict:
+    return {"ts": "2026-11-13T12:00:00Z", "reply": "msg_1", "keys": ["task"], "system": "s" * 3000,
+            "excerpt": "e" * size, "facts": {}}
+
+
+def _arrived(got: Path, job: dict, wait_s: float = 20.0) -> bool:
+    data = json.dumps(job).encode("utf-8")
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline and not (got.exists() and got.stat().st_size):
+        time.sleep(0.05)
+    return got.exists() and got.read_text(encoding="utf-8") == f"{len(data)} {hashlib.sha256(data).hexdigest()}"
+
+
+def test_handing_a_job_to_the_worker_does_not_wait_for_it_to_start(tmp_path):
+    """A Stop hook that hands Haiku's job to its worker returns at once, even when the worker is slow to
+    read it, and the worker still gets the whole job after the hook has exited."""
+    hooks, got = _stand_in_worker(tmp_path, 2.0)
+    job = _job_of(9000)  # bigger than the 4 KB pipe Windows makes, smaller than any other system's
+    (tmp_path / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    code = (
+        "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import capture_hook; "
+        "capture_hook.spawn_judge(Path(sys.argv[2]), json.loads(Path(sys.argv[3]).read_text(encoding='utf-8')))"
+    )
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(hooks), str(tmp_path), str(tmp_path / "job.json")],
+                          capture_output=True, timeout=30)
+    took = time.monotonic() - started
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    assert took < 1.5, took
+    assert _arrived(got, job)
+
+
+def test_a_job_pipe_that_cannot_be_made_hands_the_job_over_through_the_systems_own(tmp_path, monkeypatch):
+    hooks, got = _stand_in_worker(tmp_path, 0)
+    spec = importlib.util.spec_from_file_location("_capture_hook_stand_in", hooks / cat.HOOK_MODULE)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+
+    def no_pipe(size):
+        raise OSError("no pipe")
+
+    monkeypatch.setattr(hook, "_job_pipe", no_pipe)
+    job = _job_of(9000)
+    hook.spawn_judge(tmp_path, job)
+    assert _arrived(got, job)
