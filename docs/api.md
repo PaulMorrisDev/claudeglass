@@ -1039,9 +1039,18 @@ Every key a profile may set, for the dashboard's profile form.
 
 `data`: `{"settings": [Lever, ...], "agents": [Lever, ...], "env": [str, ...], "archetypes": [str, ...], "scopes": [{"key", "label"}, ...]}`,
 where a `Lever` is `{"key", "label", "kind", "values", "min", "max", "description", "tradeoff"}`.
-`kind` is `str`, `enum`, `int`, `bool` or `list[str]`; `values` is the
+`kind` is `str`, `enum`, `int`, `bool`, `list[str]`, `map[str,bool]`,
+`map[str,enum]` or `map[str,model]`; `values` is the
 allowed list for an `enum` (else `null`), `min`/`max` the range for an
-`int`. `label`, `description` and `tradeoff` come from
+`int`. `modelSettings` is the one `map[str,model]` lever: a table of model
+id to that model's own `effortLevel` (`low`, `medium`, `high` or `xhigh`)
+and `autoCompactWindow` (`"auto"`, or a whole number from 100,000 to
+1,000,000), the two keys of `profiles.schema.MODEL_SETTINGS_ALLOWLIST`
+(the second has the schema's `int|auto` kind). The route lists
+`modelSettings` among `settings` with the label "Per-model settings" and
+`values`, `min` and `max` of `null`; it does not list those two sub-keys,
+so `int|auto` is never returned here. The dashboard's profile form has no
+box for `modelSettings`: it keeps the one in the profile it starts from. `label`, `description` and `tradeoff` come from
 `fixes.LEVER_LABELS`/`fixes.SETTING_TEXT`, the same text the
 recommendation explainers use. `env` lists the environment variable
 names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
@@ -1087,7 +1096,7 @@ service's privacy rule forbids regardless of who supplied it — so a
 `--project-dir`; fill it in yourself when you run the command.
 
 `data`: `{"profile_id": str, "scope": str, "diff": str, "settings": [DiffRow, ...], "agents": [DiffRow, ...], "env": [DiffRow, ...], "apply_command": str, "dry_run_command": str, "launch_command": str, "prompt": str, "notes": [str, ...]}`,
-where a `DiffRow` is `{"key", "setting", "agent", "role", "label", "description", "where", "overridden_by", "current_value", "current_provenance", "proposed_value", "target_file", "managed"}`
+where a `DiffRow` is `{"key", "setting", "agent", "model", "role", "label", "description", "where", "overridden_by", "current_value", "current_provenance", "proposed_value", "target_file", "managed", "recorded"}`
 (`profiles.diff.DiffRow`'s own fields, split by key prefix into the
 three lists rather than left as one flat `rows` array — `settings.*` /
 `agents.<name>.*` / `env.*`). The display fields: `setting` is the key
@@ -1095,7 +1104,18 @@ without its prefix (dotted agent keys such as `experimental.cacheTtl`
 stay whole), `agent` the agent's name for an `agents.*` row (else
 `null`), `role` `"writer"` when the row's key came from the profile's
 `[roles.writer]` table rather than from an `[agents.<name>]` table of
-its own (else `null`), `label`/`description` its plain name and what it controls, and
+its own (else `null`). A profile's `modelSettings` gives one `settings` row
+per model and key, keyed `settings.modelSettings.<id>.<key>` (a model id has
+no dot): its `setting` is `modelSettings.<key>` (`modelSettings.effortLevel`
+or `modelSettings.autoCompactWindow`), `model` is the id (else `null`),
+and `label`/`description` are the "for one model" texts. `recorded` is
+`false` when the snapshot has an entry for that model that lacks the key, so
+`current_value` `null` does not mean "not set": the config snapshot keeps a
+model's `effortLevel` and nothing else of its entry, so this is every
+`modelSettings.autoCompactWindow` row of a model that has an entry. The
+dashboard writes "not recorded" under "Now" for such a row. It is `true` for
+every other row, including a model with no entry at all (nothing is set
+there). `label`/`description` its plain name and what it controls, and
 `where` the file the change is written to under the chosen `scope`
 (`fixes.profile_change_where`). `overridden_by` is one plain sentence saying
 what wins over the change, or `null` (`fixes.profile_overridden_by`): a
@@ -2116,7 +2136,16 @@ Without it, a second save is `409` (`error.code: "conflict"`, message
 
 `data`: the `POST /api/profiles` result plus `skipped_managed`: the
 allowlisted setting names left out because managed settings control
-them. `201` on success.
+them, and `skipped_project_agents`: the names of agents that belong to one
+project (`effective_agents` source `project`), sorted, left out (`[]` when
+there are none). Only the user's own agents (source `user`) are saved,
+each with the `model`, `effort`, `maxTurns` and `experimental.cacheTtl` it
+sets (`effective_agents` calls the last two `max_turns` and
+`experimental_cache_ttl`): `apply` looks for an agent's file in the user's
+folder at its default scope, so a project agent in the profile would get the
+whole profile refused. `modelSettings` is saved a model at a time, each
+model's entry checked on its own, so one the schema refuses (no effort level
+recorded, an id with a dot) drops only itself. `201` on success.
 
 ### `POST /api/whatif`
 
