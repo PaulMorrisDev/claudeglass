@@ -711,6 +711,13 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "not thought of yet.",
         "Remove the instruction from your CLAUDE.md and approve plans as they come.",
     ),
+    "run-split:plugin-agent": (
+        "Nowhere in Claude Code's config: how the main session hands work to this agent. The prompt adds an "
+        "instruction to your CLAUDE.md, and leaves the agent's file to its plugin.",
+        "Each fresh run knows only its task and the note, so it may read some files again, and a thin note can "
+        "miss a decision the last run made.",
+        "Remove the instruction from your CLAUDE.md.",
+    ),
     "run-split": (
         "Nowhere in Claude Code's config: how the main session hands work to this agent. The prompt adds an "
         "instruction to your CLAUDE.md, and a line to the agent's file if it has one.",

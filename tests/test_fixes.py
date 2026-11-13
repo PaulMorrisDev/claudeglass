@@ -1118,6 +1118,30 @@ def test_a_plugin_agents_run_split_prompt_names_no_agent_file():
     assert ".claude/agents/implementer.md" in prompt("implementer")
 
 
+def test_a_plugin_agents_run_split_explainer_names_no_agent_file():
+    from claudeglass import advice
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Diagnostics, PricingMeta, Recommendation, ReportMeta, ReportModel
+    from claudeglass.units import Units
+
+    report = ReportModel(
+        meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)), sections=[], diagnostics=Diagnostics(lines=1000)
+    )
+
+    def rows(agent):
+        rec = Recommendation(
+            id="run-split", severity="advice", category="settings", title="t", why="Long runs.", agent_type=agent
+        )
+        (rec,) = advice.finish([rec], report, None, Units())
+        fixes_mod.attach_fixes([rec])
+        return [text for row in rec.fixes[0]["explainer"] for text in row]
+
+    plugin_rows = rows("p:a")
+    assert not any("agent's file if it has one" in text or "line from the agent's file" in text for text in plugin_rows)
+    assert any("leaves the agent's file to its plugin" in text for text in plugin_rows)
+    assert any("agent's file if it has one" in text for text in rows("implementer"))
+
+
 def test_profile_overridden_by_names_a_model_whose_own_auto_compact_window_wins():
     from claudeglass.fixes import profile_overridden_by
 
