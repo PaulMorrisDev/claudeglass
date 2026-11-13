@@ -12,6 +12,7 @@ import copy
 import itertools
 import json
 import re
+import shutil
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 
@@ -413,6 +414,26 @@ def test_summaries_say_what_each_cost_and_saved_and_how_many_replies_followed(tm
     assert block["read_saving_usd"] == pytest.approx(3 * 80_000 * rate, abs=1e-6)
     even = ((block["request_usd"] + block["write_usd"]) / 3) / (block["read_saving_usd"] / 3)
     assert block["paid_back"] == sum(1 for followed in (1, 1, 1) if followed >= even)
+
+
+def test_two_bundles_with_one_session_id_each_count_their_own_summaries(tmp_path):
+    """A project folder copied to keep its history, or two projects roots holding one session, make two
+    bundles with one session id. Each takes its own records off the front of that id's list, so the
+    export is built and each summary is counted once."""
+    w = _mini_world(tmp_path)
+    project = tmp_path / "projects" / "proj-mini"
+    twin = project.parent / "proj-mini-copy"
+    shutil.copytree(project, twin)
+    corpus = load_corpus([project, twin])
+    assert len(corpus.sessions) == 2 and len({b.session_id for b in corpus.sessions}) == 1
+    doc = tuning.build(corpus, w.config, w.pricing, config_dir=w.config_dir, days=DAYS, today=TODAY, claude_root=w.claude_root)
+    block = doc["figures"]["summaries"]
+    assert block["summaries"] == doc["compactions"]["summaries"] == 6
+    assert (block["auto"], block["sized"]) == (2, 6)
+    assert block["followed_to_next"] == {"to_10": 4} and block["followed_to_end"] == {"to_10": 2}
+    once = tuning._figures(_ctx(w))["summaries"]
+    assert block["request_usd"] == pytest.approx(2 * once["request_usd"], abs=1e-6)
+    assert block["write_usd"] == pytest.approx(2 * once["write_usd"], abs=1e-6)
 
 
 def test_a_summary_pays_back_when_the_replies_after_it_reach_the_mean_break_even(tmp_path):

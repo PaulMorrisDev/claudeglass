@@ -2184,6 +2184,10 @@ def _figure_summaries(ctx: _Ctx) -> dict | None:
     paid back when the replies that followed it reach the mean break-even: the request and the cache
     written after it, over what one reply saves."""
     stats, _main_cost = ctx.compactions
+    # ``ctx.compactions`` folds the sessions in ``ctx.sessions``' order, each main transcript before its
+    # agents', and makes one record per boundary of a transcript in order (none for a scheduled one). So a
+    # session id two bundles share (a project folder copied, or read from two roots) holds each bundle's
+    # records one after the other, and each takes its own off the front of the list.
     records: dict[str, list] = {}
     for record in stats.records:
         if record.kind not in compaction_mod.AGENT_KINDS:
@@ -2196,16 +2200,19 @@ def _figure_summaries(ctx: _Ctx) -> dict | None:
     followed_all: list[int] = []
     for s in ctx.sessions:
         top = s.top
-        found = records.get(top.meta.session_id)
-        if not found or scheduled_main_session(top):
+        if scheduled_main_session(top):
+            continue
+        priced = compaction_mod._priced_turns(top)
+        starts = [i for _event, i in compaction_mod._correlate_compactions_to_turn_index(top, priced)]
+        ahead = records.get(top.meta.session_id, [])
+        found, ahead[: len(starts)] = ahead[: len(starts)], []
+        if not found:
             continue
         if not measured.measures(top, "estimated"):
             unmeasured += len(found)
             continue
         model = _dominant_transcript_model(top)
         rates = pricing.resolve_model(model) if pricing is not None and model else None
-        priced = compaction_mod._priced_turns(top)
-        starts = [i for _event, i in compaction_mod._correlate_compactions_to_turn_index(top, priced)]
         if pricing is not None:
             request += sum(
                 price_turn(t, pricing.resolve_model(t.model)).total for t in top.turns if t.estimated == "compaction"
