@@ -1430,6 +1430,7 @@ def append_prediction_log(
     predicted_pct: float | None,
     fidelity: str,
     now: datetime | None = None,
+    basis: float | None = None,
 ) -> str:
     """Log one whatif estimate worth checking against what actually
     happened (EST-P5), so it can later be matched to a real change point
@@ -1438,7 +1439,9 @@ def append_prediction_log(
     ``service/schema.py``'s "Version 7" paragraph); ``agent`` is an agent
     type or ``None`` for a main-session/global change. Returns the
     prediction's own generated id (a stable key so re-ingesting the same
-    log line twice, e.g. on a later watcher tick, is a no-op)."""
+    log line twice, e.g. on a later watcher tick, is a no-op). ``basis`` is
+    what the estimate is a share of -- the observed cost it repriced, or the
+    tokens per start it takes out -- or ``None`` when it names none."""
     resolved_dir = _resolve_config_dir(config_dir)
     resolved_dir.mkdir(parents=True, exist_ok=True)
     prediction_id = uuid.uuid4().hex[:16]
@@ -1452,6 +1455,7 @@ def append_prediction_log(
         "predicted_usd": predicted_usd,
         "predicted_pct": predicted_pct,
         "fidelity": fidelity,
+        "basis": basis,
     }
     with open(resolved_dir / PREDICTION_LOG_NAME, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")

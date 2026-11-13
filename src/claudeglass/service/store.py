@@ -363,7 +363,7 @@ def _migrate_11_to_12(conn: sqlite3.Connection) -> None:
 #: column, type)``. The version-12 statements create them; a store made
 #: before gains them in :func:`_add_v12_columns`, from the step out of 11 and
 #: whenever it is opened at 12.
-_V12_COLUMNS = (("card_marks", "saving_basis", "REAL"),)
+_V12_COLUMNS = (("card_marks", "saving_basis", "REAL"), ("predictions", "basis", "REAL"))
 
 
 def _add_v12_columns(conn: sqlite3.Connection) -> None:
@@ -2644,19 +2644,21 @@ class Store:
 
     def upsert_prediction(
         self, *, prediction_id: str, ts: str, source: str, measure_key: str, agent: str | None,
-        predicted_usd: float | None, predicted_pct: float | None, fidelity: str,
+        predicted_usd: float | None, predicted_pct: float | None, fidelity: str, basis: float | None = None,
     ) -> bool:
         """Ingest one ``prediction-log.jsonl`` record
         (``watcher._scan_predictions``). A prediction is immutable once
         logged, so this is ``INSERT OR IGNORE`` keyed on ``prediction_id``
         -- a repeat tick over an already-ingested line is a no-op.
+        ``basis`` is what the estimate was a share of (the observed cost, or
+        the tokens per start), ``None`` when the line names none.
         Returns whether a new row was actually inserted."""
         conn = self._connection()
         cursor = conn.execute(
             "INSERT OR IGNORE INTO predictions "
-            "(id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (prediction_id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, _now()),
+            "(id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, created_at, basis) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (prediction_id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, _now(), basis),
         )
         return cursor.rowcount > 0
 
@@ -2714,6 +2716,8 @@ class Store:
             "verdict": row["verdict"],
             "measured_usd": row["measured_usd"],
             "measured_pct": row["measured_pct"],
+            # A store an earlier build of this release made has no such column.
+            "basis": row["basis"] if "basis" in row.keys() else None,
         }
 
     def predictions(self, *, judged: bool | None = None) -> list[dict]:

@@ -1988,6 +1988,84 @@ def test_upsert_prediction_is_idempotent_on_its_id(store: Store) -> None:
     assert row["predicted_usd"] == 1.5  # the second (differing) write was ignored
 
 
+def test_a_prediction_keeps_its_basis(store: Store) -> None:
+    store.upsert_prediction(
+        prediction_id="with", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
+        agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", basis=12.5,
+    )
+    store.upsert_prediction(
+        prediction_id="without", ts="2026-09-20T09:01:00Z", source="whatif", measure_key="model",
+        agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling",
+    )
+    rows = {row["id"]: row for row in store.predictions()}
+    assert rows["with"]["basis"] == 12.5
+    assert rows["without"]["basis"] is None
+
+
+def test_a_store_already_at_12_without_the_prediction_basis_column_opens_and_reads_none(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v12-early-predictions.db"
+    store = Store(str(db_path))
+    store.open()
+    store.upsert_prediction(
+        prediction_id="early", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
+        agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling",
+    )
+    store.close()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE predictions DROP COLUMN basis")
+    conn.commit()
+    conn.close()
+
+    # The backtest command reads without writing: the column reads as None.
+    [read] = store_mod.read_predictions(db_path)
+    assert read["id"] == "early" and read["basis"] is None
+
+    reopened = Store(str(db_path))
+    reopened.open()
+    try:
+        assert reopened.schema_version() == schema.SCHEMA_VERSION == 12
+        [row] = reopened.predictions()
+        assert row["id"] == "early" and row["basis"] is None
+        reopened.upsert_prediction(
+            prediction_id="later", ts="2026-09-21T09:00:00Z", source="whatif", measure_key="model",
+            agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", basis=7.0,
+        )
+        assert {row["id"]: row["basis"] for row in reopened.predictions()} == {"early": None, "later": 7.0}
+    finally:
+        reopened.close()
+
+
+def test_migrate_adds_the_basis_column_to_a_v11_stores_predictions(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v11-predictions.db"
+    store = Store(str(db_path))
+    store.open()
+    store.upsert_prediction(
+        prediction_id="early", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
+        agent=None, predicted_usd=1.5, predicted_pct=None, fidelity="ceiling",
+    )
+    store.close()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE predictions DROP COLUMN basis")
+    conn.execute("UPDATE meta SET value = '11' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    conn.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
+        [row] = upgraded.predictions()
+        assert row["id"] == "early" and row["basis"] is None
+    finally:
+        upgraded.close()
+
+
 def test_mark_prediction_seen_and_judge_prediction(store: Store) -> None:
     store.upsert_prediction(
         prediction_id="pred-1", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="agent_cost",

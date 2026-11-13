@@ -222,7 +222,9 @@ is left out of ``Store.change_token``: a mark is written each time a list is
 drawn, so a mark that changed the token would rebuild every report each time.
 A v11 store gains the table in place (``store.MIGRATIONS[11]``). A store a
 build of this release stamped 12 before ``saving_basis`` was added gains the
-column when it is opened (``store._add_v12_columns``).
+column when it is opened (``store._add_v12_columns``). The same goes for
+``predictions.basis`` (the log line's ``basis``: the observed cost or the
+tokens per start the estimate was a share of, ``NULL`` when it names none).
 """
 
 from __future__ import annotations
@@ -577,7 +579,8 @@ CREATE TABLE IF NOT EXISTS predictions (
     verdict        TEXT,
     measured_usd   REAL,
     measured_pct   REAL,
-    created_at     TEXT NOT NULL
+    created_at     TEXT NOT NULL,
+    basis          REAL
 );
 CREATE INDEX IF NOT EXISTS idx_predictions_judged_at ON predictions(judged_at);
 """

@@ -377,6 +377,32 @@ def test_scan_predictions_ingests_every_record_under_config_dir(tmp_path: Path, 
     assert predictions[0]["predicted_usd"] == 1.5
 
 
+def test_a_logged_estimate_carries_its_basis_into_the_store(tmp_path: Path, store: Store):
+    from claudeglass import config as config_mod
+
+    options = _options(tmp_path)
+    config_mod.append_prediction_log(
+        options.config_dir, source="whatif", measure_key="model", agent=None,
+        predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", basis=12.5,
+    )
+    # A line an earlier build wrote has no basis key; one with a basis that is not a number reads as none.
+    log = options.config_dir / config_mod.PREDICTION_LOG_NAME
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(
+            '{"id": "old-line", "ts": "2026-09-20T09:00:00+00:00", "source": "whatif", "measure_key": "model", '
+            '"agent": null, "predicted_usd": 1.0, "predicted_pct": null, "fidelity": "ceiling"}\n'
+            '{"id": "odd-line", "ts": "2026-09-20T09:00:00+00:00", "source": "whatif", "measure_key": "model", '
+            '"agent": null, "predicted_usd": 1.0, "predicted_pct": null, "fidelity": "ceiling", "basis": "lots"}\n'
+        )
+
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.errors == 0
+    bases = {row["id"]: row["basis"] for row in store.predictions()}
+    assert sorted(bases.values(), key=lambda v: (v is None, v)) == [12.5, None, None]
+    assert bases["old-line"] is None and bases["odd-line"] is None
+
+
 def test_scan_predictions_is_a_no_op_on_an_unchanged_repeat_tick(tmp_path: Path, store: Store):
     from claudeglass import config as config_mod
 
