@@ -1153,7 +1153,7 @@ def _model_family(model_id: object, resolve_model) -> object:
 
 def _family_tier(model_id: object, resolve_model) -> int:
     """:func:`workstyle.model_tier` of ``model_id``'s canonical id (so
-    ``"best"`` reads as Fable through the rate card's alias), or ``-1``
+    ``"best"`` reads as Opus through the rate card's alias), or ``-1``
     when it names no known family or isn't a string."""
     family = _model_family(model_id, resolve_model)
     return model_tier(family) if isinstance(family, str) else -1

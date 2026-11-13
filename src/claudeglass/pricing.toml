@@ -74,8 +74,10 @@ us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
 
 # Fable 5.2 (2026-11-12 pricing page) took the bare aliases from Fable
 # 5.1, as Opus 5.5 and Sonnet 5.5 took theirs from the models before them.
+# "best" is Opus's: Claude Code resolves it to the same model as opus
+# (model-config docs, v2.1.321).
 [models."claude-fable-5-2"]
-aliases = ["fable", "fable[1m]", "best"]
+aliases = ["fable", "fable[1m]"]
 input = 8.0
 output = 40.0
 cache_write_5m = 10.0
@@ -139,7 +141,7 @@ context_window_tokens = 1000000
 # (documented on the pricing page), not the other way around.
 
 [models."claude-opus-5-5"]
-aliases = ["opus", "opus[1m]"]
+aliases = ["opus", "opus[1m]", "best"]
 input = 4.0
 output = 20.0
 cache_write_5m = 5.0

@@ -67,7 +67,6 @@ export const RATES = {
     },
     "claude-fable-5-2": {
       "aliases": [
-        "best",
         "fable",
         "fable[1m]"
       ],
@@ -193,6 +192,7 @@ export const RATES = {
     },
     "claude-opus-5-5": {
       "aliases": [
+        "best",
         "opus",
         "opus[1m]"
       ],

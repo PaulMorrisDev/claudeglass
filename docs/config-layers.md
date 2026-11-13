@@ -397,7 +397,7 @@ one `"(unknown project)"` bucket.
   an observed Opus or Sonnet model. An alias (`opus`, `sonnet`, `haiku`,
   `fable`, `best`, with or without `[1m]`: any value with no digit once
   `[1m]` is stripped) compares by family (`workstyle.model_tier`, with
-  `best` read as Fable through the rate card), because an alias follows
+  `best` read as Opus through the rate card, as Claude Code resolves it), because an alias follows
   the newest release: `opus` against an older `claude-opus-5` session is
   not drift. Every other value (a `claude-*` id, a Bedrock or Vertex id,
   an ARN) is an explicit pin and compares exactly, by the canonical id

@@ -165,7 +165,8 @@ def _swap_model(columns: dict, model_ids: dict | None = None):
 
 def test_an_alias_prices_at_the_column_the_rate_card_names():
     # "best" names no column itself; the rate card's alias table puts it
-    # on Fable 5.1, as it does "sonnet[1m]" on Sonnet 5.5.
+    # on whichever row it names (here a fixture's own table), as it does
+    # "sonnet[1m]" on Sonnet 5.5.
     columns = {"cost_claude-fable-5-1": 70.0, "cost_claude-sonnet-5-5": 30.0, "cost_claude-sonnet-5": 25.0}
     model = _swap_model(columns, {"best": "claude-fable-5-1", "sonnet[1m]": "claude-sonnet-5-5"})
     [best] = whatif.estimate({"model": "best"}, {}, model, UNITS, period=PERIOD)["rows"]

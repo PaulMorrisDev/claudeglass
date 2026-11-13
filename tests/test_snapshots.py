@@ -1086,9 +1086,9 @@ def test_detect_drift_opusplan_flags_other_families(observed):
     assert _model_drift("opusplan", observed) == [("model", "opusplan", observed)]
 
 
-def test_detect_drift_best_reads_as_fable_through_the_rate_card():
-    assert _model_drift("best", "claude-fable-5") == []
-    assert _model_drift("best", "claude-opus-5-5") == [("model", "best", "claude-opus-5-5")]
+def test_detect_drift_best_reads_as_opus_through_the_rate_card():
+    assert _model_drift("best", "claude-opus-5-5") == []
+    assert _model_drift("best", "claude-fable-5-2") == [("model", "best", "claude-fable-5-2")]
 
 
 def test_detect_drift_alias_shaped_value_of_unknown_family_compares_exactly():

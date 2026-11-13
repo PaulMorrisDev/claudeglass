@@ -69,8 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session whose transcript is gone and the verdicts of judged estimates
   drop out and stay only in that backup. Your tags, ratings and this
   record are kept.
-- **Fable 5.2 and Mythos 5.2 have rate card rows, and `fable` and `best`
-  now mean Fable 5.2.** Fable 5.1 keeps its row.
+- **Fable 5.2 and Mythos 5.2 have rate card rows, `fable` now means Fable
+  5.2, and `best` means Opus 5.5,** the model Claude Code gives it. Fable
+  5.1 keeps its row.
 - **`check` and `review` take `--claude-root`**, the folder that holds your
   CLAUDE.md, rules, agents and skills.
 
