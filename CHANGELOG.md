@@ -130,6 +130,9 @@ Capture and dashboard:
   settings your policy locks and values already set. Before, it priced
   the agent that writes code where no agent file changes, and copying the
   prompt logged that estimate. Its "Estimated effect" heading shows again.
+- **An agent whose name has a dot, such as `implementer.v2`, gets its own
+  file and key** in a profile's prompt, table and file changes. Before,
+  they named `implementer.md` and `v2.model`.
 
 Cards and checks:
 

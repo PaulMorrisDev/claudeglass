@@ -1243,10 +1243,12 @@ PROFILE_SCOPE_WHERE = {
 def profile_change_where(key: str, scope: str) -> str:
     """The file a profile diff row's dotted ``key`` (``settings.<name>``,
     ``agents.<agent>.<name>`` or ``env.<NAME>``) is written to under
-    ``scope``."""
+    ``scope``. An agent name may hold dots (``split_agent_key``)."""
+    from .profiles.diff import split_agent_key
+
     settings_path, agent_path, _ = PROFILE_SCOPE_WHERE.get(scope, PROFILE_SCOPE_WHERE["user"])
     if key.startswith("agents."):
-        return agent_path.format(agent=key.split(".")[1])
+        return agent_path.format(agent=split_agent_key(key)[0])
     if key.startswith("env."):
         return f"{settings_path} (env block)"
     return settings_path
@@ -1340,6 +1342,8 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
     """A self-contained prompt asking Claude to make a profile's changes
     by hand: one line per changed, unmanaged key, naming the file, the
     old and the new value."""
+    from .profiles.diff import split_agent_key
+
     _, _, who = PROFILE_SCOPE_WHERE.get(scope, PROFILE_SCOPE_WHERE["user"])
     lines = [f'I want to apply the settings profile "{name}" to Claude Code. It affects {who}. Make these changes:']
     for row in rows:
@@ -1349,7 +1353,7 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
         parts = key.split(".")
         where = profile_change_where(key, scope)
         if key.startswith("agents."):
-            field = f"{'.'.join(parts[2:])} in the frontmatter"
+            field = f"{split_agent_key(key)[1]} in the frontmatter"
         elif key.startswith("env."):
             field = f"the environment variable {parts[1]}"
         elif key.startswith("settings.modelSettings.") and len(parts) == 4:

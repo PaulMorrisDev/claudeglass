@@ -8167,3 +8167,18 @@ def test_a_role_at_a_target_with_no_writer_gives_the_estimate_nothing_to_price(s
     }
     # and the card route says what the profile itself holds, for the editor
     assert server.get_json("/api/profiles/implementation-heavy")[1]["data"]["own_agents"] == {}
+
+
+def test_a_dotted_agent_name_keeps_its_file_and_its_key(server):
+    _seed_agents(server, {"implementer.v2": ("user", "Read, Edit, Write")})
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    assert [(r["agent"], r["setting"], r["where"], r["role"]) for r in data["agents"]] == [
+        ("implementer.v2", key, "~/.claude/agents/implementer.v2.md", "writer")
+        for key in ("model", "effort", "maxTurns")
+    ]
+    assert (
+        '- In ~/.claude/agents/implementer.v2.md, set model in the frontmatter to "sonnet" (now: not set).'
+        in data["prompt"]
+    )
+    assert "--- .claude/agents/implementer.v2.md" in data["diff"] and "+model: sonnet" in data["diff"]
+    assert "v2." not in data["diff"].replace("implementer.v2", "")

@@ -63,6 +63,7 @@ __all__ = [
     "diff_against_effective",
     "render_unified_diff",
     "apply_command",
+    "split_agent_key",
 ]
 
 _VALID_SCOPES = ("user", "project-local", "repo")
@@ -285,6 +286,25 @@ def _bare_key(row_key: str, prefix_parts: int) -> str:
     return row_key.split(".", prefix_parts)[prefix_parts]
 
 
+#: The agent keys, longest first, so ``experimental.cacheTtl`` is found
+#: before any shorter key it ends with.
+_AGENT_KEYS_LONGEST_FIRST = tuple(sorted(AGENT_ALLOWLIST, key=len, reverse=True))
+
+
+def split_agent_key(row_key: str) -> tuple[str, str]:
+    """``(agent, key)`` from a row's ``agents.<agent>.<key>``. An agent name
+    may hold dots (``implementer.v2``) and so may a key
+    (``experimental.cacheTtl``), so the key is the allowlisted one the row
+    ends with and the agent is what comes before it. ``ValueError`` for
+    anything else."""
+    if row_key.startswith("agents."):
+        rest = row_key[len("agents.") :]
+        for key in _AGENT_KEYS_LONGEST_FIRST:
+            if rest.endswith("." + key) and len(rest) > len(key) + 1:
+                return rest[: -len(key) - 1], key
+    raise ValueError(f"not an agent row key: {row_key!r}")
+
+
 def render_unified_diff(profile_diff: ProfileDiff, *, scope: str) -> str:
     """A unified-diff-style text of ``profile_diff``'s changed,
     non-managed rows: one ``---``/``+++`` hunk for the settings file
@@ -306,7 +326,7 @@ def render_unified_diff(profile_diff: ProfileDiff, *, scope: str) -> str:
         if row.key.startswith("settings."):
             settings_rows.append(row)
         elif row.key.startswith("agents."):
-            agent_name = row.key.split(".", 2)[1]
+            agent_name = split_agent_key(row.key)[0]
             agent_rows.setdefault(agent_name, []).append(row)
         elif row.key.startswith("env."):
             env_rows.append(row)
@@ -327,7 +347,7 @@ def render_unified_diff(profile_diff: ProfileDiff, *, scope: str) -> str:
         lines.append(f"--- {path}")
         lines.append(f"+++ {path}")
         for r in active:
-            bare = _bare_key(r.key, prefix_parts)
+            bare = split_agent_key(r.key)[1] if r.key.startswith("agents.") else _bare_key(r.key, prefix_parts)
             lines.append(f"-{bare}: {_fmt(r.current_value) if r.recorded else 'not recorded'}")
             lines.append(f"+{bare}: {_fmt(r.proposed_value)}")
         lines.append("")

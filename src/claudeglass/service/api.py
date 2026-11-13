@@ -2773,9 +2773,11 @@ def make_handler(
 
         def _row(row) -> dict:
             parts = row.key.split(".")
-            # agents.<agent>.<key>; the key itself may be dotted (experimental.cacheTtl).
-            name = ".".join(parts[2:]) if row.key.startswith("agents.") else ".".join(parts[1:])
-            agent = parts[1] if row.key.startswith("agents.") else None
+            # agents.<agent>.<key>: the agent's name and the key may both hold dots.
+            if row.key.startswith("agents."):
+                agent, name = profile_diff_mod.split_agent_key(row.key)
+            else:
+                agent, name = None, ".".join(parts[1:])
             # settings.modelSettings.<model id>.<key> (a model id has no dot): the
             # setting is modelSettings.<key> and the id is the row's own ``model``.
             model = None
