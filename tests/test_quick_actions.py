@@ -3236,3 +3236,13 @@ def test_the_models_check_names_the_variable_when_the_setting_already_says_sonne
     plain = qa.run("models", _ctx(tmp_path, model=_env_model(), effective={"model": "sonnet"}, effective_agents={"Explore": {}}))
     assert next(row for row in plain["table"]["rows"] if row[0] == "Main session")[3] == "settings"
     assert _env_tip(plain) == [] and advice.MODEL_ENV_WINS not in plain["summary"]
+
+
+def test_in_a_view_of_several_projects_a_project_files_medium_is_not_called_already_set(tmp_path):
+    # R2-3: one project's snapshot says nothing about the other projects in the view.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    kw = dict(effective={"effortLevel": "medium"}, effective_provenance={"effortLevel": "project_shared"})
+    assert "is already medium" in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]
+    model.meta = NS(projects=("alpha", "beta"))
+    assert "is already medium" not in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]

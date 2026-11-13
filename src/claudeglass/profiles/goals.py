@@ -120,6 +120,9 @@ class _Draft:
     #: N2: each effective key's settings layer (``snapshots.effective_provenance``),
     #: so the effort level in force can be read (:func:`main_effort_reading`).
     provenance: dict = field(default_factory=dict)
+    #: R2-3: the report covers more than one project, so the snapshot's project
+    #: files say nothing about the others (:func:`main_effort_reading`).
+    several_projects: bool = False
 
     def now(self, key: str, agent: str | None):
         if agent is None:
@@ -419,7 +422,9 @@ def _thinking(draft: _Draft, tables, *, subagents_only: bool) -> None:
         observed = _main_model_id(observed_models.get(agent)) if is_top else None
         model_id = _canonical_model(observed)
         if is_top and not draft.effort_level_env_set:
-            level, layer, decided_by = main_effort_reading(draft.effective, draft.provenance, observed)
+            level, layer, decided_by = main_effort_reading(
+                draft.effective, draft.provenance, observed, project_layers=not draft.several_projects
+            )
             # N2: already medium or lower for this model (what the effort card
             # asks for), or set where no profile can win (managed settings).
             if level in EFFORT_DONE or layer == "managed":
@@ -466,6 +471,9 @@ def _canonical_model(model: str | None) -> str | None:
     return name if name.startswith("claude-") and _MODEL_ID_RE.match(name) else None
 
 
+#: The settings layers of one project's own files.
+_PROJECT_LAYERS = ("project_local", "project_shared")
+
 #: N2: the effort levels the effort card and the thinking goal count as done.
 EFFORT_DONE = ("low", "medium")
 
@@ -489,7 +497,7 @@ def _reads_user_effort(model_id: str | None) -> bool:
 
 
 def main_effort_reading(
-    effective: dict, provenance: dict, observed: str | None
+    effective: dict, provenance: dict, observed: str | None, *, project_layers: bool = True
 ) -> tuple[str | None, str | None, str | None]:
     """The effort level the settings give the main session on ``observed``
     (a model_swap cell or model id), lower case, the layer it comes from and
@@ -501,11 +509,21 @@ def main_effort_reading(
     in user settings counts only for :func:`_reads_user_effort` models, and
     one in a project, local or managed file for every model. The entry is
     found by canonical id (:func:`_same_model`). ``CLAUDE_CODE_EFFORT_LEVEL``
-    beats all of it; the caller checks that."""
+    beats all of it; the caller checks that.
+
+    ``project_layers=False`` is for a view of several projects: the snapshot
+    belongs to one of them, so a level its project files set says nothing about
+    the others. A key whose layer is ``project_local`` or ``project_shared``
+    then reads as not set; ``managed`` and ``user`` are read as always."""
     model_id = _canonical_model(_main_model_id(observed))
     flat = effective.get("effortLevel") if isinstance(effective.get("effortLevel"), str) else None
     own = None
     entries = effective.get("modelSettings")
+    if not project_layers:
+        if provenance.get("effortLevel") in _PROJECT_LAYERS:
+            flat = None
+        if provenance.get("modelSettings") in _PROJECT_LAYERS:
+            entries = None
     if model_id and isinstance(entries, dict):
         own = next(
             (
@@ -524,9 +542,11 @@ def main_effort_reading(
     return None, None, None
 
 
-def main_effort_in_force(effective: dict, provenance: dict, observed: str | None) -> str | None:
+def main_effort_in_force(
+    effective: dict, provenance: dict, observed: str | None, *, project_layers: bool = True
+) -> str | None:
     """:func:`main_effort_reading`'s level alone."""
-    return main_effort_reading(effective, provenance, observed)[0]
+    return main_effort_reading(effective, provenance, observed, project_layers=project_layers)[0]
 
 
 def _project_effort_note(layer: str | None) -> str:
@@ -916,6 +936,7 @@ def draft(
     tables = whatif._Tables(model)
     d = _Draft(goal, dict(effective or {}), dict(effective_agents or {}), [], effort_level_env_set, model_env_set)
     d.provenance = dict(provenance or {})
+    d.several_projects = len(getattr(getattr(model, "meta", None), "projects", ()) or ()) > 1
     reading = model_swap.main_setting(model)
     if reading is not None:
         # The main session's model setting as the saving reads it, so a

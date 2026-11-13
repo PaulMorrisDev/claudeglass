@@ -945,3 +945,16 @@ def test_a_managed_effort_level_gets_no_thinking_candidate():
         effective={"effortLevel": "high"}, provenance={"effortLevel": "managed"},
     )
     assert out["candidates"] == []
+
+
+def test_in_a_view_of_several_projects_a_project_files_flat_level_is_not_read():
+    # R2-3: the snapshot is one project's, so its project file says nothing about the others.
+    report = _with_observed_model("claude-opus-5-5")
+    report.meta = NS(projects=("alpha", "beta"))
+    out = goals.draft(
+        "thinking", report, UNITS,
+        effective={"effortLevel": "high"}, provenance={"effortLevel": "project_shared"},
+    )
+    [candidate] = out["candidates"]
+    assert candidate["key"] == "modelSettings" and candidate["value"] == {"claude-opus-5-5": {"effortLevel": "medium"}}
+    assert "This project's" not in candidate["evidence"]

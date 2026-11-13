@@ -895,6 +895,7 @@ def _effort_lever(rec: Recommendation, ctx: _Context, note: str) -> None:
         effective_config_in_force(snapshot) if snapshot is not None else {},
         effective_provenance(snapshot) if snapshot is not None else {},
         ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model"),
+        project_layers=not _several_projects(ctx),
     )
     if level in goals.EFFORT_DONE:
         # N2: the main session's model already gets medium or lower, from

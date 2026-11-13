@@ -732,6 +732,11 @@ _EFFORT_ALREADY_SET = (
 )
 
 
+def _several_projects(ctx: Context) -> bool:
+    """Whether the report covers more than one project (``advice._several_projects``)."""
+    return len(getattr(getattr(ctx.model, "meta", None), "projects", ()) or ()) > 1
+
+
 def _main_effort_already_set(ctx: Context) -> str:
     """:data:`_EFFORT_ALREADY_SET` when the main session spent at least
     ``goals.THINKING_PCT`` of its output thinking and its effort is already
@@ -752,7 +757,9 @@ def _main_effort_already_set(ctx: Context) -> str:
         (r.get("observed_model") for r in tables.rows("model_swap", "model_swap_by_agent_type") if r.get("agent_type") == goals.TOP),
         None,
     )
-    level = goals.main_effort_in_force(ctx.effective, ctx.effective_provenance, observed)
+    level = goals.main_effort_in_force(
+        ctx.effective, ctx.effective_provenance, observed, project_layers=not _several_projects(ctx)
+    )
     if level not in goals.EFFORT_DONE:
         return ""
     return _EFFORT_ALREADY_SET.format(

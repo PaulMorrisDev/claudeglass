@@ -1340,3 +1340,29 @@ def test_the_main_model_card_stays_while_the_variable_picks_a_larger_model_over_
     data.pop("env_names")
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
     assert [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"] == []
+
+
+# -- R2-3: a snapshot is one project's, so in a view of several its project files say nothing ------------------
+
+
+def _effort_on_projects(model_cell, snapshot_data, projects):
+    report = _model_swap_report([["top-level", model_cell, None, None]])
+    report.meta.projects = tuple(projects)
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=snapshot_data)
+    return [r for r in advice.finish([_reported_effort_rec()], report, snap, Units()) if r.id == "effort-mismatch"]
+
+
+def test_a_project_files_effort_level_does_not_close_the_card_in_a_view_of_several_projects():
+    data = {"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_shared"}}
+    assert _effort_on_projects("claude-opus-5-5", data, ["alpha"]) == []
+    [card] = _effort_on_projects("claude-opus-5-5", data, ["alpha", "beta"])
+    assert card.variant != "applied"
+
+
+def test_your_own_user_entry_still_closes_the_card_in_a_view_of_several_projects():
+    """Guard: the user file is read by every project, so one project's snapshot speaks for all of them."""
+    data = {
+        "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+        "effective_provenance": {"effortLevel": "user", "modelSettings": "user"},
+    }
+    assert _effort_on_projects("claude-opus-5-5", data, ["alpha", "beta"]) == []

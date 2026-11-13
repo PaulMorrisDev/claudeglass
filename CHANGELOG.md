@@ -239,7 +239,8 @@ Cards and checks:
   CLAUDE_CODE_EFFORT_LEVEL is set, it says the variable wins. The
   auto-compact cards name a model whose own window wins. The card goes once
   the main session's model already has low or medium from the file that
-  decides it, and the effort check says the level is already set.
+  decides it, and the effort check says the level is already set. In a view
+  of several projects only your own and managed settings count.
 - **The thinking goal and the Overview effort check set the main session's
   effort for the model it ran on, as /effort does.** A user-level
   effortLevel did nothing on Opus 5.5 and later. The entry goes under the
