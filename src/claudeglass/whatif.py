@@ -460,7 +460,11 @@ def estimate(
             rows.append(_skills(context_files, value))
         elif key == "enabledPlugins" and isinstance(value, dict):
             rows.append(_plugins(context_files, value))
-        elif key == "effortLevel":
+        elif key == "effortLevel" or (
+            # Per-model effort levels only, as the thinking goal drafts the main session's.
+            key == "modelSettings" and isinstance(value, dict) and value
+            and all(isinstance(v, dict) and set(v) == {"effortLevel"} for v in value.values())
+        ):
             rows.append(_effort(tables, None, value, key))
         elif key == "fastMode" and value is False:
             rows.append(_fast_mode(tables))

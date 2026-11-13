@@ -974,7 +974,11 @@ def explain_plan(plan: ApplyPlan) -> list[str]:
             where = f"{action.path} ({_SCOPE_WORDS.get(plan.scope, plan.scope)})"
         for change in changes:
             subject = f"{change['key']} for {change['agent']}" if change["agent"] else change["key"]
-            what, tradeoff, caveat = SETTING_TEXT.get(change["key"], ("", "", ""))
+            # modelSettings.<id>.<key> is explained as modelSettings.<key> (fixes.SETTING_TEXT).
+            parts = change["key"].split(".")
+            per_model = parts[0] == "modelSettings" and len(parts) == 3
+            text_key = f"modelSettings.{parts[-1]}" if per_model else change["key"]
+            what, tradeoff, caveat = SETTING_TEXT.get(text_key, ("", "", ""))
             lines.append(f"Change: {subject}")
             if what:
                 lines.append(f"  What it controls: {what}")

@@ -190,10 +190,47 @@ def test_compaction_goal_warns_and_leaves_the_window_unticked_while_the_env_vari
 
 
 def test_thinking_is_offered_unticked_and_settings_already_in_effect_are_skipped():
+    # The main session's level is set for the model it ran on, the way /effort saves it.
     out = goals.draft("thinking", _report(), UNITS)
     [candidate] = out["candidates"]
-    assert (candidate["key"], candidate["value"], candidate["ticked"]) == ("effortLevel", "medium", False)
-    assert goals.draft("thinking", _report(), UNITS, effective={"effortLevel": "medium"})["candidates"] == []
+    assert (candidate["key"], candidate["value"], candidate["ticked"]) == (
+        "modelSettings", {"claude-sonnet-5": {"effortLevel": "medium"}}, False,
+    )
+    assert "It is set for claude-sonnet-5, the model this ran on, the way /effort saves it." in candidate["evidence"]
+    assert candidate["tradeoff"] == SETTING_TEXT["effortLevel"][1]
+    already = {"modelSettings": {"claude-sonnet-5": {"effortLevel": "medium", "autoCompactWindow": 300000}}}
+    assert goals.draft("thinking", _report(), UNITS, effective=already)["candidates"] == []
+    # A top-level level doesn't count: Opus 5.5 and later ignore it in user settings.
+    [still] = goals.draft("thinking", _report(), UNITS, effective={"effortLevel": "medium"})["candidates"]
+    assert still["key"] == "modelSettings"
+
+
+def test_the_main_session_thinking_candidate_keeps_the_spelling_of_the_models_own_entry():
+    out = goals.draft(
+        "thinking", _with_observed_model("claude-opus-5-5"), UNITS,
+        effective={"modelSettings": {"opus": {"effortLevel": "high", "autoCompactWindow": 500000}}},
+    )
+    [candidate] = out["candidates"]
+    assert candidate["value"] == {"opus": {"effortLevel": "medium"}}
+    assert candidate["now"] == {"opus": {"effortLevel": "high"}}
+
+
+def test_another_version_of_the_family_is_not_the_models_own_entry():
+    out = goals.draft(
+        "thinking", _with_observed_model("claude-opus-5-5"), UNITS,
+        effective={"modelSettings": {"claude-opus-5": {"effortLevel": "medium"}}},
+    )
+    [candidate] = out["candidates"]
+    assert candidate["value"] == {"claude-opus-5-5": {"effortLevel": "medium"}}
+    assert goals._same_model("claude-haiku-4-5-20251001", "claude-haiku-4-5")
+    assert not goals._same_model("claude-opus-5", "claude-opus-5-5")
+
+
+def test_with_claude_code_effort_level_set_the_thinking_candidate_says_it_wont_apply():
+    out = goals.draft("thinking", _with_observed_model("claude-opus-5-5"), UNITS, effort_level_env_set=True)
+    [candidate] = out["candidates"]
+    assert (candidate["key"], candidate["value"]) == ("effortLevel", "medium")
+    assert "Won't apply to claude-opus-5-5: CLAUDE_CODE_EFFORT_LEVEL is set" in candidate["evidence"]
 
 
 # -- PROF-11/F14: a thinking lever offered on a model where it does nothing --
@@ -212,15 +249,19 @@ def test_on_opus_5_5_and_fable_lower_effort_is_still_offered_but_the_thinking_to
     for model_id in ("claude-opus-5-5", "claude-fable-5-1", "claude-fable-5"):
         out = goals.draft("thinking", _with_observed_model(model_id), UNITS)
         [candidate] = out["candidates"]
-        assert candidate["key"] == "effortLevel", model_id
+        assert candidate["value"] == {model_id: {"effortLevel": "medium"}}, model_id
         assert "Thinking can't be switched off on this model" in candidate["evidence"], model_id
 
 
 def test_thinking_stays_offered_on_a_plain_opus_model_v26_doesnt_name():
     # V26 names Opus 5.5 specifically, not the whole Opus family -- a
-    # mixed-model "(+N more)" label still matches by substring.
+    # mixed-model "(+N more)" label still matches by substring, and its
+    # first (most-used) model is the one set.
     out = goals.draft("thinking", _with_observed_model("claude-opus-5 (+1 more)"), UNITS)
-    assert [c["key"] for c in out["candidates"]] == ["effortLevel"]
+    assert [(c["key"], c["value"]) for c in out["candidates"]] == [
+        ("modelSettings", {"claude-opus-5": {"effortLevel": "medium"}}),
+    ]
+    assert "Thinking can't be switched off" not in out["candidates"][0]["evidence"]
 
 
 def test_thinking_is_still_offered_when_no_model_swap_data_exists():
@@ -414,8 +455,10 @@ def test_an_env_set_effort_level_warns_the_candidate_wont_apply():
         effective={"model": "opus", "effortLevel": "high"}, effort_level_env_set=True,
     )
     by_key = {c["key"]: c for c in out["candidates"]}
-    assert "Won't apply to sonnet: CLAUDE_CODE_EFFORT_LEVEL is set for this session; use --effort instead." \
-        in by_key["effortLevel"]["evidence"]
+    assert (
+        "Won't apply to sonnet: CLAUDE_CODE_EFFORT_LEVEL is set and wins over every effort setting. "
+        "Set it to medium or remove it."
+    ) in by_key["effortLevel"]["evidence"]
     # It's still drafted (a legitimate default for every other model) --
     # only the wording changes, not ticked/value.
     assert (by_key["effortLevel"]["value"], by_key["effortLevel"]["ticked"]) == ("medium", True)
@@ -470,8 +513,10 @@ def test_tasks_goal_offers_the_per_model_effort_when_the_model_has_its_own():
     )
     by_key = {c["key"]: c for c in out["candidates"]}
     assert "modelSettings" not in by_key
-    assert "Won't apply to sonnet: CLAUDE_CODE_EFFORT_LEVEL is set for this session; use --effort instead." \
-        in by_key["effortLevel"]["evidence"]
+    assert (
+        "Won't apply to sonnet: CLAUDE_CODE_EFFORT_LEVEL is set and wins over every effort setting. "
+        "Set it to medium or remove it."
+    ) in by_key["effortLevel"]["evidence"]
 
 
 def test_as_profile_merges_model_settings_candidates_per_model():
@@ -724,3 +769,111 @@ def test_the_models_goal_drafts_no_main_model_while_anthropic_model_is_set():
     assert candidates(model_env_set=False) == {(None, "model"), ("Explore", "model")}
     # ANTHROPIC_MODEL picks the main session's model, so only the agent's setting is drafted.
     assert candidates(model_env_set=True) == {("Explore", "model")}
+
+
+# -- the main session's entry is keyed by the canonical model id --------------
+
+#: (observed spelling, the key Claude Code reads it under, or None for the flat effortLevel)
+_SPELLINGS = [
+    ("claude-opus-5-5", "claude-opus-5-5"),
+    ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+    ("claude-fable-5-2[1m]", "claude-fable-5-2"),
+    ("us.anthropic.claude-opus-5-5-v1:0", "claude-opus-5-5"),
+    ("claude-opus-5-5@20260101", "claude-opus-5-5"),
+    ("my-gateway/opus", None),
+]
+
+
+def _round_trip(candidate):
+    """The candidate saved as a profile (schema validation) and as the check's
+    command read back by ``apply --set`` (``cli._one_off_profile``)."""
+    import shlex
+
+    from claudeglass import cli
+    from claudeglass.fixes import command_for
+    from claudeglass.model import SettingChange
+    from claudeglass.profiles.schema import load_dict
+
+    settings = {candidate["key"]: candidate["value"]}
+    saved = load_dict({"id": "from-goal", "settings": settings}).settings
+    change = SettingChange(target="settings", key=candidate["key"], value=candidate["value"], scope="user")
+    words = shlex.split(command_for(change, "user"))
+    sets = [words[i + 1] for i, word in enumerate(words) if word == "--set"]
+    profile, error = cli._one_off_profile(sets, None)
+    assert error is None, error
+    return saved, profile.settings
+
+
+@pytest.mark.parametrize("observed, canonical", _SPELLINGS, ids=[s for s, _ in _SPELLINGS])
+def test_the_thinking_goal_keys_the_main_sessions_entry_by_the_canonical_id(observed, canonical):
+    [candidate] = goals.draft("thinking", _with_observed_model(observed), UNITS)["candidates"]
+    if canonical is None:
+        # No canonical id: the flat effortLevel, as when no model was recorded.
+        assert (candidate["key"], candidate["value"]) == ("effortLevel", "medium")
+        expected = {"effortLevel": "medium"}
+    else:
+        assert candidate["value"] == {canonical: {"effortLevel": "medium"}}
+        assert f"It is set for {canonical}, the model this ran on" in candidate["evidence"]
+        expected = {"modelSettings": {canonical: {"effortLevel": "medium"}}}
+    saved, parsed = _round_trip(candidate)
+    assert saved == expected and parsed == expected
+
+
+@pytest.mark.parametrize(
+    "observed, canonical", [s for s in _SPELLINGS if s[1]], ids=[s for s, c in _SPELLINGS if c],
+)
+def test_the_env_note_names_the_canonical_id(observed, canonical):
+    out = goals.draft("thinking", _with_observed_model(observed), UNITS, effort_level_env_set=True)
+    [candidate] = out["candidates"]
+    assert f"Won't apply to {canonical}: CLAUDE_CODE_EFFORT_LEVEL is set" in candidate["evidence"]
+
+
+@pytest.mark.parametrize("key", ["claude-haiku-4-5-20251001", "claude-haiku-4-5[1m]"])
+def test_an_existing_entry_in_a_dated_or_1m_spelling_is_reused_as_written(key):
+    out = goals.draft(
+        "thinking", _with_observed_model("claude-haiku-4-5"), UNITS,
+        effective={"modelSettings": {key: {"effortLevel": "high"}}},
+    )
+    [candidate] = out["candidates"]
+    assert candidate["value"] == {key: {"effortLevel": "medium"}}
+    assert "It is set for claude-haiku-4-5," in candidate["evidence"]
+    _round_trip(candidate)
+
+
+def test_an_existing_key_the_schema_refuses_is_not_reused():
+    out = goals.draft(
+        "thinking", _with_observed_model("claude-opus-5-5"), UNITS,
+        effective={"modelSettings": {"us.anthropic.claude-opus-5-5-v1:0": {"effortLevel": "high"}}},
+    )
+    [candidate] = out["candidates"]
+    assert candidate["value"] == {"claude-opus-5-5": {"effortLevel": "medium"}}
+    _round_trip(candidate)
+
+
+_SONNET_SPELLINGS = [
+    ("claude-sonnet-5", True),
+    ("claude-sonnet-5-20260101", True),
+    ("claude-sonnet-5[1m]", True),
+    ("us.anthropic.claude-sonnet-5-v1:0", True),
+    ("claude-sonnet-5@20260101", True),
+    ("my-gateway/sonnet-x", False),
+]
+
+
+@pytest.mark.parametrize("observed, matched", _SONNET_SPELLINGS, ids=[s for s, _ in _SONNET_SPELLINGS])
+def test_the_tasks_goal_finds_the_models_own_entry_under_every_spelling(observed, matched):
+    # tasks only writes a key that is already in the file, so it never writes an observed spelling.
+    setups = (
+        ("bugfix", "all", "opus", "high", 12, 2.0, 80.0, 3, "usual", None),
+        ("bugfix", "all", observed, "medium", 20, 0.5, 83.0, 1, "cheaper", 75.0),
+    )
+    out = goals.draft(
+        "tasks", _with_setups(*setups), UNITS, task="bugfix",
+        effective={"effortLevel": "high", "modelSettings": {"claude-sonnet-5": {"effortLevel": "low"}}},
+    )
+    by_key = {c["key"]: c for c in out["candidates"]}
+    if matched:
+        assert by_key["modelSettings"]["value"] == {"claude-sonnet-5": {"effortLevel": "medium"}}
+        _round_trip(by_key["modelSettings"])
+    else:
+        assert "modelSettings" not in by_key and by_key["effortLevel"]["value"] == "medium"

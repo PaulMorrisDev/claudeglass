@@ -115,15 +115,22 @@ or the generic marker:
   beat the top-level `effortLevel` scalar for that model, and a profile
   goal drafting an `effortLevel` change checks both. When
   `CLAUDE_CODE_EFFORT_LEVEL` is set it appends "Won't apply to `<model>`: …
-  use `--effort` instead" to the candidate's evidence rather than silently
+  Set it to medium or remove it" to the candidate's evidence rather than silently
   implying the profile alone would move it (`profiles/goals.py`'s
   `_effort_override_note`); the variable beats a model's own entry too, so a
   change to that entry would not take effect either. Otherwise, when the
   model the cheaper setup ran on has its own `effortLevel` here (matched by
-  its family, so `claude-sonnet-5` is "sonnet"), the `tasks` goal drafts a
+  its canonical id, so a dated, `[1m]`, Bedrock or Vertex spelling is the
+  same model, or a bare family alias such as "sonnet"; another version of the
+  family is another entry, `_same_model`), the `tasks` goal drafts a
   change to that model's entry — a `modelSettings` candidate, `{<model id as
   written>: {"effortLevel": …}}` — in place of the flat `effortLevel`, which
-  the entry would beat (`_model_with_own_effort`).
+  the entry would beat (`_model_with_own_effort`). The `thinking` goal always
+  drafts the main session's level that way, for the model it ran on (the
+  first model of a mixed-model row), keyed by its canonical id
+  (`_canonical_model`), as `/effort` saves it; it falls back to the flat
+  `effortLevel` when no model was recorded, the name has no canonical id, or
+  the variable is set.
 
 `effective`/`effective_provenance` merge exactly this same key set
 (`SETTINGS_SUMMARY_KEYS`) across the four layers — a value there has

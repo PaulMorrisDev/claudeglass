@@ -2507,6 +2507,61 @@ def test_the_effort_check_drops_a_thinking_candidate_an_ignored_card_already_sug
     assert result["summary"] == IGNORED_ONLY
 
 
+def _main_effort_card(variant="session", changes=()):
+    """The main session's effort card as advice.py writes it: the user-scope
+    ("session") and env variants carry no change."""
+    return Recommendation(
+        id="effort-mismatch", key="effort-mismatch", severity="advice", category="settings",
+        title="High effort is being spent on light work", why="why", action="action", variant=variant,
+        changes=list(changes),
+    )
+
+
+def _main_on(model, model_id):
+    swap = model.sections[0].tables[0]
+    # _full_model appends its own observed_model column; a row reads the last one.
+    for i, column in enumerate(swap.columns):
+        if column.key == "observed_model":
+            swap.rows[0][i] = model_id
+    return model
+
+
+def test_the_effort_check_sets_the_main_sessions_level_for_the_model_it_ran_on(tmp_path):
+    # On Opus 5.5 a user-level effortLevel does nothing; the per-model entry is what /effort saves.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card()]
+    [fix] = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    assert fix["command"] == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope user --dry-run"
+    )
+
+
+def test_an_ignored_main_effort_card_drops_the_checks_per_model_candidate(tmp_path):
+    # The card has no change, and the candidate's key differs from it, so only the card's own key can match.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card()]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"})))
+    assert result["status"] == "ok" and not result["fixes"]
+    assert result["summary"] == IGNORED_ONLY
+
+
+def test_the_effort_check_offers_no_settings_command_while_the_effort_variable_is_set(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card(variant="env")]
+    fixes = qa.run("effort", _ctx(tmp_path, model=model))["fixes"]
+    assert not [f for f in fixes if f.get("command") and "effortLevel" in f["command"]]
+
+
+def test_a_project_effort_card_is_the_checks_only_main_session_fix(tmp_path):
+    # A project file's effortLevel outranks a user-level per-model entry, so the goal's entry would do nothing.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    change = SettingChange(target="settings", key="effortLevel", value="medium", scope="repo")
+    model.recommendations = [_main_effort_card(variant="", changes=[change])]
+    main = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert [f["key"] for f in main] == ["effortLevel"]
+
+
 @pytest.mark.parametrize("check", [c for c in qa.CHECKS if c.rule_ids], ids=lambda c: c.id)
 def test_an_ignored_card_adds_no_fix_tip_or_title_to_the_check_it_belongs_to(tmp_path, check):
     cards = [
@@ -2929,3 +2984,21 @@ def test_models_check_reads_the_main_setting_the_saving_reads(tmp_path):
     assert "--scope project-local" not in fix["command"]
     assert main_fixes({"value": "sonnet", "scope": "user"}, "opus") == []
     assert main_fixes({}, "sonnet") == []
+
+
+@pytest.mark.parametrize(
+    "observed", ["us.anthropic.claude-opus-5-5-v1:0", "claude-opus-5-5@20260101", "claude-opus-5-5[1m]"],
+)
+def test_the_effort_checks_command_names_the_canonical_id_and_apply_reads_it(tmp_path, observed):
+    import shlex
+
+    from claudeglass import cli
+
+    model = _main_on(_full_model(), observed)
+    model.recommendations = [_main_effort_card()]
+    [fix] = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    words = shlex.split(fix["command"])
+    item = words[words.index("--set") + 1]
+    profile, error = cli._one_off_profile([item], None)
+    assert error is None and profile.settings == {"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}

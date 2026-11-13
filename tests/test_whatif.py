@@ -315,6 +315,13 @@ def test_whatif_does_not_estimate_model_settings():
     assert [r["key"] for r in rows] == ["modelSettings", "fastMode"]
 
 
+def test_a_per_model_effort_level_is_estimated_like_the_flat_one():
+    # The thinking goal's main-session change gives the same basis as effortLevel.
+    flat = _estimate({"effortLevel": "medium"})["rows"][0]
+    [row] = _estimate({"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})["rows"]
+    assert row["basis"] == flat["basis"] and row["fidelity"] == "none" and row["saving_usd"] is None
+
+
 def test_fast_mode_on_is_not_simulated():
     [row] = _estimate({"fastMode": True})["rows"]
     assert row["saving_usd"] is None and row["fidelity"] == "none"
