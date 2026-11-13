@@ -130,7 +130,8 @@ SETTING_TEXT: dict[str, tuple[str, str, str]] = {
     ),
     "effortLevel": (
         "How hard Claude thinks before replying. Thinking is billed as output.",
-        "Lower effort can miss things on hard problems. You can raise it for one task with /effort.",
+        "Lower effort can miss things on hard problems. You can raise it for one task with /effort. "
+        "Claude Code doesn't keep max in settings; use /effort max for a session.",
         "",
     ),
     "promptCacheTtl": (
@@ -281,6 +282,27 @@ SETTING_TEXT["env.CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = (
     "A value in a settings file's env block replaces the one from your shell.",
 )
 
+# PF1: ``modelSettings.<id>.<key>`` rows (keyed by ``modelSettings.<key>``,
+# the model id being a row's own ``model``); the trade-offs are the flat
+# keys'.
+SETTING_TEXT["modelSettings"] = (
+    "Settings kept for one model by name: its own effort level and the size at which Claude Code "
+    "summarises the conversation. Each replaces the same setting in the same file.",
+    "",
+    "",
+)
+SETTING_TEXT["modelSettings.effortLevel"] = (
+    "How hard Claude thinks, for this model only. It replaces the effort level in the same settings file.",
+    SETTING_TEXT["effortLevel"][1],
+    SETTING_TEXT["effortLevel"][2],
+)
+SETTING_TEXT["modelSettings.autoCompactWindow"] = (
+    "When Claude Code summarises the conversation, for this model only. "
+    "It replaces the window in the same settings file.",
+    SETTING_TEXT["autoCompactWindow"][1],
+    SETTING_TEXT["autoCompactWindow"][2],
+)
+
 #: Short names for every allowlisted key, for forms and tables.
 LEVER_LABELS = {
     "model": "Model",
@@ -315,6 +337,9 @@ LEVER_LABELS = {
     "env.CLAUDE_CODE_MAX_OUTPUT_TOKENS": "Output token cap (env override)",
     "env.CLAUDE_CODE_AUTO_COMPACT_WINDOW": "Summarise the conversation at (tokens, env override)",
     "fastMode": "Fast mode (price premium for a faster reply)",
+    "modelSettings": "Per-model settings",
+    "modelSettings.effortLevel": "Effort level for one model",
+    "modelSettings.autoCompactWindow": "Summarise the conversation at (tokens), for one model",
 }
 
 _SCOPE_WHERE = {
@@ -1231,6 +1256,9 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
             field = f"{'.'.join(parts[2:])} in the frontmatter"
         elif key.startswith("env."):
             field = f"the environment variable {parts[1]}"
+        elif key.startswith("settings.modelSettings.") and len(parts) == 4:
+            # settings.modelSettings.<model id>.<key>; a model id has no dot.
+            field = f'{parts[3]} for the model {parts[2]} (under "modelSettings")'
         else:
             field = ".".join(parts[1:])
         lines.append(

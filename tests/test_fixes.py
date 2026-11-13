@@ -21,6 +21,68 @@ def test_profile_prompt_lists_changed_unmanaged_keys_with_their_files():
     assert 'set experimental.cacheTtl in the frontmatter to "1h"' in text
 
 
+def test_prompt_names_the_model_for_a_per_model_row():
+    from claudeglass.fixes import profile_prompt
+
+    rows = [
+        {
+            "key": "settings.modelSettings.claude-opus-5-5.effortLevel",
+            "current_value": "high",
+            "proposed_value": "medium",
+        },
+        {
+            "key": "settings.modelSettings.claude-sonnet-4-6[1m].autoCompactWindow",
+            "current_value": None,
+            "proposed_value": 300000,
+        },
+        {
+            "key": "settings.modelSettings.claude-haiku-4-5.effortLevel",
+            "current_value": "low",
+            "proposed_value": "low",
+        },
+    ]
+    text = profile_prompt("Lean", rows, "user")
+    assert (
+        '- In ~/.claude/settings.json, set effortLevel for the model claude-opus-5-5 (under "modelSettings") '
+        'to "medium" (now: high).'
+    ) in text
+    assert (
+        '- In ~/.claude/settings.json, set autoCompactWindow for the model claude-sonnet-4-6[1m] '
+        '(under "modelSettings") to 300000 (now: not set).'
+    ) in text
+    # an unchanged row is left out, as for any key
+    assert "claude-haiku-4-5" not in text
+    # the same rows at a project scope name that scope's file
+    assert "In .claude/settings.local.json, set effortLevel for the model claude-opus-5-5" in profile_prompt(
+        "Lean", rows, "project-local"
+    )
+
+
+def test_the_flat_effort_level_says_claude_code_keeps_no_max_in_settings():
+    from claudeglass.fixes import LEVER_LABELS, SETTING_TEXT
+
+    sentence = "Claude Code doesn't keep max in settings; use /effort max for a session."
+    assert SETTING_TEXT["effortLevel"][1].endswith(sentence)
+    # the old text is still there, ahead of it
+    assert SETTING_TEXT["effortLevel"][1].startswith("Lower effort can miss things on hard problems.")
+    # the per-model keys read as their flat keys do, and are labelled for one model
+    assert LEVER_LABELS["modelSettings.effortLevel"] == "Effort level for one model"
+    assert LEVER_LABELS["modelSettings.autoCompactWindow"] == "Summarise the conversation at (tokens), for one model"
+    assert LEVER_LABELS["modelSettings"] == "Per-model settings"
+    effort = SETTING_TEXT["modelSettings.effortLevel"]
+    assert effort[0] == (
+        "How hard Claude thinks, for this model only. It replaces the effort level in the same settings file."
+    )
+    assert effort[1] == SETTING_TEXT["effortLevel"][1]
+    window = SETTING_TEXT["modelSettings.autoCompactWindow"]
+    assert window[0] == (
+        "When Claude Code summarises the conversation, for this model only. "
+        "It replaces the window in the same settings file."
+    )
+    assert window[1] == SETTING_TEXT["autoCompactWindow"][1]
+    assert SETTING_TEXT["modelSettings"][0]
+
+
 def test_profile_prompt_says_so_when_nothing_changes():
     from claudeglass.fixes import profile_prompt
 
