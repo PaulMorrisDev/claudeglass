@@ -388,7 +388,8 @@ def test_finish_adds_the_background_stop_entry_and_the_plan_matcher_coaching_nee
     assert sorted(_capture_hooks(tmp_path)) == sorted([
         ("UserPromptSubmit", "", False),
         ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False),
-        ("SubagentStop", "", False),
+        # split_run's entry at an agent's end: only while that hint is on.
+        *([] if "split_run" in capture_catalogue.LIVE_OFF_HINTS else [("SubagentStop", "", False)]),
         ("Stop", "", True),
     ])
     assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in _capture_hooks(tmp_path))["PostToolUse"]
