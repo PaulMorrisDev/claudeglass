@@ -416,7 +416,7 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
             return [fill(node.item)] * node.limit
         keys = node.keys
         names = (
-            sorted(keys.words)
+            sorted(keys.words)[: node.limit]
             if isinstance(keys, tuning.Closed)
             else weeks(node.limit)
             if isinstance(keys, tuning.Weeks)
@@ -636,7 +636,7 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     assert "Capture cost $4.20 and coaching notes $0.35 at list prices." in lines
     for name in ("Tips:", "Plans:", "Tags:", "Rework:", "Agent answers:", "Hooks:", "Limits:"):
         assert any(line.startswith(name) for line in lines), name
-    assert len(lines) < 50
+    assert len(lines) < 75
 
 
 def test_a_file_without_a_coverage_block_as_every_older_one_is_still_passes_and_says_nothing_of_it():
@@ -645,7 +645,8 @@ def test_a_file_without_a_coverage_block_as_every_older_one_is_still_passes_and_
     assert tuning.validate(doc) == []
     text = tuning.summary_text(doc)
     assert text.splitlines()[1].startswith("Capture:")
-    for words in ("These figures cover", "what the dashboard kept", "older version"):
+    # (The figures block says "an older version read their sessions" of its own summaries: that is not this.)
+    for words in ("These figures cover", "what the dashboard kept", "read by an older version"):
         assert words not in text
 
 
@@ -731,7 +732,19 @@ def test_the_summary_counts_one_in_the_singular_and_the_rest_in_the_plural():
     assert "Words were put right 1 time by the hook and 0 times by the transcript." in text
     assert "Claude admitted 1 mistake: you caught 1 and it caught 0. 1 more reply read like" in text
     assert "Rework: 1 follow-up after delivery" in text
-    for line in text.splitlines():
+    # The figures lines agree at one: a token, a reply, a summary that was followed.
+    figures = doc["figures"]
+    figures["growth"] = {"by_reply": {"to_500": {"replies": 1, "tokens": 1}}, "by_session": {}, "shrinks": 0}
+    figures["summaries"].update(summaries=1, paid_back=1)
+    lines = tuning.summary_text(doc).splitlines()
+    assert "Context grew by 1 token a reply on average in the main session, over 1 reply." in lines
+    assert "1 of 1 summary was followed by that many replies." in lines
+    figures["growth"]["by_reply"]["to_500"].update(replies=2, tokens=3)
+    figures["summaries"].update(summaries=6, paid_back=5)
+    lines = tuning.summary_text(doc).splitlines()
+    assert "Context grew by 2 tokens a reply on average in the main session, over 2 replies." in lines
+    assert "5 of 6 summaries were followed by that many replies." in lines
+    for line in tuning.summary_text(doc).splitlines():
         _plain(line)
 
 
@@ -938,7 +951,7 @@ class World:
 #: Names that live only in the world's transcripts, tag files and folders: none may reach the document.
 PRIVATE = (
     "my-private-reviewer", "proj-alpha", "proj-beta", "src/app.py", "src/lib.py", "src/fetch.py", "login", "logout",
-    "msg_wake", "msg_a1", "msg_a2", "msg_l1", "claude-haiku-4-5", "claude-sonnet-5", "workflow-subagent-1", "wf_1",
+    "msg_wake", "msg_a1", "msg_a2", "msg_l1", "workflow-subagent-1", "wf_1",
     "timeouts", "retry logic", "agent-a1", "bg1",
 )  # fmt: skip
 
@@ -1153,7 +1166,7 @@ def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert tuning.validate(doc) == []
     assert list(doc) == [
         *tuning._HEADER,
-        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions"),
+        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions", "figures"),
     ]
     assert doc["kind"] == "claudeglass-tuning" and doc["format"] == 1
     assert doc["tool_version"] == re.match(r"\d+(?:\.\d+)+", __version__).group(0)
@@ -2212,12 +2225,15 @@ def test_the_compactions_block_is_counts_alone_without_a_rate_card(tmp_path):
 def test_the_built_document_has_a_compactions_block_and_the_model_choice_and_nothing_that_names_anything(tmp_path):
     w = _mini_world(tmp_path)
     doc = tuning.build(w.corpus, w.config, w.pricing, config_dir=w.config_dir, days=DAYS, today=TODAY, claude_root=w.claude_root)
-    assert list(doc)[-1] == "compactions" and doc["compactions"]["summaries"] == 3
+    assert list(doc)[-1] == "figures" and doc["compactions"]["summaries"] == 3
     assert len(doc["agents"]["model_choice"]) == 4 and doc["agents"]["launches"]["foreground"]["agents"] == 3
     assert_privacy_deep(doc)
     text = tuning.dumps(doc)
-    for name in ("my-private-reviewer", "proj-mini", "claude-opus-4-1", "mystery-trigger", "agent-fi", "s1", str(w.root)):
+    for name in ("my-private-reviewer", "proj-mini", "mystery-trigger", "agent-fi", "s1", str(w.root)):
         assert name not in text, name
+    # The agents' model id is named only as a key of figures.models, where it is the packaged card's own id.
+    assert "claude-opus-4-1" in doc["figures"]["models"]
+    assert set(re.findall(r"claude-opus-4-1[\w.-]*", text)) <= set(doc["figures"]["models"])
     assert tuning.validate(json.loads(text)) == []
 
 

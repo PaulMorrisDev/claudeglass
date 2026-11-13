@@ -150,3 +150,16 @@ def test_no_amount_is_written_in_raw_usd() -> None:
     assert found, "the scan should see the currency code"
     bad = [f"{name}:{line}: {text!r}" for name, line, text in found if text != "USD" or name not in {"format.js", "core.js"}]
     assert bad == [], "\n".join(bad)
+
+
+def test_the_data_quality_line_about_the_figures_is_copy_the_scan_reads_and_passes() -> None:
+    """K1: the line under Data quality that points at the tuning file's figures."""
+    line = (
+        "Some advice rests on figures no page shows, such as cost per reply and what a summary saves. "
+        "The tuning file holds them. "
+    )
+    found = [(name, text) for name, _line, text in _copy() if text == line]
+    assert found == [("page-data.js", line)]
+    assert not BANNED.search(line) and not SNAKE_CASE.search(line)
+    assert all(len(sentence.split()) <= MAX_SENTENCE_WORDS for sentence in _sentences(line))
+    assert "Figures behind the advice" in {text for _, _, text in _copy()}

@@ -15,7 +15,9 @@ file that fails the checks prints nothing.
 
 What is never in it: names, paths, hashes, session ids, project slugs,
 skill names, custom agent names (they count as ``custom``), model ids
-(they count as a family), and any text of yours or Claude's. Every map's
+other than the packaged rate card's (a model is named by the id of the
+packaged rate-card row ClaudeGlass prices it with, or ``other`` when no row
+prices it), and any text of yours or Claude's. Every map's
 keys come from a closed set built from the catalogues here, never from
 the data, so a key can't carry anything either. A problem line names the
 key path and the check, never the value or the key it found.
@@ -58,7 +60,7 @@ from collections import Counter
 from datetime import date, timedelta
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from . import PARSER_VERSION, __version__
 from . import capture as capture_mod
@@ -76,6 +78,7 @@ from . import habits as habits_mod
 from . import handoff as handoff_mod
 from . import haiku_tags, helptext, hook_health, limits, measured
 from . import pieces as pieces_mod
+from . import pricing as pricing_mod
 from . import prompting as prompting_mod
 from . import ratings as ratings_mod
 from . import recache, recommend
@@ -83,7 +86,7 @@ from . import rework as rework_mod
 from . import snapshots as snapshots_mod
 from .calibration import Calibration
 from .capture_tags import CHANGE_PATTERN, GROUNDED_KEYS
-from .model import EventKind
+from .model import EventKind, scheduled_main_session
 from .pricing import price_turn
 from .report import _agent_file_models, _dominant_transcript_model
 from .topology import LAUNCH_WORDS
@@ -1279,17 +1282,11 @@ def _cache_ttl_s(replies: list) -> int:
     return _TTL_1H_S if any(t.cc_1h > 0 for t in replies[-_TTL_REPLIES:]) else _TTL_5M_S
 
 
-def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
-    """``([cold returns, cache-write tokens], [wake-ups, cache-write
-    tokens])`` over the main sessions' replies. No report-side count
-    existed, so this mirrors the capture hook's. A cold return is a
-    message you typed after a gap longer than the cache the reply before it
-    wrote lasts (``_cold_hint``), with a context of ``cold_min_tokens`` or
-    more, and not a wait for a usage limit or a gap across a compaction. A
-    wake-up is a reply that starts at a background task's notice an hour or
-    more after the reply before it. The tokens are the cache writes of the
-    reply that followed."""
-    cold, wake = [0, 0], [0, 0]
+def _break_turns(ctx: _Ctx) -> Iterator[tuple[_Session, str, Any, Any]]:
+    """``(session, kind, reply before, turn)`` for each break in the main
+    sessions' replies: ``kind`` is ``"cold"`` for a cold return and
+    ``"wake"`` for a wake-up (see :func:`_breaks`). The one place the rule is
+    written, for the pieces block and the figures block both."""
     minimum = ctx.thresholds["cold_min_tokens"]
     for s in ctx.sessions:
         before: list = []
@@ -1313,12 +1310,27 @@ def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
                     and gap > _cache_ttl_s(before)
                     and last.ctx + last.output_tokens >= minimum
                 ):
-                    cold[0] += 1
-                    cold[1] += turn.cache_creation_tokens
+                    yield s, "cold", last, turn
                 elif habits_mod.is_wake_up(turn, gap):
-                    wake[0] += 1
-                    wake[1] += turn.cache_creation_tokens
+                    yield s, "wake", last, turn
             before.append(turn)
+
+
+def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
+    """``([cold returns, cache-write tokens], [wake-ups, cache-write
+    tokens])`` over the main sessions' replies. No report-side count
+    existed, so this mirrors the capture hook's. A cold return is a
+    message you typed after a gap longer than the cache the reply before it
+    wrote lasts (``_cold_hint``), with a context of ``cold_min_tokens`` or
+    more, and not a wait for a usage limit or a gap across a compaction. A
+    wake-up is a reply that starts at a background task's notice an hour or
+    more after the reply before it. The tokens are the cache writes of the
+    reply that followed."""
+    cold, wake = [0, 0], [0, 0]
+    for _s, kind, _last, turn in _break_turns(ctx):
+        count = cold if kind == "cold" else wake
+        count[0] += 1
+        count[1] += turn.cache_creation_tokens
     return cold, wake
 
 
@@ -1891,6 +1903,554 @@ def _compactions(ctx: _Ctx) -> dict:
     return block
 
 
+# -- figures (K1 group 3) ---------------------------------------------------------------------
+
+#: Where a reply ran: ``cost_centres.CENTRES`` without ``start``, so a main session's first reply
+#: counts with its own place.
+PLACES = ("main", "direct", "workflow")
+#: The context a reply read: under 100,000; 100,000 to 200,000; over 200,000.
+CONTEXT_SIZES = ("under_100k", "to_200k", "over_200k")
+_CONTEXT_BOUNDS = (99_999, 200_000)
+#: How many tokens the context grew from one reply to the next.
+GROWTH_SIZES = ("to_500", "to_1k", "to_2k", "to_5k", "to_10k", "to_20k", "to_50k", "over_50k")
+_GROWTH_BOUNDS = (500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000)
+#: How many replies followed a summary before the next one, or before the session ended.
+FOLLOWED = ("to_10", "to_20", "to_50", "to_100", "to_200", "over_200")
+_FOLLOWED_BOUNDS = (10, 20, 50, 100, 200)
+#: How many replies answered a message: 0 to 9, 10 to 29, 30 to 99, 100 or more.
+STRETCHES = ("under_10", "to_30", "to_100", "over_100")
+_STRETCH_BOUNDS = (9, 29, 99)
+#: What the reply before a cold return left in the context: under 150,000 and up.
+RETURN_SIZES = ("under_150k", "to_200k", "to_300k", "to_500k", "over_500k")
+_RETURN_BOUNDS = (149_999, 200_000, 300_000, 500_000)
+#: The weeks the models part keeps amounts for: the latest weeks with any reply, the same weeks for
+#: every model.
+FIGURE_WEEKS = 8
+#: The most models the models part names: the dearest ``MODELS_KEPT - 1``, and ``other`` for the rest.
+MODELS_KEPT = 8
+#: The rate card ClaudeGlass ships, never the user's own, and the ids of its rows: the only model ids a
+#: document may name, and ``other``.
+_PACKAGED = pricing_mod.load_packaged_pricing()
+MODEL_WORDS = (*sorted(pricing_mod.load_packaged_pricing().models), "other")
+
+
+def _model_word(model: str | None) -> str:
+    """A model id as a word of ``MODEL_WORDS``: the packaged card's id it resolves to (an alias, a
+    ``[1m]``, a Bedrock or Vertex form and a dated id are their row's id), else ``other`` (no row, or a
+    newer release the card prices as an older one, ``ResolvedRates.newer_version``)."""
+    resolved = _PACKAGED.resolve_model(model)
+    return "other" if resolved is None or resolved.newer_version else resolved.canonical_id
+
+
+_REPLY_CELL = Obj(
+    {
+        "replies": Count(),
+        "cost_usd": Num(),
+        "sonnet_usd": Num(),
+        "measured_replies": Count(),
+        "lookups": Count(),
+        "lookup_usd": Num(),
+        "lookup_sonnet_usd": Num(),
+    },
+    required=("replies", "measured_replies", "lookups"),
+)
+_AFTER_SIDE = _counts("messages", "corrections", "tagged", "fixes")
+_FIGURES = Obj(
+    {
+        "reply_cost": Map(PLACES, Map(CONTEXT_SIZES, _REPLY_CELL)),
+        "growth": Obj(
+            {
+                "by_reply": Map(GROWTH_SIZES, _counts("replies", "tokens")),
+                "by_session": Map(GROWTH_SIZES, _counts("sessions", "replies")),
+                "shrinks": Count(),
+            },
+            required=("by_reply", "by_session", "shrinks"),
+        ),
+        "summaries": Obj(
+            {
+                "summaries": Count(),
+                "auto": Count(),
+                "sized": Count(),
+                "pre_tokens": Count(),
+                "post_tokens": Count(),
+                "unmeasured": Count(),
+                "followed_to_next": _count_map(FOLLOWED),
+                "followed_to_end": _count_map(FOLLOWED),
+                "request_usd": Num(),
+                "write_usd": Num(),
+                "read_saving_usd": Num(),
+                "paid_back": Count(),
+            },
+            required=(
+                "summaries", "auto", "sized", "pre_tokens", "post_tokens", "unmeasured", "followed_to_next",
+                "followed_to_end",
+            ),
+        ),
+        "after_summary": Obj(
+            {
+                "sessions": Count(),
+                "unmeasured": Count(),
+                "stretches": Map(STRETCHES, Obj({"summarised": _AFTER_SIDE, "plain": _AFTER_SIDE})),
+            },
+            required=("sessions", "unmeasured", "stretches"),
+        ),
+        "models": Map(
+            MODEL_WORDS,
+            Obj(
+                {"replies": Count(), "cost_usd": Num(), "weekly_usd": Map(Weeks(), Num(), limit=FIGURE_WEEKS)},
+                required=("replies",),
+            ),
+            limit=MODELS_KEPT,
+        ),
+        "returns": Map(
+            RETURN_SIZES,
+            Obj(
+                {
+                    "returns": Count(),
+                    "context_tokens": Count(),
+                    "rewritten_tokens": Count(),
+                    "rebuilt": Count(),
+                    "rewrite_usd": Num(),
+                },
+                required=("returns", "context_tokens", "rewritten_tokens", "rebuilt"),
+            ),
+        ),
+    }
+)
+
+
+@_block("figures", _FIGURES, required=False)
+def _figures(ctx: _Ctx) -> dict | None:
+    """The figures the plan's decisions rest on, which no page shows (K1 group 3): cost per reply by
+    where it ran and the context it read, context growth per reply, what a summary cost and saved and
+    the replies that followed it, corrections after a summary against messages after as long a stretch
+    without one, spend by model and week, and the cold returns by the context they came back to.
+    Counts, token sums and list-price amounts; a model is a packaged rate card id or ``other``."""
+    if not ctx.sessions:
+        return None
+    reply_cost, models = _figure_spend(ctx)
+    parts = {
+        "reply_cost": reply_cost,
+        "growth": _figure_growth(ctx),
+        "summaries": _figure_summaries(ctx),
+        "after_summary": _figure_after_summary(ctx),
+        "models": models,
+        "returns": _figure_returns(ctx),
+    }
+    block = {name: part for name, part in parts.items() if part}
+    return block or None
+
+
+def _after_summary(turn) -> bool:
+    """Whether a summary was applied just before this reply (the marker of the boundary)."""
+    return EventKind.COMPACT_BOUNDARY in turn.preceding_event_kinds
+
+
+def _figure_spend(ctx: _Ctx) -> tuple[dict, dict]:
+    """The ``reply_cost`` and ``models`` parts, in one pass that prices each turn once. A reply is a
+    turn with ``turn_index > 0``, not synthetic and with a context, which leaves out the estimated
+    summary request and any zero-usage copy a digest from before parser 45 holds. ``models`` takes every
+    priced turn, the summary requests too, as the report's usage by week does. Without a rate card the
+    amounts, and the weeks that hang on them, are left out and the counts stay."""
+    pricing = ctx.pricing
+    sonnet_id = pricing.aliases.get("sonnet") if pricing is not None else None
+    sonnet = pricing.models.get(sonnet_id) if sonnet_id else None
+    cells: dict[str, dict[str, Counter]] = {}
+    models: dict[str, dict] = {}
+    for s in ctx.sessions:
+        for tr in (s.top, *s.subs):
+            place = cost_centres_mod._centre_of(tr)
+            gauged = measured.measures(tr, "shell_read_count")
+            for turn in tr.turns:
+                if turn.turn_index <= 0:
+                    continue
+                cost = price_turn(turn, pricing.resolve_model(turn.model)).total if pricing is not None else 0.0
+                entry = models.setdefault(_model_word(turn.model), {"replies": 0, "cost": 0.0, "weeks": Counter()})
+                entry["cost"] += cost
+                if not turn.is_synthetic:
+                    entry["replies"] += 1
+                week = _iso_week(habits_mod._week(capture_mod._moment(turn.ts), ctx.config.tz))
+                # A week counts for a model when it had a reply there, priced or not: a model the card
+                # has no row for costs 0 but still ran, and must not read as unused.
+                if week and (cost or not turn.is_synthetic):
+                    entry["weeks"][week] += cost
+                if turn.is_synthetic or turn.ctx <= 0:
+                    continue
+                cell = cells.setdefault(place, {}).setdefault(_bucket(turn.ctx, _CONTEXT_BOUNDS, CONTEXT_SIZES), Counter())
+                at_sonnet = price_turn(turn, sonnet).total if sonnet is not None else 0.0
+                cell["replies"] += 1
+                cell["cost"] += cost
+                cell["sonnet"] += at_sonnet
+                if gauged:
+                    cell["measured"] += 1
+                    if habits_mod._is_probe(turn):
+                        cell["lookups"] += 1
+                        cell["lookup"] += cost
+                        cell["lookup_sonnet"] += at_sonnet
+    reply_cost: dict = {}
+    for place in PLACES:
+        row: dict = {}
+        for size in CONTEXT_SIZES:
+            cell = cells.get(place, {}).get(size)
+            if not cell:
+                continue
+            item = {"replies": cell["replies"], "measured_replies": cell["measured"], "lookups": cell["lookups"]}
+            if pricing is not None:
+                item["cost_usd"] = _num(cell["cost"])
+                item["lookup_usd"] = _num(cell["lookup"])
+                if sonnet is not None:
+                    item["sonnet_usd"] = _num(cell["sonnet"])
+                    item["lookup_sonnet_usd"] = _num(cell["lookup_sonnet"])
+            row[size] = item
+        if row:
+            reply_cost[place] = row
+    # The dearest MODELS_KEPT - 1 named models; every other word folds into "other".
+    ranked = sorted(
+        (word for word in models if word != "other"),
+        key=lambda word: (-models[word]["cost"], -models[word]["replies"], word),
+    )
+    kept = ranked[: MODELS_KEPT - 1]
+    folded = [word for word in models if word not in kept]
+    # The latest FIGURE_WEEKS weeks with any reply, the same weeks for every model.
+    recent = set(sorted({week for entry in models.values() for week in entry["weeks"]})[-FIGURE_WEEKS:])
+    out: dict = {}
+    for word in MODEL_WORDS:
+        if word not in kept and not (word == "other" and folded):
+            continue
+        group = [word] if word != "other" else folded
+        replies = sum(models[w]["replies"] for w in group)
+        cost = sum(models[w]["cost"] for w in group)
+        if not replies and not cost:
+            continue
+        item = {"replies": replies}
+        if pricing is not None:
+            weeks: Counter = Counter()
+            for w in group:
+                weeks.update(models[w]["weeks"])
+            item["cost_usd"] = _num(cost)
+            item["weekly_usd"] = {week: _num(weeks[week]) for week in sorted(weeks) if week in recent}
+        out[word] = item
+    return reply_cost, out
+
+
+def _figure_growth(ctx: _Ctx) -> dict | None:
+    """How much the context grew from one reply to the next in the main sessions (a scheduled one is
+    left out): the rises by size, the sessions by their mean rise, and the falls. The reply after a
+    summary, and the one after the estimated request that wrote it, have no rise: the context was
+    replaced. A fall is a ``/clear`` or a summary the markers missed."""
+    by_reply = {word: [0, 0] for word in GROWTH_SIZES}
+    by_session = {word: [0, 0] for word in GROWTH_SIZES}
+    shrinks = 0
+    for s in ctx.sessions:
+        if scheduled_main_session(s.top):
+            continue
+        previous = None
+        count = total = 0
+        for turn in s.top.turns:
+            if turn.turn_index <= 0:
+                continue
+            if turn.is_synthetic:
+                if turn.estimated == "compaction":
+                    previous = None
+                continue
+            if turn.ctx <= 0:
+                continue
+            if previous is not None and not _after_summary(turn):
+                delta = turn.ctx - previous.ctx
+                if delta < 0:
+                    shrinks += 1
+                else:
+                    cell = by_reply[_bucket(delta, _GROWTH_BOUNDS, GROWTH_SIZES)]
+                    cell[0] += 1
+                    cell[1] += delta
+                    count += 1
+                    total += delta
+            previous = turn
+        if count:
+            cell = by_session[_bucket(total / count, _GROWTH_BOUNDS, GROWTH_SIZES)]
+            cell[0] += 1
+            cell[1] += count
+    if not shrinks and not any(cell[0] for cell in by_reply.values()):
+        return None
+    return {
+        "by_reply": {word: {"replies": cell[0], "tokens": cell[1]} for word, cell in by_reply.items() if cell[0]},
+        "by_session": {word: {"sessions": cell[0], "replies": cell[1]} for word, cell in by_session.items() if cell[0]},
+        "shrinks": shrinks,
+    }
+
+
+def _figure_summaries(ctx: _Ctx) -> dict | None:
+    """What the main sessions' summaries cost, what they saved and how many replies followed them. The
+    records are the ``compactions`` block's own. A session whose digest is from before the summary
+    request was measured (``measured``) adds its records to ``unmeasured`` and nothing else. The saving
+    is what each later reply reads less, at the session's dominant model's cache-read rate. A summary
+    paid back when the replies that followed it reach the mean break-even: the request and the cache
+    written after it, over what one reply saves."""
+    stats, _main_cost = ctx.compactions
+    # ``ctx.compactions`` folds the sessions in ``ctx.sessions``' order, each main transcript before its
+    # agents', and makes one record per boundary of a transcript in order (none for a scheduled one). So a
+    # session id two bundles share (a project folder copied, or read from two roots) holds each bundle's
+    # records one after the other, and each takes its own off the front of the list.
+    records: dict[str, list] = {}
+    for record in stats.records:
+        if record.kind not in compaction_mod.AGENT_KINDS:
+            records.setdefault(record.session_id, []).append(record)
+    pricing = ctx.pricing
+    count = auto = sized = pre = post = unmeasured = 0
+    request = write = saving = 0.0
+    to_next: Counter = Counter()
+    to_end: Counter = Counter()
+    followed_all: list[int] = []
+    for s in ctx.sessions:
+        top = s.top
+        if scheduled_main_session(top):
+            continue
+        priced = compaction_mod._priced_turns(top)
+        starts = [i for _event, i in compaction_mod._correlate_compactions_to_turn_index(top, priced)]
+        ahead = records.get(top.meta.session_id, [])
+        found, ahead[: len(starts)] = ahead[: len(starts)], []
+        if not found:
+            continue
+        if not measured.measures(top, "estimated"):
+            unmeasured += len(found)
+            continue
+        model = _dominant_transcript_model(top)
+        rates = pricing.resolve_model(model) if pricing is not None and model else None
+        if pricing is not None:
+            request += sum(
+                price_turn(t, pricing.resolve_model(t.model)).total for t in top.turns if t.estimated == "compaction"
+            )
+        read_rate = rates.rates.cache_read / 1_000_000 if rates is not None else 0.0
+        for k, record in enumerate(found):
+            count += 1
+            auto += int(record.trigger == "auto")
+            if record.next_turn_write_cost is not None and compaction_mod._join_is_tight(record):
+                write += record.next_turn_write_cost
+            closed = k + 1 < len(found)
+            if starts[k] is None:
+                followed = 0
+            else:
+                end = (starts[k + 1] if starts[k + 1] is not None else len(priced)) if closed else len(priced)
+                followed = max(0, end - starts[k])
+            (to_next if closed else to_end)[_bucket(followed, _FOLLOWED_BOUNDS, FOLLOWED)] += 1
+            followed_all.append(followed)
+            if record.pre_tokens is not None and record.post_tokens is not None:
+                sized += 1
+                pre += record.pre_tokens
+                post += record.post_tokens
+                saving += max(0, record.pre_tokens - record.post_tokens) * read_rate
+    if not count and not unmeasured:
+        return None
+    block: dict = {
+        "summaries": count,
+        "auto": auto,
+        "sized": sized,
+        "pre_tokens": pre,
+        "post_tokens": post,
+        "unmeasured": unmeasured,
+        "followed_to_next": _tally(to_next, FOLLOWED),
+        "followed_to_end": _tally(to_end, FOLLOWED),
+    }
+    if pricing is not None:
+        block["request_usd"] = _num(request)
+        block["write_usd"] = _num(write)
+        block["read_saving_usd"] = _num(saving)
+        if count and sized and saving > 0:
+            even = ((request + write) / count) / (saving / sized)
+            block["paid_back"] = sum(1 for followed in followed_all if followed >= even)
+    return block
+
+
+def _summary_in(turn) -> bool:
+    """Whether a summary fell at this reply: its estimated request, or the reply that follows the boundary."""
+    return turn.estimated == "compaction" or _after_summary(turn)
+
+
+def _figure_after_summary(ctx: _Ctx) -> dict | None:
+    """Corrections after a summary, against messages after as long a stretch without one. The unit is
+    the message that ends a stretch of work: the stretch is the replies to the message before it, and
+    it is ``summarised`` when a summary fell in it. A message reads as a correction by the rule of
+    ``tags.shift`` (the parser's flag, or one queued while Claude worked); ``tagged`` and ``fixes``
+    are the shift word the cycle settled on, where capture is on. The main sessions that summarised at
+    least once, a scheduled one left out; one whose digest is from before the flags were measured is
+    counted in ``unmeasured`` and nothing else. A comparison of rates, which proves nothing alone."""
+    cells = {word: {"summarised": Counter(), "plain": Counter()} for word in STRETCHES}
+    sessions = unmeasured = 0
+    for s in ctx.sessions:
+        top = s.top
+        if scheduled_main_session(top) or not compaction_mod._compaction_events(top):
+            continue
+        if not measured.measures(top, "estimated", "queued_correction"):
+            unmeasured += 1
+            continue
+        sessions += 1
+        for previous, cycle in zip(s.cycles, s.cycles[1:]):
+            stretch = sum(1 for t in previous.turns if not t.is_synthetic)
+            summarised = any(_summary_in(t) for t in previous.turns[1:]) or _summary_in(cycle.turns[0])
+            row = cells[_bucket(stretch, _STRETCH_BOUNDS, STRETCHES)]["summarised" if summarised else "plain"]
+            row["messages"] += 1
+            row["corrections"] += int(
+                bool(cycle.turns[0].human_correction or any(t.queued_correction for t in cycle.turns))
+            )
+            settled = cycle.settled
+            if settled is not None and settled.shift:
+                row["tagged"] += 1
+                row["fixes"] += int(settled.shift in ("redo", "fix"))
+    if not sessions and not unmeasured:
+        return None
+    return {
+        "sessions": sessions,
+        "unmeasured": unmeasured,
+        "stretches": {
+            word: {
+                side: {key: int(row[key]) for key in ("messages", "corrections", "tagged", "fixes")}
+                for side, row in sides.items()
+                if row["messages"]
+            }
+            for word, sides in cells.items()
+            if any(row["messages"] for row in sides.values())
+        },
+    }
+
+
+def _figure_returns(ctx: _Ctx) -> dict | None:
+    """The cold returns of ``_breaks``, by the context the reply before each left: how many, the
+    context they came back to, the tokens written again and what writing them cost, and how many of
+    them ``recache.detect`` also flags as a rebuild. The sums equal ``pieces.cold_returns``."""
+    thresholds = recache.RecacheThresholds.from_config(ctx.config.thresholds)
+    flagged: dict[int, set[str]] = {}
+    cells = {word: Counter() for word in RETURN_SIZES}
+    cost = {word: 0.0 for word in RETURN_SIZES}
+    for s, kind, last, turn in _break_turns(ctx):
+        if kind != "cold":
+            continue
+        if id(s) not in flagged:
+            flagged[id(s)] = {t.message_id for t in recache.detect(s.top.turns, thresholds)}
+        left = last.ctx + last.output_tokens
+        word = _bucket(left, _RETURN_BOUNDS, RETURN_SIZES)
+        cells[word]["returns"] += 1
+        cells[word]["context_tokens"] += left
+        cells[word]["rewritten_tokens"] += turn.cache_creation_tokens
+        cells[word]["rebuilt"] += int(turn.message_id in flagged[id(s)])
+        if ctx.pricing is not None:
+            cost[word] += price_turn(turn, ctx.pricing.resolve_model(turn.model)).cache_write_cost
+    out: dict = {}
+    for word in RETURN_SIZES:
+        if not cells[word]["returns"]:
+            continue
+        item = {key: int(cells[word][key]) for key in ("returns", "context_tokens", "rewritten_tokens", "rebuilt")}
+        if ctx.pricing is not None:
+            item["rewrite_usd"] = _num(cost[word])
+        out[word] = item
+    return out or None
+
+
+_CONTEXT_WORDS = {"under_100k": "under 100K tokens of context", "to_200k": "from 100K to 200K", "over_200k": "over 200K"}
+_RETURN_WORDS = {
+    "under_150k": "under 150K", "to_200k": "to 200K", "to_300k": "to 300K", "to_500k": "to 500K", "over_500k": "over 500K",
+}  # fmt: skip
+#: The sessions whose mean rise a reply is over 10,000 tokens.
+_FAST_GROWTH = ("to_20k", "to_50k", "over_50k")
+
+
+def _model_label(word: str) -> str:
+    return "other models" if word == "other" else pricing_mod.model_name(word)
+
+
+def _lookup_mean(reply_cost: dict, places: tuple[str, ...], key: str) -> float | None:
+    """The mean ``key`` amount of the lookups in ``places``, ``None`` with no lookup or a cell without it."""
+    cells = [cell for place in places for cell in (reply_cost.get(place) or {}).values()]
+    lookups = sum(cell["lookups"] for cell in cells)
+    if not lookups or not all(key in cell for cell in cells):
+        return None
+    return sum(cell[key] for cell in cells) / lookups
+
+
+def _figures_lines(block: dict) -> list[str]:
+    lines: list[str] = []
+    reply_cost = block.get("reply_cost") or {}
+    for place in PLACES:
+        row = reply_cost.get(place) or {}
+        parts = [
+            f"{_usd(row[size]['cost_usd'] / row[size]['replies'])} {_CONTEXT_WORDS[size]}"
+            for size in CONTEXT_SIZES
+            if size in row and "cost_usd" in row[size] and row[size]["replies"]
+        ]
+        if parts:
+            lines.append(f"Cost per reply, {cost_centres_mod.CENTRE_LABELS[place].lower()}: {_list(parts)}.")
+    in_agents = ("direct", "workflow")
+    main, agent = _lookup_mean(reply_cost, ("main",), "lookup_usd"), _lookup_mean(reply_cost, in_agents, "lookup_usd")
+    if main and agent:
+        line = f"One read-only lookup cost {_usd(main)} a reply in the main session and {_usd(agent)} in an agent"
+        main_sonnet = _lookup_mean(reply_cost, ("main",), "lookup_sonnet_usd")
+        agent_sonnet = _lookup_mean(reply_cost, in_agents, "lookup_sonnet_usd")
+        both = f", or {_usd(main_sonnet)} and {_usd(agent_sonnet)} at Sonnet's rates" if main_sonnet and agent_sonnet else ""
+        lines.append(f"{line}{both}.")
+    growth = block.get("growth") or {}
+    replies = sum(cell["replies"] for cell in (growth.get("by_reply") or {}).values())
+    if replies:
+        tokens = sum(cell["tokens"] for cell in growth["by_reply"].values())
+        lines.append(
+            f"Context grew by {_n(round(tokens / replies), 'token')} a reply on average in the main session, "
+            f"over {_n(replies, 'reply', 'replies')}."
+        )
+        fast = sum(growth["by_session"].get(word, {}).get("sessions", 0) for word in _FAST_GROWTH)
+        if fast:
+            lines.append(f"{_n(fast, 'session')} grew by over 10,000 tokens a reply on average.")
+    summaries = block.get("summaries") or {}
+    if (
+        summaries.get("summaries")
+        and summaries.get("sized")
+        and summaries.get("read_saving_usd", 0) > 0
+        and "request_usd" in summaries
+        and "write_usd" in summaries
+    ):
+        cost = (summaries["request_usd"] + summaries["write_usd"]) / summaries["summaries"]
+        saved = summaries["read_saving_usd"] / summaries["sized"]
+        lines.append(
+            f"Each summary cost about {_usd(cost)} and saved {_usd(saved)} on every later reply, "
+            f"so it paid back after about {_n(round(cost / saved), 'reply', 'replies')}."
+        )
+        if "paid_back" in summaries:
+            many = summaries["summaries"]
+            lines.append(
+                f"{summaries['paid_back']:,} of {_n(many, 'summary', 'summaries')} "
+                f"{'was' if many == 1 else 'were'} followed by that many replies."
+            )
+    if summaries.get("unmeasured"):
+        lines.append(
+            f"{_n(summaries['unmeasured'], 'summary', 'summaries')} left out of these figures: "
+            "an older version read their sessions."
+        )
+    after = block.get("after_summary") or {}
+    both_sides = [sides for sides in (after.get("stretches") or {}).values() if "summarised" in sides and "plain" in sides]
+    after_messages = sum(sides["summarised"]["messages"] for sides in both_sides)
+    plain_messages = sum(sides["plain"]["messages"] for sides in both_sides)
+    if after_messages and plain_messages:
+        lines.append(
+            f"After a summary, {sum(sides['summarised']['corrections'] for sides in both_sides):,} of "
+            f"{_n(after_messages, 'next message')} read as a correction, against "
+            f"{sum(sides['plain']['corrections'] for sides in both_sides):,} of {plain_messages:,} "
+            "after a stretch as long without one."
+        )
+    models = block.get("models") or {}
+    if any("cost_usd" in entry for entry in models.values()):
+        ranked = sorted(models.items(), key=lambda kv: (-kv[1].get("cost_usd", 0.0), kv[0]))
+        spend = [f"{_model_label(word)} {_usd(entry.get('cost_usd', 0.0))}" for word, entry in ranked[:5]]
+        lines.append(f"Spend by model: {_list(spend)}.")
+        weeks = {week for entry in models.values() for week in entry.get("weekly_usd", {})}
+        idle = [
+            _model_label(word) for word, entry in ranked if word != "other" and "weekly_usd" in entry and not entry["weekly_usd"]
+        ]
+        if weeks and idle:
+            lines.append(f"Not used in the file's last {_n(len(weeks), 'week')}: {_list(idle)}.")
+    returns = block.get("returns") or {}
+    if returns:
+        parts = [f"{returns[word]['returns']:,} {_RETURN_WORDS[word]}" for word in RETURN_SIZES if word in returns]
+        lines.append(f"Cold returns by context: {_list(parts)}.")
+    return lines
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -1974,6 +2534,7 @@ def summary_text(doc) -> str:
         (_cost_centres_lines, "cost_centres"),
         (_project_files_lines, "project_files"),
         (_compactions_lines, "compactions"),
+        (_figures_lines, "figures"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])
