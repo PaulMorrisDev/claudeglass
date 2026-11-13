@@ -569,3 +569,65 @@ def test_export_gives_the_tuning_build_the_projects_roots_it_read(world, monkeyp
     monkeypatch.setattr(tuning, "build", spy)
     assert _export(world, "--out", str(world.out)) == 0
     assert seen["projects_roots"] == [world.projects]
+
+
+def _coaching_notes_on(world: World) -> None:
+    world.config_dir.mkdir(parents=True, exist_ok=True)
+    (world.config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "standard"\ncoaching = ["coaching_notes"]\n', encoding="utf-8"
+    )
+
+
+def test_tuning_export_counts_the_mods_notes_from_the_store(world, capsys):
+    from claudeglass.service.serve import STORE_FILENAME
+    from claudeglass.service.store import Store
+
+    _coaching_notes_on(world)
+    # No store: the block is there and the mod showed nothing.
+    doc = _stdout_doc(world, capsys, "--days", "30")
+    assert doc["hint_occasions"]["hints"]["big_paste"]["glass"] == 0
+    assert sum(row["glass"] for row in doc["hint_occasions"]["hints"].values()) == 0
+    # The dashboard's store holds a note the mod showed for a big paste in an exported session.
+    store = Store(world.config_dir / STORE_FILENAME)
+    store.open()
+    try:
+        shown = {"ts": (NOW - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "note", "kind": "big_paste", "surface": "hint", "outcome": "sent"}
+        assert store.replace_mod_events("s1", [shown]) == 1
+    finally:
+        store.close()
+    doc = _stdout_doc(world, capsys, "--days", "30")
+    assert doc["hint_occasions"]["hints"]["big_paste"]["glass"] == 1
+    assert tuning.validate(doc) == []
+    # Without coaching notes there is no block, with or without the store.
+    (world.config_dir / "config.toml").unlink()
+    assert "hint_occasions" not in _stdout_doc(world, capsys, "--days", "30")
+
+
+def test_export_passes_the_dashboards_card_marks_and_the_exports_projects(world, monkeypatch):
+    seen = []
+    real = tuning.build
+
+    def spy(*args, **kw):
+        seen.append(kw.get("card_marks"))
+        return real(*args, **kw)
+
+    rows = []
+    monkeypatch.setattr(cli, "_dashboard_card_marks", lambda config_dir: rows)
+    monkeypatch.setattr(tuning, "build", spy)
+    assert _export(world, "--out", str(world.out)) == 0
+    assert _export(world, "--project", "other-project", "--days", "365", "--out", str(world.out)) == 0
+    every, one = seen
+    assert every.rows is rows and every.every_project is True
+    assert every.folders == frozenset({"acme-secret-project", "other-project"})
+    assert one.rows is rows and one.every_project is False and one.folders == frozenset({"other-project"})
+    # A dashboard that showed no card still makes the block.
+    assert json.loads(world.out.read_text(encoding="utf-8"))["cards"] == {"shown": 0, "rows": []}
+
+
+def test_export_without_a_dashboard_store_has_no_cards_block(world, capsys):
+    assert not (world.config_dir / "service.db").exists()
+    assert _export(world, "--out", str(world.out)) == 0
+    capsys.readouterr()
+    doc = json.loads(world.out.read_text(encoding="utf-8"))
+    assert "cards" not in doc
+    assert "Dashboard cards" not in tuning.summary_text(doc)

@@ -545,9 +545,10 @@ def test_capture_group_opens_for_a_metric_that_needs_you() -> None:
     sat in a closed group."""
     metrics = _function_source(_app_js(), "renderCaptureMetrics")
     assert "group.open = section.metrics.some(" in metrics
-    assert "return row.needs_hook || row.needs_install || row.statusline_note;" in metrics
+    assert "return row.needs_hook || row.needs_install || row.statusline_note || row.silent_note;" in metrics
     # The note it opens for is the one each row shows.
     assert "if (row.statusline_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
+    assert "if (row.silent_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
 
 
 def test_a_metric_row_that_needs_a_hook_entry_names_the_command_unless_a_policy_blocks_it() -> None:
@@ -4124,6 +4125,28 @@ def test_capture_segment_ends_with_the_tuning_block_of_copyable_commands() -> No
         assert forbidden not in tuning, forbidden
 
 
+def test_data_quality_links_to_the_figures_behind_the_advice() -> None:
+    """K1: some advice rests on figures no page shows; the tuning file holds them. Data quality says so in
+    one line and links to the Capture block that writes the file (scrolled to and pulsed as an evidence
+    link's table is)."""
+    data_js, links_js, capture_js = _static_text("page-data.js"), _static_text("links.js"), _static_text("page-capture.js")
+    quality = _function_source(data_js, "renderDataQuality")
+    assert 'tuningLink("Figures behind the advice")' in quality
+    assert (
+        '"Some advice rests on figures no page shows, such as cost per reply and what a summary saves. '
+        'The tuning file holds them. "'
+    ) in quality
+    assert 'el("p", { class: "notes", id: "data-figures" }, [' in quality
+    assert re.search(r'import \{[^}]*\btuningLink\b[^}]*\} from "\./links\.js";', data_js)
+    assert 'export var TUNING_BLOCK = "capture.tuning";' in links_js
+    assert 'pageLink("setup/capture", text, { t: TUNING_BLOCK })' in _function_source(links_js, "tuningLink")
+    assert 'var TUNING_NAME = "tuning";' in capture_js
+    assert 'block.setAttribute("data-table-name", TUNING_NAME)' in _function_source(capture_js, "renderCaptureTuning")
+    # The link's table part is the name the block carries.
+    table = re.search(r'export var TUNING_BLOCK = "[^."]+\.([^"]+)";', links_js).group(1)
+    assert f'var TUNING_NAME = "{table}";' in capture_js
+
+
 def test_grid_words_an_empty_status_line_table_for_desktop_sessions() -> None:
     grid_js = _static_text("grid.js")
     assert (
@@ -4365,3 +4388,64 @@ def test_capture_segment_shows_the_signed_out_count_and_the_pause_beside_the_jud
     judged = 'of agent runs" + (measured.report_signed_out_text ? ", and " + measured.report_signed_out_text : "")'
     assert judged in render
     assert "if (measured.judge_paused_text)" in render and "measured.judge_paused_text" in render
+
+
+def test_every_copy_of_a_cards_prompt_records_the_card() -> None:
+    """A copy of a card's prompt is recorded against the card (api.js
+    ``markCards``), on every button that copies one: the card's own detail,
+    its per-agent table, the project bundle, the Overview's checklist, a
+    check's fix that came from a card, and the search palette."""
+    actions = _static_text("page-actions.js")
+    detail = _function_source(actions, "renderRecommendationDetail")
+    assert 'markCards("copied", [focus.key || focus.id])' in detail
+    assert "commandBlock(fixes[0], { heading: true, onCopy: copied })" in detail
+    assert "renderFix(fix, true, { onCopy: copied })" in detail
+    assert "copyPromptButton(row.fix.prompt, row.agent, null, null, null, row.key || focus.key)" in _function_source(
+        actions, "changesTable"
+    )
+    button = _function_source(actions, "copyPromptButton")
+    assert 'if (ok && card) markCards("copied", [card])' in button
+    assert button.index('markCards("copied"') < button.index("handling.after(ok)")
+    bundle = _function_source(actions, "bundleBlock")
+    assert 'markCards("bundle", data.keys || [])' in bundle
+    assert bundle.index("if (ok)") < bundle.index('markCards("bundle"') < bundle.index("else showBundlePrompt")
+    evidence = _function_source(actions, "renderCheckEvidence")
+    assert "fix.card" in evidence and 'markCards("copied", [fix.card])' in evidence
+
+    overview = _static_text("page-overview.js")
+    overview_button = _function_source(overview, "copyPromptButton")
+    assert 'if (ok && card) markCards("copied", [card])' in overview_button
+    assert overview_button.index('markCards("copied"') < overview_button.index("toast(")
+    assert "copyPromptButton(fix.prompt, groupTitle(lead), lead.members[0].key)" in _function_source(overview, "checklistRow")
+
+    entries = _function_source(_static_text("palette.js"), "recommendationEntries")
+    assert entries.index("if (ok) {") < entries.index('markCards("copied", [key])') < entries.index('toast("Prompt copied')
+
+    ui = _static_text("ui.js")
+    fix = _function_source(ui, "renderFix")
+    assert "{ heading: true, onCopy: opts && opts.onCopy }" in fix
+    assert "commandBlock(fix, opts)" in fix
+    # The list of fixes in a drawer is not a card's: it passes nothing.
+    assert "opts" not in _function_source(ui, "renderFixList")
+
+
+def test_cards_are_marked_shown_from_the_list_and_the_overview_only_while_visible() -> None:
+    actions = _static_text("page-actions.js")
+    overview = _static_text("page-overview.js")
+    # Called from these two pages and no other.
+    callers = sorted(
+        path.name for path in _js_modules() if path.name != "api.js" and "markCardsShown(" in path.read_text(encoding="utf-8")
+    )
+    assert callers == ["page-actions.js", "page-overview.js"]
+    inbox_list = _function_source(actions, "recommendationInbox")
+    assert "drawn: function (items)" in inbox_list and "markCardsShown(" in inbox_list
+    # An ignored card is on the Ignored list, which is not a to-do: it is not marked shown.
+    marking = "markCardsShown(memberKeys(items.filter(function (g) { return !g.ignored; })));"
+    assert marking in inbox_list and inbox_list.index("drawn: function (items)") < inbox_list.index(marking)
+    assert "if (spec.drawn) spec.drawn(shownItems)" in _function_source(actions, "inbox")
+    checklist = _function_source(overview, "renderChecklist")
+    assert "markCardsShown(" in checklist and "check.headline" in checklist
+    # A tab nobody is looking at shows nothing.
+    shown = _function_source(_static_text("api.js"), "markCardsShown")
+    assert 'document.visibilityState === "visible"' in shown
+    assert 'document.addEventListener("visibilitychange"' in shown

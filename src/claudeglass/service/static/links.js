@@ -451,6 +451,15 @@ export function projectFilesLink(text) {
   return pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE });
 }
 
+// The tuning block on Setup > Capture ("Take your figures to another machine"),
+// scrolled to and pulsed as an evidence link's table is (evidence.js revealEvidence).
+// Data quality's "Figures behind the advice" points here.
+export var TUNING_BLOCK = "capture.tuning";
+
+export function tuningLink(text) {
+  return pageLink("setup/capture", text, { t: TUNING_BLOCK });
+}
+
 // Any report table, by its "section.table" name: a link to the view that
 // shows it (viewForTable), scrolled to and highlighted as evidence.js
 // revealEvidence does for the two tables above. A table the page leaves to

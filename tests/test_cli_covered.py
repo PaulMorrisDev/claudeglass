@@ -146,9 +146,12 @@ def test_tuning_export_covers_all_3_and_says_2_were_read_from_what_the_dashboard
             days=30,
             today=date.fromisoformat(doc["generated_on"]),
             claude_root=claude_root,
+            # The export read the dashboard's card marks (none yet): an empty block, not a missing one.
+            card_marks=tuning.CardMarks([], frozenset(), True),
         )
     finally:
         store.close()
+    assert doc["cards"] == {"shown": 0, "rows": []}
     assert {k: v for k, v in doc.items() if k != "coverage"} == dash
 
 

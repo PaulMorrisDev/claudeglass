@@ -521,6 +521,12 @@ def _locate_pricing_source(
         except OSError as exc:
             raise PricingError(f"cannot read pricing file: {candidate} ({exc})") from exc
 
+    return _packaged_source()
+
+
+def _packaged_source() -> tuple[bytes, str]:
+    """The packaged ``pricing.toml``'s bytes and label, read through
+    ``importlib.resources`` so it also works from the ``.pyz``."""
     try:
         packaged = importlib.resources.files("claudeglass").joinpath("pricing.toml")
         return packaged.read_bytes(), "claudeglass/pricing.toml (packaged default)"
@@ -673,6 +679,10 @@ def load_pricing(
     table, a model missing a rate field, a non-numeric rate).
     """
     raw_bytes, path_str = _locate_pricing_source(path, config_dir)
+    return _parse_pricing(raw_bytes, path_str)
+
+
+def _parse_pricing(raw_bytes: bytes, path_str: str) -> Pricing:
     try:
         text = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -682,6 +692,19 @@ def load_pricing(
     except tomllib.TOMLDecodeError as exc:
         raise PricingError(f"malformed pricing file ({path_str}): {exc}") from exc
     return _build_pricing(data, path_str, raw_bytes)
+
+
+_PACKAGED_PRICING: Pricing | None = None
+
+
+def load_packaged_pricing() -> Pricing:
+    """The rate card ClaudeGlass ships, never ``--pricing`` or a card in
+    the config folder: the one list of model ids the tuning export may name.
+    Read once, so every call gives the same object."""
+    global _PACKAGED_PRICING
+    if _PACKAGED_PRICING is None:
+        _PACKAGED_PRICING = _parse_pricing(*_packaged_source())
+    return _PACKAGED_PRICING
 
 
 def _turn_token_total(turn: Turn) -> int:
@@ -1260,6 +1283,7 @@ __all__ = [
     "EffectiveRates",
     "Pricing",
     "PricingCoverage",
+    "load_packaged_pricing",
     "load_pricing",
     "newer_version_id",
     "newer_version_of",

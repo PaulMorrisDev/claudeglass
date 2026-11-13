@@ -15,6 +15,9 @@ import { capturePoll, showCaptureData } from "./shell.js";
 
 // -- Setup, Capture ---------------------------------------------------
 
+// The block links.js TUNING_BLOCK points at (evidence.js revealEvidence finds it by this name).
+var TUNING_NAME = "tuning";
+
 // The billing mode capture's amounts were phrased for (/api/capture's
 // billing.mode), set each time the page draws.
 var captureBilling = "";
@@ -296,6 +299,7 @@ function renderCaptureTuning(data, container) {
   var tuning = data.tuning;
   if (!tuning) return;
   var block = captureBlock(container, tuning.title);
+  block.setAttribute("data-table-name", TUNING_NAME);
   block.appendChild(el("p", { class: "notes", text: tuning.text }));
   block.appendChild(el("p", { class: "notes", text: "From a terminal on this machine, write the file:" }));
   block.appendChild(codeBlockWithCopy(tuning.export_command, "Command", "writing the file"));
@@ -456,7 +460,7 @@ function renderCaptureMetrics(data, container) {
     }).length;
     var group = el("details", { class: "disclosure capture-group" });
     group.open = section.metrics.some(function (row) {
-      return row.needs_hook || row.needs_install || row.statusline_note;
+      return row.needs_hook || row.needs_install || row.statusline_note || row.silent_note;
     });
     group.appendChild(el("summary", { text: section.title + " (" + on + " of " + section.metrics.length + " on)" }));
     var list = el("div", { class: "capture-metric-list" });
@@ -522,6 +526,7 @@ function renderMetricRow(row, data, container) {
     box.appendChild(codeBlockWithCopy(row.install_command, "Command"));
   }
   if (row.statusline_note) box.appendChild(el("p", { class: "notes" }, prose(row.statusline_note)));
+  if (row.silent_note) box.appendChild(el("p", { class: "notes" }, prose(row.silent_note)));
 
   toggle.addEventListener("change", function () {
     var turningOn = toggle.checked;

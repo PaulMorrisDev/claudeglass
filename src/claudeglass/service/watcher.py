@@ -39,7 +39,8 @@ Each :meth:`FileWatcher.run_once` tick:
    ``usage-log.csv`` rows (SIG-5: ``log_usage.prune_usage_log``), and the
    ClaudeGlass mod's sensor files and the ``mod_events`` rows read from
    them (``mod_sensor.prune``, ``Store.prune_mod_events``), and its
-   heartbeat files after a day (``mod_sensor.prune_present``) -- at
+   heartbeat files after a day (``mod_sensor.prune_present``), and the
+   dashboard's card marks (``Store.prune_card_marks``) -- at
    ``options.retention_days`` when set, else
    ``config.SIGNAL_RETENTION_DEFAULT_DAYS`` (SEC-P8/G7: this telemetry
    must never grow forever just because nobody set a retention window,
@@ -739,6 +740,8 @@ class FileWatcher:
         # only reads the last ten minutes of one.
         mod_sensor_mod.prune_present(self.options.config_dir)
         self._time_store(stats, self.store.prune_mod_events, signal_retention)
+        # What the dashboard kept of the cards it showed goes at the same age.
+        self._time_store(stats, self.store.prune_card_marks, signal_retention)
         config_mod.prune_capture_log(self.options.config_dir, signal_retention)
         config_mod.prune_habit_log(self.options.config_dir, signal_retention)
 

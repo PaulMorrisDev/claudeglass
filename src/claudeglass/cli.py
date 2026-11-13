@@ -1482,6 +1482,17 @@ def _dashboard_tip_feedback(config_dir: Path) -> dict:
     return read_tip_feedback(config_dir / STORE_FILENAME)
 
 
+def _dashboard_card_marks(config_dir: Path) -> list[dict] | None:
+    """What the dashboard kept of the recommendation cards it showed, read
+    from ``<config-dir>/service.db`` without writing to it. ``None`` when
+    there is no store or it has no such table: the tuning export then leaves
+    its ``cards`` block out."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import read_card_marks
+
+    return read_card_marks(config_dir / STORE_FILENAME)
+
+
 def _dashboard_mod_events(config_dir: Path) -> list[dict]:
     """What the ClaudeGlass mod's sensor files said, by event, read from
     ``<config-dir>/service.db`` without writing to it."""
@@ -2701,8 +2712,9 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     it, as the dashboard and capture do. A document that fails the checks is
     printed as problem lines and nothing is written (exit 2). With ``--out``
     the file is written whole or not at all; without it the JSON is printed.
-    Your dashboard ratings and tip-card answers are read from its store
-    without writing to it, as ``report`` reads them. When the dashboard's
+    Your dashboard ratings and tip-card answers, and what it kept of the
+    cards it showed, are read from its store without writing to it, as
+    ``report`` reads them. When the dashboard's
     store holds sessions of the window whose transcripts are gone, they are
     read from its digests, so the file covers what the dashboard covers; its
     ``coverage`` block and a line on stderr say how many."""
@@ -2745,6 +2757,12 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
         return 1
 
     _overrides, ratings = _merge_dashboard_marks(config_dir, {})
+    card_rows = _dashboard_card_marks(config_dir)
+    card_marks = (
+        None
+        if card_rows is None
+        else tuning_mod.CardMarks(card_rows, frozenset(p.name for p in project_dirs), bool(args.all_projects))
+    )
     today = discovery.to_local(datetime.now(timezone.utc), config.tz).date()
     try:
         doc = tuning_mod.build(
@@ -2759,6 +2777,8 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
             tip_feedback=_dashboard_tip_feedback(config_dir),
             coverage=coverage,
             projects_roots=_read_where(args, config_dir)[1],
+            mod_events=_dashboard_mod_events(config_dir),
+            card_marks=card_marks,
         )
         text = tuning_mod.dumps(doc)
     except tuning_mod.TuningError as exc:
@@ -5458,7 +5478,9 @@ def _cmd_serve_purge(config_dir: Path, *, confirmed: bool, store_path: Path | No
     sidecars. The store is
     always a derived cache (never source of truth -- see
     ``service/store.py``'s module docstring), so this is safe: the next
-    ``serve`` run simply rebuilds it from the transcripts on disk.
+    ``serve`` run simply rebuilds it from the transcripts on disk. The
+    card marks (what the dashboard kept of the cards it showed) are the
+    exception: a rebuild keeps them, and this deletes them.
     Always prints exactly what it would delete; only actually deletes
     when ``confirmed`` (``--yes``) is set. Refuses while a running
     ``serve`` holds the store's lock (``service/storelock.py``): deleting

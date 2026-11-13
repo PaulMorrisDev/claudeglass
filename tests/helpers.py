@@ -519,8 +519,8 @@ def reminder_led_prompt(typed: str = "") -> str:
 
 # -- R10: digests an older parser wrote, whose transcripts are gone ------------
 
-#: The turn keys parsers 47 to 50 added: a 0.16.0 (parser 45) digest holds none.
-OLDER_TURN_KEYS = ("shell_code_write_count", "edit_code_count", "coach_tips", "coach_disowned")
+#: The turn keys parsers 47 to 52 added: a 0.16.0 (parser 45) digest holds none.
+OLDER_TURN_KEYS = ("shell_code_write_count", "edit_code_count", "coach_tips", "coach_disowned", "background_waiting")
 
 
 def to_older_digest(data: dict, *, reads_before_46: dict[int, int] | None = None) -> dict:
@@ -650,3 +650,30 @@ def store_with_gone_sessions(
     FileWatcher(store, options).run_once()
     store.close()
     return projects_root, config_dir, claude_root
+
+
+def recommendation_rule_ids() -> set[str]:
+    """Every rule id the service can send: each literal ``id="..."`` a
+    ``Recommendation(...)`` call passes in the package, and every key of a
+    module's ``RULES`` dict (one that builds its cards through a shared
+    helper passes the id on as a variable). ``quick_actions.py`` builds one
+    only to render a fix, never to send, so its placeholder id is left out.
+    The same scan as ``test_service_static._recommendation_ids``."""
+    import ast
+
+    ids: set[str] = set()
+    for path in (Path(__file__).resolve().parents[1] / "src" / "claudeglass").rglob("*.py"):
+        if path.name == "quick_actions.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Recommendation":
+                for kw in node.keywords:
+                    if kw.arg == "id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        ids.add(kw.value.value)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Dict):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(getattr(target, "id", None) == "RULES" for target in targets):
+                    ids.update(
+                        key.value for key in node.value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    )
+    return ids

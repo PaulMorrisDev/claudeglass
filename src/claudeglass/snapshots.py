@@ -768,8 +768,18 @@ def with_every_project_agents(
         base = snapshots[-1] if snapshots else None
     if base is None:
         return None
+    return widen_agents(base, latest_snapshot_per_project(snapshots, canonical).values())
+
+
+def widen_agents(base: Snapshot, latest: Iterable[Snapshot]) -> Snapshot:
+    """``base`` with its ``agents`` and ``effective_agents`` widened to
+    ``latest``, every project's latest snapshot, as
+    :func:`with_every_project_agents` does for the snapshots it is given (see
+    there for the rules). Split out so a caller that walks a history one
+    snapshot at a time can keep each project's latest and the base as it goes,
+    rather than hand over the whole prefix again at every step."""
     merged: dict[str, dict] = {"agents": {}, "effective_agents": {}}
-    for snap in sorted(latest_snapshot_per_project(snapshots, canonical).values(), key=lambda s: s.ts) + [base]:
+    for snap in sorted(latest, key=lambda s: s.ts) + [base]:
         for section, into in merged.items():
             entries = snap.data.get(section)
             if not isinstance(entries, dict):
