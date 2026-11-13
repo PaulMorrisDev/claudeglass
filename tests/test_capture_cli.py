@@ -2674,3 +2674,15 @@ def test_coaching_notes_alone_need_no_entry_at_an_agents_end(tmp_path):
     rc, out = _capture(config_dir, "connect", stdin="n\n")
     assert "- Remove the capture hook that runs capture-hook.py when a subagent finishes.\n" in out
     assert "Left unchanged." in out and "can't be captured" not in out
+
+
+def test_the_rough_size_says_when_the_note_after_a_compaction_is_bigger():
+    deep = cat.level_includes("deep")
+    rough = cat.rough_tokens(deep)
+    assert rough["compact_note"] > rough["session_note"]
+    assert cli._capture_cost_lines(deep)[0] == (
+        f"about {rough['session_note']} tokens of note when a session starts or is cleared, "
+        f"and about {rough['compact_note']} when it compacts"
+    )
+    standard = cli._capture_cost_lines(cat.level_includes("standard"))[0]
+    assert standard.endswith("tokens of note when a session starts, is cleared or compacts")

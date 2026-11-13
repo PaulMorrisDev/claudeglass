@@ -929,3 +929,35 @@ def test_deep_needs_no_entry_after_a_tool_result_while_haiku_writes_the_tags():
     assert "PostToolUse" not in _entry_matchers(("big_output", cat.HAIKU_TAGGER_HOOK))
     # Coaching notes still need theirs.
     assert _entry_matchers((*deep, cat.HAIKU_TAGGER_HOOK, "coaching_notes"))["PostToolUse"] == "|".join(cat.COACHING_TOOLS)
+
+
+# -- the page says what a compaction's note asks and how big it is -------------------------------
+
+
+def test_the_page_names_the_question_asked_after_a_summary():
+    text = cat.render_markdown()
+    prior = cat.METRICS_BY_ID["prior"]
+    assert prior.compact_line and f'The note asks: "{prior.compact_line}"' in text
+    assert "`lost=yes|no`" in text
+    # Every key a note can ask for is on the page the Privacy section points to.
+    for m in cat.METRICS:
+        for line in (m.main_line, m.compact_line):
+            if line:
+                assert f"`{line.split(':', 1)[0]}=" in text, m.id
+
+
+def test_the_levels_table_gives_the_note_after_a_compaction_where_it_is_bigger():
+    text = cat.render_markdown()
+    for level in cat.LEVELS:
+        ids = cat.level_includes(level)
+        sizes = cat.rough_tokens(ids)
+        compact = cat.note_text(ids, "main", source="compact")
+        assert sizes["compact_note"] == (
+            round((len(compact) + cat.NOTE_WRAP_CHARS + len("SessionStart")) / 4) if compact else 0
+        )
+        row = next(line for line in text.splitlines() if line.startswith(f"| {cat.LEVEL_TITLES[level]} |"))
+        assert ("after a compaction" in row) == (sizes["compact_note"] > sizes["session_note"]), level
+    deep = cat.rough_tokens(cat.level_includes("deep"))
+    assert f"~{deep['session_note']} tokens, ~{deep['compact_note']} after a compaction" in text
+    # While Haiku writes the tags there is no note, and no question after a summary.
+    assert cat.rough_tokens(cat.level_includes("deep"), "haiku")["compact_note"] == 0

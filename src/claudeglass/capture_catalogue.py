@@ -3717,11 +3717,14 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     (``reminder``) and the plan check's question (``plan_check``), with
     the note that asks for either (``message_note``, the larger of the
     two); the note after a large or web tool result (``tool_note``), none
-    while Claude Haiku writes the tags. Amounts measured from transcripts
-    replace these once capture has run."""
+    while Claude Haiku writes the tags; and the note after a compaction
+    (``compact_note``), larger than ``session_note`` when a metric asks
+    once after a summary (:attr:`Metric.compact_line`). Amounts measured
+    from transcripts replace these once capture has run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
     wanted_ids = {m.id for m in enabled}
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
+    compact = note_text(ids, "main", tagger=tagger, source="compact")
     # The reminder and the plan check come on a message of yours now and
     # then, not with every reply.
     reminder = sum(m.out_chars for m in enabled if m.id == "feedback_reminder")
@@ -3744,6 +3747,7 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     )
     return {
         "session_note": round((len(main) + NOTE_WRAP_CHARS + len("SessionStart")) / 4) if main else 0,
+        "compact_note": round((len(compact) + NOTE_WRAP_CHARS + len("SessionStart")) / 4) if compact else 0,
         "subagent_note": round((len(sub) + NOTE_WRAP_CHARS + len("SubagentStart")) / 4) if sub else 0,
         "reply_tag": round((reply + frame) / 4) if reply else 0,
         "report_tag": round(report / 4),
@@ -3908,6 +3912,8 @@ def render_markdown() -> str:
         # 201/107 for Essentials against a checked-in 182/88 here).
         sizes = rough_tokens(ids)
         main_cell = f"~{sizes['session_note']} tokens" if sizes["session_note"] else "–"
+        if sizes["compact_note"] > sizes["session_note"]:
+            main_cell += f", ~{sizes['compact_note']} after a compaction"
         sub_cell = f"~${JUDGE_USD_PER_CALL:.3f}" if agent_metric_ids(ids) else "–"
         p(f"| {LEVEL_TITLES[level]} | {LEVEL_SUMMARIES[level]} | {main_cell} | {sub_cell} |")
     p(
@@ -3957,6 +3963,12 @@ def render_markdown() -> str:
             p(f"- **Captures:** {m.what}")
             p(f"- **Why:** {m.why}")
             p(f"- **Tag:** {_metric_tag_line(m)}")
+            if m.compact_line:
+                key = m.compact_line.split(":", 1)[0]
+                p(
+                    f"- **After a summary:** `{key}={'|'.join(TAG_VOCAB[key])}`, asked once, in the reply after a "
+                    f'compaction, while Claude writes the tags. The note asks: "{m.compact_line}"'
+                )
             if m.out_chars:
                 out_tokens = max(1, round(m.out_chars / 4))
                 unit = "token" if out_tokens == 1 else "tokens"

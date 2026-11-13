@@ -3874,7 +3874,12 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
     makes for a reply Claude ends without its tag otherwise."""
     rough = capture_catalogue.rough_tokens(ids, tagger)
     lines = []
-    if rough["session_note"]:
+    if rough["compact_note"] > rough["session_note"]:
+        lines.append(
+            f"about {rough['session_note']} tokens of note when a session starts or is cleared, "
+            f"and about {rough['compact_note']} when it compacts"
+        )
+    elif rough["session_note"]:
         lines.append(f"about {rough['session_note']} tokens of note when a session starts, is cleared or compacts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
