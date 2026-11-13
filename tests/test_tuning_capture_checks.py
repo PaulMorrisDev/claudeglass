@@ -119,6 +119,17 @@ def test_the_capture_checks_block_is_valid_and_counts_only(tmp_path):
     assert set(doc["capture_checks"]["level_family"]["hard"]) <= set(tuning.capture_checks_mod.FAMILIES)
 
 
+def test_lost_words_are_counted_by_the_capture_checks_block_only(tmp_path):
+    """``tags.words`` keeps the tags' other keys; a ``lost`` word on any reply adds nothing there, and the block
+    counts the answering cycle once however often Claude writes it."""
+    story = _story().typed("one more thing").say("fine", "[cg: task=docs level=easy shift=build prior=needed lost=yes]")
+    doc = _build(_world(tmp_path, story))
+    assert "lost" not in doc["tags"]["words"]
+    assert doc["tags"]["words"]["task"]  # the other keys are still counted
+    assert doc["capture_checks"]["lost"] == _STORY["lost"]
+    assert tuning.validate(doc) == []
+
+
 def test_a_world_with_planted_names_builds_a_block_that_names_none_of_them(tmp_path):
     w = _make_world(tmp_path / "a")
     doc = _build(w)

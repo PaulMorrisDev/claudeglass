@@ -196,6 +196,7 @@ def test_the_sample_document_is_valid_and_holds_every_block():
         ("tags.grounding", {"task:chat": 1}, "tags.grounding: has a key that is not in the spec", ""),
         ("tags.settling", {"plan:following>made extra": 1}, "tags.settling: has a key", "extra"),
         ("tags.words", {"mood": {}}, "tags.words: has a key that is not in the spec", "mood"),
+        ("tags.words", {"lost": {"claude": {"yes": 1}}}, "tags.words: has a key that is not in the spec", "lost"),
         ("tags.words", {"task": {"someone": {"feature": 1}}}, "tags.words.task: has a key", "someone"),
         ("tags.words", {"task": {"claude": {"poetry": 1}}}, "tags.words.task.claude: has a key", "poetry"),
         ("tags.words", {"task": {"claude": [1]}}, "tags.words.task.claude: must be an object", ""),

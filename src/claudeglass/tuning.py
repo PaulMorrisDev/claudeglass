@@ -133,6 +133,9 @@ class TuningError(ValueError):
 #: Who wrote a tag: Claude in its reply, or Haiku (the tagger, or the
 #: fallback for a reply Claude left without one).
 WRITERS = ("claude", *catalogue.JUDGE_WRITERS)
+#: The tag keys ``tags.words`` counts, with their words: every key but ``lost``. Claude may write ``lost`` on any
+#: reply, but only the one that answers a summary is read, and ``capture_checks.lost`` is where it is counted.
+WORD_VOCAB = {key: words for key, words in catalogue.TAG_VOCAB.items() if key != "lost"}
 LEVELS = (*catalogue.LEVELS, catalogue.CUSTOM_LEVEL)
 #: The tips Claude is asked to relay.
 HINTS = tuple(prompting_mod.TIP_HINTS)
@@ -1140,7 +1143,7 @@ _SHIFT_COUNTS = ("cycles", "corrections", "adjustments", "rework")
             "words": Obj(
                 {
                     key: Obj({writer: _count_map(words) for writer in WRITERS})
-                    for key, words in catalogue.TAG_VOCAB.items()
+                    for key, words in WORD_VOCAB.items()
                 }
             ),
             "grounding": Map(Changes(), Count(), limit=_MAX_CHANGES),
@@ -1174,7 +1177,7 @@ def _tags(ctx: _Ctx) -> dict:
     mistakes Claude admitted by kind, who caught them and who wrote the
     tag. ``feedback`` counts your /cg-feedback answers."""
     tagged: Counter = Counter()
-    words: dict[str, dict[str, Counter]] = {key: {w: Counter() for w in WRITERS} for key in catalogue.TAG_VOCAB}
+    words: dict[str, dict[str, Counter]] = {key: {w: Counter() for w in WRITERS} for key in WORD_VOCAB}
     grounding: Counter = Counter()
     for s in ctx.sessions:
         for turn in s.replies:
@@ -1183,7 +1186,7 @@ def _tags(ctx: _Ctx) -> dict:
                 continue
             writer = ctx.writer_of(turn)
             tagged[writer] += 1
-            for key, vocab in catalogue.TAG_VOCAB.items():
+            for key, vocab in WORD_VOCAB.items():
                 for word in _words_of(getattr(cap, key, None)):
                     if word in vocab:
                         words[key][writer][word] += 1
@@ -1223,7 +1226,7 @@ def _tags(ctx: _Ctx) -> dict:
                         answers[key][word] += 1
             from_text.update(key for key in fb.from_text if key in catalogue.FEEDBACK_ANSWER_KEYS)
     by_key = {}
-    for key, vocab in catalogue.TAG_VOCAB.items():
+    for key, vocab in WORD_VOCAB.items():
         by_writer = {writer: _tally(words[key][writer], vocab) for writer in WRITERS}
         by_key[key] = {writer: counted for writer, counted in by_writer.items() if counted}
     return {
