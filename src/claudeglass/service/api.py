@@ -212,6 +212,11 @@ PROJECT_FILES_SHOWN = 100
 
 _RESTART_ADVICE = "Restart the dashboard: claudeglass install-service, or stop and start serve."
 
+#: Where saved profiles live by default, as a message names it: never the
+#: real path, which is a local filesystem location (docs/cli.md names the
+#: same default for --config-dir).
+_PROFILES_FOLDER_SHOWN = "~/.claude/claudeglass/profiles"
+
 #: How long the Capture tab's estimates (a replay of your last two
 #: weeks of sessions) are kept before they are worked out again, in the
 #: background: they move slowly, and each is a whole-corpus read.
@@ -2333,11 +2338,18 @@ def make_handler(
                 "for": list(p.for_),
                 "tasks": list(profile_catalogue.tasks_for(p)),
                 "updated_at": None,
+                "problem": None,
             }
             for p in profile_catalogue.list_profiles()
         ]
-        user_entries = [
-            {
+        # A saved file that fails the checks is listed with why, whether
+        # the store has a row for it (saved before a rule tightened) or not
+        # (the watcher never ingests a file that fails).
+        profiles_dir = Path(options.config_dir) / "profiles"
+        user_entries = []
+        for row in store.profiles():
+            path = profiles_dir / f"{row['id']}.toml"
+            user_entries.append({
                 "id": row["id"],
                 "name": row["name"],
                 "source": "user",
@@ -2345,9 +2357,24 @@ def make_handler(
                 "for": [],
                 "tasks": [],
                 "updated_at": row["updated_at"],
-            }
-            for row in store.profiles()
-        ]
+                "problem": _profile_file_problem(path) if path.is_file() else None,
+            })
+        listed = {entry["id"] for entry in user_entries}
+        for path in sorted(profiles_dir.glob("*.toml")) if profiles_dir.is_dir() else ():
+            if path.stem in listed or path.stem in profile_catalogue.CATALOGUE_IDS:
+                continue
+            problem = _profile_file_problem(path)
+            if problem is not None:
+                user_entries.append({
+                    "id": path.stem,
+                    "name": path.stem,
+                    "source": "user",
+                    "archetype": None,
+                    "for": [],
+                    "tasks": [],
+                    "updated_at": None,
+                    "problem": problem,
+                })
 
         # The profile `apply <profile>` last marked active: ignored
         # recommendations are kept per profile.
@@ -2608,19 +2635,28 @@ def make_handler(
         path = Path(options.config_dir) / "profiles" / f"{profile_id}.toml"
         if not path.is_file():
             return None
+        problem = _profile_file_problem(path)
+        return None if problem is None else _error(409, "conflict", problem)
+
+    def _profile_file_problem(path: Path) -> str | None:
+        """Why the saved profile file at ``path`` can't be used, as the
+        page shows it (its list card and its drawer's 409), or ``None``
+        when it loads. Its own problems name any agent only through
+        ``schema.shown_name``."""
         try:
             profile_schema.load_profile(path)
         except profile_schema.ProfileError as exc:
-            return _error(
-                409,
-                "conflict",
-                "This profile's file no longer passes ClaudeGlass's checks, so it can't be shown. "
-                + "; ".join(exc.problems)
-                + f". Fix or delete {profile_id}.toml in ClaudeGlass's profiles folder.",
-            )
-        except (OSError, ValueError):
+            why = "; ".join(exc.problems)
+        except ValueError as exc:  # tomllib.TOMLDecodeError
+            why = f"It isn't valid TOML ({exc})"
+        except OSError:
             return None
-        return None
+        else:
+            return None
+        return (
+            f"This profile's file doesn't pass ClaudeGlass's checks, so it can't be used. {why}. "
+            f"Fix or delete {path.name} in ClaudeGlass's profiles folder ({_PROFILES_FOLDER_SHOWN} by default)."
+        )
 
     def _recorded_agents(snapshot):
         """The snapshot's ``agents`` map (name -> entry), or ``None`` when

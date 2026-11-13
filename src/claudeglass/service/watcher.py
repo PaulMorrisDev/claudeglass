@@ -1595,6 +1595,8 @@ class FileWatcher:
         other per-file step in this module already follows.
         """
         profiles_dir = Path(self.options.config_dir) / "profiles"
+        # Before the folder check: deleting the whole folder leaves no card.
+        self._forget_deleted_profiles(stats, profiles_dir)
         if not profiles_dir.is_dir():
             return
 
@@ -1616,6 +1618,21 @@ class FileWatcher:
             except Exception as exc:
                 stats.errors += 1
                 stats.error_messages = stats.error_messages + (f"profile ingest error: {_error_summary(exc)}",)
+
+    def _forget_deleted_profiles(self, stats: WatcherStats, profiles_dir: Path) -> None:
+        """Drop the row of a profile whose file was deleted from this config
+        folder's ``profiles`` (the dashboard tells a person to fix or delete
+        a file that fails the checks), so it leaves no card. A row whose file
+        is elsewhere (a fixture, a store moved between config folders) is
+        kept: it is not this scan's to drop."""
+        try:
+            for profile_id, toml_path in self.store.profile_files().items():
+                path = Path(toml_path)
+                if path.parent == profiles_dir and not path.is_file():
+                    self._time_store(stats, self.store.forget_profile, profile_id)
+        except Exception as exc:
+            stats.errors += 1
+            stats.error_messages = stats.error_messages + (f"profile ingest error: {_error_summary(exc)}",)
 
     def _scan_predictions(self, stats: WatcherStats) -> None:
         """Ingest every record in ``<config_dir>/prediction-log.jsonl``

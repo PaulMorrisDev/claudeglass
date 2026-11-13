@@ -1061,7 +1061,15 @@ the store) plus every user profile written under
 watcher's `_scan_profiles`), each tagged with which of the two it came
 from.
 
-`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "active_profile_id": str|null, "active_profile_name": str|null}`.
+`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null, "problem": str|null}, ...], "active_profile_id": str|null, "active_profile_name": str|null}`.
+
+`problem` is `null` unless a user profile's file fails the checks. Then it
+is the same message `GET /api/profiles/<id>`'s `409` gives, and Setup ›
+Profiles shows it on the card in place of the summary and the button. Such
+a file is listed whether or not the store has a row for it (the watcher
+never ingests one that fails): its `id` and `name` are then the file name
+without `.toml`, and `updated_at` is `null`. A row whose file is deleted is
+dropped on the watcher's next tick.
 
 The list needs no report, so it answers at once and ignores `window` and
 `project`. The suggestion has its own route, below.
@@ -1126,7 +1134,9 @@ names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
 One profile's contents. `404` if `<id>` names neither a catalogue id
 nor an existing `<config_dir>/profiles/<id>.toml`. `409` (`conflict`) when
 the profile's saved file exists but no longer passes the checks; the
-message says why and names the file to fix or delete.
+message says why and names the file to fix or delete, in "ClaudeGlass's
+profiles folder (~/.claude/claudeglass/profiles by default)", never the
+real path. A file that isn't valid TOML gives the same `409`.
 
 `data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "own_agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
 `roles` is the profile's `[roles.<role>]` tables as written (the only

@@ -321,6 +321,14 @@ function renderProfilesList(data, container) {
     if (profile.updated_at) meta.push("saved " + String(profile.updated_at).slice(0, 10));
     card.appendChild(el("p", { class: "profile-card-meta", text: meta.join(" · ") }));
 
+    if (profile.problem) {
+      // A saved file that fails the checks: why, and where its file is.
+      // Nothing to show or apply, so no summary and no button.
+      card.appendChild(el("p", { class: "notes", text: profile.problem }));
+      cards.appendChild(card);
+      return;
+    }
+
     var summary = el("p", { class: "profile-card-summary" });
     card.appendChild(summary);
     // "Changes 3 settings: Model, Effort level, ..." from the profile

@@ -1224,6 +1224,16 @@ class Store:
             (profile_id, name, toml_path, content_hash or "", _now()),
         )
 
+    def profile_files(self) -> dict[str, str]:
+        """Every indexed user profile's id -> ``toml_path``, for the
+        watcher only (a local filesystem location, never API-returned)."""
+        rows = self._connection().execute("SELECT id, toml_path FROM profiles").fetchall()
+        return {row["id"]: row["toml_path"] for row in rows}
+
+    def forget_profile(self, profile_id: str) -> None:
+        """Drop one user profile's index row, once its file is gone."""
+        self._connection().execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+
     def record_baseline(
         self, *, project_slug: str, project_root_path: str = "", window_start: str,
         window_end: str, archetype: str | None, digest_json: str,

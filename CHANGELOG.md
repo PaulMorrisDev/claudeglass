@@ -144,7 +144,9 @@ Capture and dashboard:
   drafts and "Save my current settings" leave such agents out and say how
   many, and goal drafts and quality tips no longer offer a change to a
   plugin's agent. Agent names in copied prompts are in quotes. A saved
-  profile that breaks the rule says why when you open it.
+  profile that breaks the rule is listed in Setup › Profiles with why
+  and which file to fix or delete, and its card goes once the file is
+  deleted.
 - **An id, model id or card key with a line break at its end is
   refused.** A profile id like that gave an error 500 on Windows.
 - **During a light sample, capture keeps the hook entry the plan check and

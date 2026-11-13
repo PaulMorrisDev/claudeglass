@@ -1102,6 +1102,7 @@ def test_profiles_listing_has_no_toml_path(server):
             "for": [],
             "tasks": [],
             "updated_at": user_entries[0]["updated_at"],
+            "problem": None,
         }
     ]
     assert_privacy(body)
@@ -8272,8 +8273,9 @@ def test_a_saved_profile_that_breaks_the_name_rule_says_why_and_the_others_still
         resp, body = server.get_json(route)
         assert resp.status == 409
         assert body["error"]["message"] == (
-            "This profile's file no longer passes ClaudeGlass's checks, so it can't be shown. "
-            f"agents.'../../CLAUDE': {_AGENT_NAME_RULE}. Fix or delete old.toml in ClaudeGlass's profiles folder."
+            "This profile's file doesn't pass ClaudeGlass's checks, so it can't be used. "
+            f"agents.'../../CLAUDE': {_AGENT_NAME_RULE}. Fix or delete old.toml in ClaudeGlass's profiles folder "
+            "(~/.claude/claudeglass/profiles by default)."
         )
     assert server.get_json("/api/profiles/good")[0].status == 200
 
@@ -8323,3 +8325,57 @@ def test_save_current_settings_counts_agents_left_out_for_their_names_and_never_
     text = (server.options.config_dir / "profiles" / "my-current-settings.toml").read_text(encoding="utf-8")
     assert "reviewer" in text and "Code" not in text
     assert "Project Agent" not in json.dumps(body)
+
+
+_PROFILES_FOLDER = "ClaudeGlass's profiles folder (~/.claude/claudeglass/profiles by default)"
+
+
+def _write_profile_file(handle, name: str, text: str):
+    folder = handle.options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _listed_profiles(handle) -> dict:
+    return {p["id"]: p for p in handle.get_json("/api/profiles")[1]["data"]["profiles"]}
+
+
+def test_a_profile_file_that_fails_the_checks_is_listed_with_why_on_a_fresh_store(server):
+    from claudeglass.profiles import schema
+
+    _write_profile_file(server, "code-fixer.toml", 'id = "code-fixer"\n\n[agents."Code Fixer"]\nmodel = "sonnet"\n')
+    server.post_json("/api/profiles", {"id": "good", "settings": {"effortLevel": "low"}})
+    listed = _listed_profiles(server)
+    assert listed["good"]["problem"] is None
+    broken = listed["code-fixer"]
+    want = (
+        "This profile's file doesn't pass ClaudeGlass's checks, so it can't be used. "
+        f"agents.'Code Fixer': {schema.AGENT_NAME_RULE}. Fix or delete code-fixer.toml in {_PROFILES_FOLDER}."
+    )
+    assert broken == {"id": "code-fixer", "name": "code-fixer", "source": "user", "archetype": None, "for": [],
+                      "tasks": [], "updated_at": None, "problem": want}
+    resp, body = server.get_json("/api/profiles/code-fixer")
+    assert resp.status == 409 and body["error"]["message"] == want
+    assert all(p["problem"] is None for p in listed.values() if p["source"] == "catalogue")
+
+
+def test_a_profile_saved_before_the_rule_tightened_is_listed_once_with_the_same_why(server):
+    path = _write_profile_file(server, "old.toml", 'id = "old"\n\n[agents."Code Fixer"]\nmodel = "sonnet"\n')
+    server.store.upsert_profile(profile_id="old", name="Old one", toml_path=str(path), content_hash="x")
+    profiles = server.get_json("/api/profiles")[1]["data"]["profiles"]
+    [old] = [p for p in profiles if p["id"] == "old"]
+    assert old["name"] == "Old one" and old["updated_at"]
+    assert old["problem"] == server.get_json("/api/profiles/old")[1]["error"]["message"]
+    assert old["problem"].endswith(f"Fix or delete old.toml in {_PROFILES_FOLDER}.")
+
+
+def test_a_profile_file_that_is_not_valid_toml_is_listed_and_its_drawer_says_why(server):
+    _write_profile_file(server, "typo.toml", 'id = "typo"\nsettings = {\n')
+    problem = _listed_profiles(server)["typo"]["problem"]
+    assert problem.startswith(
+        "This profile's file doesn't pass ClaudeGlass's checks, so it can't be used. It isn't valid TOML ("
+    )
+    resp, body = server.get_json("/api/profiles/typo")
+    assert resp.status == 409 and body["error"]["message"] == problem

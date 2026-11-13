@@ -4627,3 +4627,12 @@ def test_save_current_settings_says_how_many_agents_were_left_out_for_their_name
             "underscores and hyphens to include it.") in js
     assert '" Left out, because of their names: " + nameAgents + " agents. Rename each to one word of letters, ' \
            'digits, dots, underscores and hyphens to include it."' in js
+
+
+def test_a_profile_card_with_a_problem_shows_it_and_offers_nothing_to_open():
+    source = _function_source(_app_js(), "renderProfilesList")
+    at = source.index("if (profile.problem) {")
+    branch = source[at:source.index("return;", at) + len("return;")]
+    assert 'el("p", { class: "notes", text: profile.problem })' in branch
+    assert "cards.appendChild(card);" in branch
+    assert at < source.index("Show what it changes") and at < source.index('fetchJson("/api/profiles/"')

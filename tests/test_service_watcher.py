@@ -2126,3 +2126,42 @@ def test_a_tick_prunes_card_marks_past_the_signal_retention(tmp_path: Path, stor
 
     assert stats.errors == 0
     assert [r["card_key"] for r in store.card_marks()] == ["today"]
+
+
+def test_a_deleted_profile_file_leaves_no_row(tmp_path, store):
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "keep.toml").write_text('id = "keep"\n', encoding="utf-8")
+    (folder / "gone.toml").write_text('id = "gone"\n', encoding="utf-8")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["gone", "keep"]
+    (folder / "gone.toml").unlink()
+    stats = watcher.run_once()
+    assert stats.errors == 0
+    assert [p["id"] for p in store.profiles()] == ["keep"]
+
+
+def test_deleting_the_whole_profiles_folder_leaves_no_row(tmp_path, store):
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "keep.toml").write_text('id = "keep"\n', encoding="utf-8")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["keep"]
+    (folder / "keep.toml").unlink()
+    folder.rmdir()
+    stats = watcher.run_once()
+    assert stats.errors == 0
+    assert store.profiles() == []
+
+
+def test_a_row_whose_file_is_elsewhere_is_kept(tmp_path, store):
+    """A fixture row (or a store moved between config folders) is never the watcher's to drop."""
+    options = _options(tmp_path)
+    (options.config_dir / "profiles").mkdir(parents=True, exist_ok=True)
+    store.upsert_profile(profile_id="p1", name="p1", toml_path=str(tmp_path / "elsewhere" / "p1.toml"))
+    FileWatcher(store, options).run_once()
+    assert [p["id"] for p in store.profiles()] == ["p1"]
