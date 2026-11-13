@@ -2297,15 +2297,18 @@ def make_handler(
             for row in store.profiles()
         ]
 
-        suggested_profile_id = None
-        latest_baseline = _latest_baseline_row(store)
-        if latest_baseline is not None:
-            try:
-                record = json.loads(latest_baseline["digest_json"])
-            except (TypeError, ValueError, json.JSONDecodeError):
-                record = {}
-            if isinstance(record, dict):
-                suggested_profile_id = record.get("suggested_profile")
+        # PF1: the suggestion is worked out live from the report for the
+        # picked window and project (the build the page already asked for),
+        # not read from the record `init` stored once. Nothing is shown
+        # for a view with too few sessions.
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        suggestion = baseline_mod.suggest_for_model(_get_report_model(*window, project))
+        suggested_profile_id, suggested_reason = suggestion if suggestion is not None else (None, None)
 
         # The profile `apply <profile>` last marked active: ignored
         # recommendations are kept per profile.
@@ -2318,6 +2321,7 @@ def make_handler(
             {
                 "profiles": catalogue_entries + user_entries,
                 "suggested_profile_id": suggested_profile_id,
+                "suggested_reason": suggested_reason,
                 "active_profile_id": None if active_id == ignores.NO_PROFILE else active_id,
                 "active_profile_name": active_name,
             }

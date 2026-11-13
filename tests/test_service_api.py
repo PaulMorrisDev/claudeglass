@@ -1116,10 +1116,91 @@ def test_profiles_listing_includes_the_catalogue(server):
     assert_privacy(body)
 
 
-def test_profiles_listing_reports_the_baseline_suggested_profile(server):
+def test_profiles_route_suggests_for_the_window_and_project_not_the_stored_baseline(
+    two_project_server, monkeypatch
+):
+    handle = two_project_server
+    # A stored record that says one profile; the stub below says another for
+    # whatever report model the route reads, and counts that model's sessions.
+    handle.store.record_baseline(
+        project_slug="proj-alpha",
+        project_root_path=r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-alpha",
+        window_start="2026-09-11T00:00:00Z",
+        window_end="2026-09-18T00:00:00Z",
+        archetype="plan-high-implement-low",
+        digest_json=json.dumps({"sessions": 1, "suggested_profile": "implementation-heavy"}),
+    )
+    seen: list[int] = []
+
+    def fake_suggest(model):
+        count = sum(service_api.baseline_mod._mode_mix(model).values())
+        seen.append(count)
+        return "workflow-ultracode", f"{count} sessions read."
+
+    monkeypatch.setattr(service_api.baseline_mod, "suggest_for_model", fake_suggest)
+
+    resp, body = handle.get_json("/api/profiles")
+    assert resp.status == 200
+    assert body["data"]["suggested_profile_id"] == "workflow-ultracode"  # not the stored "implementation-heavy"
+    assert body["data"]["suggested_reason"] == "2 sessions read."
+    # The picked project's own report is the one read.
+    resp, body = handle.get_json("/api/profiles?project=proj-alpha")
+    assert resp.status == 200
+    assert body["data"]["suggested_reason"] == "1 sessions read."
+    resp, body = handle.get_json("/api/profiles?project=proj-beta&window=all")
+    assert body["data"]["suggested_reason"] == "1 sessions read."
+    assert seen == [2, 1, 1]
+    # An unknown project or window is the usual 400, not a silent fall-back.
+    assert handle.get_json("/api/profiles?project=not-a-project")[0].status == 400
+    assert handle.get_json("/api/profiles?window=bogus")[0].status == 400
+
+
+def test_profiles_route_gives_the_live_suggestion_only_from_the_floor_of_sessions(server, monkeypatch):
+    # The stored record ("implementation-heavy") is not what comes back; the
+    # one-session view is under the floor, so nothing is suggested at all.
     resp, body = server.get_json("/api/profiles")
     assert resp.status == 200
-    assert body["data"]["suggested_profile_id"] == "implementation-heavy"
+    assert body["data"]["suggested_profile_id"] is None
+    assert body["data"]["suggested_reason"] is None
+    # With the floor lowered the same view speaks, in a plain sentence.
+    monkeypatch.setattr(service_api.baseline_mod, "SUGGEST_MIN_SESSIONS", 1)
+    resp, body = server.get_json("/api/profiles")
+    assert body["data"]["suggested_profile_id"] in profile_catalogue.CATALOGUE_IDS
+    assert body["data"]["suggested_profile_id"] != "implementation-heavy"
+    assert body["data"]["suggested_reason"].endswith(".")
+    assert "this window" in body["data"]["suggested_reason"]
+    assert_privacy(body)
+
+
+def test_profiles_route_shows_no_suggestion_for_a_window_without_sessions(tmp_path, monkeypatch):
+    empty = corpus_mod.Corpus(sessions=[], total_files=0, total_bytes=0, cache_hits=0, cache_misses=0, elapsed_s=0.0)
+    _install_fake_rebuild(monkeypatch, empty)
+    store = Store(tmp_path / "empty.db")
+    store.open()
+    # An old stored record is not shown in its place.
+    store.record_baseline(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        window_start="2026-09-11T00:00:00Z",
+        window_end="2026-09-18T00:00:00Z",
+        archetype="plan-high-implement-low",
+        digest_json=json.dumps({"sessions": 1, "suggested_profile": "overseer-fanout"}),
+    )
+    config_dir = tmp_path / "empty-config"
+    config_dir.mkdir()
+    options = ServeOptions(projects_root=tmp_path / "projects", config_dir=config_dir)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), service_api.make_handler(store, options))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    handle = _ServerHandle(httpd, thread, corpus=empty, store=store, options=options)
+    try:
+        resp, body = handle.get_json("/api/profiles")
+        assert resp.status == 200
+        assert body["data"]["suggested_profile_id"] is None
+        assert body["data"]["suggested_reason"] is None
+    finally:
+        handle.close()
+        store.close()
 
 
 def test_baseline_returns_the_latest_capture_and_capture_status(server):
