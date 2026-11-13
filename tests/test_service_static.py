@@ -4132,6 +4132,11 @@ def test_the_capture_page_does_not_say_nothing_is_captured_during_a_light_sample
     assert "Its end time has passed, so nothing is captured now. " in render
 
 
+def test_the_sidebar_status_names_a_light_sample_instead_of_an_ended_capture() -> None:
+    text = _function_source(_static_text("shell.js"), "captureStatusText")
+    assert text.index('if (block.light) return "Capture: light sample";') < text.index("if (block.expired)")
+
+
 def test_capture_overhead_line_is_worded_as_capture_status_words_it() -> None:
     """``capture status`` prints ``capture_view.overhead_text``; the page
     composes the same sentences from the same fields."""
