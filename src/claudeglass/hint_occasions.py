@@ -271,7 +271,13 @@ class Occasions:
 
 
 def _epoch(value) -> datetime | None:
-    """A sensor event's ``ts`` (epoch seconds; the store hands it back as text) as an aware time."""
+    """A sensor event's ``ts`` as an aware time. The store keeps the UTC ISO
+    text ``mod_sensor.clean_event`` writes; epoch seconds, as a number or as
+    text, are read too."""
+    if isinstance(value, str):
+        moment = capture_mod._moment(value)
+        if moment is not None:
+            return moment
     try:
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
     except (TypeError, ValueError, OverflowError, OSError):

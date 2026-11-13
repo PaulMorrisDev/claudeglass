@@ -525,10 +525,11 @@ def test_a_session_the_mod_ran_in_off_the_desktop_is_counted_apart(tmp_path):
     shown = mod("s1", "hint", event="note", kind="big_paste", outcome="sent")
     noted = _collect(tmp_path, corpus, mod_events=[mod("s1", "desktop"), mod("s2", "desktop"), shown], env=_env(tmp_path / "c"))
     assert noted.hints["big_paste"].glass == 1 and hint_occasions.silent(noted) == {}
-    # The store hands the time back as text.
-    as_text = {**shown, "ts": str(shown["ts"])}
-    stored = _collect(tmp_path, corpus, mod_events=[mod("s1", "desktop"), mod("s2", "desktop"), as_text], env=_env(tmp_path / "e"))
-    assert stored.hints["big_paste"].glass == 1
+    # The store keeps the time as the UTC ISO text mod_sensor.clean_event writes (epoch text is read too).
+    for n, stamp in enumerate((BASE.strftime("%Y-%m-%dT%H:%M:%SZ"), str(int(BASE.timestamp())))):
+        as_text = {**shown, "ts": stamp}
+        stored = _collect(tmp_path, corpus, mod_events=[mod("s1", "desktop"), mod("s2", "desktop"), as_text], env=_env(tmp_path / f"e{n}"))
+        assert stored.hints["big_paste"].glass == 1
     # Not a hint's note, or outside the window: nothing.
     other = mod("s1", "note", event="note", kind="cold_return")
     late = {**shown, "ts": int((UNTIL + DAY).timestamp())}

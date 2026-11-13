@@ -591,7 +591,7 @@ def test_tuning_export_counts_the_mods_notes_from_the_store(world, capsys):
     store = Store(world.config_dir / STORE_FILENAME)
     store.open()
     try:
-        shown = {"ts": int((NOW - timedelta(days=1)).timestamp()), "event": "note", "kind": "big_paste", "surface": "hint", "outcome": "sent"}
+        shown = {"ts": (NOW - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "note", "kind": "big_paste", "surface": "hint", "outcome": "sent"}
         assert store.replace_mod_events("s1", [shown]) == 1
     finally:
         store.close()
