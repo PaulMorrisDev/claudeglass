@@ -121,8 +121,9 @@ Cards and checks:
 - **Updating re-reads your transcripts once.** The parser is now version
   52, so the dashboard rebuilds its rows from them on the first start after
   you upgrade. A session whose transcripts Claude Code has deleted keeps
-  its stored figures, and a figure this version counts differently leaves
-  it out instead of reading it as zero. Data quality says how many.
+  its stored figures, as before. A figure this version counts differently
+  now leaves that session out instead of reading it as zero. Data quality
+  says how many.
 - **The capture audit counts `queue-operation.content` as read**, so its
   unread-key alarm stops.
 - **Cards for built-in agents say a same-named agent file replaces the
