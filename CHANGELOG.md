@@ -158,8 +158,8 @@ Coaching:
 - **The mod's present file lists what it has drawn (`shows`), and the hook
   hands hints over only when the mod has drawn the line.** The four
   hint-line hints move when it lists `hint`, `plan_fresh` when it lists
-  `status`, and lists them only while coaching notes apply to the session. An
-  older mod without the key keeps the old rule, and a message
+  `status`. The mod lists those two only while coaching notes apply to the
+  session. An older mod without the key keeps the old rule, and a message
   sent now writes the file at once, so a hint line drawn a moment ago counts.
 - **A tip counts as passed on only when the reply holds the note's own
   words.** The bare "ClaudeGlass tip:" label counts for a note that came
