@@ -547,6 +547,42 @@ def _models_world(tmp_path):
     return bundle, _ctx_in(tmp_path, bundle)
 
 
+def test_a_model_the_users_own_card_cannot_price_is_not_called_unused_in_a_week_it_ran(tmp_path):
+    """Amounts are priced at the user's card, so a model it has no row for costs 0 and has replies. A
+    week it ran counts for it (as a 0 amount), and the kept weeks are the weeks anything ran in."""
+    card = tmp_path / "pricing.toml"
+    card.write_text(
+        '''version = "2099-01-01-test"
+currency = "USD"
+
+[models."claude-sonnet-5-5"]
+aliases = ["sonnet"]
+input = 2.0
+output = 10.0
+cache_write_5m = 2.5
+cache_write_1h = 4.0
+cache_read = 0.1
+''',
+        encoding="utf-8",
+    )
+    mine = load_pricing(path=card)
+    week = 7 * 24 * 3600
+    turns = [_turn(10_000, 0, model="claude-sonnet-5-5", human_prompt_chars=5)]
+    for w in range(4):
+        turns += [
+            _turn(10_000, w * week + 10, model="claude-opus-5-5"),
+            _turn(10_000, w * week + 20, model="claude-sonnet-5-5"),
+        ]
+    block = tuning._figures(_ctx_in(tmp_path, _bundle(_result(turns)), pricing=mine))
+    opus, sonnet = block["models"]["claude-opus-5-5"], block["models"]["claude-sonnet-5-5"]
+    assert opus["replies"] == 4 and opus["cost_usd"] == 0.0
+    assert opus["weekly_usd"] == {f"2026-W{38 + w}": 0.0 for w in range(4)}
+    assert sorted(sonnet["weekly_usd"]) == sorted(opus["weekly_usd"]) and sonnet["cost_usd"] > 0
+    doc = _put(_sample(), "figures", {"models": block["models"]})
+    assert tuning.validate(doc) == []
+    assert not any(line.startswith("Not used") for line in tuning.summary_text(doc).splitlines())
+
+
 def test_models_keep_the_dearest_seven_and_fold_the_rest_into_other_over_the_latest_eight_weeks(tmp_path):
     bundle, ctx = _models_world(tmp_path)
     models = tuning._figures(ctx)["models"]

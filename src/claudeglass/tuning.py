@@ -2069,7 +2069,9 @@ def _figure_spend(ctx: _Ctx) -> tuple[dict, dict]:
                 if not turn.is_synthetic:
                     entry["replies"] += 1
                 week = _iso_week(habits_mod._week(capture_mod._moment(turn.ts), ctx.config.tz))
-                if week and cost:
+                # A week counts for a model when it had a reply there, priced or not: a model the card
+                # has no row for costs 0 but still ran, and must not read as unused.
+                if week and (cost or not turn.is_synthetic):
                     entry["weeks"][week] += cost
                 if turn.is_synthetic or turn.ctx <= 0:
                     continue
@@ -2108,7 +2110,7 @@ def _figure_spend(ctx: _Ctx) -> tuple[dict, dict]:
     )
     kept = ranked[: MODELS_KEPT - 1]
     folded = [word for word in models if word not in kept]
-    # The latest FIGURE_WEEKS weeks with any spend, the same weeks for every model.
+    # The latest FIGURE_WEEKS weeks with any reply, the same weeks for every model.
     recent = set(sorted({week for entry in models.values() for week in entry["weeks"]})[-FIGURE_WEEKS:])
     out: dict = {}
     for word in MODEL_WORDS:
