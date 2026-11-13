@@ -4124,6 +4124,14 @@ def test_capture_page_offers_when_it_ends() -> None:
     assert "At the end, capture stops by itself" not in controls
 
 
+def test_the_capture_page_does_not_say_nothing_is_captured_during_a_light_sample() -> None:
+    """``config.expired`` stays true while a light sample runs; the sentence about an ended capture is for the
+    capture that stopped."""
+    render = _function_source(_static_text("page-capture.js"), "renderCaptureData")
+    assert "if (config.expired && !config.light) now.push(" in render
+    assert "Its end time has passed, so nothing is captured now. " in render
+
+
 def test_capture_overhead_line_is_worded_as_capture_status_words_it() -> None:
     """``capture status`` prints ``capture_view.overhead_text``; the page
     composes the same sentences from the same fields."""

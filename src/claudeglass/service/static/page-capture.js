@@ -196,7 +196,7 @@ function renderCaptureData(data, container) {
   // Where it stands now.
   var nowBlock = captureBlock(container, "Now");
   var now = [el("strong", { text: "Metrics capture: " + config.describe + ". " })];
-  if (config.expired) now.push(el("span", { text: "Its end time has passed, so nothing is captured now. " }));
+  if (config.expired && !config.light) now.push(el("span", { text: "Its end time has passed, so nothing is captured now. " }));
   if (config.projects_limited) now.push(el("span", { text: "Only some projects are captured ([capture] projects in config.toml). " }));
   nowBlock.appendChild(el("p", {}, now));
   var measured = data.measured;
