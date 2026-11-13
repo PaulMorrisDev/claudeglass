@@ -2184,6 +2184,33 @@ def test_a_followers_setting_up_seen_elsewhere_makes_its_later_sessions_count(tm
     assert _main_model_setting(snaps, ("C--Dev-alpha",)) == {"value": "opus", "scope": "user"}
 
 
+def test_a_project_that_sets_no_model_at_all_follows_your_user_settings_down_to_sonnet(tmp_path):
+    """unset_follower, the default install: alpha's only snapshot (30 Sep) has
+    no model anywhere, not in your user settings either; beta's snapshot of
+    10 Oct 20:00 shows your user settings now say Sonnet. alpha ran Opus on
+    15 days from 1 Oct: the 10 up to 10 Oct began before the move, the 5
+    after it were picked against a Sonnet setting. Nothing is priced and no
+    change is offered, in a view of alpha alone and in a view of several."""
+    from test_change_points import _snapshot
+
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(15))
+    config_dir = tmp_path / "tl"
+    _snapshot(config_dir, "20260930T090000Z", {}, {}, slug=snapshot_project_key("C--Dev-alpha"), user_settings={})
+    _layers(config_dir, "C--Dev-beta", ("20261010T200000Z", "sonnet", None))
+    for several in (False, True):
+        _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], config_dir, several=several)
+        assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.BEFORE_CHANGE] * 10 + [model_swap.PICKED] * 5
+        stats = model_swap.compute_model_swap(sessions["C--Dev-alpha"], PRICING, main_lever=lever)
+        row = stats.by_key["top-level"]
+        assert (row.lever.spawns, row.settled_runs, row.before_change_runs, row.picked_runs, row.own_model_runs) == (
+            0, 0, 10, 5, 0), several
+        assert row.lever.tier_verdict.saving_usd == 0.0, several
+    # The setting the card, check and goal read is your user settings' Sonnet, so no change is offered to it.
+    reading = _main_model_setting(load_snapshots(config_dir), ("C--Dev-alpha",))
+    assert reading == {"value": "sonnet", "scope": "user"}
+    assert model_swap.at_main_floor(reading["value"])
+
+
 def test_the_views_main_model_setting_is_the_one_the_lever_reads(tmp_path):
     config_dir = tmp_path / "tl"
     _layers(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", None))
