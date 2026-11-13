@@ -78,7 +78,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import classify, discovery, recache, snapshots
+from . import capture_catalogue, classify, discovery, recache, snapshots
 from .cache import DigestCache
 from .config import Config
 from .corpus import load_corpus
@@ -103,6 +103,9 @@ __all__ = [
     "capture_status",
     "format_capture_status",
     "build_baseline",
+    "suggest_for_model",
+    "SUGGEST_MIN_SESSIONS",
+    "PURPOSE_WORDS",
     "baselines_dir",
     "save_baseline",
     "list_baselines",
@@ -132,6 +135,30 @@ _DOMINANT_PURPOSES_LIMIT = 3
 #: never provided by catalogue.suggest() (which requires an archetype),
 #: so named directly.
 _NO_DATA_PROFILE = "interactive-chat"
+
+#: The fewest sessions a view needs before :func:`suggest_for_model` says
+#: anything: a suggestion from one or two sessions is noise that speaks.
+SUGGEST_MIN_SESSIONS = 5
+
+#: A purpose in plain words, for the live suggestion's reason ("Most
+#: sessions in this window looked like ..."). The structural purposes
+#: (``workflow-run``, ``agent-fanout``, ``local-llm-pipeline``) have
+#: sentences of their own in ``_STRUCTURAL_REASONS``.
+PURPOSE_WORDS: dict[str, str] = {
+    "general-dev": "general coding",
+    "refactor": "refactoring",
+    "test-triage": "fixing failing tests",
+    "review": "code review",
+    "planning": "planning",
+    "docs-or-light-edit": "docs and light edits",
+}
+
+#: The reason for each structural purpose: ``{n}`` of ``{total}`` sessions.
+_STRUCTURAL_REASONS: dict[str, str] = {
+    "workflow-run": "{n} of {total} sessions in this window ran a workflow script.",
+    "agent-fanout": "{n} of {total} sessions in this window handed work to several agents at once.",
+    "local-llm-pipeline": "{n} of {total} sessions in this window ran a local model pipeline.",
+}
 
 
 @dataclass(slots=True)
@@ -379,6 +406,66 @@ def _suggested_profile(
         + (f", shape={shape!r}" if shape else "")
         + ")",
     )
+
+
+def _purpose_sessions(model: ReportModel, purpose: str) -> int:
+    """The sessions the "sessions_by_purpose" table counts for ``purpose``."""
+    table = _table(model, "sessions", "sessions_by_purpose")
+    index = _column_index(table, "sessions") if table is not None else None
+    if table is None or index is None:
+        return 0
+    return sum(int(row[index]) for row in table.rows if row and row[0] == purpose)
+
+
+def suggest_for_model(model: ReportModel) -> tuple[str, str] | None:
+    """The catalogue profile id to suggest for the sessions ``model`` holds
+    (a window, all projects or one), and one plain sentence saying what
+    decided it. The id is :func:`_suggested_profile`'s, from the same five
+    table readers :func:`build_baseline` uses; the sentence is worked out
+    in the same order as the rule (overnight, a structural purpose, a way
+    of working, a reported task, a purpose, the archetype). ``None`` when
+    the model holds fewer than :data:`SUGGEST_MIN_SESSIONS` sessions.
+    ``build_baseline`` and its stored reason are unchanged."""
+    mode_mix = _mode_mix(model)
+    total = sum(mode_mix.values())
+    if total < SUGGEST_MIN_SESSIONS:
+        return None
+    archetype = _corpus_archetype(model)
+    purposes = _dominant_purposes(model)
+    tasks = _dominant_tasks(model)
+    plan_build = _plan_build(model)
+    profile_id, _stored_reason = _suggested_profile(mode_mix, archetype, purposes, tasks, plan_build)
+
+    if profile_id == catalogue.UNREACHABLE_BY_SUGGEST:
+        overnight = mode_mix.get("overnight", 0)
+        return (
+            profile_id,
+            f"{overnight} of {total} sessions in this window were overnight runs, where Claude worked alone at night.",
+        )
+    plans_then_builds = bool(plan_build) and plan_build["share"] >= _PLAN_BUILD_SHARE * 100
+    if tasks or plans_then_builds:
+        for purpose in purposes:
+            if purpose in catalogue._STRUCTURAL_PURPOSES:
+                n = _purpose_sessions(model, purpose)
+                return profile_id, _STRUCTURAL_REASONS[purpose].format(n=n, total=total)
+    if plans_then_builds:
+        return (
+            profile_id,
+            f"{plan_build['sessions']} of {plan_build['total']} main sessions in this window approved a plan "
+            "and built it in the same session.",
+        )
+    for task in tasks:
+        if catalogue.task_profile(task) is not None:
+            return profile_id, f"Claude tagged most of the work in this window as {capture_catalogue.task_words(task)}."
+    for purpose in purposes:
+        if purpose in catalogue._PURPOSE_OVERRIDE:
+            if purpose in _STRUCTURAL_REASONS:
+                n = _purpose_sessions(model, purpose)
+                return profile_id, _STRUCTURAL_REASONS[purpose].format(n=n, total=total)
+            if purpose in PURPOSE_WORDS:
+                return profile_id, f"Most sessions in this window looked like {PURPOSE_WORDS[purpose]}."
+            break
+    return profile_id, "It matches how your sessions in this window were run."
 
 
 def _billing_mismatch_warning(config: Config, model: ReportModel) -> str | None:
