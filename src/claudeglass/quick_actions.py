@@ -22,7 +22,7 @@ from typing import Callable
 
 from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
-from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note, plugin_of
+from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, _OVERRIDING_PROJECT_FILE, already_set, build_fix, build_fixes, fix_note, plugin_of
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
@@ -224,9 +224,12 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
         current=candidate["now"],
         new_agent_file=bool(agent) and agent in _BUILTIN_AGENT_TYPES and agent not in ctx.effective_agents,
         # A project's own agent file, not one in ~/.claude/agents; the main
-        # model's change goes where the setting the saving reads lives.
+        # model's change goes where the setting the saving reads lives, and
+        # the main session's flat effortLevel (drafted only when a project
+        # file decides it, which needs a view of one project) to that file.
         scope="repo" if isinstance(fields, dict) and fields.get("source") == "project"
-        else _main_scope(ctx) if not agent and candidate["key"] == "model" else "",
+        else _main_scope(ctx) if not agent and candidate["key"] == "model"
+        else _main_effort_scope(ctx) if not agent and candidate["key"] == "effortLevel" else "",
     )
     effect = estimate.get("effect_text") or ""
     rec = Recommendation(
@@ -468,6 +471,13 @@ def _main_setting(ctx: Context) -> tuple:
 
 def _main_scope(ctx: Context) -> str:
     return _main_setting(ctx)[1]
+
+
+def _main_effort_scope(ctx: Context) -> str:
+    """The scope of the project file whose flat ``effortLevel`` decides the main
+    session's level, or ``""`` (the user file) when no project file sets it."""
+    layer = ctx.effective_provenance.get("effortLevel")
+    return model_swap.layer_scope(layer) if layer in _OVERRIDING_PROJECT_FILE else ""
 
 
 def _models_main_left_out(rows: list[dict]) -> list[dict]:

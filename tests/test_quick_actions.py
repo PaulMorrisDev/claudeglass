@@ -3246,3 +3246,26 @@ def test_in_a_view_of_several_projects_a_project_files_medium_is_not_called_alre
     assert "is already medium" in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]
     model.meta = NS(projects=("alpha", "beta"))
     assert "is already medium" not in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]
+
+
+def _expected_flat_effort_fix(scope, current="high"):
+    """What ``fixes.build_fix`` gives a main-session ``effortLevel`` change at ``scope``."""
+    from claudeglass.fixes import build_fix
+
+    change = SettingChange(target="settings", key="effortLevel", agent=None, value="medium", current=current, scope=scope)
+    rec = Recommendation(id="quick-action", title="t", scope="user", why="w", changes=[change])
+    return build_fix(rec, change)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_shared", "repo"), ("project_local", "project-local")])
+def test_the_effort_checks_flat_level_fix_goes_to_the_project_file_that_sets_it(tmp_path, layer, scope):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "high"},
+                                   effective_provenance={"effortLevel": layer}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    expected = _expected_flat_effort_fix(scope)
+    assert fix["key"] == "effortLevel"
+    assert fix["command"] == expected["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+    assert "~/.claude/settings.json" not in fix["prompt"] and "--scope user" not in fix["command"]
