@@ -30,7 +30,7 @@ it still validate. The ``cost_centres``, ``project_files`` and
 inside older blocks (``agents.probes``, ``agents.report_turns``,
 ``agents.launches``, ``agents.model_choice``,
 ``prompting.plans.builds`` and ``prompting.plans.asks``) are optional the
-same way.
+same way. So is ``hint_occasions``, which is there while coaching notes are on.
 Money keys end in ``_usd`` and hold list-price amounts.
 
 Window: the corpus the caller passes is the window (the callers load it with
@@ -74,6 +74,7 @@ from . import coaching as coaching_mod
 from . import events as events_mod
 from . import habits as habits_mod
 from . import handoff as handoff_mod
+from . import hint_occasions as hint_occasions_mod
 from . import haiku_tags, helptext, hook_health, limits, measured
 from . import pieces as pieces_mod
 from . import prompting as prompting_mod
@@ -606,6 +607,7 @@ class _Ctx:
         tip_feedback=None,
         coverage=None,
         projects_roots=None,
+        mod_events=None,
     ):
         self.corpus = corpus
         self.config = config
@@ -615,6 +617,8 @@ class _Ctx:
         # The folders of project folders the export read, where a session's folder is found when the
         # config folder is not beside them (a container).
         self.projects_roots = projects_roots
+        # The store's mod sensor events, for the coaching moments the mod showed (only counts reach the document).
+        self.mod_events = mod_events or []
         self.days = days
         self.today = today
         self.ratings = ratings or {}
@@ -817,6 +821,7 @@ def build(
     tip_feedback: dict | None = None,
     coverage: "covered_mod.Coverage | None" = None,
     projects_roots: list[Path] | None = None,
+    mod_events: list[dict] | None = None,
 ) -> dict:
     """The export document for ``corpus`` (already loaded for the last
     ``days`` days, Haiku's tags put on its turns). ``config_dir`` is where
@@ -830,12 +835,15 @@ def build(
     the window whose transcripts are gone, fills the ``coverage`` block;
     without it the block is left out. ``projects_roots`` are the
     folders of project folders the corpus was read from, where a session's
-    own folder is looked for (the project-files block). Raises :class:`TuningError` if
+    own folder is looked for (the project-files block). ``mod_events`` are the
+    store's mod sensor events (``Store.read_mod_events``), for the coaching
+    moments the mod showed; none of their words reach the document. Raises :class:`TuningError` if
     what it built doesn't validate, which would be a bug here."""
     days = max(1, int(days))
     ctx = _Ctx(
         corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback,
         coverage=coverage, projects_roots=projects_roots,
+        mod_events=mod_events,
     )
     version = _VERSION_RE.match(__version__)
     doc: dict = {
@@ -1891,6 +1899,90 @@ def _compactions(ctx: _Ctx) -> dict:
     return block
 
 
+# -- hint occasions ----------------------------------------------------------------------------
+
+#: What each hint's row holds, in the order they are written.
+_HINT_COUNT_KEYS = ("occasions", "sessions", "noted", "notes", "glass", "mod_sessions", "older")
+
+
+@_block(
+    "hint_occasions",
+    Obj(
+        {
+            "on_hours": Count(),
+            "hints": Map(hint_occasions_mod.HINTS, _counts(*_HINT_COUNT_KEYS)),
+            "muted": Arr(Word(hint_occasions_mod.HINTS), limit=len(hint_occasions_mod.HINTS)),
+            "silent": Arr(Word(hint_occasions_mod.HINTS), limit=len(hint_occasions_mod.HINTS)),
+        },
+        required=("on_hours", "hints", "muted", "silent"),
+    ),
+    required=False,
+)
+def _hint_occasions(ctx: _Ctx) -> dict | None:
+    """Whether a coaching hint could have fired (``hint_occasions``): for
+    each hint that can speak, the messages where the hook's own trigger held
+    (``occasions``), the sessions with one where the hook is the one to
+    speak, how many of those got a hook note for it (``noted``), the hook's
+    notes in all, the mod's own notes (``glass``), the sessions where the mod
+    ran on a surface that draws the hint line itself, and, for the status
+    check, the sessions left out because their digest does not measure it.
+    ``on_hours`` is how much of the window coaching notes were on, ``muted``
+    the hints you muted and ``silent`` the hints the Capture page would say
+    gave no tip. Left out while coaching notes are off. Every hint is there,
+    zeros included, so a missing one cannot read as zero (``capture.hints``
+    leaves out an all-zero row). Counts and three fixed words: no session, no
+    message, no note."""
+    from datetime import datetime, timezone
+
+    occ = hint_occasions_mod.collect(
+        ctx.corpus,
+        ctx.config,
+        config_dir=ctx.config_dir,
+        thresholds=ctx.thresholds,
+        since=ctx.start,
+        until=datetime.now(timezone.utc),
+        mod_events=ctx.mod_events,
+        claude_root=ctx.claude_root,
+    )
+    if occ is None:
+        return None
+    return {
+        "on_hours": occ.on_hours,
+        "hints": {hint: {key: getattr(count, key) for key in _HINT_COUNT_KEYS} for hint, count in occ.hints.items()},
+        "muted": list(occ.muted),
+        "silent": list(hint_occasions_mod.silent(occ)),
+    }
+
+
+def _hint_occasions_lines(block: dict) -> list[str]:
+    """The plain lines for the ``hint_occasions`` block: each hint that had a
+    moment or a note, the sessions the mod may have shown tips in, the
+    sessions left out of status checks and what the Capture page would say."""
+    labels = hint_occasions_mod.LABELS
+    rows = block["hints"]
+    lines = [
+        f"Coaching moment, {labels[hint]}: {_n(row['sessions'], 'session')} had one, "
+        f"and {row['noted']:,} of them got a tip."
+        for hint, row in rows.items()
+        if row["sessions"] or row["notes"]
+    ]
+    if not lines:
+        lines.append("Coaching moments: none in the window.")
+    mod = sum(row["mod_sessions"] for row in rows.values())
+    if mod:
+        lines.append(f"{_n(mod, 'more session')} had the mod running, which may show these tips itself.")
+    older = rows["status_poll"]["older"]
+    if older:
+        lines.append(
+            f"{_n(older, 'session')} left out of status checks: an older version read them and their transcripts are gone."
+        )
+    if block["silent"]:
+        lines.append(
+            f"The Capture page would say no tip came for {' and '.join(labels[hint] for hint in block['silent'])}."
+        )
+    return lines
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -1974,6 +2066,7 @@ def summary_text(doc) -> str:
         (_cost_centres_lines, "cost_centres"),
         (_project_files_lines, "project_files"),
         (_compactions_lines, "compactions"),
+        (_hint_occasions_lines, "hint_occasions"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])

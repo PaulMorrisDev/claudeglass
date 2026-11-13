@@ -270,6 +270,14 @@ class Occasions:
         return len(set().union(*(self.silent_sessions[hint] for hint in found))) if found else 0
 
 
+def _epoch(value) -> datetime | None:
+    """A sensor event's ``ts`` (epoch seconds; the store hands it back as text) as an aware time."""
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _note_kind(event) -> str | None:
     """The hint a hook note was for, as ``prompting._tips`` reads it."""
     if event.subkind == "coaching_note":
@@ -314,9 +322,7 @@ def collect(
         if kind == "present":
             present.setdefault(sid, set()).add(row.get("surface"))
         elif kind == "note" and row.get("kind") in HINTS:
-            ts = row.get("ts")
-            at = datetime.fromtimestamp(ts, tz=timezone.utc) if isinstance(ts, (int, float)) else None
-            if inside(at):
+            if inside(_epoch(row.get("ts"))):
                 shown[(sid, row["kind"])] = shown.get((sid, row["kind"]), 0) + 1
     changed = setup_changed_at(claude_root, config_dir)
     bounds = [since, spans[-1][0] if spans else None, changed]

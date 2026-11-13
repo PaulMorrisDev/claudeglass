@@ -569,3 +569,35 @@ def test_export_gives_the_tuning_build_the_projects_roots_it_read(world, monkeyp
     monkeypatch.setattr(tuning, "build", spy)
     assert _export(world, "--out", str(world.out)) == 0
     assert seen["projects_roots"] == [world.projects]
+
+
+def _coaching_notes_on(world: World) -> None:
+    world.config_dir.mkdir(parents=True, exist_ok=True)
+    (world.config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "standard"\ncoaching = ["coaching_notes"]\n', encoding="utf-8"
+    )
+
+
+def test_tuning_export_counts_the_mods_notes_from_the_store(world, capsys):
+    from claudeglass.service.serve import STORE_FILENAME
+    from claudeglass.service.store import Store
+
+    _coaching_notes_on(world)
+    # No store: the block is there and the mod showed nothing.
+    doc = _stdout_doc(world, capsys, "--days", "30")
+    assert doc["hint_occasions"]["hints"]["big_paste"]["glass"] == 0
+    assert sum(row["glass"] for row in doc["hint_occasions"]["hints"].values()) == 0
+    # The dashboard's store holds a note the mod showed for a big paste in an exported session.
+    store = Store(world.config_dir / STORE_FILENAME)
+    store.open()
+    try:
+        shown = {"ts": int((NOW - timedelta(days=1)).timestamp()), "event": "note", "kind": "big_paste", "surface": "hint", "outcome": "sent"}
+        assert store.replace_mod_events("s1", [shown]) == 1
+    finally:
+        store.close()
+    doc = _stdout_doc(world, capsys, "--days", "30")
+    assert doc["hint_occasions"]["hints"]["big_paste"]["glass"] == 1
+    assert tuning.validate(doc) == []
+    # Without coaching notes there is no block, with or without the store.
+    (world.config_dir / "config.toml").unlink()
+    assert "hint_occasions" not in _stdout_doc(world, capsys, "--days", "30")

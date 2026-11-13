@@ -258,5 +258,15 @@
     "write_usd": 17.9,
     "summary_usd": 20.75,
     "heavy": {"sessions": 26, "cost_usd": 159.5, "main_usd": 185.9}
+  },
+  "hint_occasions": {
+    "on_hours": 336,
+    "hints": {
+      "drip_feed": {"occasions": 6, "sessions": 3, "noted": 2, "notes": 4, "glass": 0, "mod_sessions": 0, "older": 0},
+      "big_paste": {"occasions": 2, "sessions": 0, "noted": 0, "notes": 0, "glass": 1, "mod_sessions": 1, "older": 0},
+      "status_poll": {"occasions": 0, "sessions": 0, "noted": 0, "notes": 0, "glass": 0, "mod_sessions": 0, "older": 0}
+    },
+    "muted": [],
+    "silent": []
   }
 }
