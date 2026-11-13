@@ -1712,14 +1712,29 @@ def make_handler(
         return capture_mod.feedback_usage(corpus, _capture_rates(config))
 
     def _capture_coaching(config):
-        """``capture.coaching_usage`` over the replayed days: the coaching
-        notes the capture hook added, whatever the capture level."""
+        """``(capture.coaching_usage, hint_occasions.collect)`` over the replayed
+        days: the coaching notes the capture hook added, whatever the capture
+        level, and the moments a live hint could have fired, from one corpus."""
         from .. import capture as capture_mod
+        from .. import coaching as coaching_mod
+        from .. import hint_occasions
+        from .. import ratings as ratings_mod
         from . import rebuild
 
-        since = (datetime.now(timezone.utc) - timedelta(days=capture_mod.HISTORY_DAYS)).isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=capture_mod.HISTORY_DAYS)
         corpus = rebuild.corpus_from_store(store, days=capture_mod.HISTORY_DAYS)
-        return capture_mod.coaching_usage(corpus, _capture_rates(config), since=since)
+        usage = capture_mod.coaching_usage(corpus, _capture_rates(config), since=since.isoformat(timespec="seconds"))
+        occasions = hint_occasions.collect(
+            corpus,
+            config,
+            config_dir=options.config_dir,
+            thresholds=ratings_mod.coaching_thresholds(config.thresholds, coaching_mod.read(options.config_dir)),
+            since=since,
+            until=now,
+            mod_events=store.read_mod_events(),
+        )
+        return usage, occasions
 
     def _capture_overhead(config, specs, window):
         """``capture_view.build_overhead`` over ``window``'s sessions: how
@@ -1832,10 +1847,10 @@ def make_handler(
                 "feedback", (token, *soft), soft, lambda: _capture_feedback(config), _STALE_REPORT_MAX_AGE_S
             )
             skill = footprint.feedback_skill_state()
-        coaching_use = None
+        coaching_use = occasions = None
         if capture.coaching_notes_on:
             token = store.change_token()
-            coaching_use = _capture_part(
+            coaching_use, occasions = _capture_part(
                 "coaching", (token, *soft), soft, lambda: _capture_coaching(config), _STALE_REPORT_MAX_AGE_S
             )
         brief_skill = None
@@ -1895,7 +1910,7 @@ def make_handler(
             capture, past=past, units=units, use=use, hooks=hooks, signal_sessions=signal_sessions,
             started_since=started, feedback_use=feedback_use, skill=skill, brief_skill=brief_skill, ratings=ratings,
             statusline=statusline, weekly_cost=weekly_cost, dependent_value=dependent_value,
-            coaching_use=coaching_use, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
+            coaching_use=coaching_use, occasions=occasions, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
             signed_out=signed_out,
         )
 

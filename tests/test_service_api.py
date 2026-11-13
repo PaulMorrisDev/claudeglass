@@ -6689,3 +6689,44 @@ def test_the_quick_actions_name_project_files_from_the_projects_folder_the_servi
         check = payload["data"] if route.endswith("project-files") else next(
             item for item in payload["data"]["checks"] if item["id"] == "project-files")
         assert check["status"] == "act" and check["summary"].startswith("docs/context.md is now about 10k tokens"), route
+
+
+def test_capture_names_a_live_hint_that_had_moments_and_no_tip(tmp_path, monkeypatch):
+    """Two stored sessions each hold a big paste and no note from the hook: with coaching notes on, the hook
+    entries in order and the setup older than the pastes, the coaching row carries the line."""
+    from claudeglass import hook_health
+    from claudeglass.hook_health import CaptureHookHealth
+
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    settings = claude_root / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).timestamp()
+    os.utime(settings, (old, old))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_root))
+    monkeypatch.setattr(hook_health, "check_capture", lambda *a, **k: CaptureHookHealth(settings_path=settings))
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+    when = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
+    for name in ("session-a", "session-b"):
+        write_jsonl(project_dir / f"{name}.jsonl", [
+            user_str_line("x" * 41_000, origin={"kind": "human"}, timestamp=when.strftime("%Y-%m-%dT%H:%M:%S.000Z")),
+            turn_line(timestamp=(when + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")),
+        ])
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+    try:
+        (handle.options.config_dir / "config.toml").write_text(
+            '[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8"
+        )
+        resp, body = handle.get_json("/api/capture")
+        assert resp.status == 200 and body["ok"] is True
+        rows = {row["id"]: row for s in body["data"]["sections"] for row in s["metrics"]}
+        assert rows["coaching_notes"]["on"] is True
+        assert rows["coaching_notes"]["silent_note"] == (
+            "2 sessions had a moment for a coaching tip and none came: a big paste 2. "
+            "'claudeglass capture status' checks the capture hook."
+        )
+        assert all(row["silent_note"] is None for name, row in rows.items() if name != "coaching_notes")
+    finally:
+        handle.close()
+        handle.store.close()

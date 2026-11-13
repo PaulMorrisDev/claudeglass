@@ -923,3 +923,51 @@ def test_measured_carries_the_signed_out_count_and_the_pause_for_the_judged_line
             signed_out=quiet,
         )["measured"]
         assert (measured["report_signed_out"], measured["report_signed_out_text"], measured["judge_paused_text"]) == (0, "", "")
+
+
+# -- a live hint that had moments and gave no tip ----------------------------------------------
+
+
+def _silent_occasions(sessions: int = 2):
+    from claudeglass import hint_occasions
+
+    names = {f"s{n}" for n in range(sessions)}
+    occ = hint_occasions.Occasions(hints={h: hint_occasions.HintCount(sessions=sessions) for h in hint_occasions.HINTS})
+    occ.silent_sessions["big_paste"] = set(names)
+    return occ
+
+
+def _ok_health() -> CaptureHookHealth:
+    return CaptureHookHealth(settings_path=Path("settings.json"))
+
+
+_SILENT = (
+    "2 sessions had a moment for a coaching tip and none came: a big paste 2. "
+    "'claudeglass capture status' checks the capture hook."
+)
+
+
+def test_coaching_notes_say_when_a_live_hint_had_moments_and_gave_no_tip():
+    config = CaptureConfig(coaching=["coaching_notes"])
+    rows = _rows(capture_view.view(config, units=API, hooks=_ok_health(), occasions=_silent_occasions()))
+    assert rows["coaching_notes"]["silent_note"] == _SILENT
+    assert all(row["silent_note"] is None for name, row in rows.items() if name != "coaching_notes")
+    # A missing hook entry is told by the row's chip and command, so this line stays away.
+    stop = HookSpec(catalogue.HOOK_SCRIPT, "UserPromptSubmit", "", False)
+    missing = CaptureHookHealth(settings_path=Path("settings.json"), needed=(stop,), missing=(stop,))
+    rows = _rows(capture_view.view(config, units=API, hooks=missing, occasions=_silent_occasions()))
+    assert rows["coaching_notes"]["needs_hook"] is True and rows["coaching_notes"]["silent_note"] is None
+    # No check of the hook entries, coaching notes off, or no figures: no line.
+    for kwargs in (
+        {"hooks": None, "occasions": _silent_occasions()},
+        {"hooks": _ok_health(), "occasions": None},
+    ):
+        assert _rows(capture_view.view(config, units=API, **kwargs))["coaching_notes"]["silent_note"] is None
+    off = _rows(capture_view.view(CaptureConfig(), units=API, hooks=_ok_health(), occasions=_silent_occasions()))
+    assert off["coaching_notes"]["on"] is False and off["coaching_notes"]["silent_note"] is None
+
+
+def test_one_silent_session_shows_no_line():
+    config = CaptureConfig(coaching=["coaching_notes"])
+    rows = _rows(capture_view.view(config, units=API, hooks=_ok_health(), occasions=_silent_occasions(1)))
+    assert rows["coaching_notes"]["silent_note"] is None

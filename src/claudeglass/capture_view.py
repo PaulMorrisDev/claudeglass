@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
-from . import habits, haiku_tags, hook_health
+from . import habits, haiku_tags, hint_occasions, hook_health
 from . import ratings as ratings_mod
 from .config import CAPTURE_SAMPLES, CaptureConfig
 from .render.tables import format_cell
@@ -436,7 +436,8 @@ def _feedback_facts(metric_id: str, feedback: dict) -> tuple[dict | None, int | 
 
 
 def _metric_row(
-    metric, capture: CaptureConfig, active, past, units, use, signal_sessions, missing_events, feedback=None
+    metric, capture: CaptureConfig, active, past, units, use, signal_sessions, missing_events, feedback=None,
+    hooks_ok: bool | None = None,
 ) -> dict:
     kind = _kind(metric)
     if kind == "derived":
@@ -485,6 +486,13 @@ def _metric_row(
         else ""
     )
     needs_hook = bool(on and kind != "derived" and set(metric.hooks) & missing_events)
+    # A live hint that had moments and gave no tip, said only when the hook entries look in order: a missing
+    # entry is told by the chip above, the banner or 'capture status'.
+    occasions = (feedback or {}).get("occasions")
+    silent_note = None
+    if on and metric.id == "coaching_notes" and hooks_ok is True and occasions is not None:
+        found = hint_occasions.silent(occasions)
+        silent_note = hint_occasions.silent_sentence(found, occasions.silent_distinct(found))
     return {
         "id": metric.id,
         "kind": kind,
@@ -506,6 +514,7 @@ def _metric_row(
         "install_note": install[1].get(skill_now) if needs_install else None,
         "install_command": install[2] if needs_install else None,
         "statusline_note": statusline_text,
+        "silent_note": silent_note,
         "warning": warning,
         "cost_note": COST_NOTES.get(metric.id),
         "estimate": estimate,
@@ -889,6 +898,7 @@ def view(
     weekly_cost: float | None = None,
     dependent_value: float | None = None,
     coaching_use=None,
+    occasions=None,
     unrated: dict | None = None,
     entrypoints: dict[str, dict] | None = None,
     overhead: dict | None = None,
@@ -911,7 +921,9 @@ def view(
     ``ratings`` how many sessions you rated on the dashboard (each only
     while its toggle is on). ``coaching_use`` is
     ``capture.coaching_usage`` over the same days, while coaching notes
-    are on. ``statusline`` is whether Claude Code's
+    are on. ``occasions`` is ``hint_occasions.collect`` over the same days
+    (``None`` when not worked out): a live hint with moments and no tip makes
+    the coaching row's ``silent_note``. ``statusline`` is whether Claude Code's
     status line is this tool's (``None`` when not checked).
     ``weekly_cost`` is ``capture.weekly_cost(use, until=capture.until)`` and ``dependent_value``
     ``habits.capture_dependent_value`` over the same window: together
@@ -941,9 +953,10 @@ def view(
         "statusline": statusline,
         "entrypoints": entrypoints,
         "coaching_use": coaching_use,
+        "occasions": occasions,
     }
     rows = [
-        _metric_row(m, capture, active, past, units, use, signal_sessions, missing_events, feedback)
+        _metric_row(m, capture, active, past, units, use, signal_sessions, missing_events, feedback, hooks_data["ok"])
         for m in catalogue.METRICS
     ]
     sections = [
