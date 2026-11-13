@@ -495,6 +495,9 @@ export function markCards(mark, keys) {
 var shownSent = {};
 var shownWaiting = {};
 var shownWatching = false;
+// The most keys one mark can carry: the route's limit (_MAX_IGNORE_KEYS in
+// service/api.py; a test holds the two equal).
+var MARK_KEYS_MAX = 100;
 
 // Cards whose titles the page has just drawn. Each is sent once per scope
 // per page load, and only while the tab is visible: a tab in the
@@ -513,7 +516,20 @@ export function markCardsShown(keys) {
       seen.keys[key] = true;
     });
     seen.sent = true;
-    markCards("shown", fresh);
+    // In slices the route takes. A slice that did not get through is not
+    // counted as sent, so the next draw of those cards sends it again.
+    var slices = [];
+    for (var at = 0; at < fresh.length; at += MARK_KEYS_MAX) slices.push(fresh.slice(at, at + MARK_KEYS_MAX));
+    if (!slices.length) slices.push([]);
+    slices.forEach(function (slice) {
+      markCards("shown", slice).then(function (ok) {
+        if (ok) return;
+        slice.forEach(function (key) {
+          delete seen.keys[key];
+        });
+        if (!slice.length) seen.sent = false;
+      });
+    });
     return;
   }
   var waiting = shownWaiting[scope] || (shownWaiting[scope] = []);

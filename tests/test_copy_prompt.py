@@ -18,7 +18,7 @@ import subprocess
 
 import pytest
 
-from test_service_static import _function_source, _static_text
+from test_service_static import REPO_ROOT, _function_source, _static_text
 
 PROMPT = "Work through these fixes.\n\n## ~/.claude/settings.json\n\nSet the model to sonnet."
 
@@ -114,7 +114,12 @@ var buttons = [];
 function button(text, opts) { buttons.push(opts); return { opts: opts }; }
 function toast(message, opts) { log.toasts.push({ message: message, tone: opts.tone }); }
 function agentName(agent) { return String(agent); }
-function markCards(mark, keys) { log.marks.push({ mark: mark, keys: keys }); }
+var markCalls = 0;
+function markCards(mark, keys) {
+  var call = markCalls++;
+  log.marks.push({ mark: mark, keys: keys });
+  return Promise.resolve((scenario.failMarks || []).indexOf(call) === -1);
+}
 var scopeNow = "30";
 function scopeKey() { return scopeNow; }
 // The copy button's 1.5 s reset would keep Node waiting; a timer of 0 ms is left alone.
@@ -145,7 +150,7 @@ def _run(scenario: dict, expression: str) -> dict:
     script = _DOM % {"scenario": json.dumps(scenario)}
     script += _declaration_line("page-actions.js", "BUNDLE_COPY_REFUSED") + "\n"
     script += _declaration_line("ui.js", "COPY_FAILED") + "\n"
-    for name in ("shownSent", "shownWaiting", "shownWatching"):
+    for name in ("shownSent", "shownWaiting", "shownWatching", "MARK_KEYS_MAX"):
         script += _declaration_line("api.js", name) + "\n"
     # A function the page doesn't have yet is left out, so a case about
     # another one fails on what the page does, not on the setup.
@@ -501,3 +506,45 @@ def test_a_mark_is_the_request_post_json_would_build() -> None:
         "mark": "shown",
         "keys": ["a", "b"],
     }
+
+
+# -- more cards than the route takes in one mark -----------------------------------
+
+
+def test_the_most_keys_a_mark_carries_is_the_routes_limit() -> None:
+    page = re.search(r"^var MARK_KEYS_MAX = (\d+);$", _static_text("api.js"), re.M)
+    route = re.search(r"^_MAX_IGNORE_KEYS = (\d+)$", (REPO_ROOT / "src/claudeglass/service/api.py").read_text(encoding="utf-8"), re.M)
+    assert page and route and page.group(1) == route.group(1)
+
+
+def test_cards_shown_are_sent_in_slices_of_what_the_route_takes() -> None:
+    expression = (
+        "(function () {"
+        " document.visibilityState = 'visible';"
+        " var keys = []; for (var i = 0; i < 250; i++) keys.push('k' + i);"
+        " markCardsShown(keys);"
+        " return new Promise(function (done) { setTimeout(done, 5); }).then(function () {"
+        "  return log.marks.map(function (m) { return [m.mark, m.keys.length, m.keys[0]]; }); });"
+        " })()"
+    )
+    got = _run({"clipboard": "missing", "exec": False}, expression)
+    assert got == [["shown", 100, "k0"], ["shown", 100, "k100"], ["shown", 50, "k200"]]
+
+
+def test_a_slice_that_fails_is_not_counted_as_sent() -> None:
+    expression = (
+        "(function () {"
+        " document.visibilityState = 'visible';"
+        " var keys = []; for (var i = 0; i < 250; i++) keys.push('k' + i);"
+        " var wait = function () { return new Promise(function (done) { setTimeout(done, 5); }); };"
+        " markCardsShown(keys);"
+        " return wait().then(function () {"
+        "  var first = log.marks.length;"
+        "  markCardsShown(keys);"  # the second slice (call 1) failed: only its keys go again
+        "  return wait().then(function () {"
+        "   return { first: first, again: log.marks.slice(first).map(function (m) { return [m.keys.length, m.keys[0]]; }) };"
+        "  }); });"
+        " })()"
+    )
+    got = _run({"clipboard": "missing", "exec": False, "failMarks": [1]}, expression)
+    assert got == {"first": 3, "again": [[100, "k100"]]}
