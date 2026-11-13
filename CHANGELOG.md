@@ -133,8 +133,8 @@ Capture and dashboard:
 - **Parallel sessions and agents no longer lose signal or tag lines on
   Windows.** Each line is now added in one step the system keeps whole.
 - **The Stop hook no longer waits for Haiku's worker to start on
-  Windows**, about 420 ms a turn on a large session. The job still goes
-  through a pipe, never a file.
+  Windows**, a wait measured at 160 to 420 ms a turn on a large session.
+  The job still goes through a pipe, never a file.
 
 Cards and checks:
 
