@@ -4641,3 +4641,20 @@ def test_a_profile_card_with_a_problem_shows_it_and_offers_nothing_to_open():
     assert 'el("p", { class: "notes", text: profile.problem })' in branch
     assert "cards.appendChild(card);" in branch
     assert at < source.index("Show what it changes") and at < source.index('fetchJson("/api/profiles/"')
+
+
+def test_start_from_leaves_out_a_profile_whose_file_fails_the_checks() -> None:
+    """SR-2: picking a profile with a `problem` would clear the form, get the 409 and say nothing, so the
+    select never offers one (its card already says why it can't be used)."""
+    from test_ui_figures_audit import _node
+
+    listed = [
+        {"id": "good", "name": "Good one", "problem": None},
+        {"id": "broken", "name": "Broken one", "problem": "The file has a key ClaudeGlass doesn't know."},
+        {"id": "plain", "name": "No problem field"},
+    ]
+    shown = _node([("page-setup.js", "startFromProfiles")], f"startFromProfiles({json.dumps(listed)})")
+    assert [p["id"] for p in shown] == ["good", "plain"]
+    editor = re.sub(r"\s+", " ", _function_source(_app_js(), "buildProfileEditor"))
+    assert "startFromProfiles(profiles).forEach(function (p) { startSelect.appendChild(" in editor
+    assert "profiles.forEach" not in editor

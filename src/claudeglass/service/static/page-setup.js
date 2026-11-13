@@ -609,6 +609,14 @@ function renderProfileEditor(container, profiles, onSaved) {
   });
 }
 
+// The profiles "Start from" offers: one whose file fails the checks gets a 409 when picked, and its
+// card already says why it can't be used.
+function startFromProfiles(profiles) {
+  return profiles.filter(function (p) {
+    return !p.problem;
+  });
+}
+
 function buildProfileEditor(container, schema, profiles, onSaved) {
   var form = el("form", { class: "profile-form" });
   container.appendChild(
@@ -620,7 +628,7 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
 
   var startSelect = el("select", { id: "profile-form-start" });
   startSelect.appendChild(el("option", { value: "", text: "An empty profile" }));
-  profiles.forEach(function (p) {
+  startFromProfiles(profiles).forEach(function (p) {
     startSelect.appendChild(el("option", { value: p.id, text: p.name || p.id }));
   });
   var idInput = el("input", { type: "text", id: "profile-form-id", required: true, placeholder: "my-profile" });
