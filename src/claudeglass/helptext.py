@@ -1593,6 +1593,8 @@ TABLE_COPY: dict[str, TableCopy] = {
                 ("default", "default effort"),
             )
         },
+        # The date of the newest tag is for the row's detail, not the grid: the grid stays as it was.
+        lead_columns=["setup", "cycles", "avg_cost", "thinking_pct", "redo_pct", "met_pct", "saving"],
     ),
     "habits_setups": TableCopy(
         title="Best setup for each kind of task",
