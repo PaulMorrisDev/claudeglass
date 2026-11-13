@@ -421,6 +421,52 @@ def test_plan_apply_blocks_missing_agent_file(tmp_path):
     assert not (project / ".claude" / "agents" / "ghost.md").exists()
 
 
+def test_a_saved_current_profile_applies_at_user_scope(tmp_path, monkeypatch):
+    """"Save my current settings" saved a project agent too, and apply, which looks for an agent's
+    file in the user's folder at its default scope, then refused the whole saved profile."""
+    from test_service_api import _start_server
+
+    handle = _start_server(tmp_path, monkeypatch)
+    try:
+        handle.store.upsert_snapshot(
+            project_slug="proj-a",
+            project_root_path=r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-a",
+            ts="2026-09-19T12:00:00Z",
+            schema_version=2,
+            digest_json=json.dumps(
+                {
+                    "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+                    "managed_keys": [],
+                    "effective_agents": {
+                        "helper": {"source": "user", "model": "sonnet", "effort": "low", "max_turns": 40},
+                        "builder": {"source": "project", "model": "haiku"},
+                    },
+                }
+            ),
+        )
+        resp, payload = handle.post_json("/api/profiles/from-current", {})
+        assert resp.status == 201, payload
+        saved_path = handle.options.config_dir / "profiles" / "my-current-settings.toml"
+    finally:
+        handle.close()
+        handle.store.close()
+
+    from claudeglass.profiles.schema import load_profile
+
+    profile = load_profile(saved_path)
+    assert set(profile.agents) == {"helper"}
+    assert profile.settings["modelSettings"] == {"claude-opus-5-5": {"effortLevel": "medium"}}
+    claude_root = tmp_path / "home" / ".claude"
+    (claude_root / "agents").mkdir(parents=True)
+    (claude_root / "agents" / "helper.md").write_text("---\nname: helper\n---\nBody.\n", encoding="utf-8")
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass", claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    helper = next(a for a in plan.actions if a.kind == "agent_frontmatter")
+    assert b"maxTurns: 40" in helper.new_bytes and b"effort: low" in helper.new_bytes
+
+
 def test_apply_of_discovery_scrape_without_an_explore_file_writes_the_settings(tmp_path):
     """Explore is built into Claude Code, so nearly no user has an
     Explore.md: a shipped profile must not name it, or the whole apply

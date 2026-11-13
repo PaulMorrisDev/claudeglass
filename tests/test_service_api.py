@@ -3360,7 +3360,7 @@ def test_profiles_from_current_saves_allowlisted_non_managed_keys(server):
             {
                 "effective": {"effortLevel": "high", "model": "opus", "permissions": {"allow": []}},
                 "managed_keys": ["model"],
-                "effective_agents": {"reviewer": {"effort": "low", "color": "blue"}},
+                "effective_agents": {"reviewer": {"source": "user", "effort": "low", "color": "blue"}},
             }
         ),
     )
@@ -3383,6 +3383,115 @@ def test_profiles_from_current_saves_allowlisted_non_managed_keys(server):
     # A second save without replace=1 is a conflict, not an overwrite.
     resp, _payload = server.post_json("/api/profiles/from-current", {})
     assert resp.status == 409
+
+
+def _seed_current_snapshot(handle, *, effective=None, effective_agents=None, managed=(), ts="2026-09-19T12:00:00Z"):
+    handle.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts=ts,
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "effective": effective if effective is not None else {"effortLevel": "high"},
+                "managed_keys": list(managed),
+                "effective_agents": effective_agents or {},
+            }
+        ),
+    )
+
+
+def test_from_current_keeps_agent_max_turns_and_cache_lifetime(server):
+    # effective_agents names these max_turns and experimental_cache_ttl; the profile calls them
+    # maxTurns and experimental.cacheTtl.
+    _seed_current_snapshot(
+        server,
+        effective_agents={
+            "helper": {
+                "source": "user", "model": "sonnet", "effort": "low", "max_turns": 40, "experimental_cache_ttl": "1h",
+            },
+            "bare": {"source": "user", "model": None, "effort": None, "max_turns": None, "experimental_cache_ttl": None},
+        },
+    )
+    resp, payload = server.post_json("/api/profiles/from-current", {})
+    assert resp.status == 201, payload
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["agents"] == {
+        "helper": {"model": "sonnet", "effort": "low", "maxTurns": 40, "experimental.cacheTtl": "1h"}
+    }
+    # the file on disk is a valid profile that says the same
+    text = (server.options.config_dir / "profiles" / "my-current-settings.toml").read_text(encoding="utf-8")
+    assert "maxTurns = 40" in text and '"experimental.cacheTtl" = "1h"' in text
+    # a value out of range drops only itself
+    _seed_current_snapshot(
+        server,
+        effective_agents={"helper": {"source": "user", "model": "sonnet", "max_turns": 0, "experimental_cache_ttl": "2h"}},
+        ts="2026-09-19T13:00:00Z",
+    )
+    assert server.post_json("/api/profiles/from-current?replace=1", {})[0].status == 201
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["agents"] == {"helper": {"model": "sonnet"}}
+
+
+def test_from_current_leaves_out_project_agents_and_names_them(server):
+    _seed_current_snapshot(
+        server,
+        effective_agents={
+            "helper": {"source": "user", "model": "sonnet"},
+            "zeta-builder": {"source": "project", "model": "haiku", "max_turns": 10},
+            "builder": {"source": "project", "model": "haiku"},
+            "no-source": {"model": "opus"},
+        },
+    )
+    resp, payload = server.post_json("/api/profiles/from-current", {})
+    assert resp.status == 201, payload
+    # only agents of the user's own folder are kept; the project ones are named, sorted
+    assert payload["data"]["skipped_project_agents"] == ["builder", "zeta-builder"]
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["agents"] == {"helper": {"model": "sonnet"}}
+    # with none to leave out, the list is there and empty
+    _seed_current_snapshot(server, effective_agents={"helper": {"source": "user", "model": "sonnet"}}, ts="2026-09-19T13:00:00Z")
+    resp, payload = server.post_json("/api/profiles/from-current?replace=1", {})
+    assert payload["data"]["skipped_project_agents"] == []
+    assert payload["data"]["skipped_managed"] == []
+
+
+def test_from_current_keeps_model_settings(server):
+    _seed_current_snapshot(
+        server,
+        effective={
+            "effortLevel": "high",
+            "modelSettings": {
+                "claude-opus-5-5": {"effortLevel": "medium"},
+                # the hook records an entry with no effort level as None
+                "claude-sonnet-4-6": {"effortLevel": None},
+                # each model's entry is checked alone: these two drop only themselves
+                "claude-haiku-4-5": {"effortLevel": "max"},
+                "claude-fable-4.1": {"effortLevel": "low"},
+                "claude-opus-4-1[1m]": {"effortLevel": "xhigh", "autoCompactWindow": 300000},
+            },
+        },
+    )
+    resp, payload = server.post_json("/api/profiles/from-current", {})
+    assert resp.status == 201, payload
+    saved = server.get_json("/api/profiles/my-current-settings")[1]["data"]
+    assert saved["settings"] == {
+        "effortLevel": "high",
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "medium"},
+            "claude-opus-4-1[1m]": {"effortLevel": "xhigh", "autoCompactWindow": 300000},
+        },
+    }
+    # a managed modelSettings is left out and named, like any managed key
+    _seed_current_snapshot(
+        server,
+        effective={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+        managed=["modelSettings"],
+        ts="2026-09-19T13:00:00Z",
+    )
+    resp, payload = server.post_json("/api/profiles/from-current?replace=1", {})
+    assert payload["data"]["skipped_managed"] == ["modelSettings"]
+    assert "modelSettings" not in server.get_json("/api/profiles/my-current-settings")[1]["data"]["settings"]
 
 
 # -- context files, named windows ----------------------------------------

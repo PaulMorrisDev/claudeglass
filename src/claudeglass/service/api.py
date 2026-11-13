@@ -2873,8 +2873,12 @@ def make_handler(
     def route_profiles_from_current(store, query, body):
         """Save the latest snapshot's effective config as a user
         profile: allowlisted keys only, managed keys left out and listed
-        so the UI can say so. Writes only this tool's own profile store,
-        never Claude Code's config."""
+        so the UI can say so. Only the user's own agents are kept: ``apply``
+        patches an agent's file in the user's folder at its default scope,
+        so a project agent in the profile would get the whole profile
+        refused. The project ones left out come back as
+        ``skipped_project_agents``. Writes only this tool's own profile
+        store, never Claude Code's config."""
         body = body if isinstance(body, dict) else {}
         snapshot = _latest_config_snapshot()
         if snapshot is None or not isinstance(snapshot.data.get("effective"), dict):
@@ -2892,17 +2896,40 @@ def make_handler(
             key: effective[key]
             for key in profile_schema.SETTINGS_ALLOWLIST
             if key in effective and key not in managed and effective[key] is not None
-            and _valid({"settings": {key: effective[key]}})
+            and key != "modelSettings" and _valid({"settings": {key: effective[key]}})
         }
+        # Each model's entry is checked alone, so one the schema refuses (no
+        # effort level recorded, an id with a dot) drops only itself.
+        models = effective.get("modelSettings")
+        if "modelSettings" not in managed and isinstance(models, dict):
+            kept_models = {
+                str(model_id): {
+                    sub_key: entry[sub_key]
+                    for sub_key in profile_schema.MODEL_SETTINGS_ALLOWLIST
+                    if entry.get(sub_key) is not None
+                    and _valid({"settings": {"modelSettings": {str(model_id): {sub_key: entry[sub_key]}}}})
+                }
+                for model_id, entry in models.items()
+                if isinstance(entry, dict)
+            }
+            kept_models = {model_id: kept for model_id, kept in kept_models.items() if kept}
+            if kept_models:
+                settings["modelSettings"] = kept_models
         agents: dict = {}
+        skipped_project_agents: list[str] = []
         for name, fields in effective_agents.items():
             if not isinstance(fields, dict):
                 continue
-            kept = {
-                key: fields[key]
-                for key in profile_schema.AGENT_ALLOWLIST
-                if fields.get(key) is not None and _valid({"agents": {str(name): {key: fields[key]}}})
-            }
+            if fields.get("source") != "user":
+                if fields.get("source") == "project":
+                    skipped_project_agents.append(str(name))
+                continue
+            # effective_agents names a few fields its own way (max_turns).
+            kept = {}
+            for key in profile_schema.AGENT_ALLOWLIST:
+                value = fields.get(profile_diff_mod._EFFECTIVE_AGENT_FIELD.get(key, key))
+                if value is not None and _valid({"agents": {str(name): {key: value}}}):
+                    kept[key] = value
             if kept:
                 agents[str(name)] = kept
         doc = {
@@ -2915,6 +2942,7 @@ def make_handler(
         status, payload = _save_user_profile(store, doc, replace=query.get("replace") == "1")
         if status == 201:
             payload["data"]["skipped_managed"] = sorted(k for k in profile_schema.SETTINGS_ALLOWLIST if k in managed)
+            payload["data"]["skipped_project_agents"] = sorted(skipped_project_agents)
         return status, payload
 
     def route_profiles_post(store, query, body):
