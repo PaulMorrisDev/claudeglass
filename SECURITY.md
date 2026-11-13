@@ -830,13 +830,21 @@ by its own row id, on one of this tool's own logged "what if?"
 predictions already in the store, so the "Did your estimates come
 true?" table on Setup › Settings can tell a prediction you've looked at
 from one still waiting on you — it names no session, setting or transcript
-content.
+content. `POST /api/recommendations/marks` records, in the same store, that a
+recommendation card was shown or copied (its key, the view it was shown in,
+the settings it names and when); it changes no setting and no file, and
+nothing returns what it stored.
 
 The service's on-disk SQLite store (`<config-dir>/service.db`) is
-always a derived cache rebuilt from the same transcripts the CLI
-already reads, never a second source of truth — `claudeglass
-serve --purge` deletes it safely at any time (it prints exactly which
-files it will delete and requires `--yes` before doing so).
+a derived cache rebuilt from the same transcripts the CLI already reads,
+apart from what you and the dashboard add to it: your tags and ratings, and
+what the dashboard kept of the recommendation cards it showed
+(`POST /api/recommendations/marks`: the card, the view it was shown in, the
+settings it named, and when it was first shown, copied and landed; it stays
+on this machine, no route returns it, and `serve --purge` deletes it with the
+rest). `claudeglass serve --purge` deletes the store safely at any time (it
+prints exactly which files it will delete and requires `--yes` before doing
+so).
 
 ## Digest cache
 
@@ -926,9 +934,11 @@ figures that show how you work with Claude, to take to another machine, and
 `claudeglass tuning summary FILE` reads one back. Export works over the same
 in-memory corpus every other subcommand does, and `summary` reads one local
 file and nothing else. Export also reads `<config-dir>/service.db`, read-only:
-your dashboard ratings and tip-card answers, as `report` does, and the digests
+your dashboard ratings and tip-card answers, as `report` does, the digests
 of the window's sessions whose transcripts were not found, which it
-counts like the rest; only counts reach the file. Neither makes a network call. Export writes only
+counts like the rest, and what the dashboard kept of the recommendation
+cards it showed (its `card_marks` table); only counts and fixed words reach
+the file. Neither makes a network call. Export writes only
 to the terminal or the single file `--out` names. The properties below are the
 ones the code enforces, not promises about intent:
 
@@ -951,7 +961,7 @@ ones the code enforces, not promises about intent:
   also covers the file's own text, and a key repeated in one object is
   refused, so nothing can hide in a value the parser would drop.
 - **A size limit.** The document is 256 KB or less. The fullest one the
-  description allows is about 225 KB, so a valid document always fits, and
+  description allows is about 248 KB, so a valid document always fits, and
   a real one is about 35 KB.
 - **Fail closed, at write and at read.** `tuning.build` validates what it
   built and `tuning.dumps` validates again before it returns text, so a

@@ -259,6 +259,35 @@
     "summary_usd": 20.75,
     "heavy": {"sessions": 26, "cost_usd": 159.5, "main_usd": 185.9}
   },
+  "cards": {
+    "shown": 14,
+    "rows": [
+      {
+        "rule": "spawn-tools-list",
+        "agent": "custom",
+        "shown": 8,
+        "copied": 4,
+        "bundled": 3,
+        "ignored": 0,
+        "landable": 8,
+        "landed": 8,
+        "exact": 0,
+        "median_days": 5,
+        "answers": {"useful": 1}
+      },
+      {
+        "rule": "model-tier-main",
+        "agent": "none",
+        "shown": 3,
+        "copied": 0,
+        "bundled": 0,
+        "ignored": 3,
+        "landable": 3,
+        "landed": 0,
+        "exact": 0
+      }
+    ]
+  },
   "hint_occasions": {
     "on_hours": 336,
     "hints": {

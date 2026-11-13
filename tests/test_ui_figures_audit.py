@@ -89,7 +89,7 @@ def test_each_copy_prompt_button_is_named_for_its_action() -> None:
     assert 'button("Copy prompt", {' in copy
     assert 'label: "Copy prompt" + (about ? " for " + about : "")' in copy
     row = _body("page-overview.js", "checklistRow")
-    assert row.count("copyPromptButton(") == 1 and "copyPromptButton(fix.prompt, groupTitle(lead))" in row
+    assert row.count("copyPromptButton(") == 1 and "copyPromptButton(fix.prompt, groupTitle(lead), lead.members[0].key)" in row
 
 
 def test_the_sidebar_count_is_the_inbox_count() -> None:

@@ -2722,3 +2722,14 @@ def test_the_effort_check_counts_its_changes_when_no_row_is_over_the_bar(tmp_pat
     model.recommendations = [_effort_card(), other]
     summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
     assert summary.startswith("2 effort changes would think less." + prefix), summary
+
+
+def test_a_checks_fix_from_a_card_names_the_card():
+    from types import SimpleNamespace
+
+    prompt = {"key": None, "prompt": "Do this.", "command": None, "explainer": []}
+    rec = SimpleNamespace(title="A card", key="spawn-tools-list:x", fixes=[prompt])
+    [fix] = qa._rec_fixes([rec])
+    assert fix["card"] == "spawn-tools-list:x" and fix["title"] == "A card"
+    # The fix the card holds is copied, not changed.
+    assert "card" not in prompt

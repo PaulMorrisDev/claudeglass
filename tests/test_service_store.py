@@ -679,7 +679,7 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
 
     db_path = tmp_path / "roundtrip.db"
     store = Store(str(db_path))
-    store.open()  # built fresh at the real, current SCHEMA_VERSION (11)
+    store.open()  # built fresh at the real, current SCHEMA_VERSION (12)
     _seed(store)
     store.set_feedback("session-a", outcome="delivered", slow=("scope",), worth="yes", helped=("clearer-brief",))
     store.set_tag("session-a", "purpose", "refactor")
@@ -689,17 +689,17 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     )
     store.close()
 
-    # "Downgrade": a build that only knows up to v10 opens this v11 store.
-    # v11 is newer than that build's own SCHEMA_VERSION, so migrate() takes
+    # "Downgrade": a build that only knows up to v11 opens this v12 store.
+    # v12 is newer than that build's own SCHEMA_VERSION, so migrate() takes
     # the backup-then-drop-and-rebuild path (same branch as the test
-    # above), stamping the store back down to "10".
+    # above), stamping the store back down to "11".
     monkeypatch.setattr(schema, "SCHEMA_VERSION", schema.SCHEMA_VERSION - 1)
     downgraded = Store(str(db_path))
     downgraded.open()
-    assert downgraded.schema_version() == schema.SCHEMA_VERSION == 10
+    assert downgraded.schema_version() == schema.SCHEMA_VERSION == 11
     downgraded.close()
 
-    # Upgrade back to the real, current build: v10 -> v11 walks the
+    # Upgrade back to the real, current build: v11 -> v12 walks the
     # additive MIGRATIONS ladder (it never drops a table, and finds the
     # columns the rebuilt tables already carry), so this step alone was
     # never the risk -- the ratings must already have survived the
@@ -2559,6 +2559,7 @@ def test_the_migration_ladder_reaches_the_current_version() -> None:
     assert store_mod.MIGRATIONS[7] is store_mod._migrate_7_to_8
     assert store_mod.MIGRATIONS[9] is store_mod._migrate_9_to_10
     assert store_mod.MIGRATIONS[10] is store_mod._migrate_10_to_11
+    assert store_mod.MIGRATIONS[11] is store_mod._migrate_11_to_12
 
 
 def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
@@ -2608,7 +2609,7 @@ def test_migrate_upgrades_a_v9_store_with_the_mod_events_table(tmp_path) -> None
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 11
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 12
         # What was there stays; the new table works and has its indexes.
         assert upgraded.summary()["sessions"] == 1
         assert upgraded.replace_mod_events("session-a", [_note("2026-09-21T10:00:00Z")]) == 1
@@ -2647,7 +2648,7 @@ def test_migrate_upgrades_a_v10_store_with_the_receipt_columns(tmp_path) -> None
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 11
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 12
         # The old row stays, with the new columns empty, and the new ones take values.
         assert upgraded.read_mod_events() == [
             {"session_id": "s0", **_mod_event("2026-09-20T10:00:00Z", "compaction", kind="auto", kept=5, missing=1, added=0)}
@@ -2899,3 +2900,230 @@ def test_a_moved_sessions_series_is_read_from_the_present_transcript(store: Stor
     # With neither present, the older row still answers rather than none.
     store.remove_missing(set())
     assert store.turns_for_session("moved")["turn_series"][0][1] == 111
+
+
+# -- what the dashboard kept of the cards it showed (schema 12) ------------------------------
+
+
+def _card(key="spawn-tools-list:x", rule_id="spawn-tools-list", agent_type="x", changes=None, saving_usd=1.5):
+    """A ``card_marks.card_row``-shaped dict."""
+    if changes is None:
+        changes = [{"target": "agent", "key": "tools", "agent": "x", "value": ["Read"]}]
+    return {"key": key, "rule_id": rule_id, "agent_type": agent_type, "changes": changes, "saving_usd": saving_usd}
+
+
+_T1, _T2, _T3, _T4 = (f"2026-11-0{n}T09:00:00Z" for n in (1, 2, 3, 4))
+
+
+def test_a_card_mark_keeps_when_it_was_first_shown_and_its_first_copy(store: Store) -> None:
+    other = [{"target": "settings", "key": "model", "agent": None, "value": "sonnet"}]
+    assert store.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T1) == 1
+    store.mark_cards([_card()], mark="copied", project="*", folders=[], now=_T2)
+    store.mark_cards([_card(changes=other, saving_usd=2.5)], mark="shown", project="*", folders=[], now=_T3)
+    store.mark_cards([_card(changes=other, saving_usd=2.5)], mark="copied", project="*", folders=[], now=_T4)
+
+    (row,) = store.card_marks()
+    assert row["first_shown_at"] == _T1
+    assert row["copied_at"] == _T2
+    assert row["bundled_at"] is None
+    assert row["changes"] == other and row["saving_usd"] == 2.5
+    assert row["updated_at"] == _T4
+    assert (row["card_key"], row["rule_id"], row["agent_type"], row["project"]) == (
+        "spawn-tools-list:x", "spawn-tools-list", "x", "*",
+    )
+
+
+def test_a_copy_of_a_card_never_shown_counts_it_shown_then(store: Store) -> None:
+    store.mark_cards([_card()], mark="copied", project="*", folders=[], now=_T2)
+    (row,) = store.card_marks()
+    assert row["first_shown_at"] == row["copied_at"] == _T2
+
+
+def test_a_bundle_copy_is_kept_apart_from_a_copy_of_the_cards_own_prompt(store: Store) -> None:
+    store.mark_cards([_card()], mark="bundle", project="*", folders=[], now=_T1)
+    (row,) = store.card_marks()
+    assert (row["first_shown_at"], row["bundled_at"], row["copied_at"]) == (_T1, _T1, None)
+    store.mark_cards([_card()], mark="copied", project="*", folders=[], now=_T2)
+    store.mark_cards([_card()], mark="bundle", project="*", folders=[], now=_T3)
+    store.mark_cards([_card()], mark="copied", project="*", folders=[], now=_T4)
+    (row,) = store.card_marks()
+    assert (row["first_shown_at"], row["bundled_at"], row["copied_at"]) == (_T1, _T1, _T2)
+
+
+def test_card_marks_are_kept_per_card_and_view(store: Store) -> None:
+    store.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T1)
+    store.mark_cards([_card()], mark="shown", project="proj-a", folders=["proj-a", "proj-a2"], now=_T2)
+    store.mark_cards([_card(key="other")], mark="shown", project="proj-b", folders=["proj-b"], now=_T2)
+    assert len(store.card_marks()) == 3
+    (row,) = store.card_marks("proj-a")
+    assert row["folders"] == ["proj-a", "proj-a2"] and row["first_shown_at"] == _T2
+    assert [r["card_key"] for r in store.card_marks("*")] == ["spawn-tools-list:x"]
+    assert store.card_marks("nowhere") == []
+
+
+def test_a_mark_other_than_shown_copied_or_bundle_is_refused(store: Store) -> None:
+    with pytest.raises(ValueError):
+        store.mark_cards([_card()], mark="seen", project="*", folders=[], now=_T1)
+    assert store.card_marks() == []
+    assert store.mark_cards([], mark="shown", project="*", folders=[], now=_T1) == 0
+
+
+def test_a_landing_is_kept_until_the_card_is_marked_again(store: Store) -> None:
+    store.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T1)
+    store.set_card_landed("spawn-tools-list:x", "*", _T3, True)
+    (row,) = store.card_marks()
+    assert (row["landed_at"], row["landed_exact"], row["updated_at"]) == (_T3, 1, _T1)
+    store.set_card_landed("spawn-tools-list:x", "*", None, None)
+    (row,) = store.card_marks()
+    assert (row["landed_at"], row["landed_exact"]) == (None, None)
+    store.set_card_landed("spawn-tools-list:x", "*", _T3, False)
+    assert store.card_marks()[0]["landed_exact"] == 0
+    store.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T4)
+    (row,) = store.card_marks()
+    assert (row["landed_at"], row["landed_exact"], row["updated_at"]) == (None, None, _T4)
+    # A row that is not there is left alone.
+    store.set_card_landed("missing", "*", _T3, True)
+    assert len(store.card_marks()) == 1
+
+
+def test_card_marks_leave_the_change_token_alone(store: Store) -> None:
+    before = store.change_token()
+    store.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T1)
+    store.set_card_landed("spawn-tools-list:x", "*", _T3, True)
+    store.mark_cards([_card()], mark="copied", project="*", folders=[], now=_T4)
+    assert store.change_token() == before
+
+
+def test_migrate_upgrades_a_v11_store_with_the_card_marks_table(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v11.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    conn = store._connection()
+    conn.execute("DROP TABLE card_marks")
+    conn.execute("UPDATE meta SET value = '11' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    store.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 12
+        assert upgraded.summary()["sessions"] == 1
+        assert upgraded.card_marks() == []
+        assert upgraded.mark_cards([_card()], mark="shown", project="*", folders=[], now=_T1) == 1
+    finally:
+        upgraded.close()
+
+
+def test_card_marks_survive_a_downgrade_and_the_upgrade_after_it(tmp_path, monkeypatch) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "cards.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    store.mark_cards([_card()], mark="copied", project="proj-a", folders=["proj-a"], now=_T1)
+    store.set_card_landed("spawn-tools-list:x", "proj-a", _T3, False)
+    store.close()
+
+    # The build before this one: version 11, no card_marks statement, no step from 11.
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 11)
+    monkeypatch.setattr(
+        schema, "ALL_STATEMENTS", tuple(s for s in schema.ALL_STATEMENTS if s is not schema.CREATE_CARD_MARKS)
+    )
+    monkeypatch.setattr(store_mod, "MIGRATIONS", {k: v for k, v in store_mod.MIGRATIONS.items() if k != 11})
+    older = Store(str(db_path))
+    older.open()
+    assert older.schema_version() == 11
+    older.close()
+
+    monkeypatch.undo()
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
+        (row,) = upgraded.card_marks()
+        assert (row["card_key"], row["project"], row["copied_at"], row["landed_at"]) == (
+            "spawn-tools-list:x", "proj-a", _T1, _T3,
+        )
+    finally:
+        upgraded.close()
+
+
+def test_card_marks_survive_a_rebuild_from_a_newer_store(tmp_path) -> None:
+    from claudeglass.service import schema
+
+    db_path = tmp_path / "newer-cards.db"
+    store = Store(str(db_path))
+    store.open()
+    store.mark_cards([_card()], mark="bundle", project="proj-a", folders=["proj-a"], now=_T1)
+    store.set_card_landed("spawn-tools-list:x", "proj-a", _T3, True)
+    store.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(schema.SCHEMA_VERSION + 1),))
+    conn.commit()
+    conn.close()
+
+    reopened = Store(str(db_path))
+    reopened.open()
+    try:
+        assert reopened.schema_version() == schema.SCHEMA_VERSION
+        assert list(tmp_path.glob(f"newer-cards.db.bak-{schema.SCHEMA_VERSION + 1}-*"))
+        (row,) = reopened.card_marks()
+        assert (row["folders"], row["bundled_at"], row["landed_at"], row["landed_exact"]) == (
+            ["proj-a"], _T1, _T3, 1,
+        )
+        assert row["changes"] == _card()["changes"] and row["saving_usd"] == 1.5
+    finally:
+        reopened.close()
+
+
+def test_prune_card_marks_drops_rows_not_marked_within_the_retention(store: Store) -> None:
+    import time
+
+    now = time.time()
+    stamp = lambda days: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - days * 86400))  # noqa: E731
+    store.mark_cards([_card(key="old")], mark="shown", project="*", folders=[], now=stamp(200))
+    store.mark_cards([_card(key="recent")], mark="shown", project="*", folders=[], now=stamp(5))
+    store.mark_cards([_card(key="old-but-shown-again")], mark="shown", project="*", folders=[], now=stamp(200))
+    store.mark_cards([_card(key="old-but-shown-again")], mark="shown", project="*", folders=[], now=stamp(1))
+    assert store.prune_card_marks(180) == 1
+    assert sorted(r["card_key"] for r in store.card_marks()) == ["old-but-shown-again", "recent"]
+
+
+def test_read_card_marks_is_none_without_a_store_or_its_table_and_reads_without_writing(tmp_path) -> None:
+    from claudeglass.service import store as store_mod
+
+    path = tmp_path / "service.db"
+    assert store_mod.read_card_marks(path) is None
+
+    # A dashboard older than this change: the table is not there.
+    old = Store(str(path))
+    old.open()
+    old._connection().execute("DROP TABLE card_marks")
+    old.close()
+    assert store_mod.read_card_marks(path) is None
+
+    # A garbage file is None too, not an error.
+    junk = tmp_path / "junk.db"
+    junk.write_bytes(b"not a database" * 100)
+    assert store_mod.read_card_marks(junk) is None
+
+    current = Store(str(tmp_path / "current.db"))
+    current.open()
+    assert current.mark_cards([_card()], mark="copied", project="proj-a", folders=["proj-a"], now=_T1) == 1
+    current.close()
+    target = tmp_path / "current.db"
+    mtime = target.stat().st_mtime_ns
+    rows = store_mod.read_card_marks(target)
+    assert [(r["card_key"], r["folders"], r["changes"]) for r in rows] == [
+        ("spawn-tools-list:x", ["proj-a"], _card()["changes"])
+    ]
+    assert target.stat().st_mtime_ns == mtime
+    assert store_mod.read_card_marks(str(target)) == rows

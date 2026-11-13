@@ -725,12 +725,13 @@ export function commandBlock(fix, opts) {
 }
 
 // One fixes.build_fix entry. collapsed: a <details> with the fix's
-// title, for a recommendation with several changes.
-export function renderFix(fix, collapsed) {
-  if (!collapsed) return commandBlock(fix, { heading: true });
+// title, for a recommendation with several changes. opts (may be absent)
+// goes to commandBlock: onCopy runs after a copy that worked.
+export function renderFix(fix, collapsed, opts) {
+  if (!collapsed) return commandBlock(fix, { heading: true, onCopy: opts && opts.onCopy });
   var box = el("details", { class: "fix" });
   box.appendChild(el("summary", { text: fixTitle(fix) }));
-  box.appendChild(commandBlock(fix));
+  box.appendChild(commandBlock(fix, opts));
   return box;
 }
 

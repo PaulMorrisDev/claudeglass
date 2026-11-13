@@ -1390,7 +1390,9 @@ def _bundle_body(prompt: str) -> tuple[str, bool]:
 def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()) -> dict:
     """One prompt for every open fix in ``recs`` (a project's, in service
     order): an opening line, each fix's own prompt minus its closing under
-    a ``## file`` header, then one shared closing. Leaves out cards in
+    a ``## file`` header, then one shared closing. ``cards`` counts the cards
+    it holds and ``keys`` names them (``rec.key``, in order), so a copy of
+    the prompt can be recorded against them. Leaves out cards in
     ``skip_keys`` (ignored), cards whose fix has landed (the ``fixed``
     variant), information-only cards, unconfirmed changes and managed
     settings; ``left_out`` counts the cards with at least one fix left
@@ -1406,6 +1408,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
     kinds: dict[str, list[str]] = {}
     left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0}
     cards = 0
+    keys: list[str] = []
     scoped = False
     for rec in recs:
         if rec.key in skip_keys:
@@ -1443,6 +1446,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             used = True
         if used:
             cards += 1
+            keys.append(rec.key)
         for reason in reasons:
             left_out[reason] += 1
     # A workflow card's "A or B" label joins the exact file a setting change
@@ -1464,6 +1468,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             "several": 0,
             "other": 0,
             "cards": cards,
+            "keys": keys,
             "left_out": left_out,
         }
     parts = [_BUNDLE_OPEN]
@@ -1482,6 +1487,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
         "several": sum(kind in ("several", "rule") for f in ordered for kind in kinds[f]),
         "other": sum(kind == "none" for f in ordered for kind in kinds[f]),
         "cards": cards,
+        "keys": keys,
         "left_out": left_out,
     }
 
