@@ -737,7 +737,8 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         default="status",
         choices=CAPTURE_ACTIONS,
         help="status (default); on; off; level LEVEL; enable/disable METRIC...; connect (add the hook entries "
-        "the chosen metrics need to settings.json); remove (switch off and take the entries out); "
+        "the chosen metrics need to settings.json); remove (take the entries out, and switch off capture, "
+        "coaching notes, the plan check and the rating reminder, which need them); "
         "feedback on|off (the /cg-feedback skill and its status-line reminder); "
         "brief on|off (the /cg-brief skill, which checks a request against its checklist); "
         "tagger claude|haiku (who writes the tags: Claude, at the end of its replies, or Claude Haiku, asked "
@@ -790,7 +791,7 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         choices=capture_catalogue.AFTER_CHOICES,
         default=None,
         help="what happens when it ends: stop (the default), or keep a light sample: the kind, difficulty and size "
-        "of the work, and task changes, in 1 session in 5",
+        "of the work, and task changes, in 1 session in 5, or fewer if you chose a smaller share",
     )
     sub.add_argument("--yes", action="store_true", help="make the changes without asking (they are still printed)")
     sub.add_argument(
