@@ -264,10 +264,10 @@ excluded, since it is excluded from equality too).
 
 ## The allowlist: what a profile may contain
 
-`SETTINGS_ALLOWLIST`, `AGENT_ALLOWLIST` and `ENV_ALLOWLIST` in
-`schema.py` are the single source of truth. `validate()`'s rejection
-messages are built from these three dicts; the tables below are copied
-from them by hand, so update both together. A profile naming any
+`SETTINGS_ALLOWLIST`, `MODEL_SETTINGS_ALLOWLIST`, `AGENT_ALLOWLIST` and
+`ENV_ALLOWLIST` in `schema.py` are the single source of truth.
+`validate()`'s rejection messages are built from these dicts; the tables
+below are copied from them by hand, so update both together. A profile naming any
 other key is rejected outright.
 
 ### `settings` (top-level `settings.json` overlay keys)
@@ -278,6 +278,9 @@ plugin off, or hides one skill, leaves every other entry alone.
 `skillOverrides` sets how Claude sees a skill: `on` (listed with its
 description), `name-only` (listed by name, which costs fewer tokens),
 `user-invocable-only` (only you can start it, with `/name`) or `off`.
+
+`modelSettings` holds a model's own effort level and compact window, keyed
+by model id (see "Per-model settings" below).
 
 | Key | Type | Allowed values | Doc reference |
 |---|---|---|---|
@@ -296,6 +299,47 @@ description), `name-only` (listed by name, which costs fewer tokens),
 | `cleanupPeriodDays` | int | 0–3,650 | `docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike` |
 | `includeCoAuthoredBy` | bool | — | `docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike` |
 | `fastMode` | bool | — | `docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike` |
+| `modelSettings` | map of model id to that model's own settings | `effortLevel`: `low`, `medium`, `high`, `xhigh`; `autoCompactWindow`: `"auto"` or 100,000–1,000,000 | `docs/profiles.md#settings-top-level-settingsjson-overlay-keys` |
+
+Claude Code does not keep `max` as a saved effort level, so the flat
+`effortLevel` accepts it here but a session only gets it from `/effort
+max`; the per-model `effortLevel` does not accept it.
+
+#### Per-model settings
+
+`modelSettings` is a table of model id to a table of that model's own
+settings, the same shape as the `modelSettings` object in
+`settings.json`. In a profile file it is written as an inline table:
+
+```toml
+[settings]
+modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWindow" = 300000 }, "claude-sonnet-4-6" = { "autoCompactWindow" = "auto" } }
+```
+
+- The two keys are `MODEL_SETTINGS_ALLOWLIST`: `effortLevel` (`low`,
+  `medium`, `high` or `xhigh`) and `autoCompactWindow` (`"auto"`, the
+  window Claude Code tunes for the model, or a number of tokens from
+  100,000 to 1,000,000). Any other key is rejected as
+  `settings.modelSettings.<id>.<key>: unknown key`.
+- An id is 1–64 letters, digits, `-`, `_` or brackets (so
+  `claude-sonnet-4-6[1m]` is fine); a dot is not allowed, which keeps a
+  diff row's dotted key (`settings.modelSettings.<id>.<key>`) readable.
+- Within one settings file, a model's entry replaces the flat setting of
+  the same name for that model only (Claude Code's own rule).
+- `apply` merges per model and key by key: a profile that sets one
+  model's `effortLevel` leaves that model's window, any key of its entry
+  this tool has no name for, and every other model as they were. A
+  profile with no `modelSettings` leaves the file's alone.
+  `--launch` carries it like any other settings key.
+- The diff has one row per model and key. The snapshot keeps a model's
+  `effortLevel` and nothing else of its entry, so a row for a model's
+  window whose model has an entry reads "not recorded" under "Now": the
+  window may be set, this tool just cannot see it. The estimate does not
+  simulate it ("This change isn't simulated."). To set one from the
+  command line: `claudeglass apply --set
+  modelSettings.claude-opus-5-5.effortLevel=medium --dry-run`; the value
+  is read as that key's type (`auto` stays text, digits become a number),
+  and several `--set` items for one model share its entry.
 
 ### `agents.<name>` (per-agent frontmatter overrides)
 
@@ -571,8 +615,12 @@ such as `settings.effortLevel`, `agents.claude-implementer.effort`, or
 have no "current value" a snapshot can trace), `proposed_value` (the
 profile's own value), `target_file` (where the value currently lives,
 derived from `provenance`/`effective_agents[name].source` — see the
-design note below), and `managed` (whether `managed_keys` currently
-governs this key).
+design note below), `managed` (whether `managed_keys` currently
+governs this key) and `recorded`. A profile's `modelSettings` gives one
+row per model and key, keyed `settings.modelSettings.<id>.<key>`, read
+from `effective["modelSettings"][id][key]`; its `recorded` is `False`
+when the snapshot has an entry for that model that lacks the key (the
+hook keeps only `effortLevel`), and `True` for every other row.
 
 ### `render_unified_diff`
 
@@ -765,7 +813,8 @@ Every flag is described in [`docs/cli.md`](cli.md#apply).
 `<profile>` is a catalogue id or a path to a profile TOML file.
 `--set` instead builds a one-off profile (id `one-off`) from the given
 keys (under `agents.NAME` with `--agent`) and validates it through
-`schema.load_dict`, so the allowlist and ranges are the same. It calls
+`schema.load_dict`, so the allowlist and ranges are the same. A model's
+own setting is `--set modelSettings.<model>.<key>=VALUE`. It calls
 `plan_apply(..., mark_active=False)`: the active-profile marker is left
 alone.
 
