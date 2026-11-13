@@ -2754,7 +2754,9 @@ def make_handler(
             return _not_found(f"unknown profile: {profile_id!r}")
         # PF1: the card, the estimate and "Start from" read the agents the
         # writer role goes to among the user's own (user and project).
-        resolved, _notes, _writers = _resolve_roles(profile, _config_snapshot_with_every_project_agents(), None)
+        resolved, _notes, _writers = _resolve_roles(
+            profile, _config_snapshot_with_every_project_agents() if profile.roles else None, None
+        )
         setting_count = len(resolved.settings) + sum(len(v) for v in resolved.agents.values()) + len(resolved.env)
         return _ok(
             {
