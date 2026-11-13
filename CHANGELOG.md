@@ -284,7 +284,8 @@ Cards and checks:
 - **The auto-compact card and the compaction check change the file that
   sets the window.** Under a project file's window the check's fix goes to
   that file, not your user settings, and the card no longer says a model's
-  own window in a lower file wins over its change. Under a managed window the check asks your
+  own window in a lower file wins over its change. A project's local file
+  is named as itself. Under a managed window the check asks your
   administrator. The check's fix says when a model's own window wins, as
   the card does. A user-scope apply preview names no project's file when
   your snapshots come from several projects.

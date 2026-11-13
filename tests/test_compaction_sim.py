@@ -898,7 +898,8 @@ def test_rule_names_the_env_variable_while_it_overrides_the_setting():
         "Set CLAUDE_CODE_AUTO_COMPACT_WINDOW to at least 100,000 in the env block of "
         "<project>/.claude/settings.local.json. It overrides the autoCompactWindow setting. "
     )
-    assert rec.scope == "project" and rec.lever == "autoCompactWindow"
+    # The local file's env block: its scope names that file (R3), not the shared one.
+    assert rec.scope == "project-local" and rec.lever == "autoCompactWindow"
 
 
 def test_rule_action_has_no_bare_dollar_under_a_subscription():
@@ -1035,3 +1036,19 @@ def test_rediscovery_allowance_used_note_round_trips_through_its_list_price_form
     # correct parsing returns the note's 0.1234, not this object's 0.9999.
     read_th = CompactionSimThresholds(default_rediscovery_allowance_usd=0.9999)
     assert _rediscovery_allowance_usd_used(report, read_th) == pytest.approx(0.1234)
+
+
+# -- R3-VIEW-RULE: the window card's change goes to the file that sets the window ----------------
+
+
+@pytest.mark.parametrize("layer, scope", [("project_shared", "repo"), ("project_local", "project-local"), ("user", "user")])
+def test_the_window_cards_scope_names_the_file_that_sets_the_window(layer, scope):
+    from claudeglass.compaction_sim import _scope_and_lever_note
+    from claudeglass.snapshots import Snapshot
+
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z",
+                    data={"effective": {"autoCompactWindow": 300000}, "effective_provenance": {"autoCompactWindow": layer}})
+    got, _note = _scope_and_lever_note(snap)
+    from claudeglass.advice import _advice_scope
+
+    assert _advice_scope(got) == scope

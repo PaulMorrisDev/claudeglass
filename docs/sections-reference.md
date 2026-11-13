@@ -564,7 +564,8 @@ redundant read in `topology_redundant_reads`), is still more
 than 5% of observed cost (`1 - switch_pct`) and more than $1.00
 (`switch_usd`). The action says the figure is modelled, not observed.
 See [`docs/compaction-sim.md`](compaction-sim.md#the-report-section).
-Its change goes to the file that sets the window, never a project's in a view of several projects, and it says a
+Its change goes to the file that sets the window (a project's local file
+too), never a project's in a view of several projects, and it says a
 model's own window wins only when that window is in the same file or a
 higher one. The Overview compaction check's fix goes to the same file
 with the same note; under a managed window it asks your administrator.

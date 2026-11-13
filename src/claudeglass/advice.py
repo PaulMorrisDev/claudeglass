@@ -620,18 +620,11 @@ def _drop_applied(recs: list[Recommendation]) -> list[Recommendation]:
 
 # -- per-rule wording ------------------------------------------------------------
 
-#: ``compaction_sim._scope_and_lever_note`` (compaction_sim.py is outside
-#: this work package's file list -- P5 owns it) still returns ``"project"``
-#: for a value set at either the project_shared or the project_local
-#: layer, one token short of this module's/``fixes.py``'s ``"repo"``/
-#: ``"project-local"`` split. Folded to ``"repo"`` here so every
+#: ``compaction_sim._scope_and_lever_note`` returns ``"project"`` for a
+#: value the project's shared file sets (and ``"project-local"`` for the
+#: local one); folded to ``fixes.py``'s ``"repo"`` here so every
 #: ``SettingChange`` this module builds carries a scope ``fixes.py``'s
-#: ``_SETTINGS_WHERE``/``command_for`` actually recognise -- COV-01's
-#: project-local precision is still lost for ``compaction-window``
-#: specifically (it can name the wrong of the two project-scoped files
-#: when the value is actually project-local); every other rule's scope
-#: (``recommend.py``'s own ``_lever_scope``, fixed for COV-01) already
-#: distinguishes the two correctly.
+#: ``_SETTINGS_WHERE``/``command_for`` recognise.
 _SCOPE_ALIASES = {"project": "repo"}
 
 
