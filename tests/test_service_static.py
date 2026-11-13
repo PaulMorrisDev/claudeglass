@@ -1403,6 +1403,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
         model=report, units=units, period=period, config_dir=config_dir, effective={}, effective_agents={}
     )
     canned["/api/quick-actions"] = {"period": period, "checks": quick_actions.run_all(ctx)}
+    canned["/api/profiles/suggestion"] = {"suggested_profile_id": None, "suggested_reason": None}
     canned["/api/profile-goals"] = {"goals": goals.goals_list()}
     canned["/api/skills"] = skills_review.review(config_dir, report.context_files or {}, units, period, projects=[])
     canned["/api/claude-md"] = {"period": period, "transcripts": 0, "files": []}
