@@ -276,9 +276,11 @@ export function renderProfiles(panel) {
         return;
       }
       var skipped = body.data.skipped_managed || [];
+      var projectAgents = body.data.skipped_project_agents || [];
       saveCurrentStatus.textContent =
         'Saved as "' + (body.data.name || body.data.id) + '".' +
-        (skipped.length ? " Left out, because your organisation's policy sets them: " + skipped.join(", ") + "." : "");
+        (skipped.length ? " Left out, because your organisation's policy sets them: " + skipped.join(", ") + "." : "") +
+        (projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "");
       toast("Your current settings are saved as a profile.");
       refreshList();
     });

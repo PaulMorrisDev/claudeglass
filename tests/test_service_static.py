@@ -951,6 +951,21 @@ def test_a_profile_estimate_scales_by_its_normalised_tasks() -> None:
     assert "p.tasks" in body and "p.for" not in body
 
 
+def test_saving_current_settings_names_the_project_agents_it_left_out() -> None:
+    """PF1 part 5: the status line after "Save my current settings as a profile" adds, when the save
+    left project agents out (their file is in one project, not the user's folder), their names."""
+    source = _app_js()
+    profiles = _function_source(source, "renderProfiles")
+    squeezed = re.sub(r"\s+", " ", profiles)
+    assert 'var projectAgents = body.data.skipped_project_agents || [];' in squeezed
+    assert (
+        '(projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "")'
+        in squeezed
+    )
+    # after the managed sentence, so the existing text reads as before
+    assert squeezed.index("your organisation's policy sets them") < squeezed.index("belong to one project")
+
+
 def test_a_per_model_row_names_its_model_and_says_when_its_value_is_not_recorded() -> None:
     """PF1 part 3: a diff row for one model's setting says whose in its label, and its "Now" says
     "not recorded" when the snapshot does not keep that value (an unset one would be a guess). The
