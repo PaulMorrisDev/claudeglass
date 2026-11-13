@@ -808,7 +808,7 @@ def build_fixes(review: FileReview, units: Units, period: str) -> list[dict]:
                         f"In {path}, these sections are only for specific agents:",
                         *lines,
                         "Move each one into that agent's file (~/.claude/agents/<name>.md or "
-                        ".claude/agents/<name>.md, in the body below the frontmatter). If the agent is built "
+                        ".claude/agents/<name>.md, or a folder inside them, in the body below the frontmatter). If the agent is built "
                         "into Claude Code and has no file, put the section in a skill instead "
                         "(.claude/skills/<name>/SKILL.md) and add the skill to the agent's `skills:` list. "
                         "Leave a one-line pointer in the original file only if the main session needs to know "
