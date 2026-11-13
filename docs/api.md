@@ -876,7 +876,7 @@ window rather than a fresh corpus scan.
 Query: `window`, `window_days`, or `since`/`until` (see "Report-backed
 routes: windowing query params" above).
 
-`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt", "note"}, ...], "key"}, ...]` —
+`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "priced_on", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt", "note"}, ...], "key"}, ...]` —
 exactly `render/json_out.py`'s existing `Recommendation` encoding.
 `fixes` (from `fixes.py`) holds, per change, the six-part explainer, an
 `apply --set ... --dry-run` command (`null` when the value needs
@@ -894,7 +894,12 @@ prompt or change was never something Claude Code reads at startup).
 `saving_usd` is `estimated_saving`
 as a plain number (USD at list price, `null` when not estimated) —
 used to order recommendations of the same severity, and safe for a
-client to format or sort by directly. `key` (additive) is a
+client to format or sort by directly. `priced_on` (additive) is what that
+saving was priced on, as one number: the tokens a start-context card says
+leave each start, or the observed cost (USD at list price) a price card's
+saving is a share of; `null` when the card names no one figure (a card
+whose saving adds several parts, or a workflow card). `/api/report.json`
+carries it too; the Markdown, HTML and CSV reports do not show it. `key` (additive) is a
 deterministic, URL-safe id for this recommendation: `id` alone repeats
 across agent types (the same rule can fire once per subagent type), so
 `key` adds a slug of `agent_type` when one is set, and stays the same
@@ -2137,7 +2142,7 @@ scaled to that task's share of the window (several tasks' shares add up),
 and a row with no per-task cost to scale by is not estimated. An unknown
 task is a `400`.
 
-`data`: `{"period", "rows": [{"key", "agent", "value", "saving_usd", "fidelity", "fidelity_text", "basis", "effect_text", "uncalibrated_usd", "uncalibrated_fidelity"}, ...], "total_usd", "total_text", "estimated", "not_estimated", "total_note"}`.
+`data`: `{"period", "rows": [{"key", "agent", "value", "saving_usd", "fidelity", "fidelity_text", "basis", "effect_text", "uncalibrated_usd", "uncalibrated_fidelity", "priced_on"}, ...], "total_usd", "total_text", "estimated", "not_estimated", "total_note"}`.
 `saving_usd` is `null` when a change is not estimated. `fidelity` says
 how it was worked out (`fidelity_text` in plain words) and `basis`
 explains it in a sentence: `"ceiling"` (a `model` change -- the same
@@ -2156,7 +2161,12 @@ of the turns it's read back from cache until re-sent, EST-P10),
 (not estimated) or `"calibrated"` (EST-P6: scaled by how this same kind
 of change actually turned out for you before, see below).
 `effect_text` and `total_text` are in the billing mode's units;
-`estimated`/`not_estimated` are counts of rows.
+`estimated`/`not_estimated` are counts of rows. `priced_on` is the number
+the row's saving is a share of -- the observed cost a `model`, cache-TTL or
+`autoCompactWindow` row reprices (a TTL row sums the agents it replays), the
+build cost after approved plans for `opusplan`, the CLAUDE.md tokens at each
+start for `omitClaudeMd` -- and `null` on every other row, on a row that was
+not estimated, and on a row scaled to a task's share (`?task=`).
 
 **EST-P6 calibration.** Once at least
 `backtest.MIN_JUDGED_FOR_CALIBRATION` (3) of your own past predictions

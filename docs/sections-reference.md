@@ -2558,6 +2558,7 @@ is guaranteed to cite a real, checkable number. Each `Recommendation`
 | `evidence` | one or more `(label, value, source_table, row_key)` tuples, each citing a real cell from a table already in the report — a test walks every recommendation this module produces and confirms the value it cites is genuine, not recomputed |
 | `why` | one plain sentence on why it matters |
 | `estimated_saving` / `saving_basis` | the saving phrased for your billing mode (`units.py`), and how it was worked out |
+| `saving_usd` / `priced_on` | the saving as a number, and the one number it was priced on (the tokens a start-context card says leave each start, or the observed cost a price card's saving is a share of); `None` when the card names no single figure. Shown in the JSON report and the dashboard's recommendations route, not in the Markdown, HTML or CSV reports |
 | `changes` | the concrete edits proposed: `SettingChange` (`target` `settings`/`agent`, `key`, `agent`, `value` or a `suggested` description when the value needs your judgement, `current`, `note`, `unconfirmed`, `new_agent_file`) |
 | `fixes` | per change, from `fixes.py`: a six-part `explainer`, an `apply --set ... --dry-run` `command` (when the value is known), a `command_warning` when the command alone isn't enough, and a `prompt` to give Claude |
 
