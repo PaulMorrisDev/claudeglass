@@ -364,7 +364,9 @@ modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWi
   window whose model has an entry reads "not recorded" under "Now": the
   window may be set, this tool just cannot see it. The prompt says "(now: not
   recorded)" and "Show the file changes" "not recorded" for it, in place of
-  "not set" and "(unset)". The estimate does not
+  "not set" and "(unset)". An agent's rows at user scope read the same when a
+  project agent of the same name hides the user's: only the project agent's
+  values are recorded, so they are not used as the user file's. The estimate does not
   simulate it ("This change isn't simulated."). To set one from the
   command line: `claudeglass apply --set
   modelSettings.claude-opus-5-5.effortLevel=medium --dry-run`; the value

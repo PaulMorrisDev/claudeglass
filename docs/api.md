@@ -1116,7 +1116,10 @@ model's `effortLevel` and nothing else of its entry, so this is every
 dashboard writes "not recorded" under "Now" for such a row, and `prompt`
 says "(now: not recorded)" and `diff` "not recorded" for it. It is `true` for
 every other row, including a model with no entry at all (nothing is set
-there). `label`/`description` its plain name and what it controls, and
+there). At user scope it is also `false` for an agent's rows when a project
+agent of the same name hides the user's: the snapshot holds only the project
+agent's values, so `current_value` is `null` there and the row is never
+"Already set". `label`/`description` its plain name and what it controls, and
 `where` the file the change is written to under the chosen `scope`
 (`fixes.profile_change_where`). `overridden_by` is one plain sentence saying
 what wins over the change, or `null` (`fixes.profile_overridden_by`): a

@@ -980,6 +980,8 @@ def test_a_per_model_row_names_its_model_and_says_when_its_value_is_not_recorded
     assert "profileLeverLabels(results[1])" in _function_source(source, "renderProfileEstimate")
     # a table of names reads as "model (key: value)", not "[object Object]"
     assert 'key + " (" + _diffRowValue(inner) + ")"' in _function_source(source, "_diffRowValue")
+    # a value that is not recorded is never "the same" as the proposed one
+    assert "row.recorded === false" in _function_source(source, "diffRowSame")
     editor = _function_source(source, "buildProfileEditor")
     assert 'lever.kind !== "map[str,model]"' in editor
     assert "doc.settings.modelSettings = carriedModelSettings" in editor

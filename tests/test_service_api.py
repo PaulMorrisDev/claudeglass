@@ -1714,6 +1714,47 @@ def test_a_user_writer_hidden_behind_a_project_agent_of_the_same_name_is_still_a
     assert data["agents"] == []
 
 
+def test_a_shadowed_user_agents_rows_are_not_recorded_and_never_read_as_already_set(server):
+    """The snapshot records a user agent that a project agent of the same name shadows only as the
+    project entry. At user scope apply changes the user file, whose own values are not recorded: the
+    project agent's values must not stand in for them, or a row whose proposed value equals the
+    project's would read "Already set" and drop out of the prompt while apply still writes the file."""
+    server.store.upsert_snapshot(
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        ts="2026-10-01T12:00:00Z",
+        schema_version=2,
+        digest_json=json.dumps(
+            {
+                "effective": {"effortLevel": "high"},
+                "effective_provenance": {"effortLevel": "user"},
+                "managed_keys": [],
+                "agents": {
+                    "implementer": {
+                        "name": "implementer", "source": "project", "tools": ["Read", "Edit"],
+                        "shadowed_by_project": True,
+                    },
+                    "reviewer": {"name": "reviewer", "source": "user", "tools": ["Read"]},
+                },
+                # the project agent's own values; they equal what implementation-heavy proposes
+                "effective_agents": {
+                    "implementer": {"source": "project", "model": "sonnet", "effort": "medium", "max_turns": 60},
+                    "reviewer": {"source": "user", "model": "opus", "effort": None, "max_turns": None},
+                },
+            }
+        ),
+    )
+    data = server.get_json("/api/profiles/implementation-heavy/diff")[1]["data"]
+    rows = {r["setting"]: r for r in data["agents"] if r["agent"] == "implementer"}
+    assert set(rows) == {"model", "effort", "maxTurns"}
+    assert all(r["recorded"] is False and r["current_value"] is None for r in rows.values())
+    assert all(r["where"] == "~/.claude/agents/implementer.md" for r in rows.values())
+    # so the prompt keeps every line, and says the value is not recorded
+    assert data["prompt"].count("implementer.md") == 3
+    assert '- In ~/.claude/agents/implementer.md, set model in the frontmatter to "sonnet" (now: not recorded).' in data["prompt"]
+    assert "-model: not recorded\n+model: sonnet" in data["diff"]
+
+
 def test_profile_diff_says_when_several_agents_write_code(server):
     _seed_agents(
         server,

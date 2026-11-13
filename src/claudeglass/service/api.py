@@ -2715,8 +2715,14 @@ def make_handler(
         written = profile
         profile, role_notes, role_writers = _resolve_roles(written, snapshot, scope, project)
 
+        # At user scope apply changes the user file of a user agent that a project
+        # agent of the same name hides; the snapshot holds only the project's values.
+        shadowed = frozenset()
+        if snapshot is not None and scope == "user":
+            recorded_agents = _recorded_agents(snapshot) or {}
+            shadowed = frozenset(n for n, e in recorded_agents.items() if e.get("shadowed_by_project"))
         profile_diff = profile_diff_mod.diff_against_effective(
-            profile, effective, effective_agents, provenance, managed_keys
+            profile, effective, effective_agents, provenance, managed_keys, shadowed
         )
         diff_text = profile_diff_mod.render_unified_diff(profile_diff, scope=scope)
         # project_path is deliberately never accepted from the client here

@@ -198,6 +198,7 @@ def diff_against_effective(
     effective_agents: dict,
     provenance: dict,
     managed_keys: set,
+    unrecorded_agents: frozenset = frozenset(),
 ) -> ProfileDiff:
     """Every key ``profile`` sets, compared against ``effective``
     (``snapshots.effective_config``'s merged settings),
@@ -206,7 +207,10 @@ def diff_against_effective(
     ``{key: layer}`` map) and ``managed_keys``
     (``snapshots.managed_keys``'s list, as a ``set``). Pure -- no
     filesystem access; the caller loads all four from a real snapshot
-    (or hands in synthetic data for a test)."""
+    (or hands in synthetic data for a test). ``unrecorded_agents`` are agents
+    whose own values the snapshot does not hold (a user agent hidden behind a
+    project agent of the same name): their rows have no current value and are
+    ``recorded=False``."""
     rows: list[DiffRow] = []
 
     for key, proposed in profile.settings.items():
@@ -230,7 +234,8 @@ def diff_against_effective(
 
     for agent_name in sorted(profile.agents):
         agent_settings = profile.agents[agent_name]
-        agent_effective = effective_agents.get(agent_name, {})
+        unrecorded = agent_name in unrecorded_agents
+        agent_effective = {} if unrecorded else effective_agents.get(agent_name, {})
         for key in AGENT_ALLOWLIST:
             if key not in agent_settings:
                 continue
@@ -247,6 +252,7 @@ def diff_against_effective(
                     proposed_value=proposed,
                     target_file=f".claude/agents/{agent_name}.md",
                     managed=_is_agent_key_managed(key, managed_keys),
+                    recorded=not unrecorded,
                 )
             )
 

@@ -1228,7 +1228,8 @@ drawer (`/api/profiles/<id>/diff`, against the settings of the project
 picked, or your newest from any project with none picked) with a Setting / Now / After / Set in
 table (a model's own setting has the model in its name, "Effort level for
 one model (claude-opus-5-5)"; a value the settings snapshot does not keep
-reads "not recorded" under Now; "Set in" names the file and, when something
+reads "not recorded" under Now (as does a user agent hidden behind a project agent of
+the same name, which is never "Already set"); "Set in" names the file and, when something
 wins over the change, says so in the same cell: a project file that sets it
 too (only with a project picked), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or
 `CLAUDE_CODE_EFFORT_LEVEL` being set, or a model with an effort level of its

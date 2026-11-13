@@ -401,6 +401,7 @@ function _diffRowValue(value) {
 }
 
 function diffRowSame(row) {
+  if (row.recorded === false) return false;
   return JSON.stringify(row.current_value) === JSON.stringify(row.proposed_value);
 }
 
