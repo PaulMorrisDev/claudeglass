@@ -995,3 +995,45 @@ def test_the_rename_hints_are_true_of_a_refused_name_that_is_already_one_word(na
         assert "has characters" not in text and "isn't one word" not in text and "one word of" not in text, text
     for text in texts[-4:]:
         assert schema.AGENT_NAME_USABLE in text, text
+
+
+# -- R4-2: the main session's own auto-compact window, when a project or managed file holds it -----------
+
+
+def test_main_own_window_returns_the_entry_the_layer_and_the_window():
+    own = {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}
+    for layer in ("project_local", "project_shared", "managed"):
+        assert goals.main_own_window(own, {"modelSettings": layer}, "claude-opus-5-5") == (
+            "claude-opus-5-5", layer, 500000
+        )
+    # A dated spelling of the observed model, and the entry as written.
+    assert goals.main_own_window(own, {"modelSettings": "project_local"}, "claude-opus-5-5-20260301 (+1 more)") == (
+        "claude-opus-5-5", "project_local", 500000
+    )
+    # The flat window in the same file or a lower one does not decide over the file's own entry.
+    flat_below = {**own, "autoCompactWindow": 300000}
+    assert goals.main_own_window(flat_below, {"modelSettings": "project_local", "autoCompactWindow": "project_local"},
+                                 "claude-opus-5-5")[:2] == ("claude-opus-5-5", "project_local")
+    assert goals.main_own_window(flat_below, {"modelSettings": "project_local", "autoCompactWindow": "user"},
+                                 "claude-opus-5-5")[:2] == ("claude-opus-5-5", "project_local")
+
+
+def test_main_own_window_is_none_when_nothing_in_a_project_or_managed_file_decides_it():
+    own = {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}
+    # an entry in your user file is changed with /autocompact
+    assert goals.main_own_window(own, {"modelSettings": "user"}, "claude-opus-5-5") is None
+    # a flat window in a higher file decides
+    flat = {**own, "autoCompactWindow": 300000}
+    assert goals.main_own_window(flat, {"modelSettings": "project_shared", "autoCompactWindow": "project_local"},
+                                 "claude-opus-5-5") is None
+    assert goals.main_own_window(flat, {"modelSettings": "project_local", "autoCompactWindow": "managed"},
+                                 "claude-opus-5-5") is None
+    # a model with no canonical id, and another version of the family
+    assert goals.main_own_window(own, {"modelSettings": "project_local"}, "my-gateway-model") is None
+    assert goals.main_own_window(own, {"modelSettings": "project_local"}, None) is None
+    assert goals.main_own_window(own, {"modelSettings": "project_local"}, "claude-opus-5") is None
+    # no entry with a window for the model, no block, no layer
+    effort_only = {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}}
+    assert goals.main_own_window(effort_only, {"modelSettings": "project_local"}, "claude-opus-5-5") is None
+    assert goals.main_own_window({}, {}, "claude-opus-5-5") is None
+    assert goals.main_own_window(own, {}, "claude-opus-5-5") is None

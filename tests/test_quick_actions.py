@@ -3289,16 +3289,20 @@ def test_in_a_view_of_several_projects_the_flat_level_fix_goes_to_no_projects_fi
 # -- R3-VIEW-RULE: a check's fix goes to the file that decides, read only in a view of one project ---
 
 
-def _window_model(projects=("alpha",)):
-    return NS(sections=[NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+def _window_model(projects=("alpha",), main=None):
+    sections = [NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
         {"window": 200000, "compactions_per_session": 2.0, "cost": 70.0, "delta_pct": -30.0},
         {"window": 300000, "compactions_per_session": 1.5, "cost": 90.0, "delta_pct": -10.0},
         {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
-    ])])], context_files={}, recommendations=[], meta=NS(projects=tuple(projects)))
+    ])])]
+    if main:
+        sections.append(NS(key="model_swap", tables=[_table("model_swap_by_agent_type", [
+            {"agent_type": "top-level", "observed_model": main}])]))
+    return NS(sections=sections, context_files={}, recommendations=[], meta=NS(projects=tuple(projects)))
 
 
-def _window_fix(tmp_path, effective, provenance, projects=("alpha",)):
-    result = qa.run("compaction", _ctx(tmp_path, model=_window_model(projects), effective=effective,
+def _window_fix(tmp_path, effective, provenance, projects=("alpha",), main=None):
+    result = qa.run("compaction", _ctx(tmp_path, model=_window_model(projects, main), effective=effective,
                                        effective_provenance=provenance))
     [fix] = result["fixes"]
     return fix
@@ -3412,3 +3416,62 @@ def test_a_managed_medium_is_already_set_and_the_check_adds_no_managed_sentence(
                                    effective_provenance={"effortLevel": "managed"}))
     assert qa._EFFORT_ALREADY_SET.format(level="medium", model="claude-opus-5-5") in result["summary"]
     assert "managed settings set its effort" not in result["summary"]
+
+
+# -- R4-2: a project or managed file's own window for the main model gets the change there -------------
+
+_OWN_500K = {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+
+
+def _expected_own_window_fix(scope):
+    """What ``fixes.build_fix`` gives the main model's own window entry changed to 200,000 at ``scope``."""
+    from claudeglass.fixes import build_fix
+
+    change = SettingChange(target="settings", key="modelSettings", value={"claude-opus-5-5": {"autoCompactWindow": 200000}},
+                           current=_OWN_500K, scope=scope)
+    rec = Recommendation(id="quick-action", title="x", scope="user", changes=[change])
+    return build_fix(rec, change)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_local", "project-local"), ("project_shared", "repo")])
+def test_the_compaction_checks_fix_changes_a_project_files_own_window_entry_for_the_main_model(tmp_path, layer, scope):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": layer}, main="claude-opus-5-5")
+    expected = _expected_own_window_fix(scope)
+    assert fix["key"] == "modelSettings"
+    assert fix["command"] == expected["command"] and f"--scope {scope}" in fix["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+    assert "~/.claude/settings.json" not in fix["prompt"] and "/autocompact" not in fix["prompt"]
+
+
+def test_the_compaction_check_asks_your_administrator_to_change_a_managed_own_window_entry(tmp_path):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": "managed"}, main="claude-opus-5-5")
+    expected = _expected_own_window_fix("managed")
+    assert fix["command"] is None and expected["command"] is None
+    # The request is the same up to the reason each gives for it.
+    head = expected["prompt"].split("saying why:")[0]
+    assert head and fix["prompt"].startswith(head)
+    assert "administrator" in fix["prompt"]
+
+
+def test_an_own_window_in_your_user_file_keeps_the_checks_flat_change_and_its_note(tmp_path):
+    """Guard (W4): /autocompact is how that entry is changed."""
+    fix = _window_fix(tmp_path, {"modelSettings": _OWN_500K}, {"modelSettings": "user"}, main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope user" in fix["command"]
+    assert "claude-opus-5-5 has its own auto-compact window, which wins for it." in fix["prompt"]
+
+
+def test_a_flat_window_in_a_higher_file_than_the_own_entry_keeps_the_checks_flat_change(tmp_path):
+    """Guard: the local file's flat window decides over the shared file's own entry."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "project_local", "modelSettings": "project_shared"}, main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope project-local" in fix["command"]
+
+
+def test_in_a_view_of_several_projects_the_check_does_not_read_a_projects_own_window(tmp_path):
+    """Guard: the view rule took the project's block out, so the flat change goes to your user file."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": "project_local"}, ("alpha", "beta"),
+                      main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope user" in fix["command"]

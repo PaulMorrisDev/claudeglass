@@ -185,7 +185,9 @@ or the generic marker:
   `modelSettings` block has the model's own entry. The window card's change
   and the compaction check's fix carry the same note
   (`fixes.window_change_note`, read for the change's own file), and both
-  go to the file that sets the window (see "Which file a view reads").
+  go to the file that sets the window (see "Which file a view reads");
+  when a project or managed file's own window for the main session's model
+  decides (`goals.main_own_window`), they change that entry in that file.
 
 `effective`/`effective_provenance` merge exactly this same key set
 (`SETTINGS_SUMMARY_KEYS`) across the four layers — a value there has

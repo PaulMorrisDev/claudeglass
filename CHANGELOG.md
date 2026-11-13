@@ -289,7 +289,8 @@ Cards and checks:
   is named as itself. Under a managed window the check asks your
   administrator. The check's fix says when a model's own window wins, as
   the card does. A user-scope apply preview names no project's file when
-  your snapshots come from several projects.
+  your snapshots come from several projects. A project or managed file's own
+  window for the main session's model gets the change there.
 
 Coaching:
 

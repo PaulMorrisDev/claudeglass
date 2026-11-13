@@ -651,7 +651,10 @@ def _window_change(rec: Recommendation, ctx: _Context, *, value: int | None = No
     (whose value replaces the shell's). A model's own window, saved with
     /autocompact, wins over the setting for that model when it is in the
     change's own file or a higher one, so the change's note names it
-    (``fixes.window_change_note``, as the compaction check's fix says)."""
+    (``fixes.window_change_note``, as the compaction check's fix says). A
+    project or managed file's own window for the main model, which decides
+    when no flat window sits in a higher file (``goals.main_own_window``),
+    is the change itself."""
     now = ctx.window_now()
     if not auto_compact_window_env_set(ctx.snapshot):
         scope = _advice_scope(rec.scope)
@@ -659,6 +662,26 @@ def _window_change(rec: Recommendation, ctx: _Context, *, value: int | None = No
             # The view rule: a scope worked out from one project's file is not
             # where a change for several projects goes.
             scope = "user"
+        if value is not None and ctx.snapshot is not None:
+            from .profiles import goals
+
+            own = goals.main_own_window(
+                effective_config(ctx.snapshot),
+                effective_provenance(ctx.snapshot),
+                ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model"),
+            )
+            if own is not None:
+                # A project or managed file's own window for the main model decides, so
+                # that entry is the change, there (the effort card's rule, for the window).
+                entry, layer, window = own
+                return SettingChange(
+                    target="settings",
+                    key="modelSettings",
+                    value={entry: {"autoCompactWindow": value}},
+                    current={entry: {"autoCompactWindow": window}},
+                    suggested=suggested,
+                    scope=model_swap.layer_scope(layer),
+                )
         return SettingChange(
             target="settings",
             key="autoCompactWindow",

@@ -214,7 +214,6 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
     """A goal candidate as a fix: the same explainer, prompt and command
     a recommendation's change gets."""
     agent = candidate["agent"]
-    estimate = candidate.get("estimate") or {}
     fields = ctx.effective_agents.get(agent) if agent else None
     # A project's own agent file, not one in ~/.claude/agents; the main
     # model's change goes where the setting the saving reads lives; any other
@@ -224,6 +223,23 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
         else _main_scope(ctx) if not agent and candidate["key"] == "model"
         else _settings_scope(ctx, candidate["key"]) if not agent else ""
     )
+    own = (
+        goals.main_own_window(ctx.effective, ctx.effective_provenance, _main_observed_model(whatif._Tables(ctx.model)))
+        if not agent and candidate["key"] == "autoCompactWindow" and candidate["value"] is not None
+        else None
+    )
+    if own is not None:
+        # A project or managed file's own window for the main model decides: that entry is the
+        # change, there, and the window note (about an entry in your user file) does not apply.
+        entry, layer, window = own
+        change = SettingChange(
+            target="settings",
+            key="modelSettings",
+            value={entry: {"autoCompactWindow": candidate["value"]}},
+            current={entry: {"autoCompactWindow": window}},
+            scope=model_swap.layer_scope(layer),
+        )
+        return _fix_for(change, candidate, title)
     change = SettingChange(
         target="agent" if agent else "settings",
         key=candidate["key"],
@@ -237,6 +253,12 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
         if not agent and candidate["key"] == "autoCompactWindow"
         else "",
     )
+    return _fix_for(change, candidate, title)
+
+
+def _fix_for(change: SettingChange, candidate: dict, title: str) -> dict:
+    """``change`` as a fix, with the candidate's evidence and estimate."""
+    estimate = candidate.get("estimate") or {}
     effect = estimate.get("effect_text") or ""
     rec = Recommendation(
         id="quick-action",

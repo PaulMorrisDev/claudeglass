@@ -569,6 +569,8 @@ too), never a project's in a view of several projects, and it says a
 model's own window wins only when that window is in the same file or a
 higher one. The Overview compaction check's fix goes to the same file
 with the same note; under a managed window it asks your administrator.
+When a project or managed file's own window for the main session's model
+decides (`goals.main_own_window`), both change that entry there instead.
 Once the sweep has priced the main sessions, `compaction-churn` is
 dropped and `long-context-share` keeps only its workflow advice, whether
 or not `compaction-window` fires: the replay is the one answer on the

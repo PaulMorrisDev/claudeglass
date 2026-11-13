@@ -1407,3 +1407,46 @@ def test_a_card_at_the_project_files_scope_does_not_close_in_a_view_of_several_p
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
     [card] = [r for r in advice.finish([_reported_effort_rec(scope="repo")], report, snap, Units()) if r.id == "effort-mismatch"]
     assert (card.variant, card.scope, card.changes) == ("session", "user", [])
+
+
+# -- R4-2: a project or managed file's own window for the main model gets the change there -------------
+
+_OWN_500K = {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+_OWN_WINDOW_NOTE = (
+    "claude-opus-5-5 has its own auto-compact window, which wins for it. "
+    "To change a model's own window, run /autocompact with the new size in a session on that model."
+)
+
+
+def _own_window_card(block_layer, flat=None, flat_layer="user", scope="user", projects=("alpha",)):
+    effective = {"modelSettings": _OWN_500K, **({"autoCompactWindow": flat} if flat else {})}
+    provenance = {"modelSettings": block_layer, **({"autoCompactWindow": flat_layer} if flat else {})}
+    return _window_card(scope, effective, provenance, projects)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_local", "project-local"), ("project_shared", "repo"), ("managed", "managed")])
+def test_the_window_card_changes_a_project_or_managed_files_own_entry_for_the_main_model(layer, scope):
+    """R4-2: the file's own entry for claude-opus-5-5 decides, so a flat window at your user file cannot reach it."""
+    card = _own_window_card(layer, flat=300000)
+    [change] = card.changes
+    assert (change.target, change.key, change.scope, change.note) == ("settings", "modelSettings", scope, "")
+    assert change.value == {"claude-opus-5-5": {"autoCompactWindow": 200000}}
+    assert change.current == {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+
+
+def test_an_own_window_in_your_user_file_keeps_the_flat_change_and_the_note():
+    """Guard (W4): /autocompact is how that entry is changed."""
+    [change] = _own_window_card("user").changes
+    assert (change.key, change.scope, change.note) == ("autoCompactWindow", "user", _OWN_WINDOW_NOTE)
+
+
+def test_a_flat_window_in_a_higher_file_than_the_own_entry_keeps_the_flat_change():
+    """Guard: Claude Code reads the files from the highest down, so the local file's flat window decides."""
+    [change] = _own_window_card("project_shared", flat=300000, flat_layer="project_local", scope="project-local").changes
+    assert (change.key, change.scope, change.value) == ("autoCompactWindow", "project-local", 200000)
+
+
+def test_in_a_view_of_several_projects_a_projects_own_window_is_not_read():
+    """Guard: the view rule took the project's block out, so the change is the flat one at your user file."""
+    [change] = _own_window_card("project_local", flat=300000, projects=("alpha", "beta")).changes
+    assert (change.key, change.scope, change.value) == ("autoCompactWindow", "user", 200000)

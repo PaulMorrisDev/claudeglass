@@ -547,6 +547,33 @@ def main_effort_entry(effective: dict, observed: str | None) -> str | None:
     return model_id
 
 
+def main_own_window(effective: dict, provenance: dict, observed: str | None) -> tuple[str, str, object] | None:
+    """The main session's own auto-compact window when a project, local or
+    managed file's ``modelSettings`` block holds it and it decides, as
+    ``(entry key, layer, its window)``; else ``None``. It decides unless a
+    flat ``autoCompactWindow`` sits in a higher file (Claude Code reads the
+    files from the highest down; within one file a model's own entry beats
+    the flat value). An entry in your user file is not returned: /autocompact
+    changes that one, as the window note says. In a view of several projects
+    the view rule has already taken a project's block out."""
+    model_id = _canonical_model(_main_model_id(observed))
+    entries = effective.get("modelSettings")
+    layer = provenance.get("modelSettings")
+    if not model_id or not isinstance(entries, dict) or layer not in ("project_shared", "project_local", "managed"):
+        return None
+    flat_layer = provenance.get("autoCompactWindow")
+    if (
+        effective.get("autoCompactWindow") is not None
+        and flat_layer in SETTINGS_LAYER_NAMES
+        and SETTINGS_LAYER_NAMES.index(flat_layer) < SETTINGS_LAYER_NAMES.index(layer)
+    ):
+        return None
+    for key, entry in entries.items():
+        if isinstance(entry, dict) and entry.get("autoCompactWindow") is not None and _same_model(str(key), model_id):
+            return (str(key) if _MODEL_ID_RE.match(str(key)) else model_id), layer, entry["autoCompactWindow"]
+    return None
+
+
 def _project_effort_note(layer: str | None) -> str:
     """N6: when a project file's flat effortLevel is what decides now, a
     sentence saying it wins over a model's own level in a lower file."""
