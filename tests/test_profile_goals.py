@@ -485,6 +485,22 @@ def test_a_profile_covering_several_tasks_scales_by_their_combined_share():
     assert one["saving_usd"] == pytest.approx(24.0) and "this task's 60% share" in one["basis"]
 
 
+def test_a_task_scaled_estimate_no_longer_says_what_the_whole_window_was_priced_on():
+    # The saving is now a task's share of the repriced cost, so the window's
+    # figure would not be the one it is a share of: it is dropped, not logged.
+    from claudeglass import whatif
+
+    model = _with_task_data(by_task=[
+        {"task": "all", "cost": 200.0, "main_cost": 100.0},
+        {"task": "bugfix", "cost": 150.0, "main_cost": 60.0},
+    ])
+    result = {"rows": [{"key": "model", "agent": None, "saving_usd": 40.0, "uncalibrated_usd": None,
+                        "fidelity": "ceiling", "effect_text": "", "basis": "Repriced.", "priced_on": 100.0}]}
+    [row] = goals._scale_whatif(result, whatif._Tables(model), "bugfix", UNITS, "")["rows"]
+    assert row["saving_usd"] == pytest.approx(24.0) and row["priced_on"] is None
+    assert result["rows"][0]["priced_on"] == 100.0  # the caller's row is untouched
+
+
 def test_the_tasks_goal_drafts_a_cheaper_model_for_the_agent_that_ran_the_task_most():
     model = _with_task_data(
         _SETUPS,

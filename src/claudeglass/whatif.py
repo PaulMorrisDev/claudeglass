@@ -138,7 +138,12 @@ def _version(model_id: str) -> tuple[int, ...]:
     return tuple(int(n) for n in re.findall(r"\d+", re.sub(r"-\d{8}$", "", model_id)))
 
 
-def _row(key: str, agent: str | None, value, saving: float | None, fidelity: str, basis: str) -> dict:
+def _row(
+    key: str, agent: str | None, value, saving: float | None, fidelity: str, basis: str, priced_on: float | None = None
+) -> dict:
+    """One row. ``priced_on`` is the figure the saving is a share of (an
+    observed cost, or tokens per start), where the estimate has one plain
+    figure, else None; ``basis`` is its sentence."""
     return {
         "key": key,
         "agent": agent,
@@ -146,6 +151,7 @@ def _row(key: str, agent: str | None, value, saving: float | None, fidelity: str
         "saving_usd": round(saving, 6) if saving is not None else None,
         "fidelity": fidelity,
         "basis": basis,
+        "priced_on": priced_on,
     }
 
 
@@ -184,6 +190,7 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
         if runs
         else f"Worked out by repricing {who}'s replies in this window at {column[len('cost_'):]}. "
         "A different model may need more or fewer replies for the same work, which this doesn't capture.",
+        priced_on=observed,
     )
 
 
@@ -203,6 +210,7 @@ def _opusplan(tables: _Tables, value, key: str) -> dict:
         "ceiling",
         "Worked out by repricing the main session's replies after each approved plan at Sonnet's prices. "
         "With opusplan, sessions without a plan run on Sonnet too; their saving isn't counted here.",
+        priced_on=build,
     )
 
 
@@ -211,12 +219,14 @@ def _ttl(tables: _Tables, agents: list[str], value, key: str, label: str | None)
     if column is None:
         return _row(key, label, value, None, "none", "Only 5m and 1h are simulated.")
     saving = 0.0
+    priced_on = 0.0
     found = False
     for agent in agents:
         row = tables.row("ttl", "ttl_by_agent_type", agent)
         observed, new = (_num(row.get("cost_observed")), _num(row.get(column))) if row else (None, None)
         if observed is not None and new is not None:
             saving += observed - new
+            priced_on += observed
             found = True
     if not found:
         return _row(key, label, value, None, "none", "No runs in this window to replay.")
@@ -224,6 +234,7 @@ def _ttl(tables: _Tables, agents: list[str], value, key: str, label: str | None)
         key, label, value, saving, "simulated",
         f"Every cache write in this window replayed with a {value} lifetime: a longer lifetime costs more per "
         "write but rebuilds less after pauses.",
+        priced_on=priced_on,
     )
 
 
@@ -255,6 +266,7 @@ def _compact(tables: _Tables, value, current) -> dict:
         f"Your sessions replayed with summaries at {int(value):,} tokens: about "
         f"{_num(new.get('compactions_per_session')) or 0:.1f} summaries per session. Earlier summaries carry "
         "less context each reply but lose detail.",
+        priced_on=_num(base.get("cost")),
     )
 
 
@@ -301,7 +313,7 @@ def _omit_claude_md(tables: _Tables, context_files: dict, agent: str, label: str
     carried = _claude_md_carry_usd(context_files, agent)
     if carried > floor:
         note += " Carrying it across the rest of each spawn's turns, until it's re-sent, costs still more."
-    return _row("omitClaudeMd", label, True, max(floor, carried), "measured", note)
+    return _row("omitClaudeMd", label, True, max(floor, carried), "measured", note, priced_on=tokens)
 
 
 def _skills(context_files: dict, overrides: dict) -> dict:

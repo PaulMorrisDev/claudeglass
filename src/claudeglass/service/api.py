@@ -3240,6 +3240,7 @@ def make_handler(
                     predicted_usd=predicted_usd,
                     predicted_pct=None,
                     fidelity=fidelity,
+                    priced_on=row.get("priced_on"),
                 )
         return _ok(result)
 

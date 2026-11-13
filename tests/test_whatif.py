@@ -277,6 +277,39 @@ def test_fast_mode_off_without_fast_applied_data_is_not_estimated():
     assert "No fast-priced replies in this window" in row["basis"]
 
 
+def test_each_priced_row_says_what_it_was_priced_on():
+    plan = NS(key="plan_handoff", tables=[_table("plan_handoff_summary", [
+        {"scope": "main sessions", "build_usd": 30.0, "build_usd_sonnet": 18.0},
+    ])])
+    model = _model()
+    model.sections.append(plan)
+
+    def priced_on(settings=None, agents=None):
+        return [r["priced_on"] for r in whatif.estimate(settings or {}, agents or {}, model, UNITS, period=PERIOD)["rows"]]
+
+    # The observed cost a model reprice is a share of.
+    assert priced_on({"model": "sonnet"}) == [100.0]
+    assert priced_on(agents={"Explore": {"model": "haiku"}}) == [10.0]
+    # opusplan: the build cost after approved plans.
+    assert priced_on({"model": "opusplan"}) == [30.0]
+    # A cache lifetime: the observed cost summed over the agents replayed.
+    assert priced_on({"promptCacheTtl": "1h"}) == [50.0]
+    assert priced_on({"subagentPromptCacheTtl": "1h"}) == [8.0]
+    assert priced_on(agents={"Explore": {"experimental.cacheTtl": "1h"}}) == [5.0]
+    # A compaction window: the cost of the window in force (here, none).
+    assert priced_on({"autoCompactWindow": 200000}) == [100.0]
+    # CLAUDE.md: the tokens it puts at each start.
+    assert priced_on(agents={"Explore": {"omitClaudeMd": True}}) == [5000.0]
+    # Everything else, and any row that could not be estimated, carries the key and leaves it None.
+    assert priced_on({"skillOverrides": {"dataviz": "off"}, "enabledPlugins": {"engineering@marketplace": False}}) == [None, None]
+    assert priced_on({"effortLevel": "medium", "fastMode": False, "cleanupPeriodDays": 7}) == [None, None, None]
+    assert priced_on({"model": "no-such-model", "autoCompactWindow": 123}) == [None, None]
+    assert priced_on(agents={"Nobody": {"model": "haiku"}, "Explore": {"omitClaudeMd": False}}) == [None, None]
+    # The sentence stays its own field.
+    [row] = whatif.estimate({"model": "sonnet"}, {}, model, UNITS, period=PERIOD)["rows"]
+    assert isinstance(row["basis"], str) and row["basis"]
+
+
 def test_total_counts_only_estimated_rows_and_notes_overlap():
     out = _estimate({"model": "sonnet", "autoCompactWindow": 200000, "effortLevel": "low"})
     assert out["total_usd"] == 60.0

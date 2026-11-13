@@ -3666,6 +3666,25 @@ def test_whatif_log_flag_appends_a_prediction_per_estimated_row(server):
     assert records[0]["fidelity"] == row["fidelity"]
 
 
+def test_a_logged_estimate_records_what_it_was_priced_on(server):
+    from claudeglass import config as config_mod
+
+    resp, payload = server.post_json(
+        "/api/whatif", {"settings": {"model": "sonnet"}, "agents": {}, "log": True}
+    )
+    assert resp.status == 200
+    [row] = payload["data"]["rows"]
+    # The observed cost the model reprice is a share of: a plain number the saving fits inside.
+    assert isinstance(row["priced_on"], float) and row["priced_on"] > 0
+    assert 0 < row["saving_usd"] <= row["priced_on"]
+    [record] = config_mod.load_prediction_log(server.options.config_dir)
+    assert record["priced_on"] == row["priced_on"]
+    # A row that was not logged (no log flag) still shows it, and writes nothing.
+    again = server.post_json("/api/whatif", {"settings": {"model": "sonnet"}, "agents": {}})[1]
+    assert again["data"]["rows"][0]["priced_on"] == row["priced_on"]
+    assert len(config_mod.load_prediction_log(server.options.config_dir)) == 1
+
+
 def test_whatif_log_flag_skips_rows_that_could_not_be_estimated(server):
     from claudeglass import config as config_mod
 
