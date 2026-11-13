@@ -188,13 +188,19 @@ def amount_text(units, usd: float, period: str = "", *, prefix: str = "") -> str
     return amount.phrase(prefix) if amount is not None else "nothing"
 
 
+def one_session_in(capture: CaptureConfig) -> str:
+    """How often a light sample runs, as the hook runs it: ``1 session in 5``
+    at 20% of sessions, ``1 session in 10`` at 10%."""
+    return f"1 session in {round(100 / capture.light_share)}"
+
+
 def describe(capture: CaptureConfig, now: datetime | None = None) -> str:
     """One line: the level and, when on, its date, end and sample. Once the
     end has passed and a light sample was chosen, the line is that sample."""
     if not capture.is_on:
         return "Off"
     if capture.light(now):
-        return f"Light sample (since {capture.until[:10]}, {catalogue.LIGHT_SAMPLE}% of sessions)"
+        return f"Light sample (since {capture.until[:10]}, {capture.light_share}% of sessions)"
     parts = [catalogue.LEVEL_TITLES.get(capture.level, capture.level)]
     if capture.enabled_at:
         parts.append(f"since {capture.enabled_at[:10]}")
@@ -220,6 +226,7 @@ def config_block(capture: CaptureConfig, now: datetime | None = None) -> dict:
         "expired": expired,
         "after": capture.after,
         "light": capture.light(now),
+        "light_share": capture.light_share,
         "effective": capture.is_on and not expired,
         "enabled_at": capture.enabled_at,
         "until": capture.until,
@@ -814,7 +821,7 @@ def _banner(
     parts = ["Metrics capture: light sample" if light else f"Metrics capture: {config['title']}"]
     if light:
         parts.append(f"since {capture.until[:10]}")
-        parts.append("1 session in 5")
+        parts.append(one_session_in(capture))
     elif expired:
         parts.append(f"ended {capture.until[:10]}")
     elif capture.enabled_at:
@@ -843,7 +850,7 @@ def _banner(
     if light:
         notes.append(
             f"The full capture ended on {capture.until[:10]}. Claude now tags the kind, difficulty and size of the "
-            "work, and task changes, in 1 session in 5."
+            f"work, and task changes, in {one_session_in(capture)}."
         )
         notes.append(f"'{OFF_COMMAND}' stops it. '{ON_COMMAND}' starts full capture again.")
         if low_coverage is not None:

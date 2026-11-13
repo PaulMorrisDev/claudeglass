@@ -142,6 +142,24 @@ def test_the_banner_names_the_light_sample():
     assert "light" not in capture_view.describe(stopped, now).lower()
 
 
+@pytest.mark.parametrize(
+    ("sample", "share", "phrase"),
+    [(100, 20, "1 session in 5"), (50, 20, "1 session in 5"), (25, 20, "1 session in 5"), (10, 10, "1 session in 10")],
+)
+def test_the_light_sample_names_the_share_the_hook_runs(sample, share, phrase):
+    """The hook runs it in ``min(sample, LIGHT_SAMPLE)`` percent of sessions; each surface says that."""
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light", sample=sample)
+    data = capture_view.view(light, units=API, use=_use(cycles=30, tagged_cycles=30), now=now)
+    assert data["config"]["light_share"] == share
+    assert data["config"]["describe"] == f"Light sample (since 2026-09-21, {share}% of sessions)"
+    banner = data["banner"]
+    assert banner["headline"].startswith(f"Metrics capture: light sample · since 2026-09-21 · {phrase} · ")
+    # The chosen share of the full capture is not a second figure in the headline.
+    assert "% of sessions" not in banner["headline"]
+    assert banner["notes"][0].endswith(f"and task changes, in {phrase}.")
+
+
 def test_ended_capture_leaves_out_the_hook_cost_and_step_down_notes():
     spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
     health = CaptureHookHealth(

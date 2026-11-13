@@ -458,7 +458,7 @@ function renderCaptureControls(data, container) {
     });
     form.appendChild(el("label", { for: afterId, text: "When it ends" }));
     form.appendChild(after);
-    form.appendChild(el("p", { class: "notes", text: "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in 5." }));
+    form.appendChild(el("p", { class: "notes", text: "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in " + Math.round(100 / config.light_share) + "." }));
   }
   block.appendChild(form);
 }

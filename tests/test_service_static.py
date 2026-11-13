@@ -4109,9 +4109,12 @@ def test_capture_page_offers_when_it_ends() -> None:
     assert '"Saved: capture stops at the end."' in controls
     assert '"Saved: a light sample goes on after the end."' in controls
     assert (
-        "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in 5."
+        "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in "
         in controls
     )
+    # The note says the share the hook runs, which the server works out from the chosen sample.
+    assert 'in 1 session in " + Math.round(100 / config.light_share) + "."' in controls
+    assert "in 1 session in 5." not in controls
     assert (
         "At the end, capture stops or keeps its light sample, and the banner says so. Your level stays set, "
         "so picking a new end starts it again." in controls

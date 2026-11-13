@@ -229,6 +229,12 @@ class CaptureConfig:
             return False
         return (now or datetime.now(timezone.utc)) >= stop
 
+    @property
+    def light_share(self) -> int:
+        """The percent of sessions a light sample runs in: the hook takes
+        the smaller of ``sample`` and ``capture_catalogue.LIGHT_SAMPLE``."""
+        return min(self.sample, capture_catalogue.LIGHT_SAMPLE)
+
     def light(self, now: datetime | None = None) -> bool:
         """Whether a light sample is what runs now: capture is on, its end
         has passed and ``after`` says to keep a sample

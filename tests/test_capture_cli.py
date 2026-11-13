@@ -673,6 +673,18 @@ def test_status_during_a_light_sample_lists_only_its_keys_and_their_size(tmp_pat
     assert "large or web tool result" in full and "big_output" in full
 
 
+@pytest.mark.parametrize(("sample", "share", "phrase"), [(100, 20, "1 session in 5"), (10, 10, "1 session in 10")])
+def test_status_names_the_share_the_light_sample_runs_in(tmp_path, sample, share, phrase):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        f'[capture]\nlevel = "essentials"\nsample = {sample}\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n',
+        encoding="utf-8",
+    )
+    rc, out = _capture(config_dir, "status")
+    assert f"Metrics capture: Light sample (since 2020-01-01, {share}% of sessions)" in out
+    assert f"and task changes, in {phrase}. " in out
+
+
 def test_levels_up_and_down_sync_the_entries(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "on", "--yes")

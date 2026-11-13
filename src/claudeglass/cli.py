@@ -4456,7 +4456,7 @@ def _capture_status(
         if capture.light():
             stdout.write(
                 "Its end time has passed, so full capture has stopped. A light sample goes on: Claude tags the kind, "
-                "difficulty and size of the work, and task changes, in 1 session in 5. "
+                f"difficulty and size of the work, and task changes, in {capture_view.one_session_in(capture)}. "
                 "'claudeglass capture off' stops it; 'claudeglass capture on' starts full capture again.\n"
             )
         elif capture.expired():
