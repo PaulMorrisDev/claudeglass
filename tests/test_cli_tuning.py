@@ -601,3 +601,33 @@ def test_tuning_export_counts_the_mods_notes_from_the_store(world, capsys):
     # Without coaching notes there is no block, with or without the store.
     (world.config_dir / "config.toml").unlink()
     assert "hint_occasions" not in _stdout_doc(world, capsys, "--days", "30")
+
+
+def test_export_passes_the_dashboards_card_marks_and_the_exports_projects(world, monkeypatch):
+    seen = []
+    real = tuning.build
+
+    def spy(*args, **kw):
+        seen.append(kw.get("card_marks"))
+        return real(*args, **kw)
+
+    rows = []
+    monkeypatch.setattr(cli, "_dashboard_card_marks", lambda config_dir: rows)
+    monkeypatch.setattr(tuning, "build", spy)
+    assert _export(world, "--out", str(world.out)) == 0
+    assert _export(world, "--project", "other-project", "--days", "365", "--out", str(world.out)) == 0
+    every, one = seen
+    assert every.rows is rows and every.every_project is True
+    assert every.folders == frozenset({"acme-secret-project", "other-project"})
+    assert one.rows is rows and one.every_project is False and one.folders == frozenset({"other-project"})
+    # A dashboard that showed no card still makes the block.
+    assert json.loads(world.out.read_text(encoding="utf-8"))["cards"] == {"shown": 0, "rows": []}
+
+
+def test_export_without_a_dashboard_store_has_no_cards_block(world, capsys):
+    assert not (world.config_dir / "service.db").exists()
+    assert _export(world, "--out", str(world.out)) == 0
+    capsys.readouterr()
+    doc = json.loads(world.out.read_text(encoding="utf-8"))
+    assert "cards" not in doc
+    assert "Dashboard cards" not in tuning.summary_text(doc)

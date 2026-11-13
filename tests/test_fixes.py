@@ -545,6 +545,7 @@ def test_project_prompt_leaves_out_fixed_unconfirmed_managed_and_skipped_cards()
     ignored = _bundle_rec("ign", [_agent_change("y")])
     out = project_prompt([keep, fixed, unconfirmed, managed, ignored], {"ign"})
     assert out["cards"] == 1
+    assert out["keys"] == ["keep"]
     assert out["left_out"] == {"fixed": 1, "info": 0, "unconfirmed": 1, "managed": 1}
     assert fixes_mod._bundle_body(keep.fixes[0]["prompt"])[0] in out["prompt"]
     for rec in (fixed, unconfirmed, managed, ignored):
@@ -727,6 +728,7 @@ def test_project_prompt_is_empty_without_open_fixes():
         "several": 0,
         "other": 0,
         "cards": 0,
+        "keys": [],
         "left_out": {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0},
     }
 
@@ -788,3 +790,20 @@ def test_a_rule_alone_under_a_one_path_header_is_not_a_file_to_edit():
 
     out = project_prompt([_bundle_rec("run-split:reviewer", rec_id="run-split", agent_type="reviewer")])
     assert out["files"] == [] and out["several"] == 1
+
+
+def test_the_bundle_lists_the_cards_it_holds_and_none_it_leaves_out():
+    from claudeglass.fixes import project_prompt
+    from claudeglass.model import SettingChange
+
+    first = _bundle_rec("first", [_agent_change("x")])
+    second = _bundle_rec("second", [_agent_change("y")])
+    fixed = _bundle_rec("fixed", rec_id="agent-model-asked", variant="fixed")
+    unconfirmed = _bundle_rec("unc", [SettingChange(key="disallowedTools", value=["Skill(a)"], unconfirmed=True)])
+    managed = _bundle_rec("man", [SettingChange(key="model", value="sonnet", scope="managed")])
+    ignored = _bundle_rec("ign", [_agent_change("z")])
+    out = project_prompt([first, fixed, unconfirmed, second, managed, ignored], {"ign"})
+    # In the bundle's own order, and as many as it counted.
+    assert out["keys"] == ["first", "second"]
+    assert len(out["keys"]) == out["cards"]
+    assert project_prompt([unconfirmed])["keys"] == []

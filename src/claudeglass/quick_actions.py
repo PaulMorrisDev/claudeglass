@@ -184,7 +184,10 @@ def _rec_fixes(recs) -> list[dict]:
             # finding still shows as a tip and a recommendation.
             if not fix.get("prompt") and not fix.get("command"):
                 continue
-            out.append({**fix, "title": fix.get("title") or rec.title})
+            # ``card`` names the card the fix came from, so a copy of it can be
+            # recorded against the card (a goal candidate's fix has none).
+            card = {"card": rec.key} if getattr(rec, "key", "") else {}
+            out.append({**fix, "title": fix.get("title") or rec.title, **card})
     return out
 
 
