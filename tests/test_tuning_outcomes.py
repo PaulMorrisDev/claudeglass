@@ -475,6 +475,30 @@ def test_the_summary_counts_the_fixes_the_rows_leave_out():
         assert len(line.split()) <= 25
 
 
+def test_the_first_line_speaks_of_the_rows_when_rows_are_cut():
+    def first(landed, **counts):
+        return tuning._outcomes_lines(_block(landed=landed, cards=[_row_of(landed=8, **counts)]))[0]
+
+    assert first(9) == "Fixes that landed: 9. Of the 8 this file breaks down, none can be measured from your sessions."
+    assert first(9, too_little_data=8) == (
+        "Fixes that landed: 9. Of the 8 this file breaks down, none has had enough sessions on both sides to measure yet."
+    )
+    assert first(9, too_little_data=2) == (
+        "Fixes that landed: 9. Of the 8 this file breaks down, none is measured yet: 2 fixes need more sessions, "
+        "and 6 can't be measured."
+    )
+    assert first(9, measured=1, half_or_more=1) == (
+        "Fixes that landed: 9. Of the 8 this file breaks down, 1 was measured and 1 saved at least half of what was estimated."
+    )
+    assert first(10, measured=2, half_or_more=1) == (
+        "Fixes that landed: 10. Of the 8 this file breaks down, 2 were measured and 1 saved at least half of what was estimated."
+    )
+    # Not cut: the lines as they were.
+    assert first(8) == "Fixes that landed: 8. None of them can be measured from your sessions."
+    for line in [first(9), first(9, too_little_data=2), first(10, measured=2, half_or_more=1)]:
+        assert len(line.split()) <= 25
+
+
 def test_the_summary_says_when_the_fixes_cost_more_and_names_the_fixes_that_landed_too_soon():
     losing = _block(
         landed=2, short_export=1,

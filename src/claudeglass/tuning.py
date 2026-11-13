@@ -2931,7 +2931,25 @@ def _outcomes_lines(block: dict) -> list[str]:
     waiting = int(total("too_little_data"))
     # The fixes the rows count that were neither measured nor waiting for sessions: not measurable here.
     cannot = int(total("landed")) - measured - waiting
-    if measured:
+    shown = int(total("landed"))
+    if shown < landed:
+        # The rows are cut: the counts below are of the fixes they hold, not of every fix that landed.
+        lead = f"Of the {shown:,} this file breaks down, "
+        if measured:
+            tail = lead + (
+                f"{measured:,} {'was' if measured == 1 else 'were'} measured and {half:,} saved at least half "
+                "of what was estimated."
+            )
+        elif not cannot:
+            tail = lead + "none has had enough sessions on both sides to measure yet."
+        elif not waiting:
+            tail = lead + "none can be measured from your sessions."
+        else:
+            tail = lead + (
+                f"none is measured yet: {_n(waiting, 'fix needs', 'fixes need')} more sessions, "
+                f"and {cannot:,} can't be measured."
+            )
+    elif measured:
         tail = f"Measured so far: {measured:,}, of which {half:,} saved at least half of what the card or profile estimated."
     elif not cannot:
         tail = "None has had enough sessions on both sides to measure yet."
