@@ -676,9 +676,11 @@ def _failed(
     return model.Event(kind=EventKind.HOOK_OUTPUT, subkind="hook_non_blocking_error", ts=ts, detail=detail)
 
 
-def _result(turns, events=(), session_id="s1", *, project="", kind="top-level") -> TranscriptResult:
+def _result(
+    turns, events=(), session_id="s1", *, project="", kind="top-level", agent_type=None
+) -> TranscriptResult:
     return TranscriptResult(
-        meta=TranscriptMeta(session_id=session_id, project_slug=project, kind=kind),
+        meta=TranscriptMeta(session_id=session_id, project_slug=project, kind=kind, agent_type=agent_type),
         turns=list(turns),
         events=list(events),
     )
@@ -970,13 +972,17 @@ def _clean_runs(label: str, n: int, *, hook="SubagentStop", day="2026-09-21") ->
 
 def test_an_older_digests_bare_name_is_judged_with_the_new_label_where_runs_are_counted():
     # A session whose transcript is gone keeps the label it was read with: the bare name. Runs read since
-    # carry the event too. One hook, one row, and its old failures end once it has run clean.
+    # carry the event too. One hook, one row, and its old failures end once agent runs have ended without one.
     old = _result(
-        [_turn(1)],
+        [_turn(1, ts="2026-09-20T09:00:00Z", stop_reason="end_turn")],
         [_failed("command hook", relative=False, hook="SubagentStop", ts=f"2026-09-20T10:{i:02d}:00Z") for i in range(15)],
         "old",
+        kind="subagent",
+        agent_type="Explore",
     )
-    new = _result([_turn(1)], _clean_runs("SubagentStop command hook", 40), "new")
+    new = _result(
+        _agent_ends(40), _clean_runs("SubagentStop command hook", 40), "new", kind="subagent", agent_type="Explore"
+    )
     report = _report([old, new])
     [row] = [r for r in report.sections[0].tables[1].rows]
     assert row[0] == "SubagentStop command hook"
@@ -1076,4 +1082,136 @@ def test_a_subagent_counts_in_its_sessions_project_and_other_projects_do_not():
     assert (row.chances_before, row.chances_since) == (20, 3)
     assert not row.stopped()
     assert row.stopped(HookThresholds(quiet_failures=3))
+
+
+# -- a SubagentStop hook ---------------------------------------------------------
+
+
+def _agent_ends(n: int, *, day="2026-09-21", hour="10", **fields) -> list[model.Turn]:
+    """``n`` replies that end an agent's run (``end_turn`` unless told otherwise)."""
+    fields = {"stop_reason": "end_turn", **fields}
+    return [_turn(i, ts=f"{day}T{hour}:{i:02d}:00Z", **fields) for i in range(1, n + 1)]
+
+
+def _agent_failures(n: int, *, agent_type="Explore", project="") -> list[TranscriptResult]:
+    """``n`` agent runs, each ending on 2026-09-20 and failing the hook."""
+    return [
+        _result(
+            [_turn(1, ts=f"2026-09-20T10:{i:02d}:00Z", stop_reason="end_turn")],
+            [_failed(ts=f"2026-09-20T10:{i:02d}:01Z", hook="SubagentStop")],
+            f"old{i}",
+            project=project,
+            kind="subagent",
+            agent_type=agent_type,
+        )
+        for i in range(1, n + 1)
+    ]
+
+
+def _later_agents(n: int, *, agent_type="Explore", **fields) -> list[TranscriptResult]:
+    """``n`` agent runs on 2026-09-21, each ending once."""
+    return [
+        _result(_agent_ends(1, **fields), session_id=f"new{i}", kind="subagent", agent_type=agent_type)
+        for i in range(1, n + 1)
+    ]
+
+
+def test_a_subagent_stop_hook_counts_the_agent_runs_that_ended_since():
+    # It failed after each of 3 agent runs; 5 more ended with no record, for Claude Code writes none.
+    row = compute_hook_costs(_agent_failures(3) + _later_agents(5), PRICING).hooks["guard.ps1"]
+    assert row.failed_agent_types == {"Explore"}
+    assert (row.chances_before, row.chances_since) == (3, 5)
+    assert row.stopped()
+
+
+def test_a_reply_that_is_no_end_of_an_agents_run_is_not_a_chance():
+    called_a_tool = _result(_agent_ends(2, stop_reason="tool_use"), session_id="a", kind="subagent", agent_type="Explore")
+    no_stop = _result(_agent_ends(2, stop_reason=None), session_id="b", kind="subagent", agent_type="Explore")
+    synthetic = _result(_agent_ends(2, is_synthetic=True), session_id="c", kind="subagent", agent_type="Explore")
+    row = compute_hook_costs(_agent_failures(3) + [called_a_tool, no_stop, synthetic], PRICING).hooks["guard.ps1"]
+    assert (row.chances_before, row.chances_since) == (3, 0)
+
+
+def test_a_resumed_agent_counts_each_run_that_ended():
+    resumed = _result(_agent_ends(3), session_id="again", kind="subagent", agent_type="Explore")
+    row = compute_hook_costs(_agent_failures(3) + [resumed], PRICING).hooks["guard.ps1"]
+    assert (row.chances_before, row.chances_since) == (3, 3)
+
+
+def test_a_subagent_stop_hook_counts_only_the_agent_types_it_failed_in():
+    later = _later_agents(4, agent_type="Plan") + _later_agents(2, agent_type=None)
+    row = compute_hook_costs(_agent_failures(3) + later, PRICING).hooks["guard.ps1"]
+    assert (row.chances_before, row.chances_since) == (3, 0)
+    typeless = compute_hook_costs(_agent_failures(3, agent_type=None) + later, PRICING).hooks["guard.ps1"]
+    assert typeless.failed_agent_types == {""}
+    assert (typeless.chances_before, typeless.chances_since) == (3, 2)
+
+
+def test_a_subagent_stop_hook_that_failed_in_no_agent_transcript_counts_every_agent_type():
+    failing = [
+        _result([_turn(1, ts=f"2026-09-20T10:{i:02d}:00Z")], [_failed(ts=f"2026-09-20T10:{i:02d}:01Z", hook="SubagentStop")],
+                f"old{i}")
+        for i in range(1, 4)
+    ]
+    later = _later_agents(3, agent_type="Plan") + _later_agents(2, agent_type="Explore") + _later_agents(1, agent_type=None)
+    row = compute_hook_costs(failing + later, PRICING).hooks["guard.ps1"]
+    assert row.failed_agent_types == set()
+    assert row.chances_since == 6
+
+
+def test_a_main_sessions_replies_are_not_chances_for_a_subagent_stop_hook():
+    main = _result(_agent_ends(6), session_id="main", agent_type="Explore")
+    row = compute_hook_costs(_agent_failures(3) + [main], PRICING).hooks["guard.ps1"]
+    assert (row.chances_before, row.chances_since) == (3, 0)
+    assert not row.stopped()
+
+
+def test_agent_runs_in_another_project_are_not_chances_for_a_subagent_stop_hook():
+    # The failing runs' sessions are shop's; the later runs' sessions are blog's.
+    results = [_result([], session_id=f"old{i}", project="shop") for i in range(1, 4)]
+    results += _agent_failures(3)
+    results += [_result([], session_id=f"new{i}", project="blog") for i in range(1, 6)]
+    results += _later_agents(5)
+    row = compute_hook_costs(results, PRICING).hooks["guard.ps1"]
+    assert row.failed_projects == {"shop"}
+    assert (row.chances_before, row.chances_since) == (3, 0)
+
+
+def test_a_hook_that_failed_on_subagent_stop_and_another_event_keeps_its_recorded_runs():
+    stop = [
+        _result([_turn(1, ts=f"2026-09-20T10:{i:02d}:00Z")], [_failed(ts=f"2026-09-20T10:{i:02d}:01Z", hook="Stop")],
+                f"stop{i}")
+        for i in range(1, 4)
+    ]
+    later = _result(_agent_ends(7), _clean_runs("guard.ps1", 4), "later", kind="subagent", agent_type="Explore")
+    row = compute_hook_costs(_agent_failures(3) + stop + [later], PRICING).hooks["guard.ps1"]
+    assert row.failed_events == {"SubagentStop", "Stop"}
+    # Its 6 failed runs, then its 4 clean ones: the 7 replies that ended are not counted.
+    assert (row.chances_before, row.chances_since) == (6, 4)
+
+
+def _ten_failures_among_forty_ends() -> list[TranscriptResult]:
+    ended = _agent_ends(40, day="2026-09-20", hour="09")
+    failed = [_failed(ts=f"2026-09-20T11:{i:02d}:00Z", hook="SubagentStop") for i in range(1, 11)]
+    return [
+        _result(ended, [], "before", kind="subagent", agent_type="Explore"),
+        _result([], failed, "failed", kind="subagent", agent_type="Explore"),
+    ]
+
+
+def test_a_subagent_stop_hook_is_judged_at_its_old_rate_of_failures_a_run():
+    # 10 failures among 40 runs is 1 in 4: 20 clean runs would have brought 5.
+    row = compute_hook_costs(_ten_failures_among_forty_ends() + _later_agents(20), PRICING).hooks["guard.ps1"]
+    assert (row.chances_before, row.chances_since) == (40, 20)
+    assert row.expected_since == pytest.approx(5) and row.stopped()
+    row = compute_hook_costs(_ten_failures_among_forty_ends() + _later_agents(19), PRICING).hooks["guard.ps1"]
+    assert row.expected_since == pytest.approx(4.75) and not row.stopped()
+
+
+def test_a_subagent_stop_hook_that_stopped_failing_is_not_a_card():
+    report = _report(_agent_failures(12) + _later_agents(6))
+    row = _hook_row(report)
+    assert (row["failed"], row["stopped"]) == (12, "yes")
+    assert _rules(report) == []
+    assert [r.id for r in _rules(_report(_agent_failures(12) + _later_agents(4)))] == ["hook-failures"]
 

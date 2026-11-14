@@ -65,8 +65,10 @@ subagents alike):
   subagent counts in its session's project). A tool hook's clean runs
   leave no record, so its chances to fail are the calls to the tools it
   failed on (any MCP tool counts as one); a `SessionStart` hook's are
-  the sessions that start and the summaries; any other hook's are its
-  own recorded runs. If, at the rate it failed up to then, at least
+  the sessions that start and the summaries; a `SubagentStop` hook's are
+  the agent runs that ended, in the agent types it failed in, because
+  Claude Code records no clean run of it; any other hook's are its own
+  recorded runs. If, at the rate it failed up to then, at least
   `hooks_quiet_failures` (default 5) more failures should have followed
   and none did, it has stopped failing: the table says so and the
   failing-hooks card leaves it out.

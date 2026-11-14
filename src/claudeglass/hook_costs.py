@@ -169,6 +169,9 @@ class HookRow:
     failed_tools: set[str] = field(default_factory=set)
     #: The hook events of the failures that name no tool.
     failed_events: set[str] = field(default_factory=set)
+    #: The agent types its failures that name no tool fell in (``""`` for an
+    #: agent with no type); see :func:`_since`.
+    failed_agent_types: set[str] = field(default_factory=set)
     #: What it could have failed on in its projects, up to its last
     #: failure and after it (see :func:`_since`).
     chances_before: int = 0
@@ -290,6 +293,8 @@ def _events(tr: TranscriptResult, stats: HookStats, project: str) -> None:
                 row.failed_tools.add(tool)
             else:
                 row.failed_events.add(bucket if isinstance(bucket, str) else "other")
+                if tr.meta.kind != "top-level":
+                    row.failed_agent_types.add(tr.meta.agent_type or "")
         elif event.subkind == "hook_blocking_error":
             row.stop_blocks += 1
             row.worked += 1
@@ -351,7 +356,10 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
     on. Neither does a SessionStart hook's, so its chances are the
     sessions that start and the summaries (each starts the session
     again; the summary a continued session inherits started the session it
-    came from, not this one). Any other hook's are its own recorded runs."""
+    came from, not this one). Nor does a SubagentStop hook's, which runs each
+    time an agent's run ends and is written into the agent's own transcript,
+    so its chances are the replies that end a run, in the agent types it
+    failed in. Any other hook's are its own recorded runs."""
     rows = [
         h for h in stats.hooks.values()
         if h.failed and h.last_failed_ts and project in h.failed_projects
@@ -394,7 +402,22 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
                     row.chances_since += 1
                 else:
                     row.chances_before += 1
-    by_label = {h.label: h for h in rows if h.tool_less and h.failed_events != {"SessionStart"}}
+    stops = [h for h in rows if h.tool_less and h.failed_events == {"SubagentStop"}]
+    if stops and tr.meta.kind != "top-level":
+        for row in stops:
+            if row.failed_agent_types and (tr.meta.agent_type or "") not in row.failed_agent_types:
+                continue
+            for turn in tr.turns:
+                if not turn.ts or turn.stop_reason in (None, "tool_use") or turn.is_synthetic:
+                    continue
+                if turn.ts > row.last_failed_ts:
+                    row.chances_since += 1
+                else:
+                    row.chances_before += 1
+    by_label = {
+        h.label: h for h in rows
+        if h.tool_less and h.failed_events not in ({"SessionStart"}, {"SubagentStop"})
+    }
     if not by_label:
         return
     for event in tr.events:

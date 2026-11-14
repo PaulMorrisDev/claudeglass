@@ -197,6 +197,10 @@ Cards and checks:
   shared a row named `command hook` or `command hook 2`. The hook cards, their
   copyable prompts and the "Who blocked or redirected replies" table say
   where to find such a hook.
+- **A `SubagentStop` hook you have fixed stops being listed as failing.**
+  Claude Code records no clean run of such a hook, so it kept its "failed"
+  card until the failures left the window. It is now judged on the agent
+  runs that ended after its last failure, in the agent types it failed in.
 - **A card you ignored no longer leads any check**, and a check whose only
   change was on an ignored card says so. The habits saving names its
   source. The CLAUDE.md figures say what they count, and
