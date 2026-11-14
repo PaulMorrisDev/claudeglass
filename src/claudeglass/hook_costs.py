@@ -53,7 +53,7 @@ from typing import Callable
 from .capture_catalogue import HOOK_SCRIPT
 from .carry import boundary_turn_indices, carry_end_index, carry_rate_prefix
 from .model import Column, EventKind, Recommendation, ReportModel, Section, Table, TranscriptResult
-from .parse import BUILT_IN_TOOLS, tool_server
+from .parse import BUILT_IN_TOOLS, tool_server, unnamed_hook
 from .pricing import Pricing, price_turn
 
 #: Characters per token, the approximation used throughout this report
@@ -570,6 +570,21 @@ def _names(labels: list[str]) -> str:
     return f"{labels[0]}, {labels[1]} and {len(labels) - 2} more"
 
 
+def _unnamed_note(label: str) -> str:
+    """The sentence that ends a card's action when the hook it is about
+    was recorded without its command (``parse.unnamed_hook``), else
+    ``""``. It starts with a space."""
+    unnamed = unnamed_hook(label)
+    if unnamed is None:
+        return ""
+    event = unnamed[0]
+    where = f"the hooks that run on {event}" if event else "the hooks"
+    return (
+        f" Claude Code recorded this hook without its command, so look at {where} "
+        "in your settings files and plugins."
+    )
+
+
 def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recommendation]:
     """``hook-failures``: hooks with at least ``min_failures`` failed runs
     that haven't stopped failing. One card for all of them; the action
@@ -616,6 +631,7 @@ def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recomme
         action = "Make the hook faster, or raise its timeout in the hook's settings."
     else:
         action = "Run the hook's command yourself to see the error, then fix the script."
+    action += _unnamed_note(labels[0])
     if len(failing) > 1:
         action += " Check the other hooks listed in the same way."
     evidence = [
@@ -674,6 +690,7 @@ def _rule_hook_block_resent(report: ReportModel, th: HookThresholds) -> list[Rec
                     "If Claude only needs to know something before the call runs, let the call through and pass the "
                     "message as additionalContext in the hook's JSON output. To change the call instead, return "
                     "updatedInput. Either way, no reply is spent sending it again."
+                    + _unnamed_note(label)
                 ),
                 lever=None,
                 saving_usd=saving if saving > 0 else None,
@@ -714,6 +731,7 @@ def _rule_hook_context_carry(report: ReportModel, th: HookThresholds) -> list[Re
                 action=(
                     "Make the hook's message shorter, or have it add context only when something needs Claude's "
                     "attention. If the hook comes from a plugin, turn it off for projects that don't need it."
+                    + _unnamed_note(label)
                 ),
                 lever=None,
                 saving_usd=carry_usd,

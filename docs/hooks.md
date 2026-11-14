@@ -25,7 +25,9 @@ command, its output or a full path.
 
 - **The hook's label.** The file name of the script its command runs
   (`session-digest.ps1`), or the command's first 40 characters with any
-  path hidden when it names no script. Context Claude Code adds itself is
+  path hidden when it names no script. A hook Claude Code records without
+  its command is labelled by its event and Claude Code's own name for it
+  (`SubagentStop command hook`). Context Claude Code adds itself is
   labelled `built-in`.
 - **Why a failed run failed.** Exit code 127 or a "not found" message is
   *script not found*; a timeout is *timed out*; anything else is

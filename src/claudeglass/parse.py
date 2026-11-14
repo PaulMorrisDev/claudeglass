@@ -1900,8 +1900,12 @@ _ERROR_COMMAND_WRONG_RE = re.compile(
 
 
 #: A hook's block, as Claude Code words it: ``PreToolUse:Read hook error:
-#: [<command>]: <message>``. Group 1 is the hook's command.
-_HOOK_BLOCK_RE = re.compile(r"^\w+:[\w.-]+ hook error: \[(.+?)\]: ")
+#: [<command>]: <message>``. Group 1 is the hook's event, group 2 its command.
+_HOOK_BLOCK_RE = re.compile(r"^(\w+):[\w.-]+ hook error: \[(.+?)\]: ")
+#: The name Claude Code shows for a hook it records without its command:
+#: ``command hook``, ``http hook``, with `` 2`` added when an event runs
+#: several. Nothing a command you wrote would look like.
+_HOOK_DISPLAY_NAME_RE = re.compile(r"[a-z_]+ hook(?: \d{1,3})?")
 #: A hook script's file name inside its command: the label a hook is
 #: shown by. The character class stops at path separators, so a
 #: directory never comes with it.
@@ -1923,17 +1927,36 @@ _HOOK_UNEXPANDED_RE = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*%")
 _HOOK_PLAIN_STDOUT_CONTEXT_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
 
 
-def _hook_label(command) -> str | None:
+def _hook_label(command, event: str = "other") -> str | None:
     """The label a hook is shown by: its script's file name when the
     command names one, else the command's first 40 characters with paths
-    redacted (the ``cmd_prefix`` rule). ``None`` for no command."""
+    redacted (the ``cmd_prefix`` rule). ``None`` for no command. When the
+    "command" is Claude Code's own name for the hook (``command hook 2``),
+    the label is that name behind the hook's ``event``
+    (``SubagentStop command hook 2``), so hooks on different events don't
+    share one; an ``event`` that isn't a known one leaves the name alone."""
     if not isinstance(command, str) or not command.strip():
         return None
+    name = command.strip()
+    if len(name) <= _CMD_PREFIX_MAX_CHARS and _HOOK_DISPLAY_NAME_RE.fullmatch(name):
+        return f"{event} {name}" if event in events_mod._HOOK_EVENT_NAMES else name
     capped = _cap_command_for_redaction(command)
     script = _HOOK_SCRIPT_RE.search(capped)
     if script is not None:
         return script.group(1)
     return _redact_paths(_escape_newlines(capped))[:_CMD_PREFIX_MAX_CHARS].strip() or None
+
+
+def unnamed_hook(label) -> tuple[str, str] | None:
+    """``(event, display name)`` for the label of a hook Claude Code
+    recorded without its command (``("SubagentStop", "command hook 2")``,
+    the event ``""`` when the label has none), else ``None``."""
+    if not isinstance(label, str):
+        return None
+    event, _, name = label.partition(" ")
+    if event in events_mod._HOOK_EVENT_NAMES and _HOOK_DISPLAY_NAME_RE.fullmatch(name):
+        return event, name
+    return ("", label) if _HOOK_DISPLAY_NAME_RE.fullmatch(label) else None
 
 
 def _hook_script_is_relative(command: str) -> bool:
@@ -2015,7 +2038,7 @@ def _annotate_hook_event(event: Event, attachment, context_queue: dict[tuple[str
     if command is None and isinstance(blocking, dict):
         # A Stop hook's block keeps its command inside ``blockingError``.
         command = blocking.get("command")
-    label = _hook_label(command)
+    label = _hook_label(command, key[1])
     if label is None:
         return
     event.detail["script"] = label
@@ -2046,7 +2069,7 @@ def _hook_block_label(content) -> str | None:
     if not isinstance(content, str):
         return None
     match = _HOOK_BLOCK_RE.match(content.strip()[:_ERROR_TEXT_CHARS])
-    return _hook_label(match.group(1)) if match else None
+    return _hook_label(match.group(2), match.group(1)) if match else None
 
 
 def _block_source(content) -> tuple[str, str]:

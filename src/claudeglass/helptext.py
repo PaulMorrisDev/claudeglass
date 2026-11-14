@@ -5146,7 +5146,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             act="A hook that failed in many sessions isn't guarding anything. Check its command first.",
         ),
         columns={
-            "hook": ("Hook", "The hook's script, or the start of its command."),
+            "hook": (
+                "Hook",
+                "The hook's script, or the start of its command. A hook Claude Code recorded without its command "
+                "is named by its event, as in SubagentStop command hook.",
+            ),
             "events": ("Runs on", "The hook events it ran on, as named in settings.json."),
             "failed": ("Failed runs", "Runs that ended in an error."),
             "cause": ("Why it failed", "The most common reason, read from the error. Relative path: the script path is relative."),

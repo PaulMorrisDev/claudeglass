@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from claudeglass import model
+from claudeglass import parse as parse_mod
 from claudeglass.capture_catalogue import HOOK_SCRIPT
 from claudeglass.hook_costs import RULES, HookThresholds, build_section, compute_hook_costs
 from claudeglass.model import EventKind, ReportModel, TranscriptMeta, TranscriptResult
@@ -65,6 +66,43 @@ def _hook_events(result: TranscriptResult) -> list[model.Event]:
 )
 def test_a_hook_is_labelled_by_its_script_or_a_redacted_command_prefix(command, label):
     assert _hook_label(command) == label
+
+
+@pytest.mark.parametrize(
+    ("command", "event", "label"),
+    [
+        ("command hook", "SubagentStop", "SubagentStop command hook"),
+        ("command hook 2", "SessionStart", "SessionStart command hook 2"),
+        ("  command hook 12 ", "Stop", "Stop command hook 12"),
+        ("http hook", "Stop", "Stop http hook"),
+        ("command hook", "other", "command hook"),
+        ("bash hook.sh", "Stop", "hook.sh"),
+        ("Checking UI changes", "Stop", "Checking UI changes"),
+        ("git hook run x", "Stop", "git hook run x"),
+        ("command hook 1234", "Stop", "command hook 1234"),
+        (RELATIVE, "Stop", "index-first-guard.ps1"),
+    ],
+)
+def test_a_hook_recorded_under_claude_codes_display_name_is_labelled_by_its_event(command, event, label):
+    assert _hook_label(command, event) == label
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("SubagentStop command hook 2", ("SubagentStop", "command hook 2")),
+        ("Stop http hook", ("Stop", "http hook")),
+        ("command hook", ("", "command hook")),
+        ("command hook 12", ("", "command hook 12")),
+        ("index-first-guard.ps1", None),
+        ("Checking UI changes", None),
+        ("hook.sh", None),
+        ("Nonsense command hook", None),
+        ("", None),
+    ],
+)
+def test_unnamed_hook_splits_a_label_into_its_event_and_display_name(label, expected):
+    assert parse_mod.unnamed_hook(label) == expected
 
 
 @pytest.mark.parametrize(
@@ -192,6 +230,149 @@ def test_a_failed_run_says_why(tmp_path: Path, stderr, exit_code, cause):
     )
     [event] = _hook_events(result)
     assert event.detail["cause"] == cause
+
+
+_MISSING_SCRIPT = (
+    "Hook script appears to be missing \u2014 the hook exited 2. Treating as non-blocking. "
+    "If this is a plugin hook, check the plugin install (run /plugin)."
+)
+_MISSING_FILE = (
+    "[command hook 2]: C:\\Python311\\python.exe: can't open file "
+    "'C:\\\\Users\\\\x\\\\hooks\\\\capture-hook.py': [Errno 2] No such file or directory\r\n"
+)
+
+
+def test_hooks_recorded_without_their_command_are_labelled_by_event_and_display_name(tmp_path: Path):
+    result = _parse(
+        tmp_path,
+        [
+            attachment_line(
+                "hook_non_blocking_error",
+                hookName="SubagentStop",
+                hookEvent="SubagentStop",
+                toolUseID="toolu_1",
+                command="command hook",
+                exitCode=2,
+                durationMs=31,
+                stdout="",
+                stderr=_MISSING_SCRIPT,
+            ),
+            attachment_line(
+                "hook_non_blocking_error",
+                hookName="SessionStart:compact",
+                hookEvent="SessionStart",
+                command="command hook 2",
+                exitCode=2,
+                stdout="",
+                stderr=_MISSING_FILE,
+            ),
+            attachment_line(
+                "hook_success",
+                hookName="PostToolUse:Read",
+                hookEvent="PostToolUse",
+                toolUseID="toolu_2",
+                command="command hook 1",
+                stdout="",
+            ),
+            turn_line(),
+        ],
+    )
+    events = _hook_events(result)
+    assert [e.detail["script"] for e in events] == [
+        "SubagentStop command hook",
+        "SessionStart command hook 2",
+        "PostToolUse command hook 1",
+    ]
+    assert [e.detail.get("cause") for e in events] == ["not-found", "not-found", None]
+    assert all("relative" not in e.detail for e in events)
+    assert_privacy(result)
+    assert "capture-hook" not in repr(result) and "Python311" not in repr(result)
+
+
+def test_context_a_hook_recorded_without_its_command_adds_is_paired_with_its_run(tmp_path: Path):
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Edit", "toolu_9", {"file_path": "a.py"})]),
+            user_block_line([tool_result_block("toolu_9", "ok")]),
+            attachment_line(
+                "hook_success",
+                hookName="PostToolUse:Edit",
+                hookEvent="PostToolUse",
+                toolUseID="toolu_9",
+                command="command hook 3",
+                stdout='{"hookSpecificOutput":{"additionalContext":"3 issues"}}',
+                durationMs=100,
+            ),
+            attachment_line(
+                "hook_additional_context",
+                rendered="x" * 400,
+                hookName="PostToolUse:Edit",
+                hookEvent="PostToolUse",
+                toolUseID="toolu_9",
+                content=["3 issues"],
+            ),
+            turn_line(),
+        ],
+    )
+    assert result.turns[1].hook_context_chars == {"PostToolUse command hook 3": 400}
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("command hook 4", "PreToolUse command hook 4"),
+        ("bash guard.sh", "guard.sh"),
+    ],
+)
+def test_a_block_by_a_hook_recorded_without_its_command_is_counted_by_its_event(tmp_path: Path, command, label):
+    text = f"PreToolUse:Read hook error: [{command}]: stop"
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Read", "toolu_1", {"file_path": "src/big.py"})]),
+            user_block_line([tool_result_block("toolu_1", text, is_error=True)]),
+            turn_line(),
+        ],
+    )
+    assert result.turns[0].hook_blocks == {label: 1}
+
+
+def test_a_block_under_an_event_not_known_keeps_the_display_name_alone(tmp_path: Path):
+    text = "Mystery:Read hook error: [command hook 4]: stop"
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Read", "toolu_1", {"file_path": "src/big.py"})]),
+            user_block_line([tool_result_block("toolu_1", text, is_error=True)]),
+            turn_line(),
+        ],
+    )
+    assert result.turns[0].hook_blocks == {"command hook 4": 1}
+
+
+def test_command_hook_on_two_events_is_two_rows_in_the_hooks_table(tmp_path: Path):
+    results = []
+    for n, hook_name in enumerate(("SubagentStop", "PostToolBatch")):
+        path = tmp_path / f"s{n}.jsonl"
+        write_jsonl(
+            path,
+            [
+                attachment_line(
+                    "hook_non_blocking_error",
+                    hookName=hook_name,
+                    hookEvent=hook_name,
+                    command="command hook",
+                    exitCode=2,
+                    stderr=_MISSING_SCRIPT,
+                ),
+                turn_line(),
+            ],
+        )
+        results.append(parse_transcript(path, TranscriptMeta(path=str(path), session_id=f"s{n}")))
+    by_script = build_section(compute_hook_costs(results, PRICING)).tables[1]
+    hooks = sorted(row[0] for row in by_script.rows)
+    assert hooks == ["PostToolBatch command hook", "SubagentStop command hook"]
 
 
 def test_a_stop_hook_block_is_labelled_from_its_nested_command(tmp_path: Path):
@@ -588,6 +769,65 @@ def test_failing_hooks_get_one_card_naming_the_relative_path_fix():
     assert rec.title == "2 of your hooks failed 22 times: guard.ps1 and other.ps1"
     assert "${CLAUDE_PROJECT_DIR}" in rec.action
     assert [e[0] for e in rec.evidence] == ["guard.ps1: failed runs", "other.ps1: failed runs"]
+
+
+_RECORDED_WITHOUT_COMMAND = "Claude Code recorded this hook without its command, so look at "
+
+
+def test_a_failing_hook_recorded_without_its_command_says_where_to_look():
+    events = [_failed("SubagentStop command hook", relative=False, hook="SubagentStop") for _ in range(12)]
+    report = _report([_result([_turn(1)], events)])
+    [rec] = _rules(report)
+    assert rec.id == "hook-failures"
+    assert rec.title == "Your hook SubagentStop command hook failed 12 times"
+    assert "script not found" in rec.why
+    assert rec.action == (
+        "Check the path in the hook's command: the script or program it names wasn't there when it ran. "
+        + _RECORDED_WITHOUT_COMMAND
+        + "the hooks that run on SubagentStop in your settings files and plugins."
+    )
+
+
+def test_the_sentence_comes_before_the_one_about_the_other_hooks_and_has_a_form_without_an_event():
+    events = [_failed("command hook", relative=False, hook="other") for _ in range(12)]
+    events += [_failed("guard.ps1") for _ in range(10)]
+    [rec] = _rules(_report([_result([_turn(1)], events)]))
+    assert rec.action.endswith(
+        _RECORDED_WITHOUT_COMMAND + "the hooks in your settings files and plugins. "
+        "Check the other hooks listed in the same way."
+    )
+
+
+def test_a_failing_hook_with_a_real_label_gets_no_such_sentence():
+    events = [_failed("guard.ps1") for _ in range(12)]
+    [rec] = _rules(_report([_result([_turn(1)], events)]))
+    assert rec.action == (
+        "Its command names the script by a relative path, which only works when Claude Code runs from the "
+        'project root. Start the path with ${CLAUDE_PROJECT_DIR}, as in "${CLAUDE_PROJECT_DIR}/.claude/hooks/'
+        'guard.ps1".'
+    )
+
+
+def test_a_blocking_hook_and_a_context_hook_recorded_without_their_command_say_where_to_look():
+    label = "PreToolUse command hook 4"
+    turns = []
+    for i in range(1, 25, 2):
+        turns.append(_turn(i, cache_read_tokens=1_000, hook_blocks={label: 1}, tool_calls_by_tool={"Read": 1}))
+        turns.append(_turn(i + 1, cache_read_tokens=1_000_000, hook_resends={label: 1}))
+    [rec] = _rules(_report([_result(turns)]))
+    assert rec.id == "hook-block-resent"
+    assert rec.action.endswith(
+        _RECORDED_WITHOUT_COMMAND + "the hooks that run on PreToolUse in your settings files and plugins."
+    )
+    context_label = "SessionStart command hook 2"
+    turns = [
+        _turn(i, cache_read_tokens=5_000_000, hook_context_chars={context_label: 100_000}) for i in range(1, 31)
+    ]
+    [rec] = _rules(_report([_result(turns)]))
+    assert rec.id == "hook-context-carry"
+    assert rec.action.endswith(
+        _RECORDED_WITHOUT_COMMAND + "the hooks that run on SessionStart in your settings files and plugins."
+    )
 
 
 def test_a_script_behind_a_windows_variable_gets_the_home_fix():

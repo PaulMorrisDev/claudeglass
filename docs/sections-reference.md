@@ -1016,7 +1016,9 @@ doesn't add it on top.
 
 Full write-up: [`docs/hooks.md`](hooks.md). Every transcript in the
 window, main sessions and subagents alike. A hook is named by its
-script's file name, never by its command or path.
+script's file name, never by its command or path. A hook Claude Code
+records without its command is named by its event and Claude Code's own
+name for it (`SubagentStop command hook`).
 
 - `hooks_summary` — one row (`your hooks`): hooks seen, hooks that
   failed, failed runs, time waited on failed runs, calls blocked, calls
