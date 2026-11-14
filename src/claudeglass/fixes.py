@@ -40,6 +40,7 @@ import shlex
 
 from . import snapshots as snapshots_mod
 from .model import Recommendation, SettingChange
+from .parse import unnamed_hook
 
 #: Shown after every fix and profile change, and printed after an apply:
 #: Claude Code reads settings, agent files and CLAUDE.md when it starts,
@@ -1540,6 +1541,32 @@ def fix_note(fix: dict) -> str:
     return RESTART_NOTE
 
 
+#: The hook cards (``hook_costs.RULES``), whose prompts ask Claude to find a
+#: hook by the name the card gives it.
+_HOOK_CARD_IDS = frozenset({"hook-failures", "hook-block-resent", "hook-context-carry"})
+
+#: Said in a hook card's prompt when a hook it names was recorded without its
+#: command, whose name no settings file holds (``parse.unnamed_hook``).
+_UNNAMED_HOOK_PROMPT = (
+    "Where a hook's name above is an event followed by Claude Code's own name for it, as in "
+    '"SubagentStop command hook", Claude Code recorded that hook without its command, so look at the hooks '
+    "that run on that event."
+)
+
+
+def _names_unnamed_hook(rec: Recommendation) -> bool:
+    """Whether any of ``rec``'s evidence rows from the hooks table is a hook
+    recorded without its command. An evidence row is ``(label, value,
+    "section.table", row key)``, see ``hook_costs._evidence``."""
+    return any(
+        isinstance(row, (tuple, list))
+        and len(row) == 4
+        and row[2] == "hooks.hooks_by_script"
+        and unnamed_hook(row[3]) is not None
+        for row in rec.evidence
+    )
+
+
 def build_fixes(rec: Recommendation) -> list[dict]:
     """One fix per :class:`SettingChange` on ``rec``; for workflow
     advice with no ``SettingChange`` (a bare ``lever`` string or none at
@@ -1591,6 +1618,8 @@ def build_fixes(rec: Recommendation) -> list[dict]:
         # The name is quoted where it stands as a word, bare inside a path.
         agent = json.dumps(rec.agent_type) if rec.agent_type else "this agent"
         agent_file = rec.agent_type or "this agent"
+        if rec.id in _HOOK_CARD_IDS and _names_unnamed_hook(rec):
+            opening = f"{opening} {_UNNAMED_HOOK_PROMPT}"
         prompt = f"{opening} {template.format(agent=agent, agent_file=agent_file, action=rec.action)}"
     else:
         prompt = ""

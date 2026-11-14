@@ -340,6 +340,27 @@ def test_blocked_by_names_a_hook_by_its_script(tmp_path: Path):
     assert "Put what index-first-guard.ps1 enforces into" in row["lever"]
 
 
+def test_blocked_by_a_hook_recorded_without_its_command_says_where_to_look(tmp_path: Path):
+    section = _blocked_turn(tmp_path, "PreToolUse:Read hook error: [command hook 4]: stop")
+    row = _blocked_by_row(section, "PreToolUse command hook 4")
+    assert row["kind"] == "hook"
+    assert row["lever"] == (
+        "Put what PreToolUse command hook 4 enforces into claude-implementer's instructions (its agent file, "
+        "or CLAUDE.md for the main session), so it doesn't try the blocked call first. Claude Code recorded "
+        "this hook without its command, so look at the hooks that run on PreToolUse in your settings files "
+        "and plugins."
+    )
+
+
+def test_blocked_by_a_hook_with_a_real_label_has_no_such_sentence(tmp_path: Path):
+    section = _blocked_turn(tmp_path, "PreToolUse:Read hook error: [bash guard.sh]: stop")
+    row = _blocked_by_row(section, "guard.sh")
+    assert row["lever"] == (
+        "Put what guard.sh enforces into claude-implementer's instructions (its agent file, or CLAUDE.md for "
+        "the main session), so it doesn't try the blocked call first."
+    )
+
+
 def test_blocked_by_names_an_unnamed_hook(tmp_path: Path):
     section = _blocked_turn(tmp_path, _UNNAMED_HOOK_BLOCK)
     row = _blocked_by_row(section, "a hook that doesn't give its name")
