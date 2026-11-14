@@ -1297,6 +1297,28 @@ def test_the_skills_card_asks_whether_the_list_drops_before_it_says_a_file_repla
     )
 
 
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_every_sentence_about_claude_md_for_explore_and_plan_is_short(agent):
+    """The sentences this part adds, in the card's note, the fix's explainer and its prompt, stay within the
+    project's 25 words (the older "is built into Claude Code; ..." sentence is not one of them)."""
+    omit = SettingChange(target="agent", key="omitClaudeMd", agent=agent, value=True, new_agent_file=True)
+    other = SettingChange(target="agent", key="model", agent=agent, value="sonnet", new_agent_file=True)
+    rec = Recommendation(id="spawn-cost", title="x", agent_type=agent, changes=[other])
+    bare = dict(fixes.explainer_for(rec, omit))["Where and who it affects"]
+    where = dict(fixes.explainer_for(rec, other))["Where and who it affects"]
+    prompt = fixes.prompt_for(rec, other)
+    added = [
+        recommend_mod.claude_md_choice(agent),
+        recommend_mod._built_in_note(agent, "user"),
+        where.removeprefix(bare),
+        prompt.split(" in its frontmatter.", 1)[1].split(" Write its prompt", 1)[0],
+    ]
+    assert all(text.strip() for text in added)
+    for text in added:
+        for sentence in text.split(". "):
+            assert len(sentence.split()) <= 25, (len(sentence.split()), sentence)
+
+
 def _mcp_patch_set(agent, snapshot=None):
     big = (0, 25_000.0, 800.0, 300.0)
     builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)

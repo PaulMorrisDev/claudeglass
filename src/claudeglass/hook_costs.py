@@ -18,10 +18,13 @@ The model, per hook label:
 - **Stopped failing.** A hook fixed mid-window keeps its old failures
   until they age out, so each failing hook is judged on what came after
   its last failure, in the projects it failed in: the calls to the tools
-  it failed on (a tool hook's clean runs leave no record), or its own
-  recorded runs (other events record their clean runs). At the rate it
-  used to fail, if at least ``quiet_failures`` more failures should have
-  followed and none did, it has stopped failing.
+  it failed on (a tool hook's clean runs leave no record), the sessions
+  that start and the summaries (a ``SessionStart`` hook's), the replies
+  that end an agent's run, in the agent types it failed in (a
+  ``SubagentStop`` hook's), or its own recorded runs (other events record
+  their clean runs). At the rate it used to fail, if at least
+  ``quiet_failures`` more failures should have followed and none did, it
+  has stopped failing.
 - **Runs seen working.** Successful runs Claude Code recorded, plus calls
   and stops the hook blocked. A tool hook that ran cleanly and let the
   call through leaves no record, so this undercounts those.
