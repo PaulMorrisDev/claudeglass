@@ -193,8 +193,10 @@ Cards and checks:
   current missing-script message**, "Hook script appears to be missing",
   where it said "error".
 - **Hooks that Claude Code records without their command are listed by
-  event** (`SubagentStop command hook`), where they all shared one row
-  named `command hook`. The hook cards say where to find such a hook.
+  event** (`SubagentStop command hook`), where hooks on different events
+  shared a row named `command hook` or `command hook 2`. The hook cards, their
+  copyable prompts and the "Who blocked or redirected replies" table say
+  where to find such a hook.
 - **A card you ignored no longer leads any check**, and a check whose only
   change was on an ignored card says so. The habits saving names its
   source. The CLAUDE.md figures say what they count, and
