@@ -499,6 +499,16 @@ def test_a_hook_that_stopped_failing_leaves_the_tally():
     assert (stat.calls, stat.errors) == (2, 1)
 
 
+def test_an_older_digests_bare_hook_name_is_left_out_with_its_hook_behind_its_event():
+    fixed = _hook_event("hook_non_blocking_error")
+    fixed.detail.update({"script": "command hook", "hookName": "SubagentStop"})
+    broken = _hook_event("hook_non_blocking_error")
+    broken.detail.update({"script": "command hook", "hookName": "PostToolBatch"})
+    results = [_result(*[fixed] * 30, broken)]
+    [stat] = hook_health.count_hook_errors(results, stopped=["SubagentStop command hook"]).stats
+    assert (stat.hook_name, stat.calls, stat.errors) == ("PostToolBatch", 1, 1)
+
+
 # -- Phase 7: measure_hook_overhead / HookOverhead --------------------------
 
 

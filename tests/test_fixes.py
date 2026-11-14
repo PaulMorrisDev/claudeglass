@@ -1,5 +1,7 @@
 import re
 
+import pytest
+
 from claudeglass.fixes import NO_FIX_FOR_NAME
 
 
@@ -362,6 +364,56 @@ def test_no_workflow_prompt_repeats_its_title():
         # str.format), not a leftover {agent}/{title} placeholder.
         assert "{agent}" not in fix["prompt"], template_key
         assert "{title" not in fix["prompt"], template_key
+
+
+_UNNAMED_HOOK_SENTENCE = (
+    "Where a hook's name above is an event followed by Claude Code's own name for it, as in "
+    '"SubagentStop command hook", Claude Code recorded that hook without its command, so look at the hooks '
+    "that run on that event."
+)
+
+
+def _hook_card(rec_id: str, *row_keys, table="hooks.hooks_by_script"):
+    from claudeglass.model import Recommendation
+
+    return Recommendation(
+        id=rec_id,
+        severity="advice",
+        category="workflow",
+        title="Your hook X failed 12 times",
+        why="A hook that fails doesn't do its job.",
+        action="Do the thing.",
+        lever=None,
+        evidence=[(f"{key}: failed runs", 12, table, key) for key in row_keys],
+    )
+
+
+@pytest.mark.parametrize("rec_id", ["hook-failures", "hook-block-resent", "hook-context-carry"])
+def test_a_hook_card_prompt_says_whose_name_an_event_and_claude_codes_name_is(rec_id):
+    from claudeglass import fixes as fixes_mod
+
+    (today,) = fixes_mod.build_fixes(_hook_card(rec_id))
+    for keys in (("SubagentStop command hook",), ("guard.ps1", "SubagentStop command hook")):
+        (fix,) = fixes_mod.build_fixes(_hook_card(rec_id, *keys))
+        prompt = fix["prompt"]
+        assert prompt.count(_UNNAMED_HOOK_SENTENCE) == 1
+        opening, _, rest = prompt.partition(f" {_UNNAMED_HOOK_SENTENCE} ")
+        assert "A hook that fails doesn't do its job." in opening
+        assert f"{opening} {rest}" == today["prompt"]
+
+
+@pytest.mark.parametrize("rec_id", ["hook-failures", "hook-block-resent", "hook-context-carry"])
+def test_a_hook_card_prompt_is_as_it_was_when_no_hook_is_one_of_those(rec_id):
+    from claudeglass import fixes as fixes_mod
+
+    (today,) = fixes_mod.build_fixes(_hook_card(rec_id))
+    for rec in (
+        _hook_card(rec_id, "guard.ps1", "make hook"),
+        _hook_card(rec_id, "SubagentStop command hook", table="other.table"),
+    ):
+        (fix,) = fixes_mod.build_fixes(rec)
+        assert fix["prompt"] == today["prompt"]
+        assert _UNNAMED_HOOK_SENTENCE not in fix["prompt"]
 
 
 def test_each_documented_constant_has_its_own_comment_directly_above_it():

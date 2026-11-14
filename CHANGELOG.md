@@ -189,6 +189,14 @@ Cards and checks:
   session start.
 - **The hook-block-resent card says the blocked calls not sent again would
   run too, and that its saving does not subtract them.**
+- **The failing-hooks card says "script not found" for Claude Code's
+  current missing-script message**, "Hook script appears to be missing",
+  where it said "error".
+- **Hooks that Claude Code records without their command are listed by
+  event** (`SubagentStop command hook`), where hooks on different events
+  shared a row named `command hook` or `command hook 2`. The hook cards, their
+  copyable prompts and the "Who blocked or redirected replies" table say
+  where to find such a hook.
 - **A card you ignored no longer leads any check**, and a check whose only
   change was on an ignored card says so. The habits saving names its
   source. The CLAUDE.md figures say what they count, and
@@ -196,7 +204,7 @@ Cards and checks:
 - **The pointer to the largest part of startup no longer names a "baseline"
   the action never shows.**
 - **Updating re-reads your transcripts once.** The parser is now version
-  52, so the dashboard rebuilds its rows from them on the first start after
+  53, so the dashboard rebuilds its rows from them on the first start after
   you upgrade. A session whose transcripts Claude Code has deleted keeps
   its stored figures, as before. A figure this version counts differently
   now leaves that session out instead of reading it as zero. Data quality

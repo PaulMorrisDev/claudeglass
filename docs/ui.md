@@ -1075,7 +1075,9 @@ The terminal equivalent is `claudeglass review claude-md|skills`.
 **Answers:** "Do my hooks work, and what do they cost?"
 
 The `hooks` section ([hooks](hooks.md)): one summary row, then each hook
-by its script's file name, costliest first. For each: the events it runs
+by its script's file name (a hook Claude Code records without its command
+is named by its event, as in `SubagentStop command hook`), costliest first.
+For each: the events it runs
 on, failed runs and why (a script not found by a relative path is
 marked), runs seen working, calls it blocked and how many Claude sent
 again unchanged, the context it added and what keeping it cost, and time
