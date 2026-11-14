@@ -1226,6 +1226,160 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     assert not any("replaces the built-in" in r.action for r in recs)
 
 
+_KEEP_START = (
+    "The built-in {agent} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to keep that. "
+    "Leave it out if you want {agent} to follow your CLAUDE.md rules: each start then carries those files too."
+)
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_a_file_that_replaces_explore_or_plan_is_told_to_keep_their_start_without_claude_md(agent):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    note = (
+        f"A file at ~/.claude/agents/{agent}.md replaces the built-in {agent}, so make the change there. "
+        + _KEEP_START.format(agent=agent)
+    )
+    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == agent]
+    cards = [r for r in recs if r.id in ("spawn-unused-skills", "spawn-unused-mcp")]
+    assert {r.id for r in cards} == {"spawn-unused-skills", "spawn-unused-mcp"}
+    for rec in cards:
+        assert note in rec.action, rec.id
+    assert recommend_mod.starts_without_claude_md(agent)
+    assert recommend_mod.claude_md_choice(agent) == _KEEP_START.format(agent=agent)
+    # A built-in with a file of its own is no longer replaced, so it is told nothing of the kind.
+    recs = _recs(_report(builtin), snapshot=_snapshot({agent: {"source": "user"}}), units=Units())
+    assert not any("replaces the built-in" in r.action for r in recs)
+
+
+def test_a_file_that_replaces_another_built_in_is_not_told_to_set_omit_claude_md():
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    for rule in ("spawn-unused-skills", "spawn-unused-mcp"):
+        (rec,) = [r for r in _recs(_report(builtin), units=Units()) if r.id == rule and r.agent_type == "general-purpose"]
+        assert "replaces the built-in general-purpose, so make the change there." in rec.action, rule
+        assert "omitClaudeMd" not in rec.action, rule
+    assert not recommend_mod.starts_without_claude_md("general-purpose")
+    assert not recommend_mod.starts_without_claude_md(None)
+
+
+_SKILLS_UNDOCUMENTED = (
+    "Whether that also drops the skills list from its startup isn't documented, so check the Skills list column "
+    "after a few new spawns."
+)
+
+
+def _skills_action(agent, snapshot=None):
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, skills_used=0)
+    recs = _recs(_report(builtin), snapshot=snapshot, units=Units())
+    (rec,) = [r for r in recs if r.id == "spawn-unused-skills" and r.agent_type == agent]
+    return rec.action
+
+
+def test_the_skills_card_asks_whether_the_list_drops_before_it_says_a_file_replaces_the_built_in():
+    # "that" is the change just named, so the note about the file and CLAUDE.md files comes after the question.
+    assert _skills_action("Explore") == (
+        "Give Explore a tools list that leaves Skill out, or, to change nothing else, add Skill to its "
+        "disallowedTools. " + _SKILLS_UNDOCUMENTED + " A file at ~/.claude/agents/Explore.md replaces the "
+        "built-in Explore, so make the change there. The built-in Explore starts without your CLAUDE.md files. "
+        "Set omitClaudeMd: true in the file to keep that. Leave it out if you want Explore to follow your "
+        "CLAUDE.md rules: each start then carries those files too."
+    )
+    assert _skills_action("general-purpose") == (
+        "Leave Skill off the tools list for general-purpose, which stops it being sent the skills list. To change "
+        "nothing else, add Skill to its disallowedTools instead. " + _SKILLS_UNDOCUMENTED + " A file at "
+        "~/.claude/agents/general-purpose.md replaces the built-in general-purpose, so make the change there."
+    )
+    # An agent with a file of its own is given no note, so its card is as it was.
+    assert _skills_action("searcher", _snapshot({"searcher": {"source": "user"}})) == (
+        "Leave Skill off the tools list for searcher, which stops it being sent the skills list. To change "
+        "nothing else, add Skill to its disallowedTools instead. " + _SKILLS_UNDOCUMENTED
+    )
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_every_sentence_about_claude_md_for_explore_and_plan_is_short(agent):
+    """The sentences this part adds, in the card's note, the fix's explainer and its prompt, stay within the
+    project's 25 words (the older "is built into Claude Code; ..." sentence is not one of them)."""
+    omit = SettingChange(target="agent", key="omitClaudeMd", agent=agent, value=True, new_agent_file=True)
+    other = SettingChange(target="agent", key="model", agent=agent, value="sonnet", new_agent_file=True)
+    rec = Recommendation(id="spawn-cost", title="x", agent_type=agent, changes=[other])
+    bare = dict(fixes.explainer_for(rec, omit))["Where and who it affects"]
+    where = dict(fixes.explainer_for(rec, other))["Where and who it affects"]
+    prompt = fixes.prompt_for(rec, other)
+    added = [
+        recommend_mod.claude_md_choice(agent),
+        recommend_mod._built_in_note(agent, "user"),
+        where.removeprefix(bare),
+        prompt.split(" in its frontmatter.", 1)[1].split(" Write its prompt", 1)[0],
+    ]
+    assert all(text.strip() for text in added)
+    for text in added:
+        for sentence in text.split(". "):
+            assert len(sentence.split()) <= 25, (len(sentence.split()), sentence)
+
+
+def _mcp_patch_set(agent, snapshot=None):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    recs = _recs(_report(builtin), snapshot=snapshot, units=Units())
+    return recommend_mod.render_patch_set([r for r in recs if r.agent_type == agent and r.id == "spawn-unused-mcp"])
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_the_patch_set_for_a_new_explore_or_plan_file_keeps_their_start_without_claude_md(agent):
+    assert _mcp_patch_set(agent) == (
+        f"--- .claude/agents/{agent}.md\n"
+        f"+++ .claude/agents/{agent}.md\n"
+        f"# a new file that replaces the built-in {agent}; omitClaudeMd: true keeps its start without CLAUDE.md "
+        "files, leave it out to load them\n"
+        "-disallowedTools: unknown (no config snapshot yet)\n"
+        "+disallowedTools: [mcp__playwright]\n"
+        "-omitClaudeMd: (unset)\n"
+        "+omitClaudeMd: true\n"
+    )
+
+
+def test_the_patch_set_for_another_stanza_has_no_omit_claude_md_pair():
+    text = _mcp_patch_set("general-purpose")
+    assert "omitClaudeMd" not in text and "#" not in text
+    # Explore with a file of its own is not a new file.
+    text = _mcp_patch_set("Explore", snapshot=_snapshot({"Explore": {"source": "user"}}))
+    assert "omitClaudeMd" not in text and "#" not in text
+
+
+def test_a_managed_stanza_for_a_new_explore_file_keeps_its_managed_comment_first():
+    change = SettingChange(
+        target="agent", key="disallowedTools", agent="Explore", value=["Edit"], current=None, new_agent_file=True
+    )
+    rec = Recommendation(
+        id="spawn-tools-list", severity="info", category="settings", archetypes=(), title="t", action="a",
+        lever=None, scope="managed", agent_type="Explore", changes=[change],
+    )  # fmt: skip
+    lines = recommend_mod.render_patch_set([rec]).splitlines()
+    assert lines[2] == "# managed by policy -- shown for reference only"
+    assert lines[3].startswith("# a new file that replaces the built-in Explore;")
+    assert lines[-1] == "+omitClaudeMd: true"
+
+
+def test_a_stanza_that_sets_omit_claude_md_itself_is_left_as_it_is():
+    changes = [
+        SettingChange(target="agent", key=key, agent="Explore", value=value, current=None, new_agent_file=True)
+        for key, value in (("disallowedTools", ["Edit"]), ("omitClaudeMd", False))
+    ]
+    rec = Recommendation(
+        id="spawn-tools-list", severity="info", category="settings", archetypes=(), title="t", action="a",
+        lever=None, agent_type="Explore", changes=changes,
+    )  # fmt: skip
+    text = recommend_mod.render_patch_set([rec])
+    assert "#" not in text and text.count("omitClaudeMd") == 2
+
+
+@pytest.mark.parametrize("agent", ["general-purpose", "claude", "searcher", None])
+def test_the_choice_about_claude_md_is_empty_for_an_agent_that_is_sent_it(agent):
+    assert recommend_mod.claude_md_choice(agent) == ""
+
+
 @pytest.mark.parametrize("agent", sorted(recommend_mod._BUILTIN_AGENT_TYPES - recommend_mod._NOT_OVERRIDABLE))
 @pytest.mark.parametrize("writer", [False, True])
 def test_the_folder_a_built_in_agents_card_names_is_the_one_its_fix_writes_to(agent, writer):

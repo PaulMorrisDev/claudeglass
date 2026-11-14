@@ -197,6 +197,10 @@ Cards and checks:
   shared a row named `command hook` or `command hook 2`. The hook cards, their
   copyable prompts and the "Who blocked or redirected replies" table say
   where to find such a hook.
+- **A `SubagentStop` hook you have fixed stops being listed as failing.**
+  Claude Code records no clean run of such a hook, so it kept its "failed"
+  card until the failures left the window. It is now judged on the agent
+  runs that ended after its last failure, in the agent types it failed in.
 - **A card you ignored no longer leads any check**, and a check whose only
   change was on an ignored card says so. The habits saving names its
   source. The CLAUDE.md figures say what they count, and
@@ -213,7 +217,13 @@ Cards and checks:
   unread-key alarm stops.
 - **Cards for built-in agents say a same-named agent file replaces the
   built-in, and name the file their fix writes** (`~/.claude/agents/`, or
-  `.claude/agents/` for a project fix).
+  `.claude/agents/` for a project fix). For Explore and Plan, which start
+  without your CLAUDE.md files, they also say so, say to set
+  `omitClaudeMd: true` in the new file to keep that, and say you can leave
+  it out if you want them to follow your CLAUDE.md rules, at the cost of
+  carrying those files on every start. `report --patch-set` adds that line
+  to a new Explore.md or Plan.md, and the models table names it in the
+  lever.
 - **The main-session model card prices only the sessions a settings change
   would reach.** A session counts by the model it ran on. Sessions already
   on Sonnet or smaller, from before their project moved there, or picked on

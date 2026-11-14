@@ -261,8 +261,12 @@ def agent_file_path(agent_type: str, scope: str) -> str:
 
 def _built_in_note(agent_type: str, scope: str) -> str:
     """The sentence a built-in agent type's card ends with: the built-in has
-    no file, but a same-named one replaces it, so the change goes there."""
-    return f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
+    no file, but a same-named one replaces it, so the change goes there. For
+    Explore and Plan, which start without CLAUDE.md files, it adds the choice
+    the new file makes about them (:func:`claude_md_choice`)."""
+    note = f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
+    choice = claude_md_choice(agent_type)
+    return f"{note} {choice}" if choice else note
 
 
 # -- thresholds --------------------------------------------------------------
@@ -1650,6 +1654,28 @@ def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Reco
 #: (its sub-agents docs), so omitClaudeMd means nothing for them.
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
 
+
+def starts_without_claude_md(agent_type: str | None) -> bool:
+    """Whether ``agent_type`` is a built-in that Claude Code starts without
+    CLAUDE.md files (:data:`_SKIPS_CLAUDE_MD`), so a file replacing it must
+    set ``omitClaudeMd`` to keep that."""
+    return agent_type in _SKIPS_CLAUDE_MD
+
+
+def claude_md_choice(agent_type: str | None) -> str:
+    """What a card says about CLAUDE.md files when it tells the user to create
+    a file that replaces ``agent_type``: the built-in starts without them,
+    ``omitClaudeMd: true`` keeps that, and leaving it out is the user's choice
+    (``""`` for an agent type that is sent them either way)."""
+    if not starts_without_claude_md(agent_type):
+        return ""
+    return (
+        f"The built-in {agent_type} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to "
+        f"keep that. Leave it out if you want {agent_type} to follow your CLAUDE.md rules: each start then "
+        "carries those files too."
+    )
+
+
 #: Tools that change files: an agent whose ``tools:`` line names one, and whose
 #: ``disallowedTools:`` line does not withhold it, is a writer.
 _FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
@@ -2419,8 +2445,9 @@ def _rule_spawn_parts(
                         else f"Give {agent_type} a tools list that leaves Skill out, or, to change nothing else, "
                         "add Skill to its disallowedTools."
                     )
-                    + ("" if has_file else " " + _built_in_note(agent_type, scope))
-                    + undocumented,
+                    # "that" is the change just named, so the note comes after it.
+                    + undocumented
+                    + ("" if has_file else " " + _built_in_note(agent_type, scope)),
                     lever=None,
                     scope=scope,
                     agent_type=agent_type,
@@ -3373,7 +3400,10 @@ def render_patch_set(recs: list[Recommendation]) -> str:
     (e.g. both a TTL switch and ``omitClaudeMd``) into a single diff --
     and a bare settings-key stanza (no path -- see module docstring)
     for genuine top-level settings levers. Contains no path other than
-    ``.claude/agents/<agent_type>.md``.
+    ``.claude/agents/<agent_type>.md``. A new file for Explore or Plan, which
+    Claude Code starts without CLAUDE.md files, gets a comment and an
+    ``omitClaudeMd: true`` line, so the file keeps that start unless its
+    maker leaves the line out.
 
     Fix R13: agent routing now prefers ``rec.agent_type`` (set by every
     per-agent-type rule) over sniffing the agent name back out of
@@ -3386,7 +3416,7 @@ def render_patch_set(recs: list[Recommendation]) -> str:
     """
     lines: list[str] = []
     # agent_type -> ordered {settings_key: rendered_value}, plus whether
-    # any lever contributing to it is managed.
+    # any lever contributing to it is managed or is a new file.
     agent_stanzas: dict[str, dict] = {}
     seen_settings_keys: set[str] = set()
 
@@ -3407,6 +3437,7 @@ def render_patch_set(recs: list[Recommendation]) -> str:
                 if change.target == "agent" and change.agent:
                     stanza = agent_stanzas.setdefault(change.agent, {"managed": False, "keys": {}})
                     stanza["managed"] = stanza["managed"] or scope == "managed"
+                    stanza["new_file"] = stanza.get("new_file", False) or change.new_agent_file
                     stanza["keys"][change.key] = (old_text, new_text)
                     continue
                 if change.key in seen_settings_keys:
@@ -3488,10 +3519,25 @@ def render_patch_set(recs: list[Recommendation]) -> str:
         agent_lines.append(f"+++ {path}")
         if stanza["managed"]:
             agent_lines.append("# managed by policy -- shown for reference only")
+        # A new file replaces the built-in, which is started without CLAUDE.md
+        # files: only a line in the file keeps that.
+        keeps_start = (
+            stanza.get("new_file", False)
+            and starts_without_claude_md(agent_type)
+            and "omitClaudeMd" not in stanza["keys"]
+        )
+        if keeps_start:
+            agent_lines.append(
+                f"# a new file that replaces the built-in {agent_type}; omitClaudeMd: true keeps its start "
+                "without CLAUDE.md files, leave it out to load them"
+            )
         for key, value in stanza["keys"].items():
             old_text, new_text = value if isinstance(value, tuple) else ("(unset)", value)
             agent_lines.append(f"-{key}: {old_text}")
             agent_lines.append(f"+{key}: {new_text}")
+        if keeps_start:
+            agent_lines.append("-omitClaudeMd: (unset)")
+            agent_lines.append("+omitClaudeMd: true")
         agent_lines.append("")
 
     lines = agent_lines + lines
