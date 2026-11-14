@@ -166,6 +166,10 @@ _IGNORABLE_TYPES = frozenset(
         "api-request-shape",
         "relocated",
         "dev-mods",
+        #: The tools a session used: already read from its tool calls.
+        "tools-used",
+        #: An account's and an organisation's ids, which are never kept.
+        "session-owner",
     }
 )
 _IGNORABLE_PREFIXES = ("file-history-", "artifact-")
