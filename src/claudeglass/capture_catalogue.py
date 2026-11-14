@@ -4154,8 +4154,9 @@ def render_markdown() -> str:
         f"the files it changed, the first line of up to {AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end "
         f"of its report (up to {AGENT_JUDGE_LIMITS['report']:,} characters) and up to "
         f"{AGENT_JUDGE_LIMITS['earlier']} earlier agent runs of the session, read from the whole of the "
-        "session's transcript (their type and model, the start of their brief and the end of their report, each "
-        f"cut to {AGENT_JUDGE_LIMITS['earlier_report']} characters), so Haiku "
+        "session's transcript (their type and model, their brief cut to "
+        f"{AGENT_JUDGE_LIMITS['earlier_brief']} characters, its start and end, and the end of their report, the "
+        f"last {AGENT_JUDGE_LIMITS['earlier_report']} characters), so Haiku "
         "can tell a re-run. Tool output is never in it."
     )
     p(

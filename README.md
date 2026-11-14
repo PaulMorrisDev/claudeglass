@@ -10,9 +10,9 @@ evidence from your own sessions, what it trades away, and how to undo
 it.
 
 It runs on your computer: no telemetry, no API key, no account, and no
-runtime dependencies. Only the optional metrics capture, and the mod
-when you press its buttons, ask Claude anything, through your own Claude
-Code login.
+runtime dependencies. Only the optional metrics capture and coaching
+notes, and the mod when you press it or run `/glass tighten`, ask Claude
+anything, through your own Claude Code login.
 
 [![PyPI](https://img.shields.io/pypi/v/claudeglass?label=pypi)](https://pypi.org/project/claudeglass/)
 [![Python 3.11 or newer](https://img.shields.io/badge/python-3.11%2B-3776ab)](https://github.com/PaulMorrisDev/claudeglass/blob/main/pyproject.toml)
@@ -30,7 +30,7 @@ Code login.
 
 **Try it in a minute.** `check` reads your history and prints what to
 change. It changes nothing in Claude Code. It keeps a cache of what it
-read in `~/.claude/claudeglass` (add `--no-cache` to skip it):
+read in `~/.claude/claudeglass` (add `--no-cache` to skip the cache):
 
 ```bash
 python -m pip install claudeglass
@@ -80,12 +80,13 @@ answered from your own sessions:
   move, such as tokens per session for a model change, how sure it is,
   and what it saved so far.
 
-Amounts follow how you pay: a share of your usage limits on a Pro or Max
-plan, dollars on pay-per-token billing.
+Amounts follow how you pay: on a Pro or Max plan, a share of your usage
+limits once the status line has logged enough readings (until then,
+list-price equivalents); on pay-per-token billing, dollars.
 
 **Nothing changes by itself.** Every recommendation is a prompt you give
-Claude or a command you run, and every ClaudeGlass command has a
-`--dry-run`.
+Claude or a command you run, and every ClaudeGlass command it offers
+has a `--dry-run`.
 
 ## Who it's for
 
@@ -154,8 +155,8 @@ It asks up to four questions:
    and, unless you have one already, a status line that logs your
    usage-limit readings. The dashboard uses them to show what changed
    and what that did. Neither adds tokens. Claude Code runs a status
-   line only in a terminal, so in the desktop app amounts stay at
-   list-price equivalents.
+   line only in a terminal, so if you use only the desktop app, amounts
+   on a plan stay at list-price equivalents.
 3. **Start the dashboard when you log on.** Say yes. It starts straight
    away, and again every time you log on.
 4. **Sharper tips**, optional and off unless you say yes. Claude ends
@@ -219,8 +220,9 @@ locked-down work machine.
 
 ClaudeGlass was called claude-token-lens up to version 0.8.0. 0.9.0 is a
 fresh install, not an upgrade: remove the old tool first, then follow
-the quick start above. A copy older than 0.4.0 has no `uninstall`: run
-`python -m pip install claude-token-lens==0.8.0` first.
+the quick start above. A copy older than 0.4.0 has no `uninstall`:
+bring it to 0.8.0 first, with
+`python -m pip install git+https://github.com/PaulMorrisDev/claudeglass@v0.8.0`.
 
 ```powershell
 python -m claude_token_lens uninstall --dry-run
@@ -408,9 +410,11 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 ## What it does to Claude Code, and how to undo it
 
 - **It uses no Claude tokens unless you turn on metrics capture,
-  coaching notes or one of its skills (`/cg-feedback`, `/cg-brief`).**
-  Otherwise it only reads files Claude Code has already written. All are
-  off by default, and each is described below.
+  coaching notes, `/cg-feedback`, the plan check, the rating reminder or
+  `/cg-brief`, or add the mod.** Otherwise it only reads files Claude
+  Code has already written. All are off by default, and each is
+  described below. The mod adds your keep list to each summary, and
+  calls Claude Haiku only when you press it.
 - **It changes nothing on its own.** `init`, `capture` and `update` show
   each change to Claude Code's `settings.json` and ask first, and back
   the file up before changing it. The dashboard never changes it.
@@ -429,7 +433,7 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 |---|---|---|
 | A SessionStart hook (`snapshot-config.py`) that records your settings as each session starts. It runs in the background. | `init`, when you connect | None |
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
-| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SubagentStop from Essentials up, on SessionStart from Essentials up unless Claude Haiku writes the tags, and on PostToolUse at Deep while Claude writes the tags. It is also on UserPromptSubmit while `/cg-feedback`, the plan check or the rating reminder is on, so with sharper tips and at Deep. | [Metrics capture](#metrics-capture) | See its levels |
+| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SubagentStop from Essentials up, on SessionStart from Essentials up unless Claude Haiku writes the tags, and on PostToolUse at Deep while Claude writes the tags. It is also on UserPromptSubmit while `/cg-feedback`, the plan check or the rating reminder is on, so with sharper tips and at Deep. After capture ends with a light sample, only its SessionStart (unless Claude Haiku writes the tags) and Stop entries stay. | [Metrics capture](#metrics-capture) | See its levels |
 | The same hook on UserPromptSubmit, and on PostToolUse after a file read, a web search or fetch, an approved plan and a call that starts an agent or a workflow, never after a shell, Grep, Glob or MCP tool. It also runs in the background on Stop. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
 | The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
 | The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
@@ -452,7 +456,7 @@ one before it:
 | Free | Signals from hooks, logged to a local file. | – | – | – |
 | Essentials | A tag on each message's work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~435 tokens | ~15 tokens | ~$0.002 |
 | Standard | What the request lacked, planning and skills, and Haiku's view of each subagent's brief. | ~566 tokens | ~24 tokens | ~$0.002 |
-| Deep | How much earlier context was needed, how the change was checked, whether a summary lost something the work needed (asked once, after the summary), and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~674 tokens | ~29 tokens | ~$0.002 |
+| Deep | How much earlier context was needed, how the change was checked, whether a summary lost something the work needed (asked once, after the summary, while Claude writes the tags), and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~674 tokens | ~29 tokens | ~$0.002 |
 
 The note is written to the prompt cache once, then read from it on each
 later reply. Capture switches itself off 14 days after you turn it on:
@@ -523,15 +527,19 @@ See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/
   the SessionStart hook, it also reads your Claude Code settings, and the
   names and sizes of your CLAUDE.md files, skills and plugins. It keeps
   environment variable names, never their values, apart from a few
-  numeric limits. With coaching notes on, the hook reads each message
-  you send, and your recent ones, for their length, timing and a few
-  fixed phrases. Nothing about your words is kept.
+  numeric limits. With coaching notes on, the hook reads the end of the
+  session, your messages and Claude's replies, for their length, timing,
+  whether a reply changed a file and a few fixed phrases. Nothing about
+  your words is kept.
 - **What it keeps.** Counts, token totals, costs and short labels such
   as tool and model names, in `~/.claude/claudeglass`. Never message
   text, tool output, file contents or full commands. The dashboard's own
   store keeps the paths of your transcript files, project folders and
-  profile files for its bookkeeping, and never shows them. A test checks
-  every field it reads from a transcript.
+  profile files for its bookkeeping, and each project's folder name,
+  which can include your user name. Pages show a project by that name
+  with your user name taken out, and nothing else of those paths. The
+  settings snapshots keep only a hash of the name. A test checks every
+  field it reads from a transcript.
 - **What goes online.** ClaudeGlass itself sends nothing, except
   `update`, which runs pip to download the new version from GitHub.
   There's no telemetry and no update check. The dashboard listens only
@@ -551,8 +559,9 @@ See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/
     excerpt of each finished subagent run, through your own Claude Code
     login. The excerpt holds the run's brief, what Claude said as it
     started the run, the end of its report, the files it changed, the
-    first line of its shell commands and a short view of up to 4 earlier
-    agent runs in the session, each cut to a set length. Haiku judges
+    first line of its shell commands, a short view of up to 4 earlier
+    agent runs in the session and, for a workflow agent, the line the
+    workflow was started with, each cut to a set length. Haiku judges
     every run this way, whoever writes the tags.
   - With `tagger = "haiku"`, the hook also sends Haiku an excerpt of
     each turn, mainly your message and the end of Claude's reply, and
@@ -611,8 +620,10 @@ has the detail.
   Markdown and HTML.
 - **Confidential projects.** `exclude_projects` in `config.toml` keeps a
   project's transcripts from ever being read. The SessionStart hook
-  still records that project's settings and the names and sizes of its
-  CLAUDE.md files. See
+  still records that project's settings (redacted as for any project),
+  the names of its agents, plugins and MCP servers, and the names and
+  sizes of its CLAUDE.md files, rules, commands and skills, under a hash
+  of its folder name. See
   [Settings for teams and enterprise](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/team.md#settings-for-teams-and-enterprise).
 
 ## Documentation

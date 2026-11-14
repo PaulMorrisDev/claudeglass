@@ -705,11 +705,19 @@ and the hook imports no networking module (see "Claude Haiku as the
 tagger", "Claude Haiku as the fallback" and "Agent runs" above).
 
 **The Claude Code mod** ([docs/mod.md](docs/mod.md)) is a separate plugin
-that runs inside Claude Code. It calls Claude Haiku, through Claude
-Code's own login, only when you press it: `/glass tighten` sends your
-draft, and "Check with a model" sends the summary and the keep list. The
-mod makes no other call, and ClaudeGlass's own Python code is not
-involved in these calls (`plugin/hooks/command.ts`, `$.model.complete`).
+that runs inside Claude Code and has no network code of its own. It has
+Claude Code call Claude Haiku only when you press it: `/glass tighten`
+sends your draft, and "Check with a model" sends the summary (up to
+12,000 characters) and the items it checks (`plugin/hooks/command.ts`,
+`plugin/hooks/pane.tsx`, `plugin/hooks/page-checkpoint.tsx`,
+`$.model.complete`). Every summary of the main session, including one you
+start with the mod's Summarise button, is given your keep list as
+instructions, and items you re-add go in a system-prompt section on each
+later request of the main session until a summary keeps them
+(`plugin/hooks/compaction.ts`, `plugin/hooks/readd.ts`). Once a session,
+after Claude's first reply, the mod asks Claude Code for the token count
+`/context` makes (`plugin/hooks/track.ts`); that is not a model reply.
+ClaudeGlass's own Python code is not involved in any of these.
 
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:
@@ -896,8 +904,13 @@ output. A malformed regex stops `config.toml` from loading, with an
 error naming the pattern, so a typo can't quietly stop a project being
 excluded. This covers reading transcripts, and the capture and coaching
 hooks. The SessionStart hook (`snapshot-config.py`) does not read
-`config.toml`, so it still records that project's settings and the names
-and sizes of its CLAUDE.md files.
+`config.toml`, so it still records that project's settings (redacted as
+for any project), the names of its agents, plugins and MCP servers, and
+the names and sizes of its CLAUDE.md files, rules, commands and skills,
+under a hash of its folder name. The mod's coaching hints follow
+`exclude_projects`, but its band, keep list and sensor still run in an
+excluded project, and the dashboard reads the sensor's counts by session
+(`service/watcher.py`, `plugin/hooks/settings.ts`).
 
 ```toml
 exclude_projects = ["^confidential-", "client-acme$"]
