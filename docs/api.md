@@ -155,9 +155,11 @@ below):
   never starts the watcher or the API, and refuses (exit `1`) while a
   `serve` holds the store. Always prints exactly which files it would delete first;
   only actually deletes them when `--yes` is also given. Safe at any
-  time: the store is always a derived cache (`service/store.py`'s module
+  time: the store is a derived cache (`service/store.py`'s module
   docstring), so the next `serve` run simply rebuilds it from the
-  transcripts already on disk. Exits `2` (and deletes nothing) if
+  transcripts already on disk. The card marks (what the dashboard kept of
+  the recommendation cards it showed) cannot be rebuilt that way: they stay
+  on this machine, a rebuild keeps them, and `--purge` deletes them. Exits `2` (and deletes nothing) if
   `--yes` is missing, `0` otherwise (including when there is nothing to
   delete).
 - **`--exit-on-code-change`** sets `ServeOptions.exit_on_code_change`.
@@ -321,8 +323,8 @@ can still include a session whose transcript file Claude Code's own
 `cleanupPeriodDays` retention has already removed — see "Store rebuild"
 below.
 
-`schema_version` is the store's schema: 11 since the ClaudeGlass mod's
-tweaks. Version 10 added the `mod_events` table: one row per event the mod
+`schema_version` is the store's schema: 12 since the dashboard began
+keeping what it showed of the recommendation cards. Version 10 added the `mod_events` table: one row per event the mod
 wrote to `mod/sensor/<session id>.json` (the session's id, the time, the
 event word, the closed words `kind`, `surface` and `outcome` that event
 takes, and for a compaction review the counts `kept`, `missing` and
@@ -332,7 +334,23 @@ takes, and for a compaction review the counts `kept`, `missing` and
 it changes and replaces that session's rows from the file's first event
 on, so reading it again changes nothing, and rows older than
 `retention_days` (180 by default) are removed with their files. A store at
-9 gains the table in place, and one at 10 gains the columns. Version 9,
+9 gains the table in place, and one at 10 gains the columns. Version 12
+adds the `card_marks` table: one row per card per view of the dashboard (the
+project it was shown in, or every project), holding the card's key, the rule
+and agent it is about, the settings it asked you to change, its estimated
+saving and what that saving was priced on (`priced_on`: the tokens it takes out of each
+start, or the observed cost it is a share of; empty when the card names none),
+and when it was first shown, first copied (its own prompt), first
+copied in the project's all-fixes prompt, and, once that view is drawn again,
+when it left the list with every setting it names moved (`landed_at`, and
+whether the settings hold the card's own values). It is written by
+`POST /api/recommendations/marks`, stays on this machine and is returned by
+no route; only counts and fixed words from it reach a tuning export. Rows
+older than `retention_days` (180 by default) are removed. A store at 11 gains
+the table in place, with a nullable `predictions.priced_on` column beside it (the
+`priced_on` of the prediction log's line, below); a store already stamped 12 by an
+earlier build of this release gains both `priced_on` columns when it is opened.
+Version 9,
 from the /cg-feedback
 redesign, added the rating's `why`, `missed_in`, `tip` and
 `tip_hint` columns and the `session_plan_feedback` and `tip_feedback`
@@ -343,7 +361,7 @@ day in your own zone. A store at 7 gains the column in place and every
 transcript is read once more to fill it in (a transcript whose file is
 gone keeps its UTC day). An older version that opens a newer store
 rebuilds it from the transcripts, after setting a copy aside; your
-session tags, session ratings and card ratings are put back.
+session tags, session ratings, card ratings and card marks are put back.
 
 `watcher` (S1-perf) additionally carries a per-tick timing breakdown of
 its own `duration_s`: `discovery_s` (filesystem walk + diffing against
@@ -369,7 +387,10 @@ poll (`config.toml` and `settings.json` only): `level`, `title`,
 expired), `enabled_at`, `until`, `timebox_days` (how many days a
 switch from off to on runs before it ends, when no end is given),
 `sample`, `metrics`, `feedback`,
-`coaching`, `projects_limited` (only whether `[capture] projects` is
+`coaching`, `tagger`, `after` (`stop` or `light`: what happens when the
+end passes) and `light` (a light sample is what runs now: the end has
+passed and `after` is `light`), `light_share` (the percent of sessions
+a light sample runs in: `sample`, or 20 if that is more), `projects_limited` (only whether `[capture] projects` is
 set, never the patterns) and `hooks_ok` (whether `settings.json` runs
 every hook the chosen metrics need; `true` when they need none). The
 dashboard fetches `GET /api/capture` for its banner when this block
@@ -629,7 +650,7 @@ whose first reply falls in the window are kept, so the days add up to
 
 `/api/ttl`, `/api/carry`, `/api/compaction-sim`, `/api/plan-handoff`,
 `/api/model-swap`, `/api/waste`, `/api/config-diff`, `/api/recommendations`,
-`/api/diagnostics`, `/api/claude-md`, `/api/claude-md/<id>`,
+`/api/recommendations/prompt`, `/api/diagnostics`, `/api/claude-md`, `/api/claude-md/<id>`,
 `/api/skills`, `/api/profile-goals` (with `goal`), `/api/quick-actions`,
 `/api/quick-actions/<id>`, `POST /api/whatif` and
 `/api/report.md`/`.html`/`.json` (below) all accept the same windowing
@@ -640,8 +661,9 @@ with no params it means all time rather than a 30-day default.
 `/api/sessions`, `/api/compactions`, `/api/impact` and `/api/backtest`
 accept them all but, unlike the report routes, list everything (all time)
 when none is given. Every other route (`/api/health`, `/api/session/<id>`,
-`/api/recache`, `/api/baseline`, `/api/profiles*`, `/api/setup`,
-`/api/setup/status`, `/api/capture`) ignores them.
+`/api/recache`, `/api/baseline`, `/api/profiles`, `/api/profiles/<id>`, `/api/setup`,
+`/api/setup/status`, `/api/capture`) ignores them; `/api/profile-suggestion`
+takes `window` and `project`, and `/api/profiles/<id>/diff` takes `project`.
 
 **Caching.** The service builds each window's report once per store
 change (`Store.change_token()`) or `config.toml` change (its
@@ -858,7 +880,7 @@ window rather than a fresh corpus scan.
 Query: `window`, `window_days`, or `since`/`until` (see "Report-backed
 routes: windowing query params" above).
 
-`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt", "note"}, ...], "key"}, ...]` —
+`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "priced_on", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt", "note"}, ...], "key"}, ...]` —
 exactly `render/json_out.py`'s existing `Recommendation` encoding.
 `fixes` (from `fixes.py`) holds, per change, the six-part explainer, an
 `apply --set ... --dry-run` command (`null` when the value needs
@@ -876,7 +898,12 @@ prompt or change was never something Claude Code reads at startup).
 `saving_usd` is `estimated_saving`
 as a plain number (USD at list price, `null` when not estimated) —
 used to order recommendations of the same severity, and safe for a
-client to format or sort by directly. `key` (additive) is a
+client to format or sort by directly. `priced_on` (additive) is what that
+saving was priced on, as one number: the tokens a start-context card says
+leave each start, or the observed cost (USD at list price) a price card's
+saving is a share of; `null` when the card names no one figure (a card
+whose saving adds several parts, or a workflow card). `/api/report.json`
+carries it too; the Markdown, HTML and CSV reports do not show it. `key` (additive) is a
 deterministic, URL-safe id for this recommendation: `id` alone repeats
 across agent types (the same rule can fire once per subagent type), so
 `key` adds a slug of `agent_type` when one is set, and stays the same
@@ -892,6 +919,45 @@ project, or `null`) and `ignored_before` (`{"ignored_at", "changes":
 suggests something else, so it shows again; else `null`). The list
 itself is never filtered, and `/api/report.json` and the CLI reports
 carry no ignore fields.
+
+### `GET /api/recommendations/prompt`
+
+One prompt for a project's open fixes. Query: the same window as
+`GET /api/recommendations`, and `project`, which is required (`400` when
+it is missing or matches no project).
+
+`data`: `{"prompt", "files": [{"file", "fixes"}, ...], "several", "other",
+"cards", "keys", "left_out": {"fixed", "info", "unconfirmed", "managed", "trial"}}`. `prompt` has
+one opening line (with a second sentence when a fix sits under a file in
+`~/.claude`, which every project reads), then each fix's own `prompt` (as in
+`/api/recommendations`) minus the closing a setting change ends with (its
+"show me the diff" and restart lines), the restart reminder, or the
+question about where a standing rule applies, under a `## <file>` header
+line per file, files in the order the cards come, then one shared closing
+that states those once. A workflow fix keeps its own "show me ..." line,
+which the shared closing's one diff per file covers. A prompt two cards
+share appears once, and a workflow card whose files are "A or B" sits
+under the matching exact file when there is one. Groups that are no file
+(`## No file`, `## Other`) come last. Fixes are counted in one
+unit throughout: a fix is one prompt as the bundle states it (a prompt
+two cards share is one fix). `files` lists only the groups that name one
+file (a path, or an "A or B" pair of paths), with the number of fixes
+under each. `several` counts the fixes under the groups that span several
+files (a kind of file, such as the hook scripts) or set a standing rule
+(the CLAUDE.md that Claude asks about); `other` counts the fixes under
+the group with no file to edit. The three do not overlap: every fix in
+the prompt is in exactly one of them. `cards` counts the cards that
+contributed, and `keys` names them (their `key`, in the order they came), so a
+copy of the prompt can be recorded against them (`POST
+/api/recommendations/marks`, mark `bundle`).
+`left_out` counts the cards with at least one fix left out for each
+reason, so a card can count in both `cards` and `left_out`: its fix has
+landed (the `fixed` variant, which the browser never sees), it is shown
+for information only (a change that isn't safe to make without checking
+first), it is an unconfirmed change, it is a managed setting, or it is a model
+change its card says to try first (`trial`: the main session's model and an
+agent's model). Ignored
+cards are left out and not counted. `prompt` is `""` when nothing is open.
 
 ### `POST /api/recommendations/ignore`
 
@@ -917,6 +983,37 @@ Stored in `<config_dir>/ignored-recommendations.json`.
 `data`: `{"keys", "ignored", "active_profile_id"}` (`null` when no
 profile has been applied).
 
+### `POST /api/recommendations/marks`
+
+Records what the dashboard did with recommendation cards, so a tuning export
+can say how the advice was used. Query: the same window and `project` as
+`GET /api/recommendations`; the marks are kept for that view (the project, or
+every project).
+
+Body: `{"mark": "shown" | "copied" | "bundle", "keys": [str, ...]}`; both are
+required and no other field is accepted. `shown`: the cards' titles were drawn
+on a page that was open, while its tab was visible (the To do list on Actions
+› Recommendations, and the lead card of an Overview row). `copied`: a button
+copied the card's own prompt or command, and the copy worked. `bundle`: the
+project's all-fixes prompt (`GET /api/recommendations/prompt`, whose `keys`
+name the cards it holds) was copied. A copy marks the card shown too. `keys`
+holds up to 100 recommendation `key`s (`[a-z0-9._:-]`), and at least one
+unless `mark` is `shown`. `400` when the body isn't that shape. A key that
+this window's list does not hold is skipped, not an error: the page sends what
+it drew, and the report may have been rebuilt since.
+
+A `shown` mark then checks the view's other cards: one marked before that the
+list no longer holds, whose settings the store has a record of, has
+**landed** when every setting it names has moved since it was first shown and
+stayed moved in the view's config snapshots. The result (`landed_at`, and
+whether the settings hold the card's own values) is kept with the card; a
+card marked again, or whose setting moves back, is no longer landed. The
+check runs again only when the store or the list has changed.
+
+`data`: `{"mark", "recorded"}` (how many of the keys were recorded). The
+route writes the dashboard's store and nothing else: no file in
+`<config_dir>`, no Claude Code setting. No route returns what it stored.
+
 ### `GET /api/diagnostics`
 
 The report's parse-quality counters (`ReportModel.diagnostics`) as one
@@ -939,6 +1036,22 @@ value `working` or `needs attention`. With a `project`, the counters
 count that project's sessions, but these two rows still describe the
 whole machine: the hook and the statusline are not per project.
 
+The last row, `older_sessions`, is there only when some session of the
+window holds a digest an older parser wrote, whose transcript Claude Code
+has deleted: the newer figures leave that session out. Its value is
+`"<n> of <m>"` (sessions read by an older version, of the window's sessions
+with a main transcript; the report's `meta.older_sessions` and
+`meta.sessions`) and its meaning is one sentence saying so. With a
+`project`, `n` and `m` are that project's. While the watcher's first scan
+runs (`/api/health` says `starting`) the row is left out, since an older
+session's transcript may still be on disk and about to be read again.
+
+The command-line report's `meta.sessions_left_out` (in `--json`, and as one
+line in the Markdown and HTML meta list) is how many sessions of the window
+its figures leave out: the dashboard's database holds them and their
+transcripts were not found. It is `0` when none is missing, when there is no
+database, and always in `/api/report`, which reads the database itself.
+
 ### `GET /api/profiles`
 
 Every profile the service knows about (v0.3): the eight shipped
@@ -948,7 +1061,18 @@ the store) plus every user profile written under
 watcher's `_scan_profiles`), each tagged with which of the two it came
 from.
 
-`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "suggested_profile_id": str|null, "active_profile_id": str|null, "active_profile_name": str|null}`.
+`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null, "problem": str|null}, ...], "active_profile_id": str|null, "active_profile_name": str|null}`.
+
+`problem` is `null` unless a user profile's file fails the checks. Then it
+is the same message `GET /api/profiles/<id>`'s `409` gives, and Setup ›
+Profiles shows it on the card in place of the summary and the button. Such
+a file is listed whether or not the store has a row for it (the watcher
+never ingests one that fails): its `id` and `name` are then the file name
+without `.toml`, and `updated_at` is `null`. A row whose file is deleted is
+dropped on the watcher's next tick.
+
+The list needs no report, so it answers at once and ignores `window` and
+`project`. The suggestion has its own route, below.
 
 A catalogue entry's `archetype`/`for` come straight from its shipped
 TOML document; `tasks` is `for` normalised to the capture task
@@ -958,13 +1082,28 @@ none), the form `POST /api/whatif`'s `task` takes. A user entry never
 carries them (the `profiles` table
 only indexes `id`/`name`/`updated_at` — no `toml_path`, never
 API-returned). `updated_at` is `null` for a catalogue entry (nothing to
-timestamp). `suggested_profile_id` is the latest recorded baseline's own
-`suggested_profile` field (`null` if no baseline has been captured yet),
-so the UI can mark that entry in the list without a second round trip.
-`active_profile_id` is the profile `apply <profile>` last marked active
+timestamp). `active_profile_id` is the profile `apply <profile>` last marked active
 (`<config_dir>/active-profile`), `null` when none has been; ignored
 recommendations are kept under it. `active_profile_name` is its name
 (its id when it's no longer in the list).
+
+### `GET /api/profile-suggestion`
+
+The profile to suggest for a window and project, and why. Worked out live
+from the report for that window and project (`baseline.suggest_for_model`: the
+rule `init` and `baseline` store, run on that report's tables), so a cold call
+waits for the report build the page asks for anyway; the profile list is a
+route of its own so it never waits.
+
+Query: the usual `window` and `project` (see "Filtering by project"); an
+unknown project or window is a `400`.
+
+`data`: `{"suggested_profile_id": str|null, "suggested_reason": str|null}`.
+`suggested_reason` is the one plain sentence saying what decided it (for
+example "19 of 78 sessions in this window ran a workflow script."); the UI
+marks that entry in the list and shows the sentence under it. Both are `null`
+when the view has fewer than `baseline.SUGGEST_MIN_SESSIONS` (5) sessions. The
+stored baseline record is not read here: `/api/baseline` still returns it.
 
 ### `GET /api/profile-schema`
 
@@ -972,9 +1111,20 @@ Every key a profile may set, for the dashboard's profile form.
 
 `data`: `{"settings": [Lever, ...], "agents": [Lever, ...], "env": [str, ...], "archetypes": [str, ...], "scopes": [{"key", "label"}, ...]}`,
 where a `Lever` is `{"key", "label", "kind", "values", "min", "max", "description", "tradeoff"}`.
-`kind` is `str`, `enum`, `int`, `bool` or `list[str]`; `values` is the
+`kind` is `str`, `enum`, `int`, `bool`, `list[str]`, `map[str,bool]`,
+`map[str,enum]` or `map[str,model]`; `values` is the
 allowed list for an `enum` (else `null`), `min`/`max` the range for an
-`int`. `label`, `description` and `tradeoff` come from
+`int`. `modelSettings` is the one `map[str,model]` lever: a table of model
+id to that model's own `effortLevel` (`low`, `medium`, `high` or `xhigh`)
+and `autoCompactWindow` (`"auto"`, or a whole number from 100,000 to
+1,000,000), the two keys of `profiles.schema.MODEL_SETTINGS_ALLOWLIST`
+(the second has the schema's `int|auto` kind). The route lists
+`modelSettings` among `settings` with the label "Per-model settings" and
+`values`, `min` and `max` of `null`; it does not list those two sub-keys,
+so `int|auto` is never returned here. The dashboard's profile form has no
+box for `modelSettings`: it keeps the one in the profile it starts from and
+shows it as one read-only line ("Per-model settings: claude-opus-5-5 (effortLevel: low)"); "Edit as JSON instead"
+changes it. `label`, `description` and `tradeoff` come from
 `fixes.LEVER_LABELS`/`fixes.SETTING_TEXT`, the same text the
 recommendation explainers use. `env` lists the environment variable
 names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
@@ -982,11 +1132,24 @@ names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
 ### `GET /api/profiles/<id>`
 
 One profile's contents. `404` if `<id>` names neither a catalogue id
-nor an existing `<config_dir>/profiles/<id>.toml`.
+nor an existing `<config_dir>/profiles/<id>.toml`. `409` (`conflict`) when
+the profile's saved file exists but no longer passes the checks; the
+message says why and names the file to fix or delete, in "ClaudeGlass's
+profiles folder (~/.claude/claudeglass/profiles by default)", never the
+real path. A file that isn't valid TOML gives the same `409`.
 
-`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
-`setting_count` counts settings, agent keys and environment variables
-together.
+`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "own_agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
+`roles` is the profile's `[roles.<role>]` tables as written (the only
+role is `writer`, the agent that writes code). `agents` is as resolved
+(`profiles.roles.resolve`): the profile's own agent tables, plus each
+role's keys on every one of the user's agents the latest config snapshot
+records (user and project agents together) that is named like a writer
+and can edit files. A role with no such agent adds nothing, and so does
+a role when no snapshot has recorded any agents. `setting_count` counts
+settings, the resolved agent keys and environment variables together.
+`own_agents` is the profile's own `[agents.<name>]` tables as written,
+with no role folded in. The editor's "Start from" copies `own_agents` and
+`roles`, so a copy keeps a role as a role.
 
 ### `GET /api/profiles/<id>/diff`
 
@@ -999,10 +1162,16 @@ service never calls `apply`; it renders the diff and the command"). A
 store with no snapshot at all diffs against an empty effective config
 (nothing currently set, nothing managed) and says so in `notes`, rather
 than erroring. `404` if `<id>` names neither a catalogue id nor an
-existing `<config_dir>/profiles/<id>.toml`.
+existing `<config_dir>/profiles/<id>.toml`. `409` (`conflict`) when the
+profile's saved file exists but no longer passes the checks; the message
+says why and names the file to fix or delete.
 
 Query: `scope` — one of `user` (default), `project-local`, `repo` (same
-three scopes `profiles.diff`/`apply` use); `400` for anything else. This
+three scopes `profiles.diff`/`apply` use); `400` for anything else.
+`project` (additive, see "Filtering by project") reads the picked project's
+own newest snapshot for "now", the agents the roles go to and what wins over
+a change, as `/api/profile-goals` does; without it, the machine's newest
+snapshot. An unknown project is a `400`. This
 route never accepts a client-supplied project directory — doing so
 would put a raw filesystem path in the response body, which this
 service's privacy rule forbids regardless of who supplied it — so a
@@ -1010,16 +1179,57 @@ service's privacy rule forbids regardless of who supplied it — so a
 `--project-dir`; fill it in yourself when you run the command.
 
 `data`: `{"profile_id": str, "scope": str, "diff": str, "settings": [DiffRow, ...], "agents": [DiffRow, ...], "env": [DiffRow, ...], "apply_command": str, "dry_run_command": str, "launch_command": str, "prompt": str, "notes": [str, ...]}`,
-where a `DiffRow` is `{"key", "setting", "agent", "label", "description", "where", "current_value", "current_provenance", "proposed_value", "target_file", "managed"}`
+where a `DiffRow` is `{"key", "setting", "agent", "model", "role", "label", "description", "where", "overridden_by", "current_value", "current_provenance", "proposed_value", "target_file", "managed", "recorded"}`
 (`profiles.diff.DiffRow`'s own fields, split by key prefix into the
 three lists rather than left as one flat `rows` array — `settings.*` /
 `agents.<name>.*` / `env.*`). The display fields: `setting` is the key
 without its prefix (dotted agent keys such as `experimental.cacheTtl`
 stay whole), `agent` the agent's name for an `agents.*` row (else
-`null`), `label`/`description` its plain name and what it controls, and
+`null`), `role` `"writer"` when the row's key came from the profile's
+`[roles.writer]` table rather than from an `[agents.<name>]` table of
+its own (else `null`). A profile's `modelSettings` gives one `settings` row
+per model and key, keyed `settings.modelSettings.<id>.<key>` (a model id has
+no dot): its `setting` is `modelSettings.<key>` (`modelSettings.effortLevel`
+or `modelSettings.autoCompactWindow`), `model` is the id (else `null`),
+and `label`/`description` are the "for one model" texts. `recorded` is
+`false` when the snapshot has an entry for that model that lacks the key, so
+`current_value` `null` does not mean "not set": the config snapshot keeps a
+model's `effortLevel` and nothing else of its entry, so this is every
+`modelSettings.autoCompactWindow` row of a model that has an entry. The
+dashboard writes "not recorded" under "Now" for such a row, and `prompt`
+says "(now: not recorded)" and `diff` "not recorded" for it. It is `true` for
+every other row, including a model with no entry at all (nothing is set
+there). At user scope it is also `false` for an agent's rows when a project
+agent of the same name hides the user's: the snapshot holds only the project
+agent's values, so `current_value` is `null` there and the row is never
+"Already set". `label`/`description` its plain name and what it controls, and
 `where` the file the change is written to under the chosen `scope`
-(`fixes.profile_change_where`). `target_file` is where the key is set
+(`fixes.profile_change_where`). `overridden_by` is one plain sentence saying
+what wins over the change, or `null` (`fixes.profile_overridden_by`): a
+project file ranking above the target file that sets the key too (only when a
+`project` is asked for; without one the snapshot is whichever project's took
+it), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` over `autoCompactWindow`,
+`CLAUDE_CODE_EFFORT_LEVEL` over `effortLevel` and over a model's own
+`modelSettings.<id>.effortLevel` row, `ANTHROPIC_MODEL` over `model`, models
+that have an effort level of their own (`modelSettings`) over `effortLevel`,
+or, at the `user` scope, the fact that Opus 5.5 and later ignore a user-level
+`effortLevel`. The dashboard adds
+it to the "Set in" cell after `where`. `target_file` is where the key is set
 today.
+
+A profile's roles are resolved against the agents the latest snapshot
+records at the chosen `scope` (the `user` agents for `user`, the
+`project` agents for `project-local` and `repo`), so the rows, the diff
+and the prompt name the user's own agent. `notes` then says, in one
+sentence each: that no agent at this scope is named like a writer and
+can edit files, so no agent file changes (with, when the other scope has
+one, which target to pick instead); that several agents are named like a
+writer and each gets the changes; or, when the snapshot records no
+agents, that the user's agents have not been recorded yet and so no
+agent file is listed. A `project-local` or `repo` scope with no `project`
+picked cannot say which project's agents the command will see, so the
+role's keys are left out and the only role note asks for one project to
+be picked; with `project`, that project's own agents are read.
 
 `apply_command`/`launch_command` are the two lines
 `profiles.diff.apply_command` returns, split apart — the exact
@@ -1043,12 +1253,12 @@ the config hook records only the agents of the project a session
 started in, so the newest snapshot alone would show another project's
 agents as not set.
 
-This diff, and `POST /api/profiles/from-current`, always read the
-machine's newest snapshot and take no `project`: a profile is applied to
+`POST /api/profiles/from-current` always reads the machine's newest
+snapshot and takes no `project`: a profile is applied to
 your user settings (or to a project folder you name when you run the
-command), whichever project the dashboard is showing. The routes that
-judge a window do follow a picked project: with `project`,
-`/api/profile-goals`, `/api/quick-actions`, `/api/quick-actions/<id>` and
+command), whichever project the dashboard is showing. This diff, and the
+routes that judge a window, follow a picked project: with `project`,
+`/api/profiles/<id>/diff`, `/api/profile-goals`, `/api/quick-actions`, `/api/quick-actions/<id>` and
 `POST /api/whatif` read the picked project's own newest snapshot for
 "in force now" (the settings, and the agents widened over that project's
 snapshots only), as the report's own advice does
@@ -1118,7 +1328,17 @@ changes would save over the window, at list price: the largest
 recommendation it draws on, plus the playbook's habits that no
 recommendation already covers (each one's own total over the window, the
 playbook's `saving_total`). `saving` says that in the billing
-mode.
+mode and names where it comes from: "..., most of it from <part>" when that
+part is over half the total, else "..., the largest part from <part>", the
+part being a recommendation's title (as the card "<title>") or "the Work habits
+playbook" (with "(none of it from rework)" when the rework headline leads).
+It starts "At most" when the card part of the total, the largest
+recommendation group, has an estimate that starts "At most". The `models` and `habits`
+checks leave out a recommendation you ignored: `habits` by its key, `models`
+by the change it suggested (value included, so a new value comes back). The
+`claude-md` check's figure is the file as it is today, estimated from its
+characters; the `spawn-shared-claude-md` card's is the average per spawn over
+the window, as Claude Code sent it.
 
 ### `GET /api/quick-actions/<id>`
 
@@ -1275,6 +1495,10 @@ name (`"bugfix"` to `"Bug fix"`, from `capture_catalogue.TASK_LABELS`),
 `task` is the one drafted (the one asked for when it's there, else the
 first with a cheaper setup) and `note` says what was found; other goals
 return `[]`, `{}`, `null` and `null`.
+Any goal leaves out an agent no profile can name: one whose name the
+agent-name rule refuses (counted in one sentence added to `note`, never
+named) and a plugin's agent (`plugin:agent`, left out without a word, as its
+plugin owns its file).
 A candidate is ticked only when the data supports it; the main model is
 never pre-ticked. The goals that start from recommendations
 (`recommendations`, `subagents`, `models`) leave out the ones ignored in
@@ -1288,6 +1512,38 @@ row; for `tasks`, its `saving_usd` and `effect_text` are then scaled to
 that task's own share of the window (`habits_by_task`, or the agent's
 task share of its own cost for an agent candidate) — `saving_usd` is
 `null` and `basis` says why when there's no clean share to scale by.
+When the model the cheaper setup ran on already has its own effort level
+in `modelSettings` (matched by its canonical id, so a dated, `[1m]`, Bedrock or
+Vertex spelling of either is the same model, or by a bare family alias; a key
+the profile schema refuses is never reused; and unless
+`CLAUDE_CODE_EFFORT_LEVEL` is set, which beats every model's entry), `tasks`
+drafts a `modelSettings` candidate in place of the `effortLevel` one: `key`
+`"modelSettings"`, `agent` `null`, `label` "Per-model settings", and a
+`value` shaped `{<model id as written in the settings file>: {"effortLevel":
+<the cheaper effort>}}`. It is ticked by the same rule as the plain
+`effortLevel`. Its `now` is the same shape, holding only that model's
+current `effortLevel` (not every model's entry), and its `estimate` is a row
+that is not simulated ("This change isn't simulated."). Its `tradeoff` is the
+`effortLevel` one's. In `profile`, the
+ticked `modelSettings` candidates are merged model by model.
+The `thinking` goal drafts the main session's level the same way for the
+model it ran on (`model_swap_by_agent_type`'s observed model, the first one
+of a mixed row), keyed by that model's canonical id (`claude-opus-5-5` for
+`us.anthropic.claude-opus-5-5-v1:0`, `claude-opus-5-5@20260101` or
+`claude-opus-5-5[1m]`; `claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
+or by the model's existing entry as written. `now` is that model's own level,
+so a top-level `effortLevel` does not count as already in effect. Without a
+recorded model, with a name that has no canonical id (a gateway's own name),
+or while `CLAUDE_CODE_EFFORT_LEVEL` is set, it drafts `effortLevel`.
+It drafts nothing when the settings already give that model `low` or
+`medium`, or a managed file sets its level (`main_effort_reading`, which
+reads `effective_provenance`: `draft(..., provenance=)`, passed by the goal
+route and the CLI). When a project, local or project-shared file's flat
+`effortLevel` is what decides, it drafts that flat level, and the evidence
+adds "This project's <file> sets effortLevel, which wins over a model's own
+level, so apply this to that file."
+While `ANTHROPIC_MODEL` is set, the `models` goal drafts no change to the main
+session's model, as the variable picks it.
 `profile` holds the ticked changes and `whatif` their combined
 estimate, scaled the same way for `tasks`. `current` returns no
 candidates (`from_current: true`): the dashboard saves your current
@@ -1456,13 +1712,17 @@ same count is used on both sides of a comparison.
 
 `without` is what the sessions after the change would have cost
 without it (`counterfactual.py`), or `null` with fewer than
-`min_sessions` sessions after it. `fidelity` says how:
+`min_sessions` sessions after it. It is also `null` for an agent's
+start-context keys (see below) when the agent has fewer than 5 spawns on
+one model family on a side, or when the change names any other key.
+`fidelity` says how:
 
 | `fidelity` | For | How |
 |---|---|---|
-| `repriced` | `model`, `fastMode` | The same replies at the old model's prices, or with fast mode the other way. An old model that wasn't set is the one the sessions before ran on. |
+| `repriced` | `model`, `fastMode` | The same replies at the old model's prices, or with fast mode the other way. An old model that wasn't set is the one the sessions before ran on. An agent's `model` is priced only on the runs of that agent its agent file decides: a run a spawn or a workflow script gave a model is in neither figure, and `basis` says how many of the agent's runs were read. With none left the row is zero and says the change has not changed what you paid. The main session's `model` is priced only on the sessions after the change that ran on the model it sets, leaving out a project whose sessions before it ran none on the old one, and `basis` says how many were read. With none left its row is zero too. |
 | `simulated` | cache lifetime keys; an `autoCompactWindow` the change raised | The same replies replayed under the old lifetime, or the old, smaller window. A lowered window can't be undone: its compactions happened. |
 | `approximate` | a CLAUDE.md size change, MCP servers, plugins, skills | The context the change removed or added, carried on every main-session reply. |
+| `approximate` | an agent's `tools`, `disallowedTools`, `omitClaudeMd`, `skills`, `mcpServers` | The drop in median context at the start of that agent's own spawns, from before the change to after it, on the one model family both sides ran on, carried on every reply of each spawn after the change. `null` with under 5 spawns on that family on a side, and when the change names any other key. |
 | `before` | anything else, and any change to several settings at once | Each session after the change at the cost per reply of the sessions before it that did the same kind of work. |
 
 `paid_usd` and `without_usd` are list prices over the whole of each
@@ -1536,15 +1796,21 @@ prediction an earlier version closed as `too_little_data`, once, because
 their windows were cut too short then. Such a prediction waits like any
 other unjudged one, and is dropped 90 days after it was made.
 
-`data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
+`data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "priced_on", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
 Newest prediction first. `verdict` is `null` until a matching change
 point closes the window enough to judge it, then one of the closed set
-`as_estimated`, `smaller`, `larger`, `opposite` or `too_little_data`
+`as_estimated`, `smaller`, `larger`, `opposite`, `too_little_data` or `not_measured`
 (`verdicts` lists them). `predicted_text`, `measured_text` and
 `verdict_text` are server-formatted, billing-mode-aware sentences
 (`backtest.present`) — the dashboard never formats a dollar amount or a
 verdict itself. `measured_usd`/`measured_text` stay `null` until
-judged. `judged_just_now` is how many predictions this call judged for
+judged; for a row with a `priced_on` the measured figure is the share of the
+estimate that came true on the work after the change, on the estimate's own
+scale. `priced_on` is the number the estimate was a share of when it was logged
+(the observed cost it repriced, or the tokens per start it takes out), `null`
+when the estimate named none. A row with one is judged on the work after the
+change by `outcomes.read_fix`, and calibration learns only from such rows
+([backtest](backtest.md#an-estimate-that-says-what-it-was-priced-on)). `judged_just_now` is how many predictions this call judged for
 the first time (a stale answer can be served while a change is worked
 out in the background, as with `/api/impact`).
 
@@ -1824,9 +2090,8 @@ this window".
 
 Some routes keep covering every project whichever one is picked:
 `/api/baseline` (the dashboard's "All time, all projects" chip beside
-the latest baseline) and `/api/recache`; `/api/profiles/<id>/diff` and
-`POST /api/profiles/from-current`, which read the machine's newest
-settings; and `/api/backtest`, which checks `project` and ignores it
+the latest baseline) and `/api/recache`; `POST /api/profiles/from-current`,
+which reads the machine's newest settings; and `/api/backtest`, which checks `project` and ignores it
 (the dashboard's "All projects" chip beside it says so while a project is
 picked). The hook and statusline rows of `/api/diagnostics` also stay
 machine-wide. The dashboard checks an unknown slug once with
@@ -1943,6 +2208,10 @@ Body: a JSON object with any of these keys:
 - `sample`: `100`, `50`, `25` or `10` (percent of sessions).
 - `until`: an ISO 8601 time in the future when capture switches
   itself off, or `""` for no end.
+- `tagger`: `claude` or `haiku` (who writes the tags).
+- `after`: `stop` (the default) or `light`: what happens when `until`
+  passes. `light` keeps a light sample of `task`, `level`, `size` and
+  `shift` in 1 session in 5, or fewer with a `sample` under 20, instead of stopping.
 
 Only from this machine: `403` unless the request comes from a
 loopback address, on top of the cross-site checks above (a service
@@ -1967,7 +2236,8 @@ cross-site checks above run first (`403 forbidden` for a cross-site
 request, `400 bad_request` for a wrong `Content-Type` — see "Cross-site
 protection"). `400` (`error.code: "bad_request"`) if the body is not a
 JSON object, or if the schema rejects an unknown key or
-an out-of-range value — the schema's own problem text, joined with
+an out-of-range value or an agent name that breaks the rule in
+docs/profiles.md — the schema's own problem text, joined with
 `"; "` (plan: "the schema rejects anything else so a profile can never
 promise an effect the harness cannot deliver"). `409`
 (`error.code: "conflict"`) if `id` names one of the eight shipped
@@ -2007,7 +2277,19 @@ Without it, a second save is `409` (`error.code: "conflict"`, message
 
 `data`: the `POST /api/profiles` result plus `skipped_managed`: the
 allowlisted setting names left out because managed settings control
-them. `201` on success.
+them, and `skipped_project_agents`: the names of agents that belong to one
+project (`effective_agents` source `project`), sorted, left out (`[]` when
+there are none), and `skipped_name_agents`: how many of the user's own
+agents with something to save were left out because the agent-name rule
+refuses their names (`0` when none; counted, never named, and a project
+agent with such a name is in neither field). Only the user's own agents (source `user`) are saved,
+each with the `model`, `effort`, `maxTurns` and `experimental.cacheTtl` it
+sets (`effective_agents` calls the last two `max_turns` and
+`experimental_cache_ttl`): `apply` looks for an agent's file in the user's
+folder at its default scope, so a project agent in the profile would get the
+whole profile refused. `modelSettings` is saved a model at a time, each
+model's entry checked on its own, so one the schema refuses (no effort level
+recorded, an id with a dot) drops only itself. `201` on success.
 
 ### `POST /api/whatif`
 
@@ -2026,7 +2308,7 @@ scaled to that task's share of the window (several tasks' shares add up),
 and a row with no per-task cost to scale by is not estimated. An unknown
 task is a `400`.
 
-`data`: `{"period", "rows": [{"key", "agent", "value", "saving_usd", "fidelity", "fidelity_text", "basis", "effect_text", "uncalibrated_usd", "uncalibrated_fidelity"}, ...], "total_usd", "total_text", "estimated", "not_estimated", "total_note"}`.
+`data`: `{"period", "rows": [{"key", "agent", "value", "saving_usd", "fidelity", "fidelity_text", "basis", "effect_text", "uncalibrated_usd", "uncalibrated_fidelity", "priced_on"}, ...], "total_usd", "total_text", "estimated", "not_estimated", "total_note"}`.
 `saving_usd` is `null` when a change is not estimated. `fidelity` says
 how it was worked out (`fidelity_text` in plain words) and `basis`
 explains it in a sentence: `"ceiling"` (a `model` change -- the same
@@ -2045,7 +2327,12 @@ of the turns it's read back from cache until re-sent, EST-P10),
 (not estimated) or `"calibrated"` (EST-P6: scaled by how this same kind
 of change actually turned out for you before, see below).
 `effect_text` and `total_text` are in the billing mode's units;
-`estimated`/`not_estimated` are counts of rows.
+`estimated`/`not_estimated` are counts of rows. `priced_on` is the number
+the row's saving is a share of -- the observed cost a `model`, cache-TTL or
+`autoCompactWindow` row reprices (a TTL row sums the agents it replays), the
+build cost after approved plans for `opusplan`, the CLAUDE.md tokens at each
+start for `omitClaudeMd` -- and `null` on every other row, on a row that was
+not estimated, and on a row scaled to a task's share (`?task=`).
 
 **EST-P6 calibration.** Once at least
 `backtest.MIN_JUDGED_FOR_CALIBRATION` (3) of your own past predictions
@@ -2062,11 +2349,14 @@ saving could be estimated is then appended to this tool's own
 `prediction-log.jsonl` (`config.append_prediction_log`) — always the
 *uncalibrated* estimate (`uncalibrated_usd`/`uncalibrated_fidelity`
 when present, `saving_usd`/`fidelity` otherwise), so calibrating an
-already-calibrated number never compounds. The dashboard sets this
+already-calibrated number never compounds. Each line also carries a
+`priced_on` key: the number the estimate is a share of, `null` when it names none
+(`config.append_prediction_log`'s `priced_on`). The dashboard sets this
 only for a change you mean to track, not for interactive "what if"
 exploration. A logged row reaches `GET /api/backtest` once the file
 watcher's next tick ingests it (`service.watcher._scan_predictions`)
-and `POST /api/predictions/seen` marks it shown.
+and `POST /api/predictions/seen` can mark it shown (the route is there;
+no dashboard page calls it).
 
 ### `POST /api/predictions/seen`
 

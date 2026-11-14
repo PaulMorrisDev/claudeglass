@@ -68,17 +68,17 @@ connect``):
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
   ``ExitPlanMode``, ``Agent`` and ``Workflow``) for coaching notes
   (``[capture] coaching`` has ``coaching_notes``): a short ``cg-coach``
-  note when a hint applies -- an agent or a workflow started in the
-  background by a session holding 150k tokens or more, where the reply
-  to each report it sends back reads all of that again
-  (``report_reread``, resting 30 minutes),
-  a message sent after a break that outlasted the prompt cache (a receipt
-  for the rewrite, ``cold_return``), a message asking how background work
+  note when a hint applies -- a message sent after a break that outlasted
+  the prompt cache (a receipt for the rewrite, ``cold_return``; not for a
+  go-ahead, a retry, an answer to Claude's question or a message with no
+  typed text), a message asking how background work
   is going while it still runs (``status_poll``), small change requests
-  sent one at a time (``drip_feed``), a huge paste, a large result, a plan
+  sent one at a time (``drip_feed``), a huge paste, a whole read of a large saved output (``quiet_output``, never inside an agent), a plan
   approved after a lot of planning, or a message sent in plan mode after a
   lot of planning (the note asks Claude to end the plan it submits with
-  the tip to approve it with a clear context). A tip
+  the tip to approve it with a clear context). The hints in the catalogue's
+  ``coaching.off_live`` (``capture_catalogue.LIVE_OFF_HINTS``) say nothing:
+  what is listed here is what each does once it is switched back on. A tip
   reaches you through
   Claude: the note's first sentence tells it to write the tip and its
   last line is the tip, word for word, so the reply carries it in every
@@ -96,7 +96,7 @@ connect``):
   (:func:`delivery`) the note alone carries the tip. An agent run that
   ended too big (``split_run``: Claude Code summarised its context
   part-way through, or it began from a brief of ``split_brief_chars``
-  characters or more) is never told to the subagent, whose notice never
+  characters or more, which a workflow agent's never counts) is never told to the subagent, whose notice never
   shows: ``SubagentStop`` records it, as counts under the session
   (:func:`keep_run`), and the main session is told once, at the next
   ``PostToolUse`` after an agent or workflow call (a foreground run has
@@ -114,12 +114,20 @@ connect``):
   call go out as one note, the capture note first, so a tip is the last
   line. While the ClaudeGlass mod is running for the session (its file
   ``<config-dir>/mod/present/<session id>.json`` is under 10 minutes old:
-  :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
-  own UI, so this hook neither works them out nor stamps them as shown
-  (a run that ended too big is still recorded, :func:`keep_run`, and a
+  :func:`_mod_file`) it shows the hints in ``mod.moved`` itself, in its
+  own UI (each when its file's ``shows`` lists the surface that serves it,
+  ``"hint"`` or ``"status"``, or has no ``shows``: an older mod), so this hook neither works them out nor stamps them as shown
+  (no run is recorded while ``split_run`` is off, :func:`keep_run`, and a
   tip to start fresh the mod showed rests ``plan_fresh_early`` for the
   cooldown, :func:`_mod_showed_fresh_start`); without the mod, nothing
-  changes.
+  changes. The hint decision and its write run under a claim on
+  ``coach-state.json`` (``coach-state.json.claim``, :func:`_claimed`); so do
+  the other writes to that file (:func:`keep_run`, :func:`keep_reply`,
+  :func:`feedback_note_for`). The claim covers only the decision and its
+  write: a call that finds it held skips the hint and its own upkeep (the
+  next call, or ``Stop``, catches up from the transcript), and capture, the
+  facts line and the reminder are unaffected. Parallel messages of a
+  session so draw one note per hint.
 - ``UserPromptSubmit``, for the ``/cg-feedback`` survey's items (``[capture]
   feedback``: :func:`feedback_note_for`), at any capture level and in every
   session ``[capture] projects`` leaves in. A message that starts
@@ -201,10 +209,13 @@ it can never block or break a session.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -403,11 +414,14 @@ def active_ids(catalogue: dict, capture: dict) -> tuple[str, ...]:
     return ids + tuple(i for i in catalogue["feedback_ids"] if i in feedback)
 
 
-def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: str = "claude") -> str:
+def build_note(
+    catalogue: dict, ids, scope: str, agent_type: str = "", tagger: str = "claude", source: str = ""
+) -> str:
     """The note for ``scope`` (``"main"`` or ``"subagent"``); ``""`` when
     none of ``ids`` asks anything there. While Haiku writes the tags
-    (``tagger``), the main note asks for no tag. Same text as
-    ``capture_catalogue.note_text``."""
+    (``tagger``), the main note asks for no tag. After a compaction
+    (``source`` ``compact``) the main note also carries each metric's
+    ``compact_line``. Same text as ``capture_catalogue.note_text``."""
     if scope == "subagent":
         # A subagent is asked for nothing: Haiku judges its run afterwards.
         return ""
@@ -420,7 +434,8 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: s
         (m.get("main_extra_untagged") or m["main_extra"]) if untagged else m["main_extra"] if main else m["sub_extra"]
         for m in enabled
     ]
-    codes = [m["id"] for m, line, x in zip(enabled, lines, extras) if line or x]
+    asks = [m.get("compact_line", "") if main and not untagged and source == "compact" else "" for m in enabled]
+    codes = [m["id"] for m, line, x, ask in zip(enabled, lines, extras, asks) if line or x or ask]
     if not codes:
         return ""
     text = catalogue["text"]
@@ -432,13 +447,14 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: s
     before_tag = [x for m, x in zip(enabled, extras) if x and main and m.get("extra_before_tag")]
     after_tag = [x for m, x in zip(enabled, extras) if x and not (main and m.get("extra_before_tag"))]
     out += before_tag
-    if any(lines):
+    if any(lines) or any(asks):
         if main:
             out.append(text["main_tag_intro"])
         else:
             keys = any(line for m, line in zip(enabled, lines) if m["id"] != "result")
             out.append(text["sub_tag_intro"].format(tag=text["sub_tag_with_keys"] if keys else text["sub_tag"]))
         out += [line for line in lines if line]
+        out += [ask for ask in asks if ask]
         if main:
             out.append(text["skip_key_line"])
     out += after_tag
@@ -632,18 +648,39 @@ def log_payload_keys(config_dir: Path, payload: dict, scope: str) -> None:
     _write_json(path, seen)
 
 
+#: What a light sample keeps after the time-box (``[capture] after =
+#: "light"``): these metrics, in at most this percent of sessions
+#: (``capture_catalogue.LIGHT_METRICS``/``LIGHT_SAMPLE``, held to them by a
+#: test: the hook can't import the package).
+LIGHT_METRICS = ("task", "level", "size", "shift")
+LIGHT_SAMPLE = 20
+
+
 def _capture_for(payload: dict, config: dict, now: datetime) -> dict | None:
     """The ``[capture]`` table when capture applies to this hook call:
     on, not past its end, this session sampled in, and the project not
-    left out. ``None`` otherwise."""
+    left out. Past its end that is the light sample, when ``after`` says to
+    keep one: the table with only :data:`LIGHT_METRICS` on, in no more than
+    :data:`LIGHT_SAMPLE` percent of sessions and with no feedback item.
+    ``None`` otherwise."""
     capture = config.get("capture")
     if not isinstance(capture, dict) or capture.get("level", "off") == "off":
         return None
     until = capture.get("until") or ""
     if until:
         stop = _parse_time(until)
-        if stop is None or now >= stop:
+        if stop is None:
             return None
+        if now >= stop:
+            if capture.get("after") != "light":
+                return None
+            capture = {
+                **capture,
+                "level": "custom",
+                "metrics": list(LIGHT_METRICS),
+                "sample": min(int(capture.get("sample", 100)), LIGHT_SAMPLE),
+                "feedback": [],
+            }
     if not sampled_in(str(payload.get("session_id") or ""), int(capture.get("sample", 100))):
         return None
     cwd = project_dir(payload)
@@ -762,7 +799,7 @@ def note_for(
         scheduled = catalogue["coaching"]["scheduled_task_prefix"]
         if scope == "main" and _scheduled_session(payload.get("transcript_path"), scheduled):
             return ""
-        return build_note(catalogue, ids, scope, agent_type, tagger_of(capture))
+        return build_note(catalogue, ids, scope, agent_type, tagger_of(capture), str(payload.get("source") or ""))
     if big:
         # A subagent's report carries no tag for the note's word to go in,
         # and nor does the main session's reply while Haiku writes the tags.
@@ -850,19 +887,143 @@ def _read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _write_json(path: Path, data: dict) -> None:
-    """Best-effort atomic write (a temp file, then ``os.replace``); a
-    clash with another hook call writing at the same moment loses one of
-    the two, which only means a hint may repeat."""
+#: How often :func:`_replace` tries a replace that Windows refuses, and how
+#: long it waits between tries: the other call's hold on the file is short.
+_REPLACE_TRIES = 20
+_REPLACE_WAIT_S = 0.002
+
+
+def _replace(tmp: Path, path: Path, tries: int = _REPLACE_TRIES, wait_s: float = _REPLACE_WAIT_S) -> bool:
+    """Moves ``tmp`` over ``path``; whether it landed. On Windows another
+    call that has ``path`` open refuses the replace (a ``PermissionError``)
+    until it lets go, so that error alone is tried again, up to ``tries``
+    times ``wait_s`` apart. Any other error, or the last refusal, gives up
+    and removes ``tmp``."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return True
+        except PermissionError:
+            if attempt + 1 < tries:
+                time.sleep(wait_s)
+        except OSError:
+            break
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return False
+
+
+def _write_json(path: Path, data: dict) -> bool:
+    """Best-effort atomic write (a temp file, then :func:`_replace`);
+    whether it landed. Every coach-state read-modify-write
+    (:func:`coaching_for`'s decision, :func:`keep_run`, :func:`keep_reply`,
+    :func:`feedback_note_for`) re-reads the file under :func:`_claimed` and
+    writes it whole, and a caller that finds the claim held skips its
+    write, so two hook calls never put back a copy that lacks the other's
+    change. A call that stamps a note it is about to give gives none when
+    the stamp did not land, so the hint is skipped rather than repeated;
+    upkeep-only writes ignore the result."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
     except OSError:
         try:
             tmp.unlink()
         except OSError:
             pass
+        return False
+    return _replace(tmp, path)
+
+
+#: A claim file older than this is left by a hook call that was killed
+#: before it released it, and is taken over.
+_CLAIM_STALE_S = 5.0
+#: How long a call waits for a claim another call holds, and how often it
+#: tries again: the holder's work (a transcript tail read) is short.
+_CLAIM_WAIT_S = 0.1
+_CLAIM_POLL_S = 0.005
+
+
+def _take_stale(claim: Path) -> bool:
+    """Whether the claim file was left by a call that was killed, and is
+    now gone so the claim can be made again. A claim whose mtime is within
+    :data:`_CLAIM_STALE_S` is left alone (``False``). An older one is moved
+    aside first and looked at again: if what was moved is fresh, another
+    call made a new claim in between, and it is put back (``False``). One
+    that is gone already is as good as taken (``True``); any other error
+    reads as held (``False``)."""
+    try:
+        if time.time() - claim.stat().st_mtime <= _CLAIM_STALE_S:
+            return False
+        grave = claim.with_name(f"{claim.name}.{os.getpid()}.{time.monotonic_ns()}.stale")
+        os.replace(claim, grave)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        if time.time() - grave.stat().st_mtime > _CLAIM_STALE_S:
+            return True
+        try:
+            os.link(grave, claim)
+        except OSError:
+            pass
+        return False
+    except OSError:
+        return False
+    finally:
+        try:
+            grave.unlink()
+        except OSError:
+            pass
+
+
+@contextmanager
+def _claimed(path: Path):
+    """Yields whether this call holds the claim on ``path`` (the state
+    file): ``<path>.claim`` created with ``O_EXCL``, waited for briefly,
+    never longer than :data:`_CLAIM_WAIT_S`. A claim older than :data:`_CLAIM_STALE_S` (its mtime) is taken over once
+    (:func:`_take_stale`). Calls in parallel messages of one session, or in
+    several sessions, share the state file; the one that holds the claim
+    reads it, decides and writes it whole, and the others skip their
+    decision (yield ``False``). A claim being deleted on Windows (a
+    ``PermissionError``) reads as held and is waited for the same way,
+    without the stale check. A claim that cannot be made for any other
+    reason (no folder yet) yields ``True``, so coaching is never silenced
+    by it. The claim is released at the end, an error ignored."""
+    claim = path.with_name(path.name + ".claim")
+    held = False
+    attempt = 0
+    deadline = None
+    while True:
+        try:
+            os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            held = True
+            break
+        except (FileExistsError, PermissionError) as error:
+            if attempt == 0 and isinstance(error, FileExistsError):
+                attempt = 1
+                if _take_stale(claim):
+                    continue
+            now = time.monotonic()
+            deadline = now + _CLAIM_WAIT_S if deadline is None else deadline
+            if now >= deadline:
+                yield False
+                return
+            time.sleep(_CLAIM_POLL_S)
+        except OSError:
+            yield True
+            return
+    try:
+        yield held
+    finally:
+        if held:
+            try:
+                claim.unlink()
+            except OSError:
+                pass
 
 
 def _number(value) -> float | None:
@@ -905,11 +1066,14 @@ _PLAIN_SESSION_ID = re.compile(r"[A-Za-z0-9-]+")
 _MOD_PRESENT: dict = {}
 
 
-def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> bool:
-    """Whether the ClaudeGlass mod is running for this session: its file
-    ``<config-dir>/mod/present/<session id>.json`` (``{"schema": 1,
-    "session_id": <the id>, "seen": <epoch seconds>}``) was refreshed within
-    ``mod.present_window_s`` (10 minutes) of now, either side. The mod
+def _mod_file(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> tuple | None:
+    """``(shows,)`` when the ClaudeGlass mod is running for this session,
+    else ``None``: its file ``<config-dir>/mod/present/<session id>.json``
+    (``{"schema": 1, "session_id": <the id>, "seen": <epoch seconds>,
+    "shows": [...]}``) was refreshed within ``mod.present_window_s`` (10
+    minutes) of now, either side. ``shows`` is what the mod has seen itself
+    draw (``"hint"``: the line under the prompt); ``None`` when the file has
+    no such key (an older mod). The mod
     refreshes it every minute while the session is open and, at the
     session's end, writes it once more with ``seen`` at 0 (the engine
     cannot delete a file; the dashboard's watcher removes files a day old).
@@ -922,7 +1086,7 @@ def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: flo
     leaves every note as it was). Never raises."""
     try:
         if not isinstance(session_id, str) or not _PLAIN_SESSION_ID.fullmatch(session_id):
-            return False
+            return None
         mod = catalogue["mod"]
         path = config_dir / mod["dir"] / mod["present_dir"] / f"{session_id}.json"
         stat = path.stat()
@@ -931,21 +1095,50 @@ def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: flo
             _MOD_PRESENT.clear()
             data = _read_json(path)
             ok = data.get("schema") == 1 and data.get("session_id") == session_id
-            _MOD_PRESENT[key] = _number(data.get("seen")) if ok else None
-        seen = _MOD_PRESENT[key]
-        return seen is not None and abs(now_ts - seen) <= mod["present_window_s"]
+            shows = data.get("shows")
+            shows = tuple(x for x in shows if isinstance(x, str)) if isinstance(shows, list) else None
+            _MOD_PRESENT[key] = (_number(data.get("seen")), shows) if ok else (None, None)
+        seen, shows = _MOD_PRESENT[key]
+        if seen is not None and abs(now_ts - seen) <= mod["present_window_s"]:
+            return (shows,)
+        return None
     except Exception:  # noqa: BLE001 - a presence fault must leave every note as it was
-        return False
+        return None
+
+
+#: The hints that are off live, for a catalogue that has no ``coaching.off_live``
+#: (an older one, beside this module after an install cut short): a test holds
+#: it equal to ``capture_catalogue.LIVE_OFF_HINTS``. An empty default would turn
+#: the hints that are off back on.
+_LIVE_OFF_FALLBACK = ("plan_fresh", "plan_fresh_early", "split_run", "quiet_output", "cold_return")
+
+
+def _off_live(coaching: dict):
+    """The hints that are off live: the catalogue's list, or
+    :data:`_LIVE_OFF_FALLBACK` when it has none."""
+    return coaching.get("off_live", _LIVE_OFF_FALLBACK)
 
 
 def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> frozenset:
     """The hints the mod delivers itself for this session
     (``capture_catalogue.MOVED_TO_MOD``, as the catalogue exports them),
     which the hook leaves out and does not stamp as shown; none when the
-    mod is not running for it."""
-    if not _mod_present(config_dir, catalogue, session_id, now_ts):
+    mod is not running for it. A mod that lists what it shows (``shows``)
+    takes each hint only when it lists the surface that serves it
+    (``mod.moved_on``: ``"hint"`` for the four hint-line hints, ``"status"``
+    for ``plan_fresh``): on Desktop the hint line is never drawn, ``shows``
+    stays empty and the hook keeps them. A file without ``shows`` (an older
+    mod) keeps the whole set moved."""
+    found = _mod_file(config_dir, catalogue, session_id, now_ts)
+    if found is None:
         return frozenset()
-    return frozenset(catalogue["mod"]["moved"])
+    shows = found[0]
+    mod = catalogue["mod"]
+    if shows is None:
+        return frozenset(mod["moved"])
+    # A catalogue without ``moved_on`` (an older one) names no surface: the hook keeps the hint.
+    moved_on = mod.get("moved_on", {})
+    return frozenset(hint for hint in mod["moved"] if moved_on.get(hint) in shows)
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
@@ -1441,6 +1634,43 @@ def _limit_stop(records: list[dict], at: float, prefixes: tuple[str, ...]) -> tu
         if moment is not None and (reset is None or moment > reset):
             reset = moment
     return found, reset
+
+
+#: A leading ``<system-reminder>`` block, or another app event tag
+#: (``<side-sessions-event>``), that Claude Code puts in front of what the
+#: user typed.
+_LEADING_EVENTS = re.compile(r"\A\s*(?:<(system-reminder|[a-z]+(?:-[a-z]+)*-event)>.*?</\1>\s*)+", re.DOTALL)
+
+
+def _asks_you(records: list[dict]) -> bool:
+    """Whether Claude's newest reply in ``records`` ends on a question to
+    the user: an ``AskUserQuestion`` call, or text that ends in a question
+    mark."""
+    last = next((r for r in reversed(records) if _is_reply(r)), None)
+    if last is None:
+        return False
+    blocks = _blocks(last)
+    if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion" for b in blocks):
+        return True
+    texts = [str(b.get("text") or "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+    return bool(texts) and texts[-1].rstrip().endswith("?")
+
+
+def _cold_skipped(prompt, records: list[dict], coaching: dict) -> bool:
+    """Whether a message is no new work, so the cold-return receipt (whose
+    advice is to ``/clear`` first) has nothing to say to it: it has no
+    typed text (a reminder or an app event alone, or a hook, system or task
+    notification), it is a go-ahead or a retry, or it answers a question
+    Claude asked. Only a leading reminder block is looked past, to what
+    follows it."""
+    if not isinstance(prompt, str):
+        return True
+    text = _LEADING_EVENTS.sub("", prompt, count=1).strip()
+    if not text or text.startswith(_not_typed_prefixes()) or _is_go(text, coaching):
+        return True
+    if len(text) <= coaching["cold_skip_max_chars"] and re.fullmatch(coaching["cold_skip_pattern"], text, re.IGNORECASE):
+        return True
+    return _asks_you(records)
 
 
 def _cold_hint(
@@ -2245,65 +2475,27 @@ def _typed_plan_hint(payload: dict, records: list[dict], coaching: dict, th: dic
     return _fresh_hint(path, waiting["chars"], th)
 
 
-def _quiet_hint(payload: dict, result_len: int, quiet_how: dict, th: dict) -> tuple[str, float, dict] | None:
-    """``quiet_output``: a result about ``quiet_output_tokens`` long, as
-    :func:`result_chars` measures it. A read already given a limit is left
-    alone. It rests per context: the main session and each subagent keep
-    their own stamp (``quiet_output:<agent id>``), as a subagent's big
-    result is no reason to stay quiet to you, or the other way round."""
+def _quiet_hint(payload: dict, result_len: int, coaching: dict, th: dict) -> tuple[str, float, dict] | None:
+    """``quiet_output``: a whole read, with no limit or offset, of a saved
+    output (a file under the session's ``tool-results`` or ``scratchpad``
+    folder, or a background task's output file: ``quiet_saved_pattern``)
+    about ``quiet_output_tokens`` long, as :func:`result_chars` measures
+    the read. Every later reply reads it again, and a search or a part of
+    it would have done. Never inside an agent: its note never shows and
+    the reads it makes whole are the ones its work needs. Any other big
+    result is left alone."""
+    if payload.get("agent_id") or str(payload.get("tool_name") or "") != "Read":
+        return None
     tokens = result_len / _CHARS_PER_TOKEN
     if tokens < th["quiet_output_tokens"]:
         return None
-    tool = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input")
-    if tool == "Read" and isinstance(tool_input, dict) and tool_input.get("limit"):
+    if not isinstance(tool_input, dict) or tool_input.get("limit") is not None or tool_input.get("offset") is not None:
         return None
-    agent_id = str(payload.get("agent_id") or "")
-    kind = f"quiet_output:{agent_id}" if agent_id else "quiet_output"
-    return kind, tokens, {"tokens": _k(tokens), "how": quiet_how.get(tool, quiet_how[""])}
-
-
-def _background_start(payload: dict, coaching: dict) -> bool:
-    """Whether a call to an agent or workflow tool sent the work to the
-    background, so its report comes back later as a message of its own:
-    the call asked for it (``run_in_background``), or the result says it
-    launched that way (``isAsync``, a status of ``async_launched``, a
-    workflow's ``taskType``, or the wording ``background_launch_pattern``
-    matches, as the ``status_poll`` hint reads a launch). Nothing of the
-    result is kept."""
-    tool_input = payload.get("tool_input")
-    if isinstance(tool_input, dict) and tool_input.get("run_in_background") is True:
-        return True
-    response = payload.get("tool_response")
-    limit = coaching["background_scan_chars"]
-    if isinstance(response, dict):
-        if response.get("isAsync") is True or response.get("status") == "async_launched":
-            return True
-        if response.get("taskType") == "local_workflow":
-            return True
-        head = _result_head(response, limit)
-    elif isinstance(response, str):
-        head = response[:limit]
-    elif isinstance(response, list):
-        head = _result_head({"content": response}, limit)
-    else:
-        return False
-    return re.search(coaching["background_launch_pattern"], head) is not None
-
-
-def _report_hint(payload: dict, state: dict, session: str, coaching: dict, th: dict) -> tuple[str, float, dict] | None:
-    """``report_reread``: an agent or workflow started in the background
-    while the main session holds ``report_reread_tokens`` or more. Each
-    report it sends back is answered by a reply that reads the whole
-    session again, so the note says what one such read is. The context is
-    the newest reply's, kept by :func:`remember_reply` just before; with
-    none kept, nothing is said."""
-    if not _background_start(payload, coaching):
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or re.search(coaching["quiet_saved_pattern"], file_path) is None:
         return None
-    kept = _stored_reply(state, session)
-    if kept is None or kept["ctx"] < th["report_reread_tokens"]:
-        return None
-    return "report_reread", kept["ctx"], {"ctx": _k(kept["ctx"])}
+    return "quiet_output", tokens, {"tokens": _k(tokens), "how": coaching["quiet_how"]["Read"]}
 
 
 def _agent_transcript(payload: dict) -> Path | None:
@@ -2344,12 +2536,14 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     next ``PostToolUse`` after an agent or workflow call, or the next
     background task's finishing message (:func:`_split_hint`). A run counts
     when Claude Code summarised its context part-way through, or when it
-    began from a brief of ``split_brief_chars`` characters or more. Only
+    began from a brief of ``split_brief_chars`` characters or more (not a
+    workflow agent's: its brief is its script's). Only
     counts by those two words are kept, under the session: nothing of the
-    run's type, brief or words. They are kept while the mod runs too: it
-    tells the run on the agent's row, so only :func:`coaching_for` leaves
-    it out then, and a run that ended too big before the mod stopped is
-    still there to be told. Returns whether the state changed."""
+    run's type, brief or words. They are kept whether or not the mod runs:
+    the mod never tells these runs. Nothing is kept while ``split_run`` is off live
+    (nothing reads the counts), and a run that finds the claim on the state
+    held (:func:`_claimed`) is not counted. Returns whether the state
+    changed."""
     if not _coaching_applies(payload, config):
         return False
     session_id = payload.get("session_id")
@@ -2358,6 +2552,9 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     if str(payload.get("agent_type") or "") in catalogue["skip_agent_types"]:
         return False
     coaching = catalogue["coaching"]
+    if "split_run" in _off_live(coaching):
+        # Nothing reads the counts while the hint is off.
+        return False
     personal = _read_json(config_dir / coaching["file"])
     if "split_run" in _hint_names(personal.get("muted")):
         return False
@@ -2366,22 +2563,27 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     if path is None:
         return False
     th = coaching_thresholds(coaching, config, personal)
+    brief, _relay, workflow = _agent_brief(_head(str(path), _AGENT_HEAD_BYTES))
     found = {
         "compaction": _compactions(str(path)) > 0,
-        "brief": len(_agent_brief(_head(str(path), _AGENT_HEAD_BYTES))[0]) >= th["split_brief_chars"],
+        # A workflow agent's brief is its script's, not the user's.
+        "brief": not workflow and len(brief) >= th["split_brief_chars"],
     }
     if not any(found.values()):
         return False
     state_path = config_dir / coaching["state_file"]
-    state = _read_json(state_path)
-    state.pop("agents", None)
-    row = _session_row(state, _session_key(session_id, config_dir), now.timestamp())
-    splits = row.get("splits") if isinstance(row.get("splits"), dict) else {}
-    for word, hit in found.items():
-        if hit:
-            splits[word] = int(_number(splits.get(word)) or 0) + 1
-    row["splits"] = splits
-    _write_json(state_path, state)
+    with _claimed(state_path) as held:
+        if not held:
+            return False
+        state = _read_json(state_path)
+        state.pop("agents", None)
+        row = _session_row(state, _session_key(session_id, config_dir), now.timestamp())
+        splits = row.get("splits") if isinstance(row.get("splits"), dict) else {}
+        for word, hit in found.items():
+            if hit:
+                splits[word] = int(_number(splits.get(word)) or 0) + 1
+        row["splits"] = splits
+        _write_json(state_path, state)
     return True
 
 
@@ -2412,8 +2614,10 @@ def keep_reply(
     context and cache lifetime in the coach state (:func:`remember_reply`)
     and prints nothing, so it runs in the background. A usage-limit line
     or an API error at the end of the turn is no reply, so the clock the
-    cold-return receipt runs on never restarts for one. Returns whether the
-    state changed."""
+    cold-return receipt runs on never restarts for one. A call that finds
+    the claim on the state held (:func:`_claimed`) keeps nothing: the next
+    ``PostToolUse`` or ``Stop`` remembers the reply from the transcript.
+    Returns whether the state changed."""
     if not _coaching_applies(payload, config):
         return False
     session_id = payload.get("session_id")
@@ -2421,10 +2625,13 @@ def keep_reply(
         return False
     now = now or datetime.now(timezone.utc)
     state_path = config_dir / catalogue["coaching"]["state_file"]
-    state = _read_json(state_path)
-    if not remember_reply(state, _session_key(session_id, config_dir), payload.get("transcript_path"), now.timestamp()):
-        return False
-    _write_json(state_path, state)
+    with _claimed(state_path) as held:
+        if not held:
+            return False
+        state = _read_json(state_path)
+        if not remember_reply(state, _session_key(session_id, config_dir), payload.get("transcript_path"), now.timestamp()):
+            return False
+        _write_json(state_path, state)
     return True
 
 
@@ -2450,6 +2657,22 @@ def coaching_for(
     result_len: int | None = None,
     tail: _TailReader | None = None,
 ) -> tuple[str, str]:
+    """:func:`_coaching_for`, which takes the claim on the coach state
+    (:func:`_claimed`) only for its decision and the write that follows.
+    The rest of the hook's work (capture, the facts line, the rating
+    reminder) is not part of this call and runs as it would."""
+    return _coaching_for(payload, config, catalogue, config_dir, now, result_len, tail)
+
+
+def _coaching_for(
+    payload: dict,
+    config: dict,
+    catalogue: dict,
+    config_dir: Path,
+    now: datetime | None = None,
+    result_len: int | None = None,
+    tail: _TailReader | None = None,
+) -> tuple[str, str]:
     """``(note, notice)`` for this hook call: the coaching note to add for
     Claude, and what to show you at once (Claude Code's ``systemMessage``;
     every hint that carries a tip has one), each ``""`` when there's none. At
@@ -2462,7 +2685,19 @@ def coaching_for(
     of a PostToolUse call when the caller already measured it. ``tail`` is
     the reader of the transcript's end the caller shares with the feedback
     items (:class:`_TailReader`); one is made when it is missing or reads
-    another file."""
+    another file.
+
+    Two phases. The first, unclaimed, reads a snapshot of the state and
+    works out the candidates from it (a hint that is off live, or that the
+    mod shows, costs nothing), and notes whether there is upkeep to do (the
+    old ``agents`` key, the newest reply's time). With no candidate and no
+    upkeep the call ends there without a claim. Otherwise the second takes
+    the claim (:func:`_claimed`), re-reads the state, redoes the upkeep,
+    works out ``split_run`` again from the fresh counts, gates and stamps,
+    and writes it whole. A call that finds the claim held draws no hint and
+    skips its upkeep: the next call, or ``Stop``'s :func:`keep_reply`,
+    catches up from the transcript. Parallel messages of one session so
+    draw one note per hint."""
     if not _coaching_applies(payload, config):
         return "", ""
     event = payload.get("hook_event_name")
@@ -2487,8 +2722,15 @@ def coaching_for(
     # neither worked out nor stamped here, so the rest the mod keeps is
     # the only one, and they are all there when the mod stops.
     moved = _moved(config_dir, catalogue, session_id, now_ts)
+    # What is off live is neither worked out nor stamped either.
+    off = moved | set(_off_live(coaching))
     # A run's counts used to be kept by agent id here; they are by session now.
-    dirty = state.pop("agents", None) is not None
+    upkeep = state.pop("agents", None) is not None
+
+    def split_now(fresh: dict):
+        return _split_hint(fresh, session, coaching, th)
+
+    remember = False
     candidates: list = []
     tool = str(payload.get("tool_name") or "")
     if event == "UserPromptSubmit":
@@ -2498,7 +2740,7 @@ def coaching_for(
         if not in_agent and isinstance(prompt, str) and prompt.lstrip().startswith(coaching["task_notification_prefix"]):
             # A background task finished: the next main-session hook after an
             # agent or workflow run that ended too big (``keep_run``).
-            candidates = [None if "split_run" in moved else _split_hint(state, session, coaching, th)]
+            candidates = [None if "split_run" in off else split_now]
         elif not in_agent and typed and isinstance(path, str) and path:
             records, replayed = (tail if tail is not None and tail.path == path else _TailReader(path)).get()
             if not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
@@ -2508,75 +2750,94 @@ def coaching_for(
                 ctx = last["ctx"] if last else next((_reply_ctx(r) for r in reversed(records) if _is_reply(r)), 0)
                 candidates = [
                     *([
-                        None if "plan_fresh" in moved else _typed_plan_hint(payload, records, coaching, th),
-                        _planning_hint(payload, records, coaching, th, now),
+                        None if "plan_fresh" in off else _typed_plan_hint(payload, records, coaching, th),
+                        None if "plan_fresh_early" in off else _planning_hint(payload, records, coaching, th, now),
                     ] if fresh else []),
-                    None if "drip_feed" in moved else _drip_hint(prompt, records, coaching, th, now, ctx),
-                    None if "big_paste" in moved else _paste_hint(prompt, th),
-                    None if "status_poll" in moved else _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
-                    None if "cold_return" in moved else _cold_hint(
+                    None if "drip_feed" in off else _drip_hint(prompt, records, coaching, th, now, ctx),
+                    None if "big_paste" in off else _paste_hint(prompt, th),
+                    None if "status_poll" in off else _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
+                    None if "cold_return" in off or _cold_skipped(prompt, records, coaching) else _cold_hint(
                         path, records, replayed, last, known, th, now_ts, tuple(coaching["limit_line_prefixes"])
                     ),
                 ]
     elif tool == "ExitPlanMode":
         if not in_agent:
-            dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
-            if personal.get("plan_fresh", True) is not False and "plan_fresh" not in moved:
+            remember = True
+            upkeep = remember_reply(state, session, payload.get("transcript_path"), now_ts) or upkeep
+            if personal.get("plan_fresh", True) is not False and "plan_fresh" not in off:
                 candidates = [_plan_hint(payload, th)]
     else:
         if not in_agent:
-            dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
+            remember = True
+            upkeep = remember_reply(state, session, payload.get("transcript_path"), now_ts) or upkeep
         if tool in catalogue["spawn_tools"]:
-            # No size hint on a report or a launch message. An agent or a
-            # workflow the main session started in the background gets
-            # the cost of reading its report instead; one that ended too
-            # big is told here (``split_run``) when the main session
-            # called it in the foreground, as it has ended by now.
-            if not in_agent:
-                if "report_reread" not in moved:
-                    candidates.append(_report_hint(payload, state, session, coaching, th))
-                if "split_run" not in moved:
-                    candidates.append(_split_hint(state, session, coaching, th))
-        else:
+            # No size hint on a report or a launch message. A run that
+            # ended too big is told here (``split_run``) when the main
+            # session called it in the foreground, as it has ended by now.
+            if not in_agent and "split_run" not in off:
+                candidates.append(split_now)
+        elif "quiet_output" not in off:
             if result_len is None:
                 result_len = result_chars(payload, catalogue)
-            candidates.append(_quiet_hint(payload, result_len, coaching["quiet_how"], th))
-    # How to do what a tip says depends on the app: a few words each tip fills in.
-    how = {key: variants["desktop" if desktop() else "terminal"] for key, variants in coaching["how"].items()}
-    for found in candidates:
-        if found is None:
-            continue
-        kind, stake, fields = found
-        hint = kind.split(":", 1)[0]
-        if hint in moved or hint in muted or not _gate(state, session, kind, stake, now_ts, th):
-            continue
-        if hint in _FRESH_START_HINTS and _mod_showed_fresh_start(
-            config_dir, catalogue, session_id, now_ts, th["cooldown_minutes"] * 60
-        ):
-            # The mod showed one of these and the hook doesn't stamp what it
-            # shows: rest this one for the cooldown, as a hook-shown one would.
-            continue
-        if hint == "cold_return":
-            # A receipt for one break: it rests half a day, however the context grows.
-            _stamp(state, session, kind, 0, now_ts, th, rest=th["cold_rest_hours"] * 3600, once=hint in once)
-        else:
-            _stamp(state, session, kind, stake, now_ts, th, once=hint in once)
-        if hint == "split_run":
-            # Told: the runs it was about are not told again, only later ones.
-            _session_row(state, session, now_ts).pop("splits", None)
-        if hint in _FRESH_START_HINTS:
-            # Resting the others for the cooldown, however much grows.
-            for other in _FRESH_START_HINTS:
-                if other != hint:
-                    _rest_beside(state, session, other, now_ts, th)
-        _write_json(state_path, state)
-        fields = {**how, **fields}
-        text = coaching["text"].get(hint) or ""
-        note = f"{coaching['marker']}{coaching['version']} {hint}\n{text.format(**fields)}" if text else ""
-        notice = coaching.get("notice", {}).get(hint, "")
-        return note, notice.format(**fields) if notice else ""
-    if dirty:
-        _write_json(state_path, state)
+            candidates.append(_quiet_hint(payload, result_len, coaching, th))
+    def hints_of(snapshot: dict) -> list:
+        """The candidates that can still speak, worked out against ``snapshot``."""
+        found = [c(snapshot) if callable(c) else c for c in candidates]
+        return [
+            c for c in found
+            if c is not None and c[0].split(":", 1)[0] not in off and c[0].split(":", 1)[0] not in muted
+        ]
+
+    # Nothing to say and nothing to keep up: no claim taken.
+    if not hints_of(state) and not upkeep:
+        return "", ""
+    with _claimed(state_path) as held:
+        if not held:
+            return "", ""
+        # The snapshot may be stale: decide on what is on disk now.
+        state = _read_json(state_path)
+        dirty = state.pop("agents", None) is not None
+        if remember:
+            dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
+        # How to do what a tip says depends on the app: a few words each tip fills in.
+        how = {
+            key: variants["desktop" if desktop() else "terminal"].replace("the plan in `<file>`", "the plan file")
+            for key, variants in coaching["how"].items()
+        }
+        for found in hints_of(state):
+            kind, stake, fields = found
+            hint = kind.split(":", 1)[0]
+            if not _gate(state, session, kind, stake, now_ts, th):
+                continue
+            if hint in _FRESH_START_HINTS and _mod_showed_fresh_start(
+                config_dir, catalogue, session_id, now_ts, th["cooldown_minutes"] * 60
+            ):
+                # The mod showed one of these and the hook doesn't stamp what it
+                # shows: rest this one for the cooldown, as a hook-shown one would.
+                continue
+            if hint == "cold_return":
+                # A receipt for one break: it rests half a day, however the context grows.
+                _stamp(state, session, kind, 0, now_ts, th, rest=th["cold_rest_hours"] * 3600, once=hint in once)
+            else:
+                _stamp(state, session, kind, stake, now_ts, th, once=hint in once)
+            if hint == "split_run":
+                # Told: the runs it was about are not told again, only later ones.
+                _session_row(state, session, now_ts).pop("splits", None)
+            if hint in _FRESH_START_HINTS:
+                # Resting the others for the cooldown, however much grows.
+                for other in _FRESH_START_HINTS:
+                    if other != hint:
+                        _rest_beside(state, session, other, now_ts, th)
+            if not _write_json(state_path, state):
+                # The stamp is lost: a note given now would come again.
+                return "", ""
+            fields = {**how, **fields}
+            text = coaching["text"].get(hint) or ""
+            note = f"{coaching['marker']}{coaching['version']} {hint}\n{text.format(**fields)}" if text else ""
+            notice = coaching.get("notice", {}).get(hint, "")
+            return note, notice.format(**fields) if notice else ""
+        if dirty:
+            _write_json(state_path, state)
     return "", ""
 
 
@@ -3032,7 +3293,9 @@ def feedback_note_for(
     line of its note, so it wins), nor with a message sent while Claude was
     still working, and the plan check wins over the reminder. A message
     you didn't type gets nothing. Writes ``coach-state.json`` when it
-    notes or learns something."""
+    notes or learns something, under :func:`_claimed`: a call that finds
+    the claim held notes nothing (the parallel call that holds it decides
+    the plan check and reminder for the burst)."""
     ids = feedback_ids(config)
     if not ids or payload.get("hook_event_name") != "UserPromptSubmit" or not _project_applies(payload, config):
         return ""
@@ -3056,25 +3319,38 @@ def feedback_note_for(
         return _facts_line(scan, plans, personal, coaching)
     feedback = coaching["feedback"]
     state_path = config_dir / coaching["state_file"]
-    state = _read_json(state_path)
-    session = _session_key(session_id, config_dir)
-    dirty = "plan_check" in ids and _learn_plan_check(state, scan, feedback, th, now_ts, config_dir)
-    note = ""
-    if not tipped and not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
-        gate = _feedback_state(state)
-        check = gate.get("plan_check")
-        resting = isinstance(check, dict) and (_number(check.get("off_until")) or 0) > now_ts
-        plan_id = None if "plan_check" not in ids or resting else _plan_check_due(prompt, scan, plans, coaching)
-        if plan_id is not None and not _noted_before(state, "plans", session, plan_id):
-            _note_made(state, "plans", session, plan_id)
-            note = _feedback_note(coaching, "plan_check", feedback["text"]["plan_check"])
-        elif "feedback_reminder" in ids:
-            # The reminder is the hook's alone: the mod shows no end-of-reply
-            # notes, so whether it runs changes nothing here.
-            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
-        dirty = dirty or bool(note)
-    if dirty:
-        _write_json(state_path, state)
+    # With no plan check to ask, a call whose reminder is not due (judged on a
+    # copy of the state, unclaimed) takes no claim and waits for nothing.
+    if "plan_check" not in ids and not _reminder_due(
+        scan, personal, th, coaching, copy.deepcopy(_read_json(state_path)), _session_key(session_id, config_dir),
+        now_ts, config_dir, session_id,
+    ):
+        return ""
+    # Claimed like the coaching decision (:func:`_claimed`): a call that finds it
+    # held leaves the plan check and the reminder to the one that holds it.
+    with _claimed(state_path) as held:
+        if not held:
+            return ""
+        state = _read_json(state_path)
+        session = _session_key(session_id, config_dir)
+        dirty = "plan_check" in ids and _learn_plan_check(state, scan, feedback, th, now_ts, config_dir)
+        note = ""
+        if not tipped and not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
+            gate = _feedback_state(state)
+            check = gate.get("plan_check")
+            resting = isinstance(check, dict) and (_number(check.get("off_until")) or 0) > now_ts
+            plan_id = None if "plan_check" not in ids or resting else _plan_check_due(prompt, scan, plans, coaching)
+            if plan_id is not None and not _noted_before(state, "plans", session, plan_id):
+                _note_made(state, "plans", session, plan_id)
+                note = _feedback_note(coaching, "plan_check", feedback["text"]["plan_check"])
+            elif "feedback_reminder" in ids:
+                # The reminder is the hook's alone: the mod shows no end-of-reply
+                # notes, so whether it runs changes nothing here.
+                note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
+            dirty = dirty or bool(note)
+        if dirty and not _write_json(state_path, state) and note:
+            # The stamp is lost: a note given now would come again.
+            return ""
     return note
 
 
@@ -4018,7 +4294,8 @@ def _session_records(path: str) -> list[dict]:
 def _model_tier(model: str, tiers) -> int:
     """The rank of ``model``'s family in ``tiers``, smallest first; -1 when
     it names none (``workstyle.model_tier``)."""
-    lowered = str(model).lower()
+    # Mythos is priced as Fable, so it ranks as Fable (workstyle._SAME_TIER_AS).
+    lowered = str(model).lower().replace("mythos", "fable")
     for rank, family in enumerate(tiers):
         if family in lowered:
             return rank
@@ -4381,24 +4658,75 @@ def agent_grounded(tag: str, facts: dict | None) -> str:
     return " ".join(words)
 
 
+#: The least buffer the pipe a worker reads its job from gets on Windows:
+#: the system's own is 4 KB, smaller than a turn's job, so the write would
+#: wait until the worker had started Python and read it.
+_JOB_PIPE_BYTES = 1 << 16
+
+
+def _job_pipe(size: int) -> tuple[int, int]:
+    """Windows: a pipe whose buffer holds ``size`` bytes, as ``(read file
+    descriptor, write handle)``. Raises when it can't be made."""
+    import _winapi
+    import msvcrt
+
+    read, write = _winapi.CreatePipe(None, max(_JOB_PIPE_BYTES, 2 * size))
+    try:
+        return msvcrt.open_osfhandle(read, os.O_RDONLY), write
+    except BaseException:
+        _winapi.CloseHandle(read)
+        _winapi.CloseHandle(write)
+        raise
+
+
 def spawn_judge(config_dir: Path, job: dict) -> None:
     """Hand ``job`` to a worker (the launcher with ``--judge``) that
     outlives this call, so the Stop hook returns at once and Haiku's
     answer still lands when Claude Code has moved on or, run with ``-p``,
-    exited."""
+    exited. The job goes through a pipe, never a file. On Windows the pipe
+    is made with a buffer that holds it (:func:`_job_pipe`), so the write
+    doesn't wait for the worker to start; the write still comes after the
+    worker has started, so a smaller buffer only waits as long as the
+    system's own would. A pipe that can't be made is the system's own."""
     import subprocess
 
-    options: dict = {"stdin": subprocess.PIPE, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    options: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
-        options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # A console of its own with no window, not DETACHED_PROCESS: a
+        # worker with no console at all gives any console program it starts
+        # a new, visible window -- a venv's python.exe is such a launcher.
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
     # -I -S as the hook itself runs: no user site or PYTHON* settings.
     launcher = Path(__file__).resolve().with_name(LAUNCHER_FILE)
     command = [sys.executable, "-I", "-S", str(launcher), "--judge", "--config-dir", str(config_dir)]
-    worker = subprocess.Popen(command, **options)
-    worker.stdin.write(json.dumps(job).encode("utf-8"))
-    worker.stdin.close()
+    data = json.dumps(job).encode("utf-8")
+    pipe = None
+    if _WINDOWS:
+        try:
+            pipe = _job_pipe(len(data))
+        except Exception:  # noqa: BLE001 - the system's own pipe instead
+            pipe = None
+    if pipe is None:
+        worker = subprocess.Popen(command, stdin=subprocess.PIPE, **options)
+        worker.stdin.write(data)
+        worker.stdin.close()
+        return
+    import _winapi
+
+    read, write = pipe
+    try:
+        subprocess.Popen(command, stdin=read, **options)
+    except BaseException:
+        _winapi.CloseHandle(write)
+        raise
+    finally:
+        os.close(read)
+    try:
+        _winapi.WriteFile(write, data)
+    finally:
+        _winapi.CloseHandle(write)
 
 
 def _claude_command() -> str | None:
@@ -4474,7 +4802,64 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
     return answer
 
 
-def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None, clock=None) -> dict:
+#: How long the judge is left alone after the ``claude`` command is found
+#: signed out. A call it answers ends it. There is no cheap sign-in check to
+#: wait on instead: the login is a file on one system and a keychain entry on
+#: another, and only starting the command shows it works. The wait is short
+#: so that a user who signs in is judged again within the hour.
+_SIGNED_OUT_WAIT_S = 3600.0
+
+
+def _judge_state_path(config_dir: Path, catalogue: dict) -> Path:
+    return config_dir / catalogue["coaching"]["state_file"]
+
+
+def _wait_to(row, now: float) -> bool:
+    """Whether the coach state's ``judge`` row holds a wait that is still to
+    end: an end past ``now`` and no more than :data:`_SIGNED_OUT_WAIT_S`
+    past it. One further off cannot be one this hook began (a clock put
+    right since, or a file that is wrong), and it would hold the judge for
+    as long as the error, so it counts as no wait. A number that is not
+    finite fails both tests, so it counts as none too."""
+    until = _number(row.get("until")) if isinstance(row, dict) else None
+    return until is not None and now < until <= now + _SIGNED_OUT_WAIT_S
+
+
+def _judge_waiting(config_dir: Path, catalogue: dict, now: float) -> bool:
+    """Whether the judge is in the wait a signed-out result began
+    (:func:`_judge_signed_out`). Read without the claim."""
+    return _wait_to(_read_json(_judge_state_path(config_dir, catalogue)).get("judge"), now)
+
+
+def _judge_signed_out(config_dir: Path, catalogue: dict, now: float) -> None:
+    """Begin the wait: ``judge.until`` in the coach state is an hour from
+    ``now``. A worker that finds the wait already begun (it was started
+    before another had found the command signed out) leaves it as it is."""
+    path = _judge_state_path(config_dir, catalogue)
+    with _claimed(path) as held:
+        if not held:
+            return
+        state = _read_json(path)
+        if _wait_to(state.get("judge"), now):
+            return
+        state["judge"] = {"until": now + _SIGNED_OUT_WAIT_S}
+        _write_json(path, state)
+
+
+def _judge_signed_in(config_dir: Path, catalogue: dict) -> None:
+    """A call the command answered: the wait, if any, is over."""
+    path = _judge_state_path(config_dir, catalogue)
+    if "judge" not in _read_json(path):
+        return
+    with _claimed(path) as held:
+        if not held:
+            return
+        state = _read_json(path)
+        if state.pop("judge", None) is not None:
+            _write_json(path, state)
+
+
+def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None, clock=None, now=None) -> dict:
     """Ask Haiku for ``job``'s tag (``ask``: :func:`ask_haiku`) and log
     the answer, or why there is none, in this month's tag file: the
     line written. Only the tag's words, the reply's id, what the call
@@ -4482,9 +4867,18 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
     run's job is the lean one the hook made: this first waits for the
     agent's transcript (``sleep`` and ``clock`` stand in for the time
     it waits by) and reads it (:func:`prepare_agent_job`), and a run with
-    nothing to judge writes no line (``{}``)."""
+    nothing to judge writes no line (``{}``).
+
+    After a call finds the ``claude`` command signed out, the command is not
+    started again for an hour (``now``, in seconds, stands in for the clock
+    the wait is kept by); a call the command answers ends it. A run that
+    comes while the judge waits is not judged and writes no line (``{}``),
+    and takes no claim: no call was made for it to count."""
     import subprocess
 
+    now = time.time() if now is None else now
+    if _judge_waiting(config_dir, catalogue, now):
+        return {}
     judge = catalogue["judge"]
     agent = job.get("kind") == "agent"
     if agent and "excerpt" not in job:
@@ -4512,9 +4906,11 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
         record["err"] = "timeout"
     except NoLogin:
         record["err"] = "no_login"
+        _judge_signed_out(config_dir, catalogue, now)
     except (OSError, ValueError):
         record["err"] = "failed"
     else:
+        _judge_signed_in(config_dir, catalogue)
         if agent:
             tag = judge_tag(answer.get("result"), job["keys"], judge, judge["agent"]["vocab"])
             # "retry=none" only says the run was no retry.
@@ -4546,8 +4942,7 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None, sleep=None
             record["model"] = model
     folder = config_dir / judge["dir"]
     folder.mkdir(parents=True, exist_ok=True)
-    with open(folder / f"{record['ts'][:7]}.jsonl", "a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+    append_line(folder / f"{record['ts'][:7]}.jsonl", json.dumps(record, separators=(",", ":")) + "\n")
     return record
 
 
@@ -4640,8 +5035,59 @@ def write_signal(config_dir: Path, catalogue: dict, record: dict) -> None:
     """Append ``record`` to this month's signal file, as one write."""
     folder = config_dir / catalogue["signals_dir"]
     folder.mkdir(parents=True, exist_ok=True)
-    with open(folder / f"{record['ts'][:7]}.jsonl", "a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+    append_line(folder / f"{record['ts'][:7]}.jsonl", json.dumps(record, separators=(",", ":")) + "\n")
+
+
+#: Whether the hook runs on Windows, where :func:`append_line` opens the file
+#: for appending only (a test sets it to try the other path).
+_WINDOWS = os.name == "nt"
+#: ``CreateFile``'s arguments for that: append access alone, so the system
+#: puts every write at the end of the file; every share mode, as ``open``
+#: leaves the file open to others (and to a delete, so a prune never fails);
+#: the file made when it isn't there.
+_FILE_APPEND_DATA = 0x0004
+_FILE_SHARE_ALL = 0x0007
+_OPEN_ALWAYS = 4
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
+def _append_windows(path: Path, data: bytes) -> bool:
+    """Write ``data`` at the end of ``path`` through a handle opened for
+    appending only. ``False`` when that handle could not be opened, so
+    nothing was written; ``True`` once it was, whatever the write did, so
+    the caller never writes the line a second time."""
+    try:
+        import _winapi
+
+        handle = _winapi.CreateFile(
+            str(path), _FILE_APPEND_DATA, _FILE_SHARE_ALL, 0, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, 0
+        )
+    except Exception:  # noqa: BLE001 - append_line falls back to open()
+        return False
+    try:
+        _winapi.WriteFile(handle, data)
+    except Exception:  # noqa: BLE001 - lost as a failed open() write would be; never written twice
+        pass
+    finally:
+        try:
+            _winapi.CloseHandle(handle)
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
+def append_line(path: Path, line: str) -> None:
+    """Append ``line`` (one JSON line and its ``\\n``) to ``path`` in one
+    write. Parallel hooks and workers append to the same file: on Windows
+    ``open(path, "a")`` moves to the end and then writes, so two of them can
+    write at the same place and a line is lost or two are mixed. There the
+    file is opened for appending only, which the system keeps whole
+    (:func:`_append_windows`), and ``open`` is used should that fail.
+    Elsewhere ``open(path, "a")`` already appends in one step."""
+    if _WINDOWS and _append_windows(path, line.encode("utf-8")):
+        return
+    with open(path, "a", encoding="utf-8", newline="\n") as handle:
+        handle.write(line)
 
 
 #: Claude Code's ``CLAUDE_CODE_ENTRYPOINT`` starts with this for a run

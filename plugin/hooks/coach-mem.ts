@@ -1,5 +1,5 @@
 import type { GlassRestState, GlassSettings, GlassSnap } from '../types'
-import { HOW, PATTERNS, THRESHOLDS, TIPS } from './generated/coaching.js'
+import { HOW, OFF, PATTERNS, THRESHOLDS, TIPS } from './generated/coaching.js'
 import { COPY } from './generated/copy.js'
 import {
   BACKGROUND_FORGET_S,
@@ -181,7 +181,8 @@ export function submitted(snap: GlassSnap, settings: GlassSettings, input: { tex
 
 /**
  * Whether a main-session call to a launching tool (Workflow) sent its work to the background: the call asked
- * for it, or its result says it launched that way (capture_hook._background_start).
+ * for it, or its result says it launched that way (the fields capture_hook._is_async_launch reads, or a
+ * workflow's taskType).
  */
 export function startedInBackground(input: Record<string, unknown>, output: unknown, text: string | undefined): boolean {
   if (input.run_in_background === true) return true
@@ -240,7 +241,7 @@ function limitOf(snap: GlassSnap): { stopped: boolean; reset: number | null } {
  * The one hint for the draft in the box now, or null (always null when coaching is
  * off or doesn't cover this project). In the capture hook's
  * order (drip_feed, big_paste, status_poll, cold_return) the first that
- * applies, isn't muted and isn't resting. A hint that was on screen stays
+ * applies, isn't muted or off (`OFF`) and isn't resting. A hint that was on screen stays
  * while it applies. When a new one is chosen it is stamped for the rest rule
  * and queued for the sensor (drainShown).
  */
@@ -268,7 +269,7 @@ export function chooseHint(view: View): Found | null {
       pollHint(draft.status, last, nowS, hasBackground(snap, nowS)),
       coldHint(last, nowS, compacted, limitOf(snap), th),
     ],
-    settings.muted,
+    [...settings.muted, ...OFF],
     rest,
     nowS,
     th,
@@ -344,7 +345,8 @@ export function planStatusSet(clear: () => void): void {
  * planning that building in a fresh session would save it, else null. Under
  * the same rest, mute and once rules as the other hints; null as well when coaching
  * is off, doesn't cover this project, or the user switched this tip off
- * (`plan_fresh: false` in coaching.json).
+ * (`plan_fresh: false` in coaching.json). Always null while `plan_fresh` is among
+ * the hints whose live note is off (`OFF`: the replay found it more often wrong than right).
  */
 export function planApproved(snap: GlassSnap, settings: GlassSettings, plan: PlanTip, now: number): string | null {
   learn(settings, snap.model)
@@ -354,7 +356,7 @@ export function planApproved(snap: GlassSnap, settings: GlassSettings, plan: Pla
   const ctx = snap.reqs[snap.reqs.length - 1]?.ctx ?? snap.reading?.tokens ?? null
   const start = snap.startupFirst === null || mem.firstPromptChars === null ? null : startingContext(snap.startupFirst, mem.firstPromptChars, mem.cpt)
   const found = freshHint(ctx, start, plan.chars, snap.compactions.length > 0, mem.cpt, th)
-  if (found === null || settings.muted.includes(found.kind)) return null
+  if (found === null || settings.muted.includes(found.kind) || OFF.includes(found.kind)) return null
   const rest = mergeRest(snap.rest, mem.overlay)
   if (!mayShow(rest, found.kind, found.stake, nowS, th)) return null
   snap.rest = recordShown(rest, found.kind, found.stake, nowS, th, settings.once.includes(found.kind))

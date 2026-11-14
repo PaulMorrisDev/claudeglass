@@ -20,8 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import agent_models, ignores, model_swap, recommend
+from claudeglass import PARSER_VERSION, agent_models, ignores, model_swap, recommend
 from claudeglass.agent_models import AgentModelThresholds, compute_agent_models
+from claudeglass.cache import encode_result, result_from_jsonable
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.model import ReportModel, Section, TranscriptMeta, TranscriptResult, Turn
 from claudeglass.pricing import load_pricing
 
@@ -68,6 +70,7 @@ EVIDENCE_LABELS = [
     "Last seen",
     "Later compliant writers",
     "CLAUDE_CODE_SUBAGENT_MODEL set",
+    "Sessions measured",
 ]
 
 
@@ -110,13 +113,19 @@ def _result_from_agent(agent: dict, group_fields: list[str]) -> TranscriptResult
                     cache_creation_tokens=fields["cache_creation_tokens"] if first else 0,
                     cc_5m=fields["cc_5m"] if first else 0,
                     cc_1h=fields["cc_1h"] if first else 0,
+                    # Counted by the current parser: a turn that wrote no code is a 0.
+                    shell_code_write_count=0,
+                    edit_code_count=0,
                 )
             )
     edits = agent["real_edit_turns"]
     for turn in turns[:edits]:
         turn.edit_kind = "real"
+        turn.edit_call_count = 1
+        turn.edit_code_count = 1
     for turn in turns[edits : edits + agent["shell_write_turns"]]:
         turn.shell_write_count = 1
+        turn.shell_code_write_count = 1
     return TranscriptResult(meta=meta, turns=turns)
 
 
@@ -200,7 +209,7 @@ def test_fixture_deciders_that_edited_get_cost_but_no_saving(fixture_stats):
     assert row["saving_usd"] is None
     assert row["saving_pct"] is None
     assert row["write_turns"] >= 4 * AgentModelThresholds().decide_apply_min_edit_turns
-    assert row["later_compliant"] == 0
+    assert row["later_compliant"] is None
 
 
 def test_fixture_table_holds_no_paths_and_every_row_key_is_a_string(fixture_stats):
@@ -241,6 +250,8 @@ def _agent(
     turns: int = 3,
     real_edits: int = 0,
     shell_writes: int = 0,
+    doc_edits: int = 0,
+    shell_doc_writes: int = 0,
     alias: str | None = None,
     recorded: bool = True,
     first_ts: str = "2026-09-23T12:00:00.000Z",
@@ -252,8 +263,12 @@ def _agent(
             turn_index=i + 1,
             ts=(start + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
             model=model,
-            edit_kind="real" if i < real_edits else None,
-            shell_write_count=1 if real_edits <= i < real_edits + shell_writes else 0,
+            edit_kind="real" if i < real_edits + doc_edits else None,
+            shell_write_count=1 if real_edits <= i < real_edits + shell_writes + shell_doc_writes else 0,
+            shell_code_write_count=1 if real_edits <= i < real_edits + shell_writes else 0,
+            edit_call_count=1 if i < real_edits + doc_edits else 0,
+            edit_doc_count=1 if real_edits <= i < real_edits + doc_edits else 0,
+            edit_code_count=1 if i < real_edits else 0,
             **_TOKENS,
         )
         for i in range(turns)
@@ -454,6 +469,130 @@ def test_a_decider_that_edited_enough_is_decide_apply_whoever_chose_the_model():
     assert set(_verdicts([asked])) == {("general-purpose", "decide-apply")}
 
 
+def test_a_decider_that_only_wrote_documents_is_not_decide_apply():
+    # Reports and ledgers written through the shell, and a report made with
+    # the Write tool, are not changing code.
+    assert _verdicts([_agent(role_word="review", turns=8, shell_doc_writes=4, doc_edits=2)]) == {}
+    assert _verdicts([_workflow(role_word="audit", turns=8, shell_doc_writes=5)]) == {}
+
+
+def test_a_decider_that_wrote_code_is_decide_apply_beside_its_documents():
+    run = _agent(role_word="review", turns=8, shell_writes=3, shell_doc_writes=2)
+    assert set(_verdicts([run])) == {("general-purpose", "decide-apply")}
+    # The Edit turns cell is the count the verdict used (3), not every write (5).
+    assert _verdicts([run])[("general-purpose", "decide-apply")]["write_turns"] == 3
+    stats = compute_agent_models([run], PRICING)
+    report = _report(stats)
+    [rec] = _fire(report, "agent-decide-apply")
+    from claudeglass import advice
+    from claudeglass.snapshots import Snapshot
+    from claudeglass.units import Units
+
+    (card,) = advice.finish([rec], report, Snapshot(path=None, ts="2026-10-02T00:00:00Z", data={"agents": {}}), Units())
+    assert "edited code in 3 replies" in card.why
+
+
+def _old_digest(result: TranscriptResult) -> TranscriptResult:
+    """``result`` as a parser from before the two code-write counts stored
+    it and the store hands it back: the keys are not in the digest."""
+    data = encode_result(result)
+    for turn in data["turns"]:
+        del turn["shell_code_write_count"], turn["edit_code_count"]
+    return result_from_jsonable(json.loads(json.dumps(data)))
+
+
+def test_a_digest_from_before_the_code_write_counts_reads_them_as_not_measured():
+    run = _old_digest(_agent(role_word="review", turns=6, real_edits=3))
+    assert {t.shell_code_write_count for t in run.turns} == {None}
+    assert {t.edit_code_count for t in run.turns} == {None}
+    # A digest that stored them keeps what it stored, zeros included.
+    kept = result_from_jsonable(json.loads(json.dumps(encode_result(_agent(role_word="review", turns=6, real_edits=3)))))
+    assert [t.edit_code_count for t in kept.turns[:4]] == [1, 1, 1, 0]
+    assert {t.shell_code_write_count for t in kept.turns} == {0}
+
+
+def test_a_decider_from_an_old_digest_is_left_out_of_decide_apply_whatever_the_threshold():
+    # Its transcript is gone, so the counts can't be had again; the count the
+    # edit calls would give is no stand-in (it was right in 0 of 11 flagged runs).
+    decider = dict(role_word="review", turns=6, real_edits=3)
+    assert _verdicts([_old_digest(_agent(**decider))]) == {}
+    free = AgentModelThresholds(decide_apply_min_edit_turns=0)
+    assert _verdicts([_old_digest(_agent(**decider))], thresholds=free) == {}
+    # Counted zeros are a measurement: at that threshold they flag, as before.
+    assert set(_verdicts([_agent(role_word="review", turns=6, doc_edits=3)], thresholds=free)) == {
+        ("general-purpose", "decide-apply")
+    }
+    # Only decide-apply needs the counts: an old digest's writer is judged as ever.
+    assert set(_verdicts([_old_digest(_agent(role_word="fix", real_edits=2))])) == {("general-purpose", "inherited")}
+
+
+def test_a_digest_from_before_the_stamp_is_left_out_of_decide_apply_even_with_counts():
+    # A 47 to 49 digest keeps its code-write counts, but in their pre-50 meaning:
+    # the stamp, not the counts, says whether they are measured.
+    decider = dict(role_word="review", turns=6, real_edits=3)
+    older = _agent(**decider)
+    older.parser_version = BEFORE_STAMP
+    assert {t.edit_code_count for t in older.turns} == {0, 1}
+    assert _verdicts([older]) == {}
+    for stamp in (None, PARSER_VERSION):
+        run = _agent(**decider)
+        run.parser_version = stamp
+        assert set(_verdicts([run])) == {("general-purpose", "decide-apply")}
+    # The decide-apply group counts the measured runs only.
+    current = _agent(**decider)
+    row = _verdicts([older, current])[("general-purpose", "decide-apply")]
+    assert row["runs"] == 1
+
+
+def _parsed_decider(tmp_path, paths):
+    """A decider's transcript, parsed: one reply per path, each an Edit to it."""
+    import tempfile as _tempfile
+
+    from claudeglass.parse import parse_transcript
+    from helpers import tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
+
+    lines = [user_str_line("go", timestamp="2026-09-23T12:00:00.000Z")]
+    for i, path in enumerate(paths):
+        reply = turn_line(
+            model=OPUS,
+            content=[tool_use_block("Edit", f"t{i}", {"file_path": path})],
+            timestamp=f"2026-09-23T12:00:{1 + 2 * i:02d}.000Z",
+            cwd="C:/Dev/repo",
+        )
+        reply["message"]["stop_reason"] = "tool_use"
+        lines.append(reply)
+        lines.append(
+            user_block_line([tool_result_block(f"t{i}", "ok")], timestamp=f"2026-09-23T12:00:{2 + 2 * i:02d}.000Z")
+        )
+    final = turn_line(model=OPUS, content=[{"type": "text", "text": "done"}], timestamp="2026-09-23T12:01:00.000Z")
+    final["message"]["stop_reason"] = "end_turn"
+    lines.append(final)
+    file = tmp_path / "agent.jsonl"
+    write_jsonl(file, lines)
+    meta = TranscriptMeta(
+        path=str(file),
+        kind="subagent",
+        session_id="sess-e2e",
+        agent_type="general-purpose",
+        role_word="review",
+        model_recorded=True,
+    )
+    return parse_transcript(file, meta)
+
+
+def test_a_decider_that_edited_worktree_code_is_decide_apply_end_to_end(tmp_path):
+    result = _parsed_decider(tmp_path, ["C:/Dev/repo/.claude/worktrees/w/src/a.py"] * 3)
+    assert set(_verdicts([result])) == {("general-purpose", "decide-apply")}
+
+
+def test_a_decider_that_only_wrote_temp_files_and_reports_is_not_decide_apply_end_to_end(tmp_path):
+    import tempfile as _tempfile
+
+    temp = _tempfile.gettempdir().replace("\\", "/")
+    result = _parsed_decider(tmp_path, [f"{temp}/x.py", "C:/Dev/repo/REVIEW.md"] * 3)
+    assert _verdicts([result]) == {}
+
+
 def test_a_decider_that_edited_less_than_the_threshold_is_not_flagged():
     assert _verdicts([_agent(role_word="review", turns=6, real_edits=2)]) == {}
     th = AgentModelThresholds(decide_apply_min_edit_turns=2)
@@ -550,15 +689,50 @@ def test_later_compliant_for_an_agent_tool_group_counts_agent_tool_writers_of_an
     assert row["later_compliant"] == 2
 
 
-def test_later_compliant_is_zero_for_asked_and_decide_apply():
+def test_asked_later_compliant_counts_only_same_type_runs_whose_call_named_sonnet():
+    flagged = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, alias="opus",
+                     first_ts="2026-09-23T08:00:00.000Z")
+    named = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET, alias="sonnet",
+                   first_ts="2026-09-24T08:00:00.000Z")
+    inherited_sonnet = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET,
+                              first_ts="2026-09-25T08:00:00.000Z")
+    other_type = _agent(agent_type="general-purpose", role_word="fix", real_edits=1, model=SONNET, alias="sonnet",
+                        first_ts="2026-09-26T08:00:00.000Z")
+    workflow = _workflow(role_word="fix", real_edits=1, model=SONNET, alias="sonnet", first_ts="2026-09-27T08:00:00.000Z")
+    before = _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET, alias="sonnet",
+                    first_ts="2026-09-22T08:00:00.000Z")
+    rows = _verdicts([flagged, named, inherited_sonnet, other_type, workflow, before])
+    assert rows[("claude-implementer", "asked")]["later_compliant"] == 1
+
+
+def test_asked_workflow_group_and_decide_apply_are_not_measured():
     runs = [
-        _agent(role_word="fix", real_edits=1, alias="opus", first_ts="2026-09-23T08:00:00.000Z"),
+        _workflow(role_word="fix", real_edits=1, alias="opus", first_ts="2026-09-23T08:00:00.000Z"),
+        _workflow(role_word="fix", real_edits=1, model=SONNET, alias="sonnet", first_ts="2026-09-25T08:00:00.000Z"),
         _agent(role_word="review", turns=6, real_edits=4, first_ts="2026-09-23T08:00:00.000Z"),
-        _agent(role_word="fix", real_edits=1, model=SONNET, first_ts="2026-09-25T08:00:00.000Z"),
     ]
     rows = _verdicts(runs)
-    assert rows[("general-purpose", "asked")]["later_compliant"] == 0
-    assert rows[("general-purpose", "decide-apply")]["later_compliant"] == 0
+    assert rows[("workflow-subagent", "asked")]["later_compliant"] is None
+    assert rows[("general-purpose", "decide-apply")]["later_compliant"] is None
+    report = _report(compute_agent_models(runs, PRICING))
+    for rule_id in ("agent-model-asked", "agent-decide-apply"):
+        for rec in _fire(report, rule_id):
+            assert "Later compliant writers" not in [label for label, *_ in rec.evidence]
+
+
+def test_asked_card_is_fixed_once_later_calls_of_the_type_name_sonnet():
+    runs = [_agent(agent_type="claude-implementer", role_word="implement", real_edits=1, alias="opus",
+                   first_ts="2026-09-23T08:00:00.000Z")]
+    runs += [
+        _agent(agent_type="claude-implementer", role_word="implement", real_edits=1, model=SONNET, alias="sonnet",
+               first_ts=f"2026-09-2{day}T08:00:00.000Z")
+        for day in (4, 5, 6)
+    ]
+    [rec] = _fire(_report(compute_agent_models(runs, PRICING)), "agent-model-asked")
+    assert (rec.severity, rec.variant) == ("info", "fixed")
+    assert rec.saving_usd is not None and rec.saving_usd > 0
+    open_ = _fire(_report(compute_agent_models(runs[:3], PRICING)), "agent-model-asked")
+    assert [(r.severity, r.variant) for r in open_] == [("info", "")]
 
 
 # -- thresholds ----------------------------------------------------------------
@@ -713,11 +887,17 @@ def test_each_rule_fires_only_for_its_own_verdict(fixture_stats):
     assert len(_fire(report, "agent-decide-apply")) == 1
 
 
+def row_of(rows, rec, rule_id):
+    verdict = {"agent-model-inherited": "inherited", "agent-model-asked": "asked", "agent-decide-apply": "decide-apply"}[rule_id]
+    return rows[(rec.agent_type, verdict)]
+
+
 def test_evidence_labels_are_exactly_the_contract_and_resolve_to_the_row(fixture_stats):
     report = _report(fixture_stats)
     table = report.sections[0].tables[0]
     rows = _rows(table)
     cells = {
+        "Sessions measured": "sessions_measured",
         "Agents": "runs",
         "Roles": "roles",
         "Model": "model",
@@ -734,13 +914,70 @@ def test_evidence_labels_are_exactly_the_contract_and_resolve_to_the_row(fixture
     }
     for rule_id in agent_models.RULES:
         for rec in _fire(report, rule_id):
-            assert [label for label, *_ in rec.evidence] == EVIDENCE_LABELS
+            # A row that did not measure it (None) has no "Later compliant writers" evidence.
+            expected = [
+                label
+                for label in EVIDENCE_LABELS
+                if (label != "Later compliant writers" or row_of(rows, rec, rule_id)["later_compliant"] is not None)
+                and (label != "Sessions measured" or row_of(rows, rec, rule_id).get("sessions_measured") is not None)
+            ]
+            assert [label for label, *_ in rec.evidence] == expected
             verdict = {"agent-model-inherited": "inherited", "agent-model-asked": "asked", "agent-decide-apply": "decide-apply"}[rule_id]
             row = rows[(rec.agent_type, verdict)]
             for label, value, source, row_key in rec.evidence:
                 assert source == "model_swap.model_swap_agent_models"
                 assert row_key == row["case"] == f"{rec.agent_type}:{verdict}"
                 assert value == row[cells[label]]
+
+
+def _report_of(table) -> ReportModel:
+    return ReportModel(sections=[Section(key="model_swap", title="Model-swap counterfactual", tables=[table])])
+
+
+def _decide_apply_stats():
+    return compute_agent_models([_agent(role_word="review", turns=6, real_edits=3)], PRICING)
+
+
+def test_decide_apply_card_names_the_sessions_measured_when_under_half():
+    stats = _decide_apply_stats()
+    table = agent_models.build_table(stats, older=(2, 3))
+    assert [c.key for c in table.columns] == [*COLUMNS, "sessions_measured"]
+    [row] = _rows(table).values()
+    assert row["verdict"] == "decide-apply" and row["sessions_measured"] == "1 of 3"
+    [rec] = _fire(_report_of(table), "agent-decide-apply")
+    assert rec.evidence[-1] == (
+        "Sessions measured", "1 of 3", "model_swap.model_swap_agent_models", "general-purpose:decide-apply"
+    )
+    # Exactly half, nothing older, or nothing measured: no column and no evidence, as in a report with every
+    # transcript on disk.
+    for older in ((1, 2), (0, 3), (0, 0), (3, 3)):
+        table = agent_models.build_table(stats, older=older)
+        assert [c.key for c in table.columns] == COLUMNS, older
+        [rec] = _fire(_report_of(table), "agent-decide-apply")
+        assert "Sessions measured" not in [label for label, *_ in rec.evidence], older
+    assert [c.key for c in agent_models.build_table(stats).columns] == COLUMNS
+    # Every session older, with a run that was measured all the same (its own digest is current): "0 of 3"
+    # would only puzzle beside a card that stands, so there is no column and no evidence row.
+    # Above none and under half it stays: 1 of 4 measured.
+    [row] = _rows(agent_models.build_table(stats, older=(3, 4))).values()
+    assert row["sessions_measured"] == "1 of 4"
+
+
+def test_sessions_measured_is_never_shown_as_an_empty_column_or_on_another_verdict():
+    # A report with a verdict but no decide-apply row, under half measured: the column would be empty, so it is not there.
+    stats = compute_agent_models([_agent(role_word="fix", real_edits=2)], PRICING)
+    table = agent_models.build_table(stats, older=(2, 3))
+    assert [c.key for c in table.columns] == COLUMNS
+    # With both kinds of row the cell is on the decide-apply row only.
+    both = compute_agent_models(
+        [_agent(role_word="fix", real_edits=2), _agent(role_word="review", turns=6, real_edits=3, agent_type="reviewer")],
+        PRICING,
+    )
+    rows = _rows(agent_models.build_table(both, older=(2, 3)))
+    assert {key: row["sessions_measured"] for key, row in rows.items()} == {
+        ("general-purpose", "inherited"): None,
+        ("reviewer", "decide-apply"): "1 of 3",
+    }
 
 
 def test_env_var_value_reaches_the_evidence():

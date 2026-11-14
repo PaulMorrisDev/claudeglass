@@ -16,8 +16,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace as NS
 
-from claudeglass import model, model_swap
+from claudeglass import helptext, model, model_swap
 from claudeglass.model import (
     Diagnostics,
     PricingMeta,
@@ -311,6 +312,118 @@ def test_runs_given_a_model_when_started_are_left_out_of_the_agent_file_saving()
     assert only_named.tier_verdict.state == "set_elsewhere"
 
 
+def _two_main_sessions(reason_of_early: str):
+    """Two Opus main sessions, the first of which ``main_lever`` leaves off
+    the lever (``reason_of_early``): the stats, the same for the second
+    alone, and the rendered section."""
+    early, late = _run(OPUS, "", kind="top-level"), _run(OPUS, "", kind="top-level")
+    stats = model_swap.compute_model_swap(
+        [early, late], PRICING, main_lever=lambda tr: reason_of_early if tr is early else None
+    )
+    alone = model_swap.compute_model_swap([late], PRICING).by_key["top-level"]
+    return stats.by_key["top-level"], alone, model_swap.build_section(stats)
+
+
+def _main_rule(section: Section):
+    report = _report_with_section(section)
+    return report, model_swap.RULES["model-tier"](report, _firing_th(), archetype=None, snapshot=None)
+
+
+def test_a_main_session_on_sonnet_or_smaller_is_left_off_the_lever_whatever_the_settings():
+    opus, sonnet, haiku = (_run(m, "", kind="top-level") for m in (OPUS, SONNET, HAIKU))
+    stats = model_swap.compute_model_swap([opus, sonnet, haiku], PRICING)
+    alone = model_swap.compute_model_swap([opus], PRICING).by_key["top-level"]
+    row = stats.by_key["top-level"]
+
+    assert row.spawns == 3 and row.lever.spawns == 1
+    assert (row.before_change_runs, row.settled_runs) == (0, 2)
+    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
+    assert row.tier_verdict.label.endswith(", on 1 of 3 main sessions)")
+
+    section = model_swap.build_section(stats)
+    report, recs = _main_rule(section)
+    (rec,) = recs
+    assert (
+        "Main sessions already on Sonnet or smaller (not counted)", 2,
+        "model_swap.model_swap_by_agent_type", "top-level",
+    ) in rec.evidence
+    _assert_evidence_resolves(report, rec)
+
+
+def test_a_session_on_sonnet_is_already_there_even_when_the_lever_would_cut_it():
+    sonnet = _run(SONNET, "", kind="top-level")
+    row = model_swap.compute_model_swap(
+        [sonnet], PRICING, main_lever=lambda tr: model_swap.BEFORE_CHANGE
+    ).by_key["top-level"]
+    assert (row.before_change_runs, row.settled_runs) == (0, 1)
+
+
+def test_a_main_session_from_before_a_move_down_counts_on_the_row_not_the_lever():
+    row, alone, section = _two_main_sessions(model_swap.BEFORE_CHANGE)
+
+    assert row.spawns == 2 and row.lever.spawns == 1
+    assert (row.before_change_runs, row.settled_runs) == (1, 0)
+    assert row.observed_cost == pytest.approx(2 * alone.observed_cost)
+    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
+    assert row.tier_verdict.label.endswith(", on 1 of 2 main sessions)")
+
+    cells = _row_cells(section, "top-level")
+    assert (cells["spawns"], cells["lever_runs"], cells["before_change_runs"], cells["settled_runs"]) == (2, 1, 1, 0)
+    file_cells = _row_cells(section, "top-level", "model_swap_agent_file_runs")
+    assert file_cells["runs"] == 1
+    assert file_cells[f"cost_{SONNET}"] == pytest.approx(alone.cost_by_model[SONNET])
+
+    report, recs = _main_rule(section)
+    (rec,) = recs
+    assert (
+        "Main sessions from before their project moved to Sonnet (not counted)", 1,
+        "model_swap.model_swap_by_agent_type", "top-level",
+    ) in rec.evidence
+    _assert_evidence_resolves(report, rec)
+
+
+def test_with_every_main_session_left_out_there_is_no_saving_and_no_card():
+    def sessions(*models):
+        return [_run(m, "", kind="top-level") for m in models]
+
+    cut = lambda tr: model_swap.BEFORE_CHANGE  # noqa: E731
+    cut_opus = lambda tr: model_swap.BEFORE_CHANGE if OPUS in tr.turns[0].model else None  # noqa: E731
+    results_of: list = []
+    cases = (
+        (sessions(OPUS, OPUS), cut, "before_change",
+         "every main session started before its project moved to Sonnet or smaller"),
+        (sessions(SONNET, SONNET), None, "main_floor",
+         "Sonnet is the smallest model suggested for your main session"),
+        (sessions(SONNET, OPUS), cut_opus, "left_out", "no main session is left that a settings change would reach"),
+        (sessions(OPUS, OPUS), lambda tr: model_swap.PICKED, "picked",
+         "every main session was picked on a larger model against a Sonnet setting"),
+        (sessions(OPUS, OPUS), lambda tr: model_swap.OWN_MODEL, "own_model",
+         "every main session ran in a project that sets its own model"),
+        (sessions(OPUS, OPUS), lambda tr: model_swap.PICKED if tr is results_of[0] else model_swap.OWN_MODEL,
+         "left_out", "no main session is left that a settings change would reach"),
+    )
+    for results, lever, state, label in cases:
+        results_of[:] = results
+        stats = model_swap.compute_model_swap(results, PRICING, main_lever=lever)
+        verdict = stats.by_key["top-level"].tier_verdict
+        assert verdict.state == state and verdict.alt_model is None and verdict.saving_usd == 0.0
+        assert verdict.label == label
+        section = model_swap.build_section(stats)
+        assert not [r for r in next(t for t in section.tables if t.name == "model_swap_agent_file_runs").rows
+                    if r[0] == "top-level"]
+        assert _main_rule(section)[1] == []
+
+
+def test_at_main_floor_is_sonnet_or_smaller():
+    for setting in ("sonnet", "claude-sonnet-5-5", "sonnet[1m]", "haiku"):
+        assert model_swap.at_main_floor(setting), setting
+    for setting in ("opus", "opusplan", "fable[1m]", "default", None, "", "a-model-nobody-knows"):
+        assert not model_swap.at_main_floor(setting), setting
+    # A damaged value (a list, a number, a dict) is no model name: it reads as no model set.
+    for setting in (["sonnet"], 5, {"model": "haiku"}, True):
+        assert not model_swap.at_main_floor(setting), setting
+
+
 def test_workflow_subagents_have_no_agent_file_lever():
     stats = model_swap.compute_model_swap([_run(OPUS, "workflow-subagent", kind="workflow-agent")], PRICING)
     row = stats.by_key["workflow-subagent"]
@@ -341,6 +454,20 @@ def test_a_fork_has_no_lever_and_claude_code_picks_its_model_whatever_runs_besid
     stats = model_swap.compute_model_swap([_run(OPUS, "fork")], PRICING)
     assert "Claude Code sets its model" in stats.by_key["fork"].tier_verdict.label
     assert _row_cells(model_swap.build_section(stats), "fork")["lever"] == "none (Claude Code picks)"
+
+
+@pytest.mark.parametrize(
+    ("agent", "lever"),
+    [
+        ("Explore", "model and omitClaudeMd: true in a new Explore.md (overrides the built-in)"),
+        ("Plan", "model and omitClaudeMd: true in a new Plan.md (overrides the built-in)"),
+        ("general-purpose", "model in a new general-purpose.md (overrides the built-in)"),
+        ("claude-implementer", "model in claude-implementer.md"),
+    ],
+)
+def test_a_built_in_started_without_claude_md_names_that_in_its_lever(agent, lever):
+    stats = model_swap.compute_model_swap([_run(OPUS, agent)], PRICING)
+    assert _row_cells(model_swap.build_section(stats), agent)["lever"] == lever
 
 
 # -- unknown model ---------------------------------------------------------------
@@ -691,3 +818,80 @@ def test_measured_work_is_cited_but_never_changes_the_saving():
         ("Calls before the first edit", 0.0, "habits.habits_agents", "claude-implementer")
     ]
     assert before_edit_evidence(None) == []
+
+
+def test_a_main_session_with_as_many_replies_on_a_larger_model_is_not_already_on_sonnet():
+    def session(*models):
+        return _transcript([_turn(model=m, input_tokens=1_000_000, output_tokens=1_000_000) for m in models])
+
+    for models, settled in (((OPUS, SONNET), 0), ((HAIKU, OPUS), 0), ((SONNET, SONNET, OPUS), 1)):
+        row = model_swap.compute_model_swap([session(*models)], PRICING).by_key["top-level"]
+        assert (row.settled_runs, row.lever.spawns) == (settled, 1 - settled), models
+
+
+def test_a_main_session_with_no_priced_reply_is_on_no_row():
+    empty = _transcript([_turn(turn_index=0)])
+    stats = model_swap.compute_model_swap([_run(OPUS, "", kind="top-level"), empty], PRICING)
+    row = stats.by_key["top-level"]
+    assert (row.spawns, row.lever.spawns, row.settled_runs, row.before_change_runs) == (1, 1, 0, 0)
+    assert "top-level" not in model_swap.compute_model_swap([empty], PRICING).by_key
+
+
+def test_the_file_runs_tables_main_session_row_reads_main_session():
+    assert helptext.TABLE_COPY["model_swap_agent_file_runs"].value_labels == {"top-level": "Main session"}
+
+
+def test_picks_and_own_model_sessions_count_on_the_row_and_are_said_on_the_card():
+    picked, own, counted = (_run(OPUS, "", kind="top-level") for _ in range(3))
+    reasons = {id(picked): model_swap.PICKED, id(own): model_swap.OWN_MODEL}
+    stats = model_swap.compute_model_swap([picked, own, counted], PRICING, main_lever=lambda tr: reasons.get(id(tr)))
+    alone = model_swap.compute_model_swap([counted], PRICING).by_key["top-level"]
+    row = stats.by_key["top-level"]
+    assert (row.spawns, row.lever.spawns, row.picked_runs, row.own_model_runs) == (3, 1, 1, 1)
+    assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
+    section = model_swap.build_section(stats)
+    cells = _row_cells(section, "top-level")
+    assert (cells["picked_runs"], cells["own_model_runs"]) == (1, 1)
+    report, (rec,) = _main_rule(section)
+    for label in ("Main sessions picked against a Sonnet setting (not counted)",
+                  "Main sessions in projects that set their own model (not counted)"):
+        assert (label, 1, "model_swap.model_swap_by_agent_type", "top-level") in rec.evidence
+    _assert_evidence_resolves(report, rec)
+
+
+def test_the_tier_cards_cost_evidence_is_named_for_the_runs_it_prices():
+    picked, counted = (_run(OPUS, "", kind="top-level") for _ in range(2))
+    reasons = {id(picked): model_swap.PICKED}
+    stats = model_swap.compute_model_swap([picked, counted], PRICING, main_lever=lambda tr: reasons.get(id(tr)))
+    section = model_swap.build_section(stats)
+    cells = _row_cells(section, "top-level")
+    # The row's own "Observed cost" column holds every run's cost, the lever's column the runs the change reaches.
+    assert cells["lever_cost"] < cells["observed_cost"]
+    _report, (rec,) = _main_rule(section)
+    label, value, *_rest = rec.evidence[0]
+    assert (label, value) == ("Cost of the runs this change reaches", cells["lever_cost"])
+    # A table from before the lever columns existed falls back to the whole row's cost, under its own name.
+    table = next(t for t in section.tables if t.name == "model_swap_by_agent_type")
+    keep = [i for i, column in enumerate(table.columns) if not column.key.startswith("lever_")]
+    table.columns = [table.columns[i] for i in keep]
+    table.rows = [[row[i] for i in keep] for row in table.rows]
+    _report, (older,) = _main_rule(section)
+    label, value, *_rest = older.evidence[0]
+    assert (label, value) == ("Observed cost", cells["observed_cost"])
+
+
+def test_above_main_floor_is_a_known_larger_model():
+    for model in ("opus", "claude-opus-5-5", "fable", "claude-fable-5-1"):
+        assert model_swap.above_main_floor(model), model
+    for model in ("sonnet", "claude-sonnet-5", "haiku", "my-gateway-model", "", None, ["opus"], 5):
+        assert not model_swap.above_main_floor(model), model
+
+
+def test_main_setting_is_the_views_reading_or_none():
+    report = NS(meta=NS(main_model_setting={"value": "opus", "scope": "project-local"}))
+    assert model_swap.main_setting(report) == ("opus", "project-local")
+    assert model_swap.main_setting(NS(meta=NS(main_model_setting={}))) is None
+    assert model_swap.main_setting(NS(meta=NS())) is None
+    assert model_swap.main_setting(None) is None
+    assert [model_swap.layer_scope(layer) for layer in ("user", "project_local", "project_shared", "managed", None)] == [
+        "user", "project-local", "repo", "managed", "user"]

@@ -6,6 +6,7 @@ the ``capture`` command around them.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
@@ -22,9 +23,10 @@ from types import SimpleNamespace as NS
 import pytest
 
 from claudeglass import (
-    capture, capture_catalogue as cat, cli, coaching, habits, hook_health, ignores, installer, parse, prompt_shape,
-    prompting,
+    PARSER_VERSION, capture, capture_catalogue as cat, cli, coaching, habits, hook_health, ignores, installer, parse,
+    prompt_shape, prompting,
 )
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.habits import Habits, Piece, SessionShape
 from claudeglass.config import load_config
 from claudeglass.model import Recommendation, TranscriptMeta, TranscriptResult, Turn
@@ -32,7 +34,7 @@ from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 from claudeglass.service.coaching_job import CoachingJob
 
-from helpers import attachment_line, tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
+from helpers import attachment_line, reminder_led_prompt, tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
 
 SCRIPT = Path(str(resources.files("claudeglass") / "hooks" / cat.HOOK_SCRIPT))
 MODULE = SCRIPT.with_name(cat.HOOK_MODULE)
@@ -50,6 +52,15 @@ def _load_hook_module():
 HOOK = _load_hook_module()
 CATALOGUE = HOOK.load_catalogue()
 ON = {"capture": {"level": "off", "coaching": ["coaching_notes"]}}
+
+
+@pytest.fixture(autouse=True)
+def _hints_open(request, monkeypatch):
+    """The hints' own rules are tested with the live switch open
+    (``off_live`` empty), as the replay measured them; the ``test_live_off``
+    tests at the end of the file run on the catalogue as it ships."""
+    if not request.node.name.startswith("test_live_off"):
+        monkeypatch.setitem(CATALOGUE["coaching"], "off_live", [])
 
 
 # -- the hook's hints --------------------------------------------------------------
@@ -178,27 +189,27 @@ def test_the_cold_return_receipt_rests_half_a_day_however_the_context_grows(tmp_
 
 
 def test_a_hint_rests_after_it_shows_unless_the_stake_grows(tmp_path):
-    grep = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "tool_input": {"pattern": "ls"}}
-    assert _kind(_coach(tmp_path, grep, result_len=40_000)) == "quiet_output"
-    assert _coach(tmp_path, grep, result_len=40_000) == ""
+    grep = _saved_read()
+    assert _kind(_coach(tmp_path, grep)) == "quiet_output"
+    assert _coach(tmp_path, grep) == ""
     # Another session has its own rest.
-    assert _coach(tmp_path, {**grep, "session_id": "s2"}, result_len=40_000)
-    # A result 1.5 times as long wakes it.
-    assert _kind(_coach(tmp_path, grep, result_len=60_000)) == "quiet_output"
-    assert _coach(tmp_path, grep, result_len=40_000) == ""
+    assert _coach(tmp_path, {**grep, "session_id": "s2"})
+    # A read 1.5 times as long wakes it.
+    assert _kind(_coach(tmp_path, _saved_read(60_000))) == "quiet_output"
+    assert _coach(tmp_path, grep) == ""
     later = NOW + timedelta(minutes=cat.COACHING_THRESHOLDS["cooldown_minutes"] * 2 + 1)
-    assert _kind(_coach(tmp_path, grep, now=later, result_len=40_000)) == "quiet_output"
+    assert _kind(_coach(tmp_path, grep, now=later)) == "quiet_output"
 
 
 def test_a_hint_that_keeps_coming_back_rests_twice_as_long_each_time(tmp_path):
-    grep = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "tool_input": {"pattern": "ls"}}
+    grep = _saved_read()
     cooldown = cat.COACHING_THRESHOLDS["cooldown_minutes"]
     clock = NOW
     for shown in range(1, 5):
-        assert _kind(_coach(tmp_path, grep, now=clock, result_len=40_000)) == "quiet_output"
+        assert _kind(_coach(tmp_path, grep, now=clock)) == "quiet_output"
         rest = cooldown * 2 ** min(shown - 1, cat.COACHING_THRESHOLDS["max_backoff"])
         # Not a minute before the rest is over; at it, the hint shows again.
-        assert _coach(tmp_path, grep, now=clock + timedelta(minutes=rest - 1), result_len=40_000) == ""
+        assert _coach(tmp_path, grep, now=clock + timedelta(minutes=rest - 1)) == ""
         clock += timedelta(minutes=rest)
     state = json.loads((tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
     (row,) = state["sessions"].values()
@@ -212,17 +223,6 @@ def test_the_state_keeps_a_session_by_its_salted_hash(tmp_path):
     _coach(tmp_path, _prompt_payload(_transcript(tmp_path, [_prompt(), _reply(120_000, ago_s=20 * 60)])))
     state = json.loads((config_dir / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
     assert list(state["sessions"]) == [HOOK.session_hash(salt, "s1")]
-
-
-def test_a_large_result_gets_the_quiet_hint_for_its_tool(tmp_path):
-    grep = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "tool_input": {"pattern": "ls"}}
-    note = _coach(tmp_path, grep, result_len=40_000)
-    assert _kind(note) == "quiet_output" and "about 10k tokens" in note and cat.COACHING_QUIET_HOW["Grep"] in note
-    fetch = {"hook_event_name": "PostToolUse", "tool_name": "WebFetch", "session_id": "s2"}
-    assert cat.COACHING_QUIET_HOW[""] in _coach(tmp_path, fetch, result_len=40_000)
-    assert _coach(tmp_path, {**grep, "session_id": "s3"}, result_len=4_000) == ""
-    limited = {"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {"limit": 2000}, "session_id": "s4"}
-    assert _coach(tmp_path, limited, result_len=40_000) == ""
 
 
 def _result(tool: str, response, **extra) -> dict:
@@ -274,11 +274,12 @@ def test_a_picture_counts_for_its_tokens_never_its_encoding():
 def test_a_picture_alone_gets_no_hint_but_words_beside_it_still_count(tmp_path):
     threshold = cat.COACHING_THRESHOLDS["quiet_output_tokens"] * 4
     picture = _read_image(dimensions={"displayWidth": 1568, "displayHeight": 1000})
-    assert _coach(tmp_path, _result("Read", picture)) == ""
+    read = lambda response, **extra: _result("Read", response, tool_input={"file_path": _SAVED}, **extra)
+    assert _coach(tmp_path, read(picture)) == ""
     # Words just under the threshold are pushed over it by the picture that comes with them.
     mixed = [{"type": "text", "text": "x" * (threshold - 100)}, {"type": "image", "source": {"data": "B"}}]
-    assert _kind(_coach(tmp_path, _result("mcp__shot__take", mixed, session_id="s2"))) == "quiet_output"
-    assert _coach(tmp_path, _result("mcp__shot__take", mixed[:1], session_id="s3")) == ""
+    assert _kind(_coach(tmp_path, read(mixed, session_id="s2"))) == "quiet_output"
+    assert _coach(tmp_path, read(mixed[:1], session_id="s3")) == ""
 
 
 def test_a_result_saved_to_a_file_counts_for_its_preview_only(tmp_path):
@@ -296,28 +297,10 @@ def test_a_result_saved_to_a_file_counts_for_its_preview_only(tmp_path):
     assert measure("PowerShell", {"stdout": "o" * 40_000}) == preview
     # A read is never saved, so a long one counts whole.
     assert measure("Read", _read_text(62_000)) == 62_000
-    # So a saved search is no big result, and a fetch under its limit is.
+    # So a saved search is no big result, and a fetch gets no quiet hint at all: only a whole read of a saved output does.
     saved_search = _result("Grep", {"mode": "content", "content": "c" * 60_000})
     assert _coach(tmp_path, saved_search) == ""
-    assert _kind(_coach(tmp_path, _result("WebFetch", {"result": "r" * 40_000}, session_id="s2"))) == "quiet_output"
-    assert _coach(tmp_path, _result("WebFetch", {"result": "r" * 60_000}, session_id="s3")) == ""
-
-
-def test_the_main_session_and_each_subagent_rest_apart(tmp_path):
-    main = _result("Read", _read_text(40_000))
-    assert _kind(_coach(tmp_path, main)) == "quiet_output"
-    assert _coach(tmp_path, main) == ""
-    # A subagent's big result isn't silenced by the main session's, and the other way round.
-    agent = {**main, "agent_id": "abc", "agent_type": "general-purpose"}
-    assert _kind(_coach(tmp_path, agent)) == "quiet_output"
-    assert _coach(tmp_path, agent) == ""
-    assert _kind(_coach(tmp_path, {**agent, "agent_id": "def"})) == "quiet_output"
-    state = json.loads((tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
-    (row,) = state["sessions"].values()
-    assert set(row["hints"]) == {"quiet_output", "quiet_output:abc", "quiet_output:def"}
-    # The marker names the hint, not the context it was for.
-    other = _coach(tmp_path, {**main, "session_id": "s2", "agent_id": "ghi", "agent_type": "general-purpose"})
-    assert other.split("\n", 1)[0] == cat.COACH_MARKER + str(cat.COACH_VERSION) + " quiet_output"
+    assert _coach(tmp_path, _result("WebFetch", {"result": "r" * 40_000}, session_id="s2")) == ""
 
 
 def test_many_reads_for_one_message_get_no_hint(tmp_path):
@@ -430,7 +413,7 @@ def test_the_clear_context_hint_names_the_way_to_clear_in_the_app_you_use(tmp_pa
     else:
         monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
     note = _planning(tmp_path)
-    assert note.endswith(how)
+    assert note.endswith(how.replace("the plan in `<file>`", "the plan file"))
     # The built-in option first, with /clear and the plan's file as the way out, on the desktop.
     assert ("approval option" in how) == (entrypoint == "claude-desktop")
     assert "/clear" in how and "implement the plan in" in how
@@ -1380,8 +1363,10 @@ def test_coaching_notes_add_the_prompt_and_plan_hooks():
     # A background Stop keeps the newest reply for the cold-return receipt: it prints nothing, so nothing waits.
     assert (cat.HOOK_SCRIPT, "Stop", "", True) in specs
     assert sum(1 for spec in deep if spec[1] == "Stop") == 1
-    # A SubagentStop records a run that ended too big, in the foreground like the agent metrics' own.
-    assert [spec for spec in specs if spec[1] == "SubagentStop"] == [(cat.HOOK_SCRIPT, "SubagentStop", "", False)]
+    # A SubagentStop records a run that ended too big, in the foreground like the agent metrics' own, while
+    # split_run is on; while it is off nothing would read the record, so there is no entry.
+    split = [] if "split_run" in cat.LIVE_OFF_HINTS else [(cat.HOOK_SCRIPT, "SubagentStop", "", False)]
+    assert [spec for spec in specs if spec[1] == "SubagentStop"] == split
     agents = cat.hook_specs((*cat.agent_metric_ids(cat.level_metrics("standard")), "coaching_notes"))
     assert sum(1 for spec in agents if spec[1] == "SubagentStop") == 1
     assert not any(spec[1] == "SubagentStop" for spec in cat.hook_specs(("big_output",)))
@@ -1446,7 +1431,7 @@ def test_usage_limit_lines_after_a_reply_never_restart_the_cold_return_clock(tmp
     # The last real reply was two hours ago; the turn since ended in usage-limit lines that reset an hour ago.
     records = [_prompt(), _reply(200_000, ago_s=7_200), _limit_line(5_000, resets_in_s=-3_600),
                _limit_line(4_900, tokens=5_000, resets_in_s=-3_600)]
-    note = _send(tmp_path, records, "try again")
+    note = _send(tmp_path, records, "update the footer layout")
     # Timed from the real reply, and the context that reply left, less the shared start.
     assert _kind(note) == "cold_return" and "idle for 2 hours" in note and "about 158k tokens" in note
 
@@ -1471,7 +1456,7 @@ def test_a_return_soon_after_a_usage_limit_reset_gets_no_cold_return_receipt(tmp
     records = [_prompt(), _reply(200_000, ago_s=7_200), _limit_line(5_000, **limit)]
     case = tmp_path / "case"
     case.mkdir()
-    note = _send(case, records, "try again")
+    note = _send(case, records, "update the footer layout")
     assert (_kind(note) if note else "") == expected, name
 
 
@@ -1932,12 +1917,26 @@ def _run(config_dir: Path, payload: dict, entrypoint: str = "") -> tuple[int, st
     return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
 
 
-def test_the_hook_runs_coaching_notes_with_capture_off(tmp_path):
+def _run_open(monkeypatch, capsys, config_dir: Path, payload: dict, entrypoint: str = "") -> tuple[int, str, str]:
+    """:func:`_run` in this process, on the catalogue with the live switch
+    open (the ``_hints_open`` fixture), for the hints the shipped one turns off."""
+    monkeypatch.setattr(HOOK, "load_catalogue", lambda path=None: CATALOGUE)
+    if entrypoint:
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", entrypoint)
+    else:
+        monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(payload).encode("utf-8")), encoding="utf-8"))
+    rc = HOOK.main(["--config-dir", str(config_dir)])
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
+
+
+def test_the_hook_runs_coaching_notes_with_capture_off(tmp_path, monkeypatch, capsys):
     config_dir = _config_dir(tmp_path)
     (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
     # The hook runs on the real clock, so a reply dated in 2026 left the cache cold long ago.
     path = _transcript(tmp_path, [_prompt(), _reply(150_000)])
-    rc, out, err = _run(config_dir, {"session_id": "s1", "cwd": "/w", **_prompt_payload(path)})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"session_id": "s1", "cwd": "/w", **_prompt_payload(path)})
     assert rc == 0 and err == ""
     output = json.loads(out)["hookSpecificOutput"]
     assert output["hookEventName"] == "UserPromptSubmit"
@@ -2158,27 +2157,28 @@ def test_the_notice_takes_the_same_fields_as_the_note(tmp_path):
     assert notice.startswith("⚠️ ClaudeGlass: Your message is about 12k tokens")
 
 
-def test_a_capture_note_and_a_coaching_note_go_out_as_one(tmp_path):
+def test_a_capture_note_and_a_coaching_note_go_out_as_one(tmp_path, monkeypatch, capsys):
     config_dir = _config_dir(tmp_path)
     (config_dir / "config.toml").write_text('[capture]\nlevel = "deep"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
     big = {"session_id": "s1", "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "Read",
+           "tool_input": {"file_path": _SAVED},
            "tool_response": {"type": "text", "file": {"content": "x" * cat.BIG_OUTPUT_TOKENS * 4}}}
-    rc, out, _ = _run(config_dir, big)
+    rc, out, _ = _run_open(monkeypatch, capsys, config_dir, big)
     text = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     capture_note, coaching_note = text.split("\n" + cat.COACH_MARKER)
     assert rc == 0 and capture_note == cat.tool_note_text("big_output")
     assert coaching_note.startswith(f"{cat.COACH_VERSION} quiet_output\n")
 
 
-def test_a_broken_coaching_file_or_state_is_read_as_empty(tmp_path):
+def test_a_broken_coaching_file_or_state_is_read_as_empty(tmp_path, monkeypatch, capsys):
     config_dir = _config_dir(tmp_path)
     (config_dir / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
     (config_dir / cat.COACHING_FILE).write_text("{not json", encoding="utf-8")
     (config_dir / cat.COACH_STATE_FILE).write_text('{"sessions": [1, 2]}', encoding="utf-8")
     path = _transcript(tmp_path, [_prompt(), _reply(150_000)])
-    rc, out, err = _run(config_dir, {"session_id": "s1", **_prompt_payload(path)})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"session_id": "s1", **_prompt_payload(path)})
     assert rc == 0 and err == "" and _kind(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "cold_return"
-    rc, out, err = _run(config_dir, {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "transcript_path": 5})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "transcript_path": 5})
     assert (rc, out, err) == (0, "", "")
 
 
@@ -2455,8 +2455,12 @@ def test_the_summary_says_what_the_typical_piece_is_or_that_it_is_not_known_yet(
     unknown = "Your typical piece of work isn't known yet: it needs a few more sessions."
     for data in ({"plan_fresh": True}, {"typical_piece_tokens": 0}, {"typical_piece_tokens": "many"}, {"typical_piece_tokens": -3}):
         assert coaching.describe(data)[-1] == unknown, data
-    # No file yet has its own line: nothing was worked out, the typical piece included.
-    assert coaching.describe({}) == ["No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
+    # No file yet has its own line: nothing was worked out, the typical piece included. The hints
+    # that are off for everyone are said first: that does not depend on the file.
+    off = [f"Off for everyone (the replay found them more often wrong than right): {coaching._hint_name(hint)}."
+           for hint in cat.LIVE_OFF_HINTS]
+    assert coaching.describe({}) == [
+        *off, "No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
 
 
 def test_the_service_job_writes_the_typical_piece_beside_the_other_numbers(tmp_path):
@@ -2917,7 +2921,8 @@ def test_a_tip_the_reply_disowns_is_marked_and_a_plain_misfire_mention_is_not(tm
         _human("again", 4), _said_back("Fixed.\n\n" + tip, 5),
     ])
     assert [t.tip_disowned for t in result.turns] == [True, False, False]
-    assert [t.coach_tip for t in result.turns] == [False, False, True]
+    # The label counts from any block of the reply, a disowned tip's included: it was shown, then called wrong.
+    assert [t.coach_tip for t in result.turns] == [True, False, True]
 
 
 def test_a_plan_that_ends_with_the_tip_the_note_asked_for_counts_as_a_relayed_tip(tmp_path):
@@ -3003,7 +3008,7 @@ def test_a_tip_you_knew_more_often_than_you_found_useful_shows_once_a_session(tm
 def test_a_hint_that_is_not_a_tip_is_left_alone_and_no_answers_change_nothing(tmp_path):
     columns = [NS(key=key) for key in ("hint", "useful", "known", "wrong", "misfires")]
     table = NS(name="prompting_tips", columns=columns,
-               rows=[["quiet_output", 0, 0, 5, 5], ["not_a_hint", 0, 0, 5, 5], ["status_poll", 0, 0, "x", None]])
+               rows=[["not_a_hint", 0, 0, 5, 5], ["status_poll", 0, 0, "x", None]])
     report = NS(recommendations=[], sections=[NS(key="prompting", tables=[table])])
     data = coaching.from_report(report, tmp_path)
     assert data["muted"] == [] and data["once"] == [] and data["thresholds"] == {"plan_fresh_tokens": 40_000}
@@ -3045,6 +3050,57 @@ def test_the_summary_says_which_tips_are_left_out_wait_for_more_or_show_once():
     assert "Tips shown once a session because you already knew them: pasting a lot of text." in lines
     quiet = coaching.describe({"plan_fresh": True, "typical_piece_tokens": 0})
     assert not any("called them wrong" in line or "knew" in line for line in quiet)
+
+
+def test_the_summary_names_a_muted_note_to_claude_apart_from_the_tips_you_called_wrong(monkeypatch):
+    # quiet_output is off for everyone while the switch is shut, and a hint that never speaks is not "left out".
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", ())
+    lines = coaching.describe({"muted": ["quiet_output"], "typical_piece_tokens": 0})
+    assert "Notes to Claude left out because Claude called them misfires: reading a saved output whole." in lines
+    assert not any("you called them wrong" in line for line in lines)
+
+
+def test_the_summary_says_which_hints_are_off_for_everyone_and_gives_no_reason_about_you_for_them():
+    lines = coaching.describe({"plan_fresh": False, "typical_piece_tokens": 0})
+    assert not any("you ignored its tip" in line for line in lines)
+    prefix = "Off for everyone (the replay found them more often wrong than right): "
+    off = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+    assert off == [f"{coaching._hint_name(hint)}." for hint in cat.LIVE_OFF_HINTS]
+    assert "building a plan in a fresh session." in off and "reading a saved output whole." in off
+
+
+def test_the_summary_leaves_a_hint_that_is_off_or_gone_out_of_what_you_called_wrong(monkeypatch):
+    # split_run, quiet_output and cold_return are off for everyone and report_reread no longer speaks:
+    # an old coaching.json that mutes or raises them says nothing of it, so nothing here is left out "because of you".
+    data = {
+        "typical_piece_tokens": 0,
+        "muted": ["split_run", "quiet_output", "report_reread", "status_poll"],
+        "once": ["cold_return", "report_reread", "big_paste"],
+        "thresholds": {"report_reread_tokens": 900_000, "cold_min_tokens": 900_000, "drip_count": 9},
+    }
+    lines = " ".join(coaching.describe(data))
+    for hint in (*cat.LIVE_OFF_HINTS, *cat.NO_TRIGGER_HINTS):
+        title = coaching._hint_name(hint)
+        assert not any(title in line for line in coaching.describe(data) if not line.startswith("Off for everyone")), hint
+    assert "asking how background work is going." in lines and "pasting a lot of text." in lines
+    assert "sending small requests one at a time." in lines
+    # With every switch open the live ones come back; the one with no trigger stays out.
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", ())
+    open_lines = " ".join(coaching.describe(data))
+    for hint in ("split_run", "quiet_output", "cold_return"):
+        assert coaching._hint_name(hint) in open_lines, hint
+    assert coaching._hint_name("report_reread") not in open_lines
+    assert not any(line.startswith("Off for everyone") for line in coaching.describe(data))
+
+
+def test_the_daily_run_writes_nothing_for_a_hint_that_no_longer_speaks(tmp_path):
+    report = _tips_report(("report_reread", 0, 3, 5, 5), ("drip_feed", 0, 0, 2, 0))
+    data = coaching.from_report(report, tmp_path, now=NOW)
+    assert "report_reread_tokens" not in data["thresholds"] and "report_reread" not in data["muted"]
+    assert "report_reread" not in data["once"]
+    assert data["thresholds"]["drip_count"] == _rearmed("drip_count")
+    assert coaching.tip_rules(report, 2.0) == ([], [], {"drip_count": 6})
+    assert "report_reread" not in cat.TIP_THRESHOLD_KEYS and "report_reread" not in coaching._MUTABLE
 
 
 def _as_the_daily_run_writes_it(tmp_path, report) -> Path:
@@ -3160,8 +3216,7 @@ def test_the_quiet_hint_never_fires_on_an_agent_or_workflow_result(tmp_path):
         assert _coach(tmp_path, payload, result_len=40_000) == "", tool
         assert _coach(tmp_path, payload) == "", tool
     # The same result from a tool that isn't one of those is.
-    big = _started("Grep", {"mode": "content", "content": "c" * 40_000}, session="s9")
-    assert _kind(_coach(tmp_path, big, result_len=40_000)) == "quiet_output"
+    assert _kind(_coach(tmp_path, _saved_read(session_id="s9"), result_len=40_000)) == "quiet_output"
 
 
 def test_agent_and_workflow_are_watched_for_the_coaching_hint_only():
@@ -3172,80 +3227,15 @@ def test_agent_and_workflow_are_watched_for_the_coaching_hint_only():
 
 
 @pytest.mark.parametrize("start", list(_BACKGROUND_STARTS))
-def test_a_background_agent_started_in_a_long_session_gets_the_report_reread_note(tmp_path, start):
+def test_a_background_start_in_a_long_session_gets_no_report_reread_note(tmp_path, start):
     spec = dict(_BACKGROUND_STARTS[start])
     tool = spec.pop("tool", "Agent")
-    payload = _started(tool, transcript_path=_long_session(tmp_path), **spec)
-    note = _coach(tmp_path, payload)
-    assert _kind(note) == "report_reread"
-    # What one re-read of the session is, said as a number and nothing of the work.
-    assert "about 200k tokens" in note and "reply to each report" in note
-    # A tip note: Claude passes the last line on.
-    assert note.rstrip().splitlines()[-1].startswith(cat.TIP_LABEL)
+    assert _coach(tmp_path, _started(tool, transcript_path=_long_session(tmp_path), **spec)) == ""
 
 
-def test_a_foreground_or_small_or_nested_start_gets_no_report_reread_note(tmp_path):
-    long = _long_session(tmp_path)
-    # It ran in the foreground, so its report came back in this very reply.
-    done = {"status": "completed", "content": [{"type": "text", "text": "done"}]}
-    assert _coach(tmp_path, _started(transcript_path=long, response=done)) == ""
-    # A session under the line.
-    small = _transcript(tmp_path, [_prompt(), _reply(149_000, ago_s=30)], "small.jsonl")
-    assert _coach(tmp_path, _started(transcript_path=small, response={"isAsync": True}, session="s2")) == ""
-    # Nothing known of the session's size.
-    assert _coach(tmp_path, _started(response={"isAsync": True}, session="s3")) == ""
-    # A subagent starting its own helper is not the main session re-reading anything.
-    nested = _started(transcript_path=long, response={"isAsync": True}, session="s4", agent_id="abc",
-                      agent_type="general-purpose")
-    assert _coach(tmp_path, nested) == ""
-    # A background shell command is no agent: its tool is not watched for this hint.
-    shell = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"run_in_background": True},
-             "tool_response": {"stdout": "ok"}, "transcript_path": long, "session_id": "s5"}
-    assert _coach(tmp_path, shell) == ""
-
-
-def test_the_report_reread_line_is_the_configured_one():
+def test_the_retired_report_reread_line_is_still_the_configured_one():
     assert cat.COACHING_THRESHOLDS["report_reread_tokens"] == 150_000
-    assert CATALOGUE["coaching"]["thresholds"]["report_reread_tokens"] == 150_000
     assert HOOK.coaching_thresholds(CATALOGUE["coaching"], ON, {})["report_reread_tokens"] == 150_000
-
-
-def test_the_report_reread_note_rests_half_an_hour_then_comes_back(tmp_path):
-    long = _long_session(tmp_path)
-    start = lambda **kw: _started(transcript_path=long, response={"isAsync": True}, **kw)
-    cooldown = cat.COACHING_THRESHOLDS["cooldown_minutes"]
-    assert cooldown == 30 and _kind(_coach(tmp_path, start())) == "report_reread"
-    # Another start soon after is quiet, up to the last minute of the rest.
-    assert _coach(tmp_path, start(), now=NOW + timedelta(minutes=1)) == ""
-    assert _coach(tmp_path, start(), now=NOW + timedelta(minutes=cooldown - 1)) == ""
-    # Past it, the note shows again.
-    assert _kind(_coach(tmp_path, start(), now=NOW + timedelta(minutes=cooldown + 1))) == "report_reread"
-    # Another session has its own rest.
-    assert _kind(_coach(tmp_path, start(session="s2"))) == "report_reread"
-    state = json.loads((tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
-    hints = [row["hints"]["report_reread"] for row in state["sessions"].values()]
-    assert sorted(hint["n"] for hint in hints) == [1, 2]
-    # Numbers only: no word of the work is kept.
-    assert all(set(hint) <= {"ts", "stake", "n", "rest", "once"} for hint in hints)
-
-
-def test_the_report_reread_note_is_a_notice_too_where_the_app_shows_one(tmp_path):
-    long = _long_session(tmp_path)
-    payload = {"session_id": "s1", "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "Agent",
-               "tool_input": {}, "tool_response": {"isAsync": True}, "transcript_path": long}
-    note, notice = HOOK.coaching_for(payload, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)
-    assert _kind(note) == "report_reread"
-    # The hint carries a tip, so the note is the way it reaches you, and the notice is its short form.
-    assert "report_reread" in cat.NOTICE_HINTS and "200k" in notice
-
-
-def test_a_report_reread_tip_you_called_wrong_is_not_shown(tmp_path):
-    _as_the_daily_run_writes_it(tmp_path, _tips_report(("report_reread", 0, 0, 2, 0)))
-    long = _long_session(tmp_path)
-    assert _coach(tmp_path, _started(transcript_path=long, response={"isAsync": True})) == ""
-    # Another hint is still shown.
-    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
-    assert _kind(_coach(tmp_path, {**_prompt_payload(cold), "session_id": "s2"})) == "cold_return"
 
 
 # -- split_run: an agent run that ended too big, recorded when it stops and told in the main session -------------------
@@ -3323,7 +3313,7 @@ def test_a_run_that_began_from_a_long_brief_is_recorded_at_the_line_and_not_belo
     assert _keep_run(tmp_path, _agent_stop(small, session_id="s2"), config) is True
 
 
-def test_a_workflow_agents_brief_is_the_task_its_script_computed(tmp_path):
+def test_a_workflow_agents_brief_is_the_task_its_script_computed_and_counts_for_nothing(tmp_path):
     line = cat.COACHING_THRESHOLDS["split_brief_chars"]
     frame = "[Workflow harness: the task below was computed by the script]\n"
     relay = _prompt("[Workflow harness: started with]\n" + "r" * (line * 2))
@@ -3331,9 +3321,10 @@ def test_a_workflow_agents_brief_is_the_task_its_script_computed(tmp_path):
     session, _ = _agent_run(tmp_path, [relay, short, _reply(1_000)], "wf1", workflow="wf_a")
     # The long line the workflow was started with is context, not this agent's brief.
     assert _keep_run(tmp_path, _agent_stop(session, "wf1", agent_type="workflow-subagent")) is False
+    # Nor is the brief its script computed: it counts for plain agent runs only.
     long = _prompt(frame + "t" * line)
     session, _ = _agent_run(tmp_path, [relay, long, _reply(1_000)], "wf2", workflow="wf_b", name="long")
-    assert _keep_run(tmp_path, _agent_stop(session, "wf2", agent_type="workflow-subagent")) is True
+    assert _keep_run(tmp_path, _agent_stop(session, "wf2", agent_type="workflow-subagent")) is False
 
 
 def test_how_many_replies_a_run_made_decides_nothing(tmp_path):
@@ -3455,13 +3446,12 @@ def test_a_run_recorded_while_the_note_rests_waits_for_the_rest_and_is_not_lost(
     assert set(row["hints"]["split_run"]) <= {"ts", "stake", "n", "rest", "once"} and row["hints"]["split_run"]["n"] == 2
 
 
-def test_the_report_note_goes_first_and_the_split_note_follows_at_the_next_call(tmp_path):
+def test_a_background_start_is_told_the_run_that_ended_too_big_and_nothing_about_its_reports(tmp_path):
     session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], ctx=200_000)
     assert _keep_run(tmp_path, _agent_stop(session))
     started = _started("Agent", {"isAsync": True}, transcript_path=session)
-    assert _kind(_coach(tmp_path, started)) == "report_reread"
-    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
-    assert _kind(_coach(tmp_path, started, now=NOW + timedelta(minutes=1))) == "split_run"
+    assert _kind(_coach(tmp_path, started)) == "split_run"
+    assert _pending(tmp_path) == {}
 
 
 def test_a_split_tip_you_called_wrong_is_left_out_of_a_note_already_waiting(tmp_path):
@@ -3506,14 +3496,14 @@ def test_the_catalogue_gives_the_hook_every_word_the_split_note_is_made_from():
     assert cat.TIP_HINT_TITLES["split_run"] and "split_run" not in cat.TIP_THRESHOLD_KEYS
 
 
-def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_next_agent_call(tmp_path):
+def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_next_agent_call(tmp_path, monkeypatch, capsys):
     config_dir = _coaching_config(_config_dir(tmp_path))
     session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
     # Recording prints nothing: a subagent's own message never shows.
-    rc, out, err = _run(config_dir, _agent_stop(session))
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, _agent_stop(session))
     assert (rc, out, err) == (0, "", "")
     assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
-    rc, out, err = _run(config_dir, {"cwd": "/work/app", **_after_the_agent(session)})
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"cwd": "/work/app", **_after_the_agent(session)})
     assert rc == 0 and err == ""
     output = json.loads(out)
     assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "split_run"
@@ -3521,9 +3511,9 @@ def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_
     assert _pending(tmp_path) == {}
     # The desktop app shows no notice, so the note alone carries the tip.
     session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="desk")
-    rc, out, err = _run(config_dir, _agent_stop(session, session_id="s2"), "claude-desktop")
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, _agent_stop(session, session_id="s2"), "claude-desktop")
     assert (rc, out, err) == (0, "", "")
-    rc, out, err = _run(config_dir, {"cwd": "/work/app", **_after_the_agent(session, session_id="s2")}, "claude-desktop")
+    rc, out, err = _run_open(monkeypatch, capsys, config_dir, {"cwd": "/work/app", **_after_the_agent(session, session_id="s2")}, "claude-desktop")
     output = json.loads(out)
     assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "split_run" and "systemMessage" not in output
 
@@ -3538,7 +3528,7 @@ def _heartbeat_path(base: Path, session: str = "s1") -> Path:
     return _config_dir(base) / cat.MOD_DIR / cat.MOD_PRESENT_DIR / f"{session}.json"
 
 
-def _heartbeat(base: Path, entries=None, *, schema: int = 1) -> Path:
+def _heartbeat(base: Path, entries=None, *, schema: int = 1, shows=None) -> Path:
     """One ``<config dir>/mod/present/<session id>.json`` per entry of ``entries`` (a session id to the
     seconds before :data:`NOW` the mod last saw it; default: session ``s1``, just now). Returns the first."""
     paths = []
@@ -3546,7 +3536,10 @@ def _heartbeat(base: Path, entries=None, *, schema: int = 1) -> Path:
         path = _heartbeat_path(base, sid)
         path.parent.mkdir(parents=True, exist_ok=True)
         seen = (NOW - timedelta(seconds=ago)).timestamp()
-        path.write_text(json.dumps({"schema": schema, "session_id": sid, "seen": seen}), encoding="utf-8")
+        body = {"schema": schema, "session_id": sid, "seen": seen}
+        if shows is not None:
+            body["shows"] = shows
+        path.write_text(json.dumps(body), encoding="utf-8")
         # The hook remembers the file by its time and size, and a rewrite of the same length in the same clock
         # tick can keep both: give each write its own time, as the mod's writes a minute apart have.
         _HEARTBEAT_WRITES[0] += 1
@@ -3603,10 +3596,6 @@ def _scene_drip_feed(base: Path) -> dict:
 def _scene_big_paste(base: Path) -> dict:
     records = [_said("hi", 200), _reply(20_000, ago_s=100)]
     return {**_prompt_payload(_transcript(base, records)), "prompt": "Why does this fail?\n" + "log line\n" * 5_000}
-
-
-def _scene_report_reread(base: Path) -> dict:
-    return _started("Agent", transcript_path=_long_session(base), **_BACKGROUND_STARTS["asked for it"])
 
 
 def _scene_plan_fresh(base: Path) -> dict:
@@ -3675,6 +3664,464 @@ def test_a_moved_hint_is_left_out_while_the_mod_runs_for_the_session(tmp_path, s
     assert _hint_of(scene) not in _rested(tmp_path)
     _heartbeat_path(tmp_path).unlink()
     assert _kind(_coach(tmp_path, payload)) == _hint_of(scene)
+
+
+@pytest.mark.parametrize("scene", list(_MOVED_SCENES))
+def test_a_mod_that_shows_no_hint_leaves_the_moved_hints_with_the_hook(tmp_path, scene):
+    # Desktop never renders the hint line: the mod writes ``shows: []`` and the hook keeps the hints.
+    payload = _MOVED_SCENES[scene](tmp_path)
+    _heartbeat(tmp_path, shows=[])
+    assert _kind(_coach(tmp_path, payload)) == _hint_of(scene)
+
+
+@pytest.mark.parametrize("scene", [s for s in _MOVED_SCENES if _hint_of(s) != "plan_fresh"])
+def test_a_mod_that_lists_hint_takes_the_hint_line_hints(tmp_path, scene):
+    payload = _MOVED_SCENES[scene](tmp_path)
+    _heartbeat(tmp_path, shows=["hint"])
+    assert _coach(tmp_path, payload) == ""
+    assert _hint_of(scene) not in _rested(tmp_path)
+
+
+@pytest.mark.parametrize("scene", [s for s in _MOVED_SCENES if _hint_of(s) == "plan_fresh"])
+def test_plan_fresh_stays_with_the_hook_until_the_mod_lists_status(tmp_path, scene):
+    payload = _MOVED_SCENES[scene](tmp_path)
+    _heartbeat(tmp_path, shows=["hint"])
+    assert _kind(_coach(tmp_path, payload)) == "plan_fresh"
+    (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).unlink()
+    _heartbeat(tmp_path, shows=["hint", "status"])
+    assert _coach(tmp_path, payload) == ""
+    assert "plan_fresh" not in _rested(tmp_path)
+
+
+def test_a_present_file_that_lists_hint_moves_the_four_hint_line_hints_and_not_plan_fresh(tmp_path):
+    _heartbeat(tmp_path, shows=["hint"])
+    moved = HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp())
+    assert moved == frozenset({"cold_return", "status_poll", "drip_feed", "big_paste"})
+
+
+def test_every_moved_hint_names_the_surface_that_shows_it():
+    assert set(cat.MOVED_TO_MOD_SHOWN_ON) == set(cat.MOVED_TO_MOD)
+    assert CATALOGUE["mod"]["moved_on"] == dict(cat.MOVED_TO_MOD_SHOWN_ON)
+    assert set(cat.MOVED_TO_MOD_SHOWN_ON.values()) == {"hint", "status"}
+
+
+def test_a_present_file_from_an_older_mod_without_shows_keeps_the_whole_set_moved(tmp_path):
+    _heartbeat(tmp_path)
+    assert "shows" not in json.loads(_heartbeat_path(tmp_path).read_text(encoding="utf-8"))
+    assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset(cat.MOVED_TO_MOD)
+    _heartbeat(tmp_path, shows=["status"])
+    assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset({"plan_fresh"})
+    _heartbeat(tmp_path, shows=[])
+    assert HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp()) == frozenset()
+
+
+def _claim_path(base: Path) -> Path:
+    return _config_dir(base) / (cat.COACH_STATE_FILE + ".claim")
+
+
+def test_a_call_that_finds_the_claim_held_draws_no_hint_and_leaves_the_state_alone(tmp_path):
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    assert _coach(tmp_path, payload) == ""
+    assert _rested(tmp_path) == {} and claim.exists()
+    # The holder's own claim is released at the end of its call: the next call draws the note, once.
+    claim.unlink()
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+    assert not claim.exists()
+    assert _coach(tmp_path, payload) == ""
+
+
+def test_a_claim_older_than_five_seconds_is_taken_over(tmp_path):
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    old = datetime.now(timezone.utc).timestamp() - 10
+    os.utime(claim, (old, old))
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+    assert not claim.exists()
+
+
+def test_two_calls_racing_in_one_message_draw_one_note(tmp_path, monkeypatch):
+    # The second call starts while the first still holds the claim (between its read and its write).
+    payload = _scene_big_paste(tmp_path)
+    inner = []
+    real = HOOK._gate
+
+    def gate(*args, **kwargs):
+        if not inner:
+            inner.append(_coach(tmp_path, payload))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(HOOK, "_gate", gate)
+    outer = _coach(tmp_path, payload)
+    assert inner == [""] and _kind(outer) == "big_paste"
+
+
+def test_keep_reply_and_keep_run_leave_the_state_alone_while_the_claim_is_held(tmp_path):
+    records = [_prompt(), _reply(20_000, ago_s=100)]
+    assert _stop(tmp_path, records, name="first.jsonl")
+    state_file = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    before = state_file.read_bytes()
+    claim = _claim_path(tmp_path)
+    claim.write_text("", encoding="utf-8")
+    newer = [*records, _reply(30_000, ago_s=10, message_id="msg_newer")]
+    assert _stop(tmp_path, newer, name="second.jsonl") is False
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="held")
+    assert _keep_run(tmp_path, _agent_stop(session)) is False
+    assert state_file.read_bytes() == before and claim.exists()
+    # Released, the same calls write.
+    claim.unlink()
+    assert _stop(tmp_path, newer, name="second.jsonl") is True
+    assert _keep_run(tmp_path, _agent_stop(session)) is True
+
+
+def test_keep_run_keeps_no_count_while_split_run_is_off_live(tmp_path, monkeypatch):
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="off")
+    monkeypatch.setitem(CATALOGUE["coaching"], "off_live", ["split_run"])
+    assert _keep_run(tmp_path, _agent_stop(session)) is False
+    assert not (_config_dir(tmp_path) / cat.COACH_STATE_FILE).exists()
+
+
+def test_a_reply_kept_while_a_hint_is_being_decided_is_still_there_afterwards(tmp_path, monkeypatch):
+    # keep_reply runs (Stop) while the status_poll decision computes its candidate: both writes survive.
+    payload = _scene_status_poll(tmp_path)
+    stop = {"hook_event_name": "Stop", "session_id": "s1", "cwd": "/work/app", "transcript_path": payload["transcript_path"]}
+    real = HOOK._poll_hint
+    kept = []
+
+    def poll(*args, **kwargs):
+        found = real(*args, **kwargs)
+        kept.append(HOOK.keep_reply(stop, ON, CATALOGUE, _config_dir(tmp_path), now=NOW))
+        return found
+
+    monkeypatch.setattr(HOOK, "_poll_hint", poll)
+    assert _kind(_coach(tmp_path, payload)) == "status_poll"
+    assert kept == [True]
+    assert "status_poll" in _rested(tmp_path)
+    assert _kept(tmp_path) is not None
+
+
+def test_an_agent_call_that_has_nothing_to_decide_takes_no_claim(tmp_path, monkeypatch):
+    taken = []
+    real = HOOK._claimed
+
+    def recorder(path):
+        taken.append(path)
+        return real(path)
+
+    monkeypatch.setattr(HOOK, "_claimed", recorder)
+    assert _coach(tmp_path, _saved_read(agent_id="ag1", agent_type="general-purpose")) == ""
+    assert taken == [] and not _claim_path(tmp_path).exists()
+
+
+def test_a_message_gets_its_hint_when_an_agent_call_runs_during_its_transcript_read(tmp_path, monkeypatch):
+    payload = _scene_status_poll(tmp_path)
+    real = HOOK._TailReader.get
+    inner = []
+
+    def get(self):
+        if not inner:
+            inner.append(_coach(tmp_path, _saved_read(session_id="s1", agent_id="ag1", agent_type="general-purpose")))
+        return real(self)
+
+    monkeypatch.setattr(HOOK._TailReader, "get", get)
+    assert _kind(_coach(tmp_path, payload)) == "status_poll"
+    assert inner == [""]
+
+
+def test_a_hint_that_is_off_live_costs_no_claim(tmp_path, monkeypatch):
+    taken = []
+    real = HOOK._claimed
+    monkeypatch.setattr(HOOK, "_claimed", lambda path: (taken.append(path), real(path))[1])
+    monkeypatch.setitem(CATALOGUE["coaching"], "off_live", ["big_paste"])
+    assert _coach(tmp_path, _scene_big_paste(tmp_path)) == ""
+    assert taken == []
+
+
+def test_a_claim_of_the_last_second_is_not_taken_over(tmp_path):
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    old = datetime.now(timezone.utc).timestamp() - 1
+    os.utime(claim, (old, old))
+    assert HOOK._take_stale(claim) is False and claim.exists()
+
+
+def test_a_stale_claim_is_taken_over_once(tmp_path):
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    old = datetime.now(timezone.utc).timestamp() - 10
+    os.utime(claim, (old, old))
+    assert HOOK._take_stale(claim) is True and not claim.exists()
+    assert not list(claim.parent.glob("*.stale"))
+    # Gone already: the create may be tried again.
+    assert HOOK._take_stale(claim) is True
+
+
+def test_a_fresh_claim_that_replaced_the_stale_one_is_put_back(tmp_path, monkeypatch):
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    real = HOOK.time.time
+    calls = []
+
+    def clock():
+        # The first look sees an old claim; by the second, what was moved aside is another call's fresh one.
+        calls.append(1)
+        return real() + (100 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(HOOK.time, "time", clock)
+    assert HOOK._take_stale(claim) is False
+    assert claim.exists() and not list(claim.parent.glob("*.stale"))
+
+
+def test_a_claim_that_windows_refuses_to_make_reads_as_held(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise PermissionError("being deleted")
+
+    monkeypatch.setattr(HOOK.os, "open", refuse)
+    with HOOK._claimed(_config_dir(tmp_path) / cat.COACH_STATE_FILE) as held:
+        assert held is False
+
+
+class _Claim:
+    """Counts what ``_claimed`` does to a claim that Windows refuses: the ``os.open`` calls of the claim file (the
+    first ``refuse`` of them raise ``PermissionError``), the ``time.sleep`` calls between them, and the
+    ``_take_stale`` calls. Counted, not timed: the Windows clock ticks every 15.6 ms."""
+
+    def __init__(self, monkeypatch, refuse):
+        self.refuse, self.opens, self.refused, self.sleeps, self.stale = refuse, 0, 0, 0, 0
+        real_open, real_sleep = os.open, HOOK.time.sleep
+
+        def opened(path, *args, **kwargs):
+            if not str(path).endswith(".claim"):
+                return real_open(path, *args, **kwargs)
+            self.opens += 1
+            if self.opens <= self.refuse:
+                self.refused += 1
+                raise PermissionError("being deleted")
+            return real_open(path, *args, **kwargs)
+
+        def slept(seconds):
+            self.sleeps += 1
+            return real_sleep(seconds)
+
+        def taken(claim):
+            self.stale += 1
+            return False
+
+        monkeypatch.setattr(HOOK.os, "open", opened)
+        monkeypatch.setattr(HOOK.time, "sleep", slept)
+        monkeypatch.setattr(HOOK, "_take_stale", taken)
+
+
+def test_a_claim_that_windows_refuses_for_a_moment_is_waited_for(tmp_path, monkeypatch):
+    seen = _Claim(monkeypatch, refuse=3)
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    claim = state_path.with_name(state_path.name + ".claim")
+    with HOOK._claimed(state_path) as held:
+        assert held is True
+        assert claim.exists()
+    assert not claim.exists()
+    # Three refusals, each waited out; the fourth try made the claim. A refusal is no sign of a dead call's claim.
+    assert (seen.refused, seen.opens, seen.sleeps, seen.stale) == (3, 4, 3, 0)
+
+
+def test_a_claim_that_windows_always_refuses_is_given_up_on_after_the_wait(tmp_path, monkeypatch):
+    import time
+
+    seen = _Claim(monkeypatch, refuse=10**9)
+    started = time.monotonic()
+    with HOOK._claimed(_config_dir(tmp_path) / cat.COACH_STATE_FILE) as held:
+        assert held is False
+    elapsed = time.monotonic() - started
+    # Both ends are read from the clock the deadline is, so the wait cannot come out shorter.
+    assert HOOK._CLAIM_WAIT_S * 0.9 <= elapsed < 2.0
+    # It waited between tries rather than spinning, and never took a refused claim for a stale one.
+    assert seen.opens > 1 and seen.sleeps >= seen.opens - 1 and seen.stale == 0
+
+
+class _Replace:
+    """Counts what ``_write_json`` does to a replace that Windows refuses: the ``os.replace`` calls (the first
+    ``refuse`` of them raise ``PermissionError``, or ``error`` when one is given) and the ``time.sleep`` calls
+    between them, which pass at once. Counted, not timed."""
+
+    def __init__(self, monkeypatch, refuse, error=PermissionError):
+        self.refuse, self.error, self.calls, self.sleeps = refuse, error, 0, 0
+        real = os.replace
+
+        def replace(src, dst):
+            self.calls += 1
+            if self.calls <= self.refuse:
+                raise self.error("in use")
+            return real(src, dst)
+
+        def slept(seconds):
+            self.sleeps += 1
+
+        monkeypatch.setattr(HOOK.os, "replace", replace)
+        monkeypatch.setattr(HOOK.time, "sleep", slept)
+
+
+def test_a_write_that_windows_refuses_twice_lands_on_the_third_try(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    target.write_text('{"old":1}', encoding="utf-8")
+    seen = _Replace(monkeypatch, refuse=2)
+    assert HOOK._write_json(target, {"new": 2}) is True
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
+    assert (seen.calls, seen.sleeps) == (3, 2)
+    assert not list(target.parent.glob("*.tmp"))
+
+
+def test_a_write_that_windows_always_refuses_gives_up_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    target.write_text('{"old":1}', encoding="utf-8")
+    seen = _Replace(monkeypatch, refuse=10**9)
+    assert HOOK._write_json(target, {"new": 2}) is False
+    assert target.read_text(encoding="utf-8") == '{"old":1}'
+    assert not list(target.parent.glob("*.tmp"))
+    # It tried a fixed number of times, waiting between tries.
+    assert (seen.calls, seen.sleeps) == (HOOK._REPLACE_TRIES, HOOK._REPLACE_TRIES - 1)
+
+
+def test_a_replace_refused_for_any_other_reason_is_not_retried(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    seen = _Replace(monkeypatch, refuse=10**9, error=OSError)
+    assert HOOK._write_json(target, {"new": 2}) is False
+    assert (seen.calls, seen.sleeps) == (1, 0)
+    assert not target.exists() and not list(target.parent.glob("*.tmp"))
+
+
+def test_a_write_to_a_folder_that_is_not_there_reads_as_not_landed(tmp_path):
+    assert HOOK._write_json(tmp_path / "missing" / cat.COACH_STATE_FILE, {"new": 2}) is False
+
+
+def test_a_hint_whose_stamp_did_not_land_is_not_given(tmp_path, monkeypatch):
+    payload = _scene_big_paste(tmp_path)
+    state = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    writes = []
+    with monkeypatch.context() as refusing:
+        refusing.setattr(HOOK, "_write_json", lambda path, data: writes.append(path) is not None and False)
+        assert _coach(tmp_path, payload) == ""
+    assert writes == [state] and not state.exists()
+    # Once the write lands again the hint is given: it was skipped, not spent.
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+
+
+def test_a_hint_whose_stamp_windows_refused_leaves_the_state_as_it_was(tmp_path, monkeypatch):
+    payload = _scene_big_paste(tmp_path)
+    state = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    state.write_text('{"sessions":{}}', encoding="utf-8")
+    _Replace(monkeypatch, refuse=10**9)
+    assert _coach(tmp_path, payload) == ""
+    assert state.read_text(encoding="utf-8") == '{"sessions":{}}'
+    assert not list(state.parent.glob("*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a file held open refuses a replace on Windows only")
+def test_a_write_to_a_file_another_call_has_open_lands_once_it_is_closed(tmp_path, monkeypatch):
+    target = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    target.write_text('{"old":1}', encoding="utf-8")
+    holder = open(target, "rb")
+    seen = {"refused": 0, "sleeps": 0}
+    real_replace, real_sleep = os.replace, HOOK.time.sleep
+
+    def replace(src, dst):
+        try:
+            return real_replace(src, dst)
+        except PermissionError:
+            seen["refused"] += 1
+            raise
+
+    def slept(seconds):
+        # The other call lets go while this one waits: not on a timer, so a slow machine cannot make it late.
+        seen["sleeps"] += 1
+        if seen["sleeps"] == 3:
+            holder.close()
+        return real_sleep(seconds)
+
+    monkeypatch.setattr(HOOK.os, "replace", replace)
+    monkeypatch.setattr(HOOK.time, "sleep", slept)
+    try:
+        assert HOOK._write_json(target, {"new": 2}) is True
+    finally:
+        holder.close()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
+    # Windows itself refused the replace while the file was open, as the patched tests assume.
+    assert seen["refused"] == 3
+    assert not list(target.parent.glob("*.tmp"))
+
+
+def _delete_pending(path):
+    """Marks ``path`` for deletion the way a call that is deleting its claim does, so that the name stays, refusing
+    a create, until the handle closes: returns the function that closes it. (A plain delete removes the name
+    at once on current Windows, so it cannot show this.)"""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.HANDLE]
+    k32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    generic_read, delete, share_all, open_existing, disposition = 0x80000000, 0x00010000, 0x7, 3, 4
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    handle = k32.CreateFileW(str(path), generic_read | delete, share_all, None, open_existing, 0, None)
+    assert handle not in (None, wintypes.HANDLE(-1).value), ctypes.get_last_error()
+    flag = ctypes.c_ubyte(1)
+    assert k32.SetFileInformationByHandle(handle, disposition, ctypes.byref(flag), 1), ctypes.get_last_error()
+    return lambda: k32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a claim that is delete-pending is a Windows state")
+def test_a_claim_that_is_delete_pending_is_waited_for_and_then_taken(tmp_path, monkeypatch):
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    claim = state_path.with_name(state_path.name + ".claim")
+    close = _delete_pending(claim)
+    seen = {"refused": 0, "sleeps": 0}
+    real_open, real_sleep = os.open, HOOK.time.sleep
+
+    def opened(path, *args, **kwargs):
+        try:
+            return real_open(path, *args, **kwargs)
+        except PermissionError:
+            seen["refused"] += 1
+            raise
+
+    def slept(seconds):
+        # The call deleting the claim lets go while this one waits: not on a timer, so a slow machine cannot
+        # make it late.
+        seen["sleeps"] += 1
+        if seen["sleeps"] == 1:
+            close()
+        return real_sleep(seconds)
+
+    monkeypatch.setattr(HOOK.os, "open", opened)
+    monkeypatch.setattr(HOOK.time, "sleep", slept)
+    with HOOK._claimed(state_path) as held:
+        assert held is True
+        assert claim.exists()
+    assert not claim.exists()
+    # Windows itself refused the create while the claim was pending, as the patched tests assume.
+    assert seen["refused"] >= 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a claim that is delete-pending is a Windows state")
+def test_a_claim_that_stays_delete_pending_is_given_up_on(tmp_path):
+    state_path = _config_dir(tmp_path) / cat.COACH_STATE_FILE
+    close = _delete_pending(state_path.with_name(state_path.name + ".claim"))
+    try:
+        with HOOK._claimed(state_path) as held:
+            assert held is False
+    finally:
+        close()
 
 
 def _stale(base):
@@ -3766,8 +4213,7 @@ def test_a_heartbeat_with_the_extra_active_key_still_counts_by_its_seen_time(tmp
 
 def test_the_hints_the_hook_keeps_are_added_while_the_mod_runs(tmp_path):
     _heartbeat(tmp_path)
-    grep = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "tool_input": {"pattern": "ls"}}
-    assert _kind(_coach(tmp_path, grep, result_len=40_000)) == "quiet_output"
+    assert _kind(_coach(tmp_path, _saved_read())) == "quiet_output"
     # Planning for a long time in plan mode: the plan_fresh_early tip is written inside the plan, so it stays.
     note = _planning(tmp_path)
     assert _kind(note) == "plan_fresh_early"
@@ -3796,25 +4242,25 @@ def test_the_hook_reads_the_heartbeat_once_for_all_the_questions_of_a_call(tmp_p
     monkeypatch.setattr(HOOK, "_read_json", lambda path: reads.append(path.name) or real(path))
     now_ts = NOW.timestamp()
     config_dir = _config_dir(tmp_path)
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts)
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None and HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset(cat.MOVED_TO_MOD)
     assert reads.count("s1.json") == 1
     # A rewrite of the file is read again.
     _heartbeat(tmp_path, {"s1": 0, "s2": 0})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and reads.count("s1.json") == 2
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) and reads.count("s2.json") == 1
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None and reads.count("s1.json") == 2
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is not None and reads.count("s2.json") == 1
 
 
 def test_the_presence_check_never_raises(tmp_path):
     config_dir = _config_dir(tmp_path)
     now_ts = NOW.timestamp()
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
-    assert HOOK._mod_present(config_dir, {}, "s1", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
+    assert HOOK._mod_file(config_dir, {}, "s1", now_ts) is None
     # The file's place is a folder.
     _heartbeat_path(tmp_path).mkdir(parents=True)
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset()
-    assert HOOK._mod_present(config_dir, CATALOGUE, None, now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, None, now_ts) is None
 
 
 def test_two_sessions_each_have_their_own_heartbeat(tmp_path):
@@ -3822,13 +4268,13 @@ def test_two_sessions_each_have_their_own_heartbeat(tmp_path):
     now_ts = NOW.timestamp()
     # One session's heartbeat is stale, the other's is fresh: they do not touch each other.
     _heartbeat(tmp_path, {"s1": 0, "s2": cat.MOD_PRESENT_WINDOW_S + 1})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is True
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is not None
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is None
     # A session's own file going doesn't take the other's.
     _heartbeat_path(tmp_path).unlink()
     _heartbeat(tmp_path, {"s2": 0})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is True
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s1", now_ts) is None
+    assert HOOK._mod_file(config_dir, CATALOGUE, "s2", now_ts) is not None
 
 
 @pytest.mark.parametrize("session", ["../x", "a/b", "a.b", "s_1", "s 1", "", "s1\n", "..", "\\x"])
@@ -3841,7 +4287,7 @@ def test_a_session_id_that_is_not_a_plain_word_is_never_present(tmp_path, sessio
             (place / name).write_text(
                 json.dumps({"schema": 1, "session_id": session, "seen": NOW.timestamp()}), encoding="utf-8"
             )
-    assert HOOK._mod_present(config_dir, CATALOGUE, session, NOW.timestamp()) is False
+    assert HOOK._mod_file(config_dir, CATALOGUE, session, NOW.timestamp()) is None
     assert HOOK._moved(config_dir, CATALOGUE, session, NOW.timestamp()) == frozenset()
 
 
@@ -3935,3 +4381,328 @@ def test_the_hook_prints_nothing_for_a_moved_hint_while_the_mod_runs(tmp_path):
     heartbeat.unlink()
     rc, out, err = _run(config_dir, payload)
     assert rc == 0 and err == "" and _kind(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "drip_feed"
+
+
+# -- G13: the live hints that failed the control groups ----------------------------------------------------
+
+
+_SAVED = "/home/u/.claude/projects/p/s1/tool-results/toolu_abc.txt"
+
+
+def _saved_read(chars: int = 40_000, *, file_path: str = _SAVED, tool_input=None, **extra) -> dict:
+    """A PostToolUse call for a whole Read of ``file_path``."""
+    return _result("Read", {"type": "text", "file": {"filePath": file_path, "content": "x" * chars, "numLines": 1}},
+                   tool_input={"file_path": file_path, **(tool_input or {})}, **extra)
+
+
+def test_quiet_output_fires_only_for_a_whole_read_of_a_saved_output(tmp_path):
+    note = _coach(tmp_path, _saved_read())
+    assert _kind(note) == "quiet_output" and "Grep the saved output, or read part of it with an offset and a limit" in note
+    # Any other big result is left alone: a search, a fetch, a file of the project.
+    assert _coach(tmp_path, _result("Grep", {"mode": "content", "content": "c" * 40_000}, session_id="s2")) == ""
+    assert _coach(tmp_path, _result("WebFetch", {"result": "r" * 40_000}, session_id="s3")) == ""
+    assert _coach(tmp_path, _saved_read(file_path="/w/app/src/a.py", session_id="s4")) == ""
+    # A read of part of it, or a small one, is not a whole read.
+    assert _coach(tmp_path, _saved_read(tool_input={"limit": 200}, session_id="s5")) == ""
+    assert _coach(tmp_path, _saved_read(tool_input={"offset": 10}, session_id="s6")) == ""
+    assert _coach(tmp_path, _saved_read(4_000, session_id="s7")) == ""
+
+
+def test_quiet_output_never_fires_inside_an_agent(tmp_path):
+    for n, kind in enumerate(("general-purpose", "workflow-subagent")):
+        payload = _saved_read(session_id=f"a{n}", agent_id=f"ag{n}", agent_type=kind)
+        assert _coach(tmp_path, payload) == "", kind
+    assert _kind(_coach(tmp_path, _saved_read(session_id="main"))) == "quiet_output"
+
+
+def _says(second: int, text: str) -> dict:
+    return turn_line(content=[{"type": "text", "text": text}], model="claude-widget-9",
+                     timestamp=f"2026-09-18T12:00:{second:02d}.000Z", cache_read_input_tokens=5_000)
+
+
+def test_quiet_output_has_its_own_mute_entry_and_is_no_question_of_the_tip_survey(tmp_path, _salt):
+    assert cat.CLAUDE_ONLY_HINTS == ("quiet_output",)
+    assert "quiet_output" not in cat.TIP_HINT_TITLES and "quiet_output" not in cat.TIP_THRESHOLD_KEYS
+    # Claude calls the note a misfire in words, with no tip in the reply: the transcript alone mutes it.
+    lines = []
+    for n in range(cat.TIP_WRONG_MIN):
+        second = 3 * n
+        lines += [_ask(second), _note_line(_coach_text("quiet_output"), "PostToolUse", second + 1),
+                  _says(second + 2, "That ClaudeGlass note doesn't apply: I needed the whole file.")]
+    top = _session(tmp_path, lines)
+    session = prompting.session_prompting(NS(top=top, session_id="q"), prompting._Prices(load_pricing()))
+    assert session.notes == {"quiet_output": cat.TIP_WRONG_MIN} and session.misfires == {"quiet_output": cat.TIP_WRONG_MIN}
+    section = prompting.build_section([session])
+    tips = next(t for t in section.tables if t.name == "prompting_tips")
+    cells = dict(zip([c.key for c in tips.columns], tips.rows[0]))
+    assert cells["hint"] == "quiet_output" and cells["relay"] == "no tip asked" and cells["shown"] == 0
+    report = NS(recommendations=[], sections=[section])
+    config_dir = _config_dir(tmp_path)
+    assert "quiet_output" in coaching.from_report(report, config_dir, now=NOW)["muted"]
+    coaching.write(config_dir, coaching.from_report(report, config_dir, now=NOW))
+    assert coaching.read(config_dir)["muted"] == ["quiet_output"]
+    assert _coach(tmp_path, _saved_read()) == ""
+
+
+def test_coaching_does_not_mute_quiet_output_on_misfires_an_older_digest_cannot_measure(tmp_path, _salt):
+    # Claude calls the note a misfire in words, in transcripts whose digests an older parser wrote
+    # (their transcripts are gone): the words are not measured there, so they don't mute the hint.
+    lines = []
+    for n in range(cat.TIP_WRONG_MIN):
+        second = 3 * n
+        lines += [_ask(second), _note_line(_coach_text("quiet_output"), "PostToolUse", second + 1),
+                  _says(second + 2, "That ClaudeGlass note doesn't apply: I needed the whole file.")]
+
+    def rules(stamp):
+        top = _session(tmp_path, lines)
+        top.parser_version = stamp
+        session = prompting.session_prompting(NS(top=top, session_id="q"), prompting._Prices(load_pricing()))
+        return coaching.tip_rules(NS(sections=[prompting.build_section([session])]), 2.0)
+
+    assert rules(PARSER_VERSION) == (["quiet_output"], [], {})
+    assert rules(BEFORE_STAMP) == ([], [], {})
+
+
+def test_report_reread_is_off_live_but_its_tag_stays_known(tmp_path):
+    payload = _started(transcript_path=_long_session(tmp_path), response={"isAsync": True})
+    assert _coach(tmp_path, payload) == ""
+    assert "report_reread" in cat.TIP_HINT_TITLES
+
+
+def test_a_workflow_agents_long_brief_is_no_split_run_but_a_plain_agents_still_is(tmp_path):
+    line = cat.COACHING_THRESHOLDS["split_brief_chars"]
+    frame = "[Workflow harness: the task below was computed by the script]" + chr(10)
+    session, _ = _agent_run(tmp_path, [_prompt(frame + "t" * line), _reply(1_000)], "wf1", workflow="wf_a")
+    assert _keep_run(tmp_path, _agent_stop(session, "wf1", agent_type="workflow-subagent")) is False
+    # A workflow agent that summarised its context still counts.
+    session, _ = _agent_run(tmp_path, [_prompt(frame + "t" * line), _SUMMARISED, _reply(1_000)], "wf2", workflow="wf_b", name="c")
+    assert _keep_run(tmp_path, _agent_stop(session, "wf2", agent_type="workflow-subagent")) is True
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    plain, _ = _agent_run(tmp_path, [_prompt("x" * line), _reply(1_000)], name="plain")
+    assert _keep_run(tmp_path, _agent_stop(plain, session_id="s2")) is True
+
+
+def test_cold_return_skips_a_message_that_is_not_new_work(tmp_path):
+    records = [_prompt(), _reply(150_000, ago_s=7_200)]
+    skipped = {
+        "only a reminder": reminder_led_prompt(),
+        "a go-ahead": "yes",
+        "a go-ahead with a word": "Yes, fix the wrapper",
+        "permission": "You may merge all the PRs",
+        "continue": "continue",
+        "a retry": "Try again",
+        "a retry, please": "please retry",
+    }
+    for n, (name, text) in enumerate(skipped.items()):
+        assert _send(tmp_path, records, text, session=f"skip{n}") == "", name
+    # Typed text behind a reminder is typed.
+    assert _kind(_send(tmp_path, records, reminder_led_prompt("Build me a settings page"), session="typed")) == "cold_return"
+    assert _kind(_send(tmp_path, records, "add a settings page for the theme", session="plain")) == "cold_return"
+
+
+def test_cold_return_skips_an_answer_to_claudes_own_question(tmp_path):
+    asked = _reply(150_000, ago_s=7_200, content=[{"type": "text", "text": "Done. Want me to merge it now?"}])
+    assert _send(tmp_path, [_prompt(), asked], "the second one, on a branch", session="q1") == ""
+    tool = _reply(150_000, ago_s=7_200, content=[{"type": "tool_use", "id": "toolu_q", "name": "AskUserQuestion", "input": {}}])
+    assert _send(tmp_path, [_prompt(), tool], "option b please, only the docs", session="q2") == ""
+    statement = _reply(150_000, ago_s=7_200, content=[{"type": "text", "text": "All done."}])
+    assert _kind(_send(tmp_path, [_prompt(), statement], "the second one, on a branch", session="q3")) == "cold_return"
+
+
+def test_plan_fresh_names_the_plan_file_in_words(tmp_path):
+    payload = {"hook_event_name": "PostToolUse", "tool_name": "ExitPlanMode", "session_id": "s1", "cwd": "/w",
+               "tool_input": {"plan": "p" * 400}, "transcript_path": _transcript(
+                   tmp_path, [_prompt("start"), _reply(5_000, ago_s=900), _prompt("plan"), _reply(120_000, ago_s=60)])}
+    note = _coach(tmp_path, payload)
+    assert _kind(note) == "plan_fresh" and "the plan file" in note and "<file>" not in note
+
+
+# -- hints the replay found more often wrong than right: off live -------------------------
+
+_LIVE_OFF = ("plan_fresh", "plan_fresh_early", "split_run", "quiet_output", "cold_return")
+
+
+def _live_off_cases(tmp_path) -> dict:
+    """For each hint turned off, what makes it speak with the switch open: ``(call, kind)``."""
+    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="split")
+    plan = {"hook_event_name": "PostToolUse", "tool_name": "ExitPlanMode", "session_id": "p1", "cwd": "/w",
+            "tool_input": {"plan": "p" * 400}, "transcript_path": _transcript(
+                tmp_path, [_prompt("start"), _reply(5_000, ago_s=900), _prompt("plan"), _reply(120_000, ago_s=60)], "p.jsonl")}
+    return {
+        "cold_return": lambda: _coach(tmp_path, {**_prompt_payload(cold), "session_id": "c1"}),
+        "plan_fresh": lambda: _coach(tmp_path, plan),
+        "plan_fresh_early": lambda: _planning(tmp_path, session="e1"),
+        "quiet_output": lambda: _coach(tmp_path, _saved_read(session_id="q1")),
+        "split_run": lambda: (_keep_run(tmp_path, _agent_stop(session, session_id="sp1")),
+                              _coach(tmp_path, _after_the_agent(session, session_id="sp1")))[1],
+    }
+
+
+def test_live_off_the_catalogue_names_the_hints_the_replay_found_more_often_wrong_than_right():
+    assert set(cat.LIVE_OFF_HINTS) == set(_LIVE_OFF)
+    assert set(CATALOGUE["coaching"]["off_live"]) == set(_LIVE_OFF)
+    assert set(cat.LIVE_OFF_HINTS) <= set(cat.COACHING_HINTS)
+
+
+def _hints_the_source_names(source: str) -> set[str]:
+    """The hints a Python source names as a string of their own: code, not a comment or a docstring."""
+    return {
+        node.value for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant) and node.value in cat.COACHING_HINTS
+    }
+
+
+def test_the_hints_a_source_names_are_its_string_constants_not_its_comments_or_prose():
+    source = '"""status_poll and report_reread are described here."""\n# report_reread was retired\nHINT = "drip_feed"\n'
+    assert _hints_the_source_names(source) == {"drip_feed"}
+    hook = MODULE.read_text(encoding="utf-8")
+    assert "status_poll" in _hints_the_source_names(hook)
+    # A trigger taken out of the hook shows, though its docstring mention stays.
+    without = hook.replace('"status_poll"', '"__gone__"')
+    assert "status_poll" in without and "status_poll" not in _hints_the_source_names(without)
+    # A comment that names a retired hint is not a trigger.
+    commented = hook + "\n# report_reread was retired: nothing here raises it.\n"
+    assert _hints_the_source_names(commented) == _hints_the_source_names(hook)
+
+
+def test_a_hint_nothing_in_the_hook_raises_is_listed_once_and_keeps_its_words_for_old_notes():
+    # The hook names every hint that can speak, switched on or off, and none that has no trigger left.
+    named = _hints_the_source_names(MODULE.read_text(encoding="utf-8"))
+    assert set(cat.NO_TRIGGER_HINTS) == set(cat.COACHING_HINTS) - named
+    for hint in cat.NO_TRIGGER_HINTS:
+        # Not retired: old notes keep their words, their tip and their row of the tips table.
+        assert hint in cat.COACHING_HINTS and hint not in cat.RETIRED_COACHING_HINTS, hint
+        assert hint in cat.COACHING_TEXT and hint in cat.TIP_HINT_TITLES, hint
+        assert hint not in cat.LIVE_OFF_HINTS, hint
+    assert not set(cat.NO_TRIGGER_HINTS) & set(cat.LIVE_OFF_HINTS)
+
+
+def _hints_after_a_tool_result(source: str) -> set[str]:
+    """The hints ``_coaching_for`` can raise on a call that is not a message you send: the hint names in the
+    branches after its ``if event == "UserPromptSubmit":`` (the approved plan, then every other tool result)."""
+    tree = ast.parse(source)
+    func = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_coaching_for")
+    branch = next(
+        n for n in ast.walk(func)
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+        and isinstance(n.test.left, ast.Name) and n.test.left.id == "event"
+        and any(isinstance(c, ast.Constant) and c.value == "UserPromptSubmit" for c in n.test.comparators)
+    )
+    return {
+        node.value for part in branch.orelse for node in ast.walk(part)
+        if isinstance(node, ast.Constant) and node.value in cat.COACHING_HINTS
+    }
+
+
+def test_the_hints_given_after_a_tool_result_are_the_catalogues():
+    assert _hints_after_a_tool_result(MODULE.read_text(encoding="utf-8")) == set(cat.TOOL_RESULT_HINTS)
+
+
+@pytest.mark.parametrize("hint", _LIVE_OFF)
+def test_live_off_a_hint_the_replay_found_more_often_wrong_than_right_gives_no_note(tmp_path, monkeypatch, hint):
+    case = _live_off_cases(tmp_path)[hint]
+    assert case() == ""
+    # The same call speaks with the switch open, so the silence is the switch.
+    monkeypatch.setitem(CATALOGUE["coaching"], "off_live", [])
+    (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).unlink(missing_ok=True)
+    assert _kind(case()) == hint
+
+
+def _older_catalogue() -> dict:
+    """The catalogue of a package from before ``off_live`` and ``moved_on`` were written: the hook module of
+    this package can end up beside it when an install is cut short."""
+    import copy
+
+    older = copy.deepcopy(CATALOGUE)
+    del older["coaching"]["off_live"]
+    del older["mod"]["moved_on"]
+    return older
+
+
+def test_the_hooks_own_off_list_is_the_catalogues():
+    assert tuple(HOOK._LIVE_OFF_FALLBACK) == cat.LIVE_OFF_HINTS
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_the_off_hint_off_and_the_live_hint_live(tmp_path):
+    older = _older_catalogue()
+    config_dir = _config_dir(tmp_path)
+
+    def note(payload, session):
+        return HOOK.coaching_note_for({"session_id": session, "cwd": "/work/app", **payload}, ON, older, config_dir, now=NOW)
+
+    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
+    assert note({**_prompt_payload(cold), "prompt": "add a settings page for the theme"}, "c1") == ""
+    assert _kind(note(_scene_big_paste(tmp_path), "b1")) == "big_paste"
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_what_the_mod_does_not_show(tmp_path):
+    older = _older_catalogue()
+    _heartbeat(tmp_path, shows=["hint"])
+    config_dir = _config_dir(tmp_path)
+    # No ``moved_on`` to say which surface serves a hint: none is taken from the hook, and nothing raises.
+    assert HOOK._moved(config_dir, older, "s1", NOW.timestamp()) == frozenset()
+    note = HOOK.coaching_note_for({"session_id": "s1", "cwd": "/work/app", **_scene_big_paste(tmp_path)}, ON, older, config_dir, now=NOW)
+    assert _kind(note) == "big_paste"
+    # A mod without ``shows`` (older still) moves the whole set, as it does with any catalogue.
+    _heartbeat(tmp_path)
+    assert HOOK._moved(config_dir, older, "s1", NOW.timestamp()) == frozenset(older["mod"]["moved"])
+
+
+def test_a_new_hook_beside_an_older_catalogue_keeps_no_count_of_runs_for_the_hint_that_is_off(tmp_path):
+    older = _older_catalogue()
+    session, _ = _agent_run(tmp_path, [_prompt(), _SUMMARISED, _reply(1_000, message_id="m1")])
+    assert HOOK.keep_run(_agent_stop(session), ON, older, _config_dir(tmp_path), now=NOW) is False
+    assert not (_config_dir(tmp_path) / cat.COACH_STATE_FILE).exists()
+
+
+def test_a_claim_released_within_a_moment_is_waited_for(tmp_path, monkeypatch):
+    # Counted, not timed: the holder lets go during the first wait, whatever the machine is doing.
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    sleeps = []
+
+    def released_while_waiting(seconds):
+        sleeps.append(seconds)
+        claim.unlink(missing_ok=True)
+
+    monkeypatch.setattr(HOOK.time, "sleep", released_while_waiting)
+    assert _kind(_coach(tmp_path, payload)) == "big_paste"
+    # One wait, after which the claim was made, used and released: no later wait, no claim left behind.
+    assert sleeps == [HOOK._CLAIM_POLL_S]
+    assert not claim.exists()
+
+
+def test_a_claim_that_stays_held_is_given_up_on_after_a_moment(tmp_path, monkeypatch):
+    # Counted, not timed: the clock the wait is read from moves only when the call sleeps, so a loaded machine
+    # can make the wait neither longer nor shorter.
+    payload = _scene_big_paste(tmp_path)
+    claim = _claim_path(tmp_path)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text("", encoding="utf-8")
+    clock = [0.0]
+    sleeps = []
+
+    def slept(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+        # A wait that never ends would loop here for good: fail it instead.
+        if len(sleeps) > 1000:
+            raise AssertionError("the claim wait never ended")
+
+    monkeypatch.setattr(HOOK.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(HOOK.time, "sleep", slept)
+    assert _coach(tmp_path, payload) == ""
+    # It waited between tries, each a poll long, for the wait and no longer, then left the claim alone.
+    assert sleeps and set(sleeps) == {HOOK._CLAIM_POLL_S}
+    assert abs(len(sleeps) - round(HOOK._CLAIM_WAIT_S / HOOK._CLAIM_POLL_S)) <= 1
+    assert claim.exists()
+
+
+def test_plan_fresh_is_moved_only_when_the_status_line_has_been_drawn(tmp_path):
+    _heartbeat(tmp_path, shows=["hint", "status"])
+    assert "plan_fresh" in HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp())
+    _heartbeat(tmp_path, shows=["hint"])
+    assert "plan_fresh" not in HOOK._moved(_config_dir(tmp_path), CATALOGUE, "s1", NOW.timestamp())

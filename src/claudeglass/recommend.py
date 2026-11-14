@@ -80,20 +80,21 @@ Deviations from the plan/brief, reported rather than made silently (see
   ``scorecard.dimensions`` row for ``"data_quality"`` (a table cell that
   genuinely exists) and states the diagnostics-derived counts in prose in
   ``action`` instead of fabricating a table citation for them.
-- A5's ``effort-mismatch`` rule ("thinking share high on docs/general-dev
+- A5's ``effort-mismatch`` fallback ("thinking share high on light
   sessions") wants the high-effort thinking share computed *for those
   sessions specifically*, but no report table joins
   ``topology_effort_tokens``'s per-effort-level thinking share to
   ``sessions_by_purpose``'s per-purpose session counts -- they're
   independent group-bys (one by effort level, one by purpose) with no
   shared key exposed anywhere in this codebase. This rule instead
-  compares the corpus-wide high-effort thinking share against the mere
-  presence of docs/general-dev sessions in the corpus, which can over-
-  or under-state the mismatch for a corpus whose docs/general-dev
-  sessions don't run at high effort (or vice versa). Both the action
-  text and the evidence list disclose this: the evidence separately
-  cites the (unjoined) thinking-share and session-count cells rather
-  than implying a single joined metric.
+  compares the corpus-wide thinking share at high, xhigh and max effort
+  (pooled by output tokens) against the share of sessions that are
+  docs-or-light-edit, and fires only when those are more than half of all
+  sessions -- only then does a corpus-wide figure say much about light
+  work. Both the action text and the evidence list disclose the
+  approximation: the evidence separately cites the (unjoined)
+  thinking-share and session-count cells rather than implying a single
+  joined metric.
 - A5's ``long-context-share`` rule's second clause ("median top-level ctx
   > 150k") has no table exposing a *median*; ``scorecard.dimensions``'s
   ``context_hygiene`` row exposes ``p90_top_level_ctx`` instead (the one
@@ -159,16 +160,38 @@ from . import (
     waste,
     whatif,
 )
+from .capture_catalogue import AGENT_TOOLS
 from .config import Config
-from .context_budget import DIET_EXCLUDED, MIN_WINDOW_DAYS, REMOVABLE_USE_SHARE, SKILLS_TOOL, diet_usd
-from .fixes import BATCH_PROBES_LINE, CRITIQUE_PLAN_LINE
+from .context_budget import (
+    DIET_EXCLUDED,
+    MIN_WINDOW_DAYS,
+    REMOVABLE_USE_SHARE,
+    ROSTER_TOOLS,
+    SKILLS_TOOL,
+    diet_usd,
+    mcp_tool_key,
+)
+from .fixes import _SCOPE_WHERE, CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
-from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
+from .snapshots import (
+    NAME_CUT,
+    NAME_REDACTED,
+    Snapshot,
+    cut_off_name,
+    effective_config,
+    effective_provenance,
+    for_view,
+    list_text,
+    managed_keys,
+    split_tool_line,
+    view_spans_projects,
+)
 from .units import NO_LIMIT_SHARE_HINT, Units
 
-#: Purposes ``classify.classify_purpose`` can return that count as
-#: "docs/general-dev" for the ``effort-mismatch`` rule (plan A5 wording).
-_DOCS_GENERAL_PURPOSES = frozenset({"docs-or-light-edit", "general-dev"})
+#: The one purpose ``classify.classify_purpose`` returns that counts as light
+#: work for the ``effort-mismatch`` fallback (``general-dev`` is the catch-all
+#: and includes heavy sessions, so it does not).
+_LIGHT_PURPOSES = frozenset({"docs-or-light-edit"})
 
 #: Archetypes that never spawn subagents of their own -- rules whose
 #: advice is about subagent behaviour (TTL-per-agent-type, spawn cost,
@@ -227,6 +250,23 @@ def _agent_has_frontmatter(agent_type: str, snapshot: Snapshot | None) -> bool:
         if isinstance(agents_map, dict) and agent_type in agents_map:
             return True
     return agent_type not in _BUILTIN_AGENT_TYPES
+
+
+def agent_file_path(agent_type: str, scope: str) -> str:
+    """Where the agent's file goes, as the card's fix writes it: the same path
+    :func:`fixes.fix_file` names (``~/.claude/agents/<agent>.md`` for a
+    built-in with no file)."""
+    return _SCOPE_WHERE.get(scope, _SCOPE_WHERE["user"])[0].format(agent=agent_type)
+
+
+def _built_in_note(agent_type: str, scope: str) -> str:
+    """The sentence a built-in agent type's card ends with: the built-in has
+    no file, but a same-named one replaces it, so the change goes there. For
+    Explore and Plan, which start without CLAUDE.md files, it adds the choice
+    the new file makes about them (:func:`claude_md_choice`)."""
+    note = f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
+    choice = claude_md_choice(agent_type)
+    return f"{note} {choice}" if choice else note
 
 
 # -- thresholds --------------------------------------------------------------
@@ -293,18 +333,6 @@ class RecommendThresholds:
     # agent type".
     agent_report_size_tokens: float = 8_000.0
 
-    # agent-batch-probes: "an agent type that made at least 100 replies, a
-    # quarter or more of them one read-only call and nothing else, where
-    # batching the runs of those would have spared at least $1". The
-    # habits_probes figure is the cache reads of the replies after the first
-    # of each run, and takes the lookups of a run to be independent, which
-    # some are (a read that needs the name a search just found), so the card
-    # quotes this share of it.
-    agent_batch_probes_min_replies: int = 100
-    agent_batch_probes_share_pct: float = 25.0
-    agent_batch_probes_min_saving_usd: float = 1.0
-    agent_batch_probes_saving_factor: float = 0.5
-
     # plan-rounds: "at least 5 approved plans, 30% or more of them sent back
     # before you approved, and 30% or more of those rounds a question, a
     # critique or a doubt, where the replies between the first plan and the
@@ -346,6 +374,10 @@ class RecommendThresholds:
     # effort-mismatch: ">= 30% of output tokens are thinking on sessions
     # whose purpose is docs/general-dev at effort high or above".
     effort_mismatch_thinking_share_pct: float = 30.0
+    # effort-mismatch fallback (no effort tags captured): docs-or-light-edit
+    # sessions must be more than this share of all sessions. Unvalidated:
+    # chosen as "most sessions", with no backtest.
+    effort_mismatch_light_share_pct: float = 50.0
 
     # discovery-share: a phases section with DISCOVERY > 35% (matches
     # phases.DISCOVERY_SHARE_THRESHOLD's 0.35, expressed here as a pct).
@@ -930,6 +962,17 @@ def _rule_subagent_volume(report: ReportModel, th: RecommendThresholds, archetyp
     return out
 
 
+def _summary_loss_evidence(report: ReportModel) -> list[tuple]:
+    """The share of summaries Claude said left out something the work needed,
+    for the two cards that move the compact window. Only the Work habits table
+    that ``capture_checks.lost_check`` lets through has it, so without the table
+    there is nothing to cite."""
+    share = _cell(report, "habits", "habits_summary_losses", "yes", "share_pct")
+    if not isinstance(share, (int, float)):
+        return []
+    return [_evidence("Summaries Claude said lost something the work needed", share, "habits", "habits_summary_losses", "yes")]
+
+
 def _rule_compaction_churn(report: ReportModel, th: RecommendThresholds, snapshot: Snapshot | None) -> list[Recommendation]:
     mean_per_session = _cell(report, "compactions", "compactions_summary", "Compactions per session (mean)", "value")
     dropped_share_row_key = "Dropped tokens (share of new_tokens: input+cache_creation)"
@@ -950,6 +993,7 @@ def _rule_compaction_churn(report: ReportModel, th: RecommendThresholds, snapsho
         evidence.append(
             _evidence("Dropped-token share of new tokens", dropped_share_pct, "compactions", "compactions_summary", dropped_share_row_key)
         )
+    evidence.extend(_summary_loss_evidence(report))
     return [
         Recommendation(
             id="compaction-churn",
@@ -986,6 +1030,7 @@ def _rule_long_context_share(report: ReportModel, th: RecommendThresholds, snaps
         evidence.append(_evidence("Cache-read volume share from huge-context turns", share_pct, "recache", "recache_huge_context", row_key))
     if fires_on_p90:
         evidence.append(_evidence("Context size 9 in 10 main-session replies stay under", p90_ctx, "scorecard", "dimensions", "context_hygiene"))
+    evidence.extend(_summary_loss_evidence(report))
     return [
         Recommendation(
             id="long-context-share",
@@ -1123,7 +1168,7 @@ def _rule_baseline_bloat(
         "ones shrinks every session's first call."
     )
     if biggest_bucket_label:
-        action += f" The largest estimated share of that baseline is {biggest_bucket_label}."
+        action += f" The largest estimated part of every session's startup is {biggest_bucket_label} (see Context files)."
 
     return [
         Recommendation(
@@ -1540,69 +1585,6 @@ def _rule_agent_report_size(report: ReportModel, th: RecommendThresholds, archet
     return out
 
 
-#: The columns of ``habits_probes`` the rule reads, in the order it uses them.
-_PROBE_COLUMNS = ("calls", "probes", "shell", "runs", "batch_cost")
-
-
-def _rule_agent_batch_probes(report: ReportModel, th: RecommendThresholds, archetype: str | None) -> list[Recommendation]:
-    """``agent-batch-probes``: an agent type whose replies are often one
-    read-only call and nothing else (a Read, a Grep, a Glob or a file-reading
-    shell command). Each such reply reads the agent's whole context again to
-    look at one thing, so independent lookups in one message would have cost
-    one read instead of several. Reads the Work habits section's
-    ``habits_probes``, a row for each agent type; the main session's row is
-    left out, since its prompts are yours and the card is for agent
-    definitions and workflow prompts. ``saving_usd`` is
-    :attr:`~RecommendThresholds.agent_batch_probes_saving_factor` of the
-    row's ``batch_cost``, the cache reads of the replies after the first of
-    each run: the table's figure is an upper bound, and what a batched
-    message still writes is not in it."""
-    if archetype in _NO_SUBAGENT_ARCHETYPES:
-        return []
-    table = _table(report, "habits", "habits_probes")
-    if table is None:
-        return []
-    at = {key: _col_index(table, key) for key in _PROBE_COLUMNS}
-    if None in at.values():
-        return []
-    out: list[Recommendation] = []
-    for row in table.rows:
-        agent_type = row[0] if row else None
-        if not isinstance(agent_type, str) or agent_type == "top-level" or len(row) <= max(at.values()):
-            continue
-        calls, probes, shell, runs, cost = (row[at[key]] for key in _PROBE_COLUMNS)
-        if not all(_is_number(value) for value in (calls, probes, shell, runs, cost)):
-            continue
-        if calls < th.agent_batch_probes_min_replies or probes * 100 < calls * th.agent_batch_probes_share_pct:
-            continue
-        saving = cost * th.agent_batch_probes_saving_factor
-        if saving < th.agent_batch_probes_min_saving_usd:
-            continue
-        out.append(
-            Recommendation(
-                id="agent-batch-probes",
-                severity="advice",
-                category="workflow",
-                archetypes=_ALL_ARCHETYPES,
-                title=f"{agent_type} looks things up one call at a time",
-                action=(
-                    f"Add \"{BATCH_PROBES_LINE}\" to {agent_type}'s agent definition, or to the workflow "
-                    "prompt that starts it, so independent lookups share one message."
-                ),
-                lever=None,
-                agent_type=agent_type,
-                evidence=[
-                    _evidence("Replies it made", calls, "habits", "habits_probes", agent_type),
-                    _evidence("Single read-only calls", probes, "habits", "habits_probes", agent_type),
-                    _evidence("Of them by shell command", shell, "habits", "habits_probes", agent_type),
-                    _evidence("Re-reads a batch would spare", cost, "habits", "habits_probes", agent_type),
-                ],
-                saving_usd=saving,
-            )
-        )
-    return out
-
-
 #: The columns of ``habits_plan_rounds`` the rule reads, in the order it uses them.
 _PLAN_ROUND_COLUMNS = ("plans", "rounds", "asked", "cost")
 
@@ -1671,6 +1653,35 @@ def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Reco
 #: Built-in agent types that Claude Code already starts without CLAUDE.md
 #: (its sub-agents docs), so omitClaudeMd means nothing for them.
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
+
+
+def starts_without_claude_md(agent_type: str | None) -> bool:
+    """Whether ``agent_type`` is a built-in that Claude Code starts without
+    CLAUDE.md files (:data:`_SKIPS_CLAUDE_MD`), so a file replacing it must
+    set ``omitClaudeMd`` to keep that."""
+    return agent_type in _SKIPS_CLAUDE_MD
+
+
+def claude_md_choice(agent_type: str | None) -> str:
+    """What a card says about CLAUDE.md files when it tells the user to create
+    a file that replaces ``agent_type``: the built-in starts without them,
+    ``omitClaudeMd: true`` keeps that, and leaving it out is the user's choice
+    (``""`` for an agent type that is sent them either way)."""
+    if not starts_without_claude_md(agent_type):
+        return ""
+    return (
+        f"The built-in {agent_type} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to "
+        f"keep that. Leave it out if you want {agent_type} to follow your CLAUDE.md rules: each start then "
+        "carries those files too."
+    )
+
+
+#: Tools that change files: an agent whose ``tools:`` line names one, and whose
+#: ``disallowedTools:`` line does not withhold it, is a writer.
+_FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+#: The share of an agent type's task prompt tokens one run must hold for
+#: the spawn-task-prompt card to name it.
+_TASK_PROMPT_TOP_SHARE_PCT = 50.0
 
 #: Agent types started by Claude Code itself (workflow scripts, forks)
 #: rather than by name, so no agent file can override them.
@@ -1809,8 +1820,233 @@ def _name_list(names: list[str], shown: int = _TOOLS_SHOWN) -> str:
     return f"{head}, and {extra} more" if extra > 0 else head
 
 
+def _join_names(names: list[str]) -> str:
+    """``names`` as "A", "A and B" or "A, B and C"."""
+    return f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else "".join(names)
+
+
+def _tool_name(entry: str) -> str:
+    """The tool an entry of a ``tools:`` line names: the text before its
+    parentheses, with ``Task`` (the old name of ``Agent``) as ``Agent``."""
+    base = entry.split("(", 1)[0].strip()
+    return AGENT_TOOLS[0] if base in AGENT_TOOLS else base
+
+
+def _read_entries(value, *, keep_cut_base: bool = False) -> tuple[list[tuple[str, bool]], bool]:
+    """The entries of a stored ``tools`` or ``disallowedTools`` value, each
+    with whether the hook cut it inside its parentheses (it is then its base
+    name, ``Agent`` for ``Agent(worker-one, ...``), and whether they are the
+    whole line. A list is the whole line, as the hook stores it: each entry
+    was cut or masked on its own, so one cut before any parenthesis, or
+    masked as a path or URL, is a tool that cannot be read. A string comes
+    from a hook that cut the whole line at 64 characters: one that ends in
+    ``...`` at that length, or holds the masked-path marker, is not the whole
+    line. With ``keep_cut_base`` (a line that withholds tools) a last entry cut
+    inside its parentheses is kept as its base name, as a list entry is: it
+    still withholds that tool; a ``tools:`` line leaves it out, as it does not
+    list a tool it cannot read whole."""
+    if isinstance(value, str) and value != _CURRENT_UNKNOWN:
+        if NAME_REDACTED in value:
+            return [], False
+        if cut_off_name(value):
+            body = value[: -len(NAME_CUT)]
+            entries = split_tool_line(body)
+            # The last entry may be cut short; one that ended at a comma was not.
+            if entries and not body.rstrip().endswith(","):
+                last = entries.pop()
+                if keep_cut_base and "(" in last:
+                    entries.append(last.split("(", 1)[0].strip())
+            return [(entry, False) for entry in entries], False
+        return [(entry, False) for entry in split_tool_line(value)], True
+    if isinstance(value, (list, tuple)):
+        entries: list[tuple[str, bool]] = []
+        whole = True
+        for item in value:
+            text = str(item).strip()
+            if not text:
+                continue
+            if NAME_REDACTED in text:
+                whole = False
+            elif cut_off_name(text):
+                if "(" in text:
+                    entries.append((text.split("(", 1)[0].strip(), True))
+                else:
+                    whole = False
+            else:
+                entries.append((text, False))
+        return entries, whole
+    return [], False
+
+
+def _entry_covers(entry: str, name: str) -> bool:
+    """Whether a line's ``entry`` names the tool ``name`` (``mcp__server__*``
+    for a whole server). An MCP entry matches by its server: ``mcp__X``,
+    ``mcp__X__*`` and ``mcp__X__tool`` all mean server X."""
+    base, want = _tool_name(entry), _tool_name(name)
+    if want.startswith("mcp__"):
+        prefix = want.removesuffix("__*")
+        return base == prefix or base.startswith(prefix + "__")
+    return base == want
+
+
+def _entry_denies(entry: str, name: str) -> bool:
+    """Whether a ``disallowedTools`` ``entry`` withholds the tool ``name``
+    (``mcp__server__*`` for a whole server). ``mcp__X`` and ``mcp__X__*``
+    withhold server X and each of its tools, ``mcp__*`` every MCP tool, and
+    ``mcp__X__tool`` that one tool only, so the server stays offered. An entry
+    with a specifier (``Bash(git push *)``) still removes the whole tool, so it
+    withholds its base tool (``Task`` counting as ``Agent``)."""
+    base, want = _tool_name(entry), _tool_name(name)
+    if not want.startswith("mcp__"):
+        return base == want
+    if not base.startswith("mcp__"):
+        return False
+    held = base.removesuffix("__*")
+    return want == held or want.startswith(held + "__")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTools:
+    """What an agent file says about its tools, as :func:`read_agent_tools`
+    reads it from the config snapshot: ``allow``, the entries of its
+    ``tools:`` line (``None`` when they are not known, which means every
+    tool), and ``deny``, the entries of its ``disallowedTools:`` line. An
+    entry keeps its parentheses (``Agent(a, b)``)."""
+
+    allow: tuple[str, ...] | None = None
+    deny: tuple[str, ...] = ()
+    #: The tools of ``allow`` with an entry the hook cut inside its parentheses
+    #: (``Agent(worker-one, ...``): their allowlist is lost, so a line can't be
+    #: written with that entry.
+    cut: tuple[str, ...] = ()
+    #: Whether ``deny`` is the whole ``disallowedTools`` line. A deny entry cut
+    #: inside its parentheses is its base name (a specifier does not narrow it),
+    #: but a deny line the hook cut off or masked is only partly read: it still withholds what
+    #: it shows (:meth:`denied`), but a tool it does not show may be withheld.
+    deny_whole: bool = True
+
+    def denied(self, name: str) -> bool:
+        """Whether the ``disallowedTools:`` line withholds the tool ``name``
+        (``mcp__server__*`` for a whole server)."""
+        return any(_entry_denies(entry, name) for entry in self.deny)
+
+    def offered(self, name: str) -> bool:
+        """Whether the tool ``name`` (``mcp__server__*`` for a whole server)
+        is on a known ``tools:`` line, or the line is not known, and the
+        ``disallowedTools:`` line does not withhold it. That line is applied
+        first, so a tool on both is removed."""
+        if self.denied(name):
+            return False
+        return self.allow is None or any(_entry_covers(entry, name) for entry in self.allow)
+
+    def entries_for(self, name: str) -> list[str]:
+        """The line's own entries for the tool ``name``, as a suggested line
+        writes it: ``Task`` or ``Agent(a, b)`` as the file has them, and
+        ``mcp__X__*`` only when the line names the whole server or is not
+        known. None when a known line does not have the tool."""
+        if self.allow is None:
+            return [name]
+        found = [entry for entry in self.allow if _entry_covers(entry, name)]
+        if _tool_name(name).startswith("mcp__"):
+            server = _tool_name(name).removesuffix("__*")
+            whole = [entry for entry in found if _tool_name(entry) in (server, server + "__*")]
+            found = whole or found
+        return list(dict.fromkeys(found))
+
+
+def read_agent_tools(tools, disallowed=None) -> AgentTools:
+    """An agent's tools from the ``tools`` and ``disallowedTools`` values the
+    config snapshot stores: a list, or a string from a hook that stored the
+    line whole. ``allow`` is ``None`` (every tool) when the line is not known:
+    no config snapshot, no ``tools:`` line (the agent gets every tool), an
+    empty one, or one the hook cut off (:func:`_read_entries`)."""
+    entries, whole = _read_entries(tools)
+    denied, denied_whole = _read_entries(disallowed, keep_cut_base=True)
+    known = whole and bool(entries)
+    return AgentTools(
+        allow=tuple(entry for entry, _cut in entries) if known else None,
+        # An entry cut inside its parentheses is its base name, which a specifier does not narrow.
+        deny=tuple(entry for entry, _cut in denied),
+        cut=tuple(dict.fromkeys(_tool_name(entry) for entry, cut in entries if cut)) if known else (),
+        # No line at all denies nothing; the unknown-snapshot marker says nothing.
+        deny_whole=disallowed is None or denied_whole,
+    )
+
+
+def known_tools_line(current) -> list[str] | None:
+    """The entries of an agent's current ``tools:`` line, or ``None`` when
+    the line is not known (:func:`read_agent_tools`)."""
+    allow = read_agent_tools(current).allow
+    return list(allow) if allow is not None else None
+
+
+def _diet_sizes(text) -> dict[str, tuple[float, float, float]]:
+    """``agent_startup_diet``'s ``rare_sizes``: tool -> (definition,
+    deferred names, instructions) tokens per spawn."""
+    sizes: dict[str, tuple[float, float, float]] = {}
+    for item in _split_names(text):
+        name, _eq, numbers = item.partition("=")
+        try:
+            definitions, deferred, instructions = (float(n) for n in numbers.split("/"))
+        except ValueError:
+            continue
+        sizes[name] = (definitions, deferred, instructions)
+    return sizes
+
+
+def current_diet(diet: dict, current, disallowed=None) -> dict:
+    """``diet``, an ``agent_startup_diet`` row, for an agent whose
+    ``tools:`` line is ``current`` and ``disallowedTools:`` line is
+    ``disallowed``: only the rarely used tools still offered (on a known
+    line and not withheld) are left out, the amounts are worked out again
+    from each one's size, and a tool to keep that the agent is not offered
+    is dropped (a card never adds one). Nothing is left out when a kept tool's only entry on the
+    line was cut inside its parentheses (:attr:`AgentTools.cut`): no line
+    can be written for it. The row as it is when the line is not known and
+    nothing is withheld (:func:`read_agent_tools`) or the row has no sizes."""
+    line = read_agent_tools(current, disallowed)
+    sizes = _diet_sizes(diet.get("rare_sizes"))
+    if (line.allow is None and not line.deny) or not sizes:
+        return diet
+    rare = [name for name in _split_names(diet.get("rare_tools")) if name in sizes and line.offered(name)]
+    row = dict(diet)
+    kept = [name for name in _split_names(diet.get("keep_tools")) if line.offered(name)]
+    row["keep_tools"] = list_text(kept)
+    if any(_tool_name(name) in line.cut for name in kept):
+        # A kept tool the file gives an allowlist the hook cut off can't be written
+        # back as the file has it, and its bare name would widen it: no list to give.
+        rare = []
+    row["rare_tools"] = list_text(rare)
+    definitions = sum(sizes[name][0] for name in rare)
+    deferred = sum(sizes[name][1] for name in rare)
+    skills = diet.get("dropped_skills") if SKILLS_TOOL in rare else 0.0
+    roster = diet.get("dropped_roster") if ROSTER_TOOLS & set(rare) else 0.0
+    row.update(
+        dropped_definitions=definitions,
+        dropped_deferred=deferred,
+        dropped_skills=skills if _is_number(skills) else 0.0,
+        dropped_roster=roster if _is_number(roster) else 0.0,
+        kept_instructions=sum(sizes[name][2] for name in rare),
+    )
+    spawns, share = diet.get("spawns"), diet.get("prefix_write_share")
+    usd = None
+    if _is_number(spawns) and _is_number(share):
+        write, read, later = diet.get("write_price"), diet.get("read_price"), diet.get("later_calls")
+        usd = diet_usd(
+            spawns,
+            definitions,
+            deferred + row["dropped_skills"] + row["dropped_roster"],
+            write=write if _is_number(write) else None,
+            read=read if _is_number(read) else None,
+            later_calls=later if _is_number(later) else 0.0,
+            written_share=share / 100.0,
+        )
+    row["saving_usd"] = usd or None
+    return row
+
+
 def tools_list_offer(
-    agent_type: str, diet: dict, th: RecommendThresholds | None = None
+    agent_type: str, diet: dict, th: RecommendThresholds | None = None, current=None, disallowed=None
 ) -> tuple[list[str], list[str], float] | None:
     """The tools to keep, the tools to leave off and the tokens that
     leaving them off takes from each start, for one ``agent_startup_diet``
@@ -1818,18 +2054,24 @@ def tools_list_offer(
     is worth giving: an agent the diet leaves alone, one with no file to
     give a list (a fork or an unknown type), too few spawns, no tool called
     to put on the line, or less than
-    :attr:`RecommendThresholds.spawn_tools_list_tokens` to take off it."""
+    :attr:`RecommendThresholds.spawn_tools_list_tokens` to take off it.
+    ``current`` is the agent's ``tools:`` line when it is known and
+    ``disallowed`` its ``disallowedTools:`` line (:func:`current_diet`)."""
     th = th or RecommendThresholds()
+    diet = current_diet(diet, current, disallowed)
     if agent_type in DIET_EXCLUDED or (agent_type in _NOT_OVERRIDABLE and agent_type != _WORKFLOW_AGENT):
         return None
     measured = diet.get("spawns")
     if not isinstance(measured, int) or measured < th.spawn_parts_min_spawns:
         return None
-    keep = _split_names(diet.get("keep_tools"))
+    kept = _split_names(diet.get("keep_tools"))
     rare = _split_names(diet.get("rare_tools"))
     dropped = sum(diet[column] for column, _label in _DIET_PARTS if _is_number(diet.get(column)))
-    if not keep or not rare or dropped < th.spawn_tools_list_tokens:
+    if not kept or not rare or dropped < th.spawn_tools_list_tokens:
         return None
+    # Each kept tool as the line writes it, so a suggested line never changes an entry.
+    line = read_agent_tools(current)
+    keep = list(dict.fromkeys(entry for name in kept for entry in line.entries_for(name)))
     return keep, rare, dropped
 
 
@@ -1844,11 +2086,20 @@ def _tools_list_card(
     from the tools at least a tenth of its spawns called, with the rest
     named as rarely used. Needs the ``agent_startup_diet`` row, which
     carries what leaving them out takes from a start."""
-    diet = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
-    offer = tools_list_offer(agent_type, diet, th) if diet is not None else None
+    row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
+    current = _agent_current(agent_type, "tools", snapshot)
+    denied = _agent_current(agent_type, "disallowedTools", snapshot)
+    offer = tools_list_offer(agent_type, row, th, current, denied) if row is not None else None
     if offer is None:
         return None
+    diet = current_diet(row, current, denied)
     keep, rare, dropped = offer
+    # A card never adds a tool: one the diet keeps that a known line lacks.
+    on_line = _split_names(diet["keep_tools"])
+    not_added = [name for name in _split_names(row["keep_tools"]) if name not in on_line]
+    # Of those, the ones the deny line withholds (whatever the tools line says) and the ones a tools line lacks.
+    withheld = [name for name in not_added if read_agent_tools(current, denied).denied(name)]
+    not_added = [name for name in not_added if name not in withheld]
     measured = diet["spawns"]
     sizes = [(label, diet.get(column)) for column, label in _DIET_PARTS]
 
@@ -1858,7 +2109,7 @@ def _tools_list_card(
     scope = "user" if workflow else ("repo" if source == "project" or (has_file and source is None) else "user")
     general = agent_type == "general-purpose"
     pct = int(REMOVABLE_USE_SHARE * 100)
-    line = "tools: " + ", ".join(keep)
+    line = "tools: " + list_text(keep)
     model = diet.get("model")
     check = (
         "Check it with one spawn before and one after on the same model"
@@ -1866,9 +2117,21 @@ def _tools_list_card(
     )
     left_out = (
         f"Rarely used, so left out (each was called in fewer than {pct}% of the spawns offered it): "
-        f"{_name_list(rare)}. Claude Code adds StructuredOutput and SubagentHandback to every subagent "
+        f"{_name_list(rare)}. Claude Code adds StructuredOutput, SubagentHandback and advisor to every subagent "
         "whatever the list says."
     )
+    if withheld:
+        plural = len(withheld) > 1
+        left_out += (
+            f" {_name_list(withheld)} {'are' if plural else 'is'} on its disallowedTools line, so "
+            f"{'they aren' if plural else 'it isn'}'t added."
+        )
+    if not_added:
+        plural = len(not_added) > 1
+        left_out += (
+            f" {_name_list(not_added)} {'aren' if plural else 'isn'}'t on its tools line, so "
+            f"{'they aren' if plural else 'it isn'}'t added."
+        )
     if workflow:
         title = "Workflow agents are given tools they rarely call"
         action = (
@@ -1881,15 +2144,28 @@ def _tools_list_card(
         title = f"{agent_type} is given tools it rarely calls"
         action = f"Limit {agent_type}'s tools to the ones it calls: {line}. {left_out} {check}"
         category = "settings"
+        if not has_file:
+            action += " " + _built_in_note(agent_type, scope)
         if general:
             action += " " + _GENERAL_PURPOSE_WARNING
 
     why_parts = [f"{value:,.0f} of {label}" for label, value in sizes if _is_number(value) and value >= 1]
+    # The tools that cleared the bar, from the row as the report gave it: a rule's additions did not, and
+    # a tool a known line lacks did.
+    rule_kept = _split_names(row.get("rule_kept_tools"))
+    cleared = [name for name in _split_names(row["keep_tools"]) if name not in rule_kept]
+    # N3: the why names only the run-called tools that are on the line; one the
+    # agent's own tools or disallowedTools line keeps off is in the action instead.
+    rule_kept = [name for name in rule_kept if name in on_line]
     why = (
-        f"In {measured} spawns, {agent_type} called {len(keep)} of the tools it was offered in at least "
+        f"In {measured} spawns, {agent_type} called {len(cleared)} of the tools it was offered in at least "
         f"{pct}% of them. Leaving out the rest takes about {dropped:,.0f} tokens out of each start: "
         f"{', '.join(why_parts)}."
     )
+    if rule_kept:
+        one = len(rule_kept) == 1
+        who = "workflow agents" if workflow else f"some of {agent_type}'s runs"
+        why += f" {_join_names(rule_kept)} {'stays' if one else 'stay'} too because {who} called {'it' if one else 'them'}."
     evidence = [_evidence("Spawns with tools recorded", measured, "agent_startup", "agent_startup_diet", agent_type)]
     definitions = diet.get("dropped_definitions")
     if _is_number(definitions):
@@ -1946,6 +2222,7 @@ def _tools_list_card(
         estimated_saving=_startup_saving(units, usd, prefix="about "),
         saving_basis=basis if usd is not None else "",
         saving_usd=usd,
+        priced_on=float(dropped) if _is_number(dropped) else None,
         why=why,
         variant="workflow-script" if workflow else "",
     )
@@ -2001,12 +2278,20 @@ def _rule_spawn_parts(
 
         # The tools list comes first: the skills list and MCP cards below
         # point at it, and the generic spawn-cost card leaves the agent alone
-        # once it is given.
+        # once it is given or a tools line is already in place.
         tools_card = _tools_list_card(report, th, agent_type, snapshot, units)
+        current_tools = _agent_current(agent_type, "tools", snapshot)
+        denied_tools = _agent_current(agent_type, "disallowedTools", snapshot)
+        tools_line = read_agent_tools(current_tools, denied_tools)
+        known_line = known_tools_line(current_tools)
         if tools_card is not None:
             out.append(tools_card)
+        # A known tools line means the tools lever is already used, and
+        # spawn-cost's removable_tools is measured on spawns from before it.
+        if tools_card is not None or known_line is not None:
             covered.add(agent_type)
-        diet_rare = _split_names(_cell(report, "agent_startup", "agent_startup_diet", agent_type, "rare_tools"))
+        diet_row = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
+        diet_rare = _split_names(current_diet(diet_row, current_tools, denied_tools).get("rare_tools")) if diet_row is not None else []
 
         claude_md_total = part(agent_type, "claude_md")
         # PROF-11/F13: Managed policy CLAUDE.md still loads regardless of
@@ -2027,9 +2312,26 @@ def _rule_spawn_parts(
             and agent_type not in _SKIPS_CLAUDE_MD
             and overridable
             and rules_used <= rules_unused
+            # With no reports (0 and 0) the card still fires; with reports, a tie holds it back.
+            and (rules_used + rules_unused == 0 or rules_unused > rules_used)
         ):
             rules_evidence = []
+            # An agent that edits files leans on the rules it is sent. With no run
+            # saying it didn't, the card stays but asks for the rules to move first.
+            edited = used(agent_type, "edit_spawns")
+            edited = edited if isinstance(edited, int) else 0
+            # A known tools line decides, less the tools the deny line withholds (offered); with no
+            # line, the spawns that edited files do.
+            writer = any(tools_line.offered(name) for name in _FILE_TOOLS) if known_line is not None else edited > 0
+            writer_first = writer and rules_unused == 0
             why = f"Each {agent_type} spawn starts with about {claude_md:,.0f} tokens of CLAUDE.md files and memory."
+            if writer_first:
+                why = (
+                    (f"{edited} of its {spawns} spawns edited files, so " if edited else "It can edit files, so ")
+                    + "move the rules it needs into its agent file first, then omitClaudeMd. "
+                    + why
+                )
+                why = why[:1].upper() + why[1:]
             if all_read_only:
                 why += " Every measured spawn only searched or read files, so it rarely needs your working rules."
             if claude_md_managed:
@@ -2038,10 +2340,13 @@ def _rule_spawn_parts(
                     _evidence("Managed policy CLAUDE.md per spawn (still loads)", claude_md_managed, "agent_startup", "agent_startup_breakdown", agent_type)
                 ]
             if rules_unused:
-                why += (
-                    f" {rules_unused} of the {rules_used + rules_unused} runs that said, said they didn't use "
-                    "your CLAUDE.md."
-                )
+                if rules_used + rules_unused == 1:
+                    why += " The one run that said, said it didn't use your CLAUDE.md."
+                else:
+                    why += (
+                        f" {rules_unused} of the {rules_used + rules_unused} runs that said, said they didn't use "
+                        "your CLAUDE.md."
+                    )
                 rules_evidence.append(
                     _evidence("Runs that said they didn't use CLAUDE.md", rules_unused, "habits", "habits_agents", agent_type)
                 )
@@ -2055,17 +2360,22 @@ def _rule_spawn_parts(
             out.append(
                 Recommendation(
                     id="spawn-claude-md",
-                    severity="advice",
+                    severity="info" if writer_first else "advice",
                     category="settings",
                     archetypes=_ALL_ARCHETYPES,
                     title=f"{agent_type} is sent your CLAUDE.md files every time it starts",
                     action=(
-                        f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
+                        f"First move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
+                        "sending it CLAUDE.md (omitClaudeMd: true)."
+                        if has_file and writer_first
+                        else f"Move the CLAUDE.md rules {agent_type} needs into its agent file, then stop "
                         "sending it CLAUDE.md (omitClaudeMd: true)."
                         if has_file
-                        else f"{agent_type} is a built-in agent, so it has no file to change. Create a "
-                        f"same-named agent file that does the same job with omitClaudeMd: true; it replaces "
-                        "the built-in one."
+                        else f"Create {agent_file_path(agent_type, scope)} (it replaces the built-in {agent_type}) with the "
+                        f"same job and the CLAUDE.md rules {agent_type} needs, then give it omitClaudeMd: true."
+                        if writer_first
+                        else f"Create {agent_file_path(agent_type, scope)} (it replaces the built-in {agent_type}) with the "
+                        "same job, and give it omitClaudeMd: true."
                     ),
                     lever="omitClaudeMd" if has_file else None,
                     scope=scope,
@@ -2086,6 +2396,8 @@ def _rule_spawn_parts(
                         )
                     ],
                     estimated_saving=_startup_saving(units, claude_md_usd),
+                    saving_usd=claude_md_usd if _is_number(claude_md_usd) and claude_md_usd > 0 else None,
+                    priced_on=float(claude_md) if _is_number(claude_md) else None,
                     saving_basis=(
                         _startup_basis(units, carried=carried)
                         + (" It is priced as the Context files section prices carrying it." if carried else "")
@@ -2107,6 +2419,9 @@ def _rule_spawn_parts(
             and listed >= th.spawn_parts_min_spawns
             and skills_used == 0
             and overridable
+            # A known tools line without Skill, or Skill on disallowedTools,
+            # already leaves the skills list out.
+            and tools_line.offered(SKILLS_TOOL)
         ):
             # Whether the tools list above leaves Skill out, which takes the
             # skills list with it: this card is then a part of that saving.
@@ -2130,7 +2445,9 @@ def _rule_spawn_parts(
                         else f"Give {agent_type} a tools list that leaves Skill out, or, to change nothing else, "
                         "add Skill to its disallowedTools."
                     )
-                    + undocumented,
+                    # "that" is the change just named, so the note comes after it.
+                    + undocumented
+                    + ("" if has_file else " " + _built_in_note(agent_type, scope)),
                     lever=None,
                     scope=scope,
                     agent_type=agent_type,
@@ -2154,6 +2471,7 @@ def _rule_spawn_parts(
                         )
                     ],
                     estimated_saving=_startup_saving(units, skills_usd, prefix="if the list is dropped, about "),
+                    priced_on=float(skills_tokens),
                     saving_basis=(
                         _startup_basis(units, carried=skills_carried)
                         + (" It is part of the tools list saving, not on top of it." if in_tools_list else "")
@@ -2183,6 +2501,10 @@ def _rule_spawn_parts(
             if not (isinstance(server_offered, int) and isinstance(server_used, int)):
                 continue
             if server_offered < th.spawn_parts_min_spawns:
+                continue
+            if not tools_line.offered(mcp_tool_key(str(values.get("server")))):
+                # A known tools line with no mcp__<server> entry never gets the server,
+                # and a server on disallowedTools is already withheld.
                 continue
             if "__" in str(values.get("server")):
                 # disallowedTools names a server as mcp__<server>, and Claude
@@ -2228,6 +2550,7 @@ def _rule_spawn_parts(
                     action=(
                         f"Add {_name_list(entries)} to the disallowedTools of {agent_type}, so its spawns no "
                         f"longer get these servers: {_name_list(names)}."
+                        + ("" if has_file else " " + _built_in_note(agent_type, scope))
                     ),
                     lever=None,
                     scope=scope,
@@ -2267,6 +2590,13 @@ def _rule_spawn_parts(
         task_prompt = part(agent_type, "task_prompt")
         if isinstance(task_prompt, (int, float)) and task_prompt >= th.spawn_task_prompt_tokens:
             prompt_usd, prompt_carried = _body_usd(task_prompt / 2, spawns, price, read_price, later_calls)
+            top_share = part(agent_type, "task_prompt_top_share")
+            top_run = part(agent_type, "task_prompt_top_run")
+            concentrated = (
+                f" {top_share:.0f}% of it came from one {'workflow run' if str(top_run).startswith('wf_') else 'session'}, {top_run}."
+                if _is_number(top_share) and top_share >= _TASK_PROMPT_TOP_SHARE_PCT and top_run
+                else ""
+            )
             out.append(
                 Recommendation(
                     id="spawn-task-prompt",
@@ -2289,7 +2619,7 @@ def _rule_spawn_parts(
                     saving_basis=(
                         _startup_basis(units, carried=prompt_carried) if units is not None and prompt_usd else ""
                     ),
-                    why=f"Each {agent_type} spawn starts with about {task_prompt:,.0f} tokens of instructions from its parent.",
+                    why=f"Each {agent_type} spawn starts with about {task_prompt:,.0f} tokens of instructions from its parent.{concentrated}",
                 )
             )
             covered.add(agent_type)
@@ -2318,10 +2648,19 @@ def _rule_spawn_parts(
                     _evidence("Size per spawn", mean_tokens, "agent_startup", "agent_startup_shared", key),
                     _evidence("Agent types given it", reach, "agent_startup", "agent_startup_shared", key),
                 ],
-                why=f"About {mean_tokens:,.0f} tokens of it are sent to each of these agents when they start.",
+                why=(
+                    f"Each of these agents got about {mean_tokens:,.0f} tokens of {_mid_sentence(source_label)} when it started, "
+                    "on average over this window. Its size today is in Context files."
+                ),
             )
         )
     return out, covered
+
+
+def _mid_sentence(label: str) -> str:
+    """A source label ("The project's CLAUDE.md") with a leading "The "
+    lower-cased, so it reads inside a sentence."""
+    return "the " + label[4:] if label.startswith("The ") else label
 
 
 def _rule_spawn_cost(
@@ -2447,6 +2786,7 @@ def _effort_mismatch_reported(
     cycles_idx = _col_index(table, "cycles")
     share_idx = _col_index(table, "thinking_pct")
     saving_idx = _col_index(table, "saving")
+    newest_idx = _col_index(table, "newest_tag")
     if None in (cycles_idx, share_idx, saving_idx):
         return []
     rows = [
@@ -2470,6 +2810,11 @@ def _effort_mismatch_reported(
         evidence.append(
             _evidence(f"Easy work at {effort} effort, thinking share of output", row[share_idx], "habits", "habits_effort_fit", row[0])
         )
+    # Say when the newest tag was written, once, only if every cited row's tags are a week or more behind your
+    # newest message (a filled cell): one fresh row means the evidence is not old. Dates are ISO, so max is latest.
+    if newest_idx is not None and all(newest_idx < len(row) and row[newest_idx] for row in rows):
+        latest = max(rows, key=lambda row: row[newest_idx])
+        evidence.append(_evidence("Newest tag behind this", latest[newest_idx], "habits", "habits_effort_fit", latest[0]))
     saving = sum(row[saving_idx] for row in rows if isinstance(row[saving_idx], (int, float)))
     lever, scope = _lever_scope("effortLevel", snapshot)
     return [
@@ -2499,8 +2844,8 @@ def _rule_effort_mismatch(
     (:func:`_effort_mismatch_reported`); otherwise the fallback below.
 
     Fix R22 (see module docstring's deviations list): the fallback's
-    corpus-wide high-effort thinking share and the docs/general-dev
-    session counts are read from two independent group-bys with no report
+    corpus-wide high-effort thinking share and the docs-or-light-edit
+    session count are read from two independent group-bys with no report
     table joining them by session -- this is an approximation, not a per-
     session join, and both ``action`` and the module docstring say so."""
     direct = _effort_mismatch_reported(report, th, snapshot)
@@ -2513,18 +2858,41 @@ def _rule_effort_mismatch(
     sessions_idx = _col_index(purpose_table, "sessions")
     if sessions_idx is None:
         return []
-    docs_purpose_rows = [
+    counted = [
         (row[0], row[sessions_idx])
         for row in purpose_table.rows
-        if row and row[0] in _DOCS_GENERAL_PURPOSES and sessions_idx < len(row)
+        if row and sessions_idx < len(row) and isinstance(row[sessions_idx], (int, float))
     ]
-    if not docs_purpose_rows:
+    total = sum(sessions for _purpose, sessions in counted)
+    light_rows = [(purpose, sessions) for purpose, sessions in counted if purpose in _LIGHT_PURPOSES and sessions > 0]
+    if not total or sum(sessions for _p, sessions in light_rows) * 100.0 <= th.effort_mismatch_light_share_pct * total:
         return []
-    thinking_share = _cell(report, "agents", "topology_effort_tokens", "high", "thinking_share")
-    if not isinstance(thinking_share, (int, float)) or thinking_share <= th.effort_mismatch_thinking_share_pct:
+    share_idx = _col_index(effort_table, "thinking_share")
+    output_idx = _col_index(effort_table, "output_tokens")
+    if share_idx is None:
         return []
-    evidence = [_evidence("High-effort thinking share of output", thinking_share, "agents", "topology_effort_tokens", "high")]
-    for purpose, sessions in docs_purpose_rows:
+    weighted = []  # (row key, output tokens, thinking share)
+    for row in effort_table.rows:
+        if row and row[0] in _HIGH_EFFORT_LEVELS and share_idx < len(row) and isinstance(row[share_idx], (int, float)):
+            weight = row[output_idx] if output_idx is not None and output_idx < len(row) else 1
+            weighted.append((row[0], weight if isinstance(weight, (int, float)) else 1, row[share_idx]))
+    weight_sum = sum(weight for _key, weight, _share in weighted)
+    if not weight_sum:
+        return []
+    thinking_share = sum(weight * share for _key, weight, share in weighted) / weight_sum
+    if thinking_share <= th.effort_mismatch_thinking_share_pct:
+        return []
+    # The pooled share is in no row, so cite each pooled row's own cells.
+    evidence = []
+    for key, _weight, share in weighted:
+        evidence.append(_evidence(f"Thinking share at {key} effort", share, "agents", "topology_effort_tokens", key))
+        if output_idx is not None:
+            row = next(r for r in effort_table.rows if r and r[0] == key)
+            if output_idx < len(row) and isinstance(row[output_idx], (int, float)):
+                evidence.append(
+                    _evidence(f"Output tokens at {key} effort", row[output_idx], "agents", "topology_effort_tokens", key)
+                )
+    for purpose, sessions in light_rows:
         evidence.append(_evidence(f"{purpose} sessions in corpus", sessions, "sessions", "sessions_by_purpose", purpose))
     lever, scope = _lever_scope("effortLevel", snapshot)
     return [
@@ -2535,7 +2903,7 @@ def _rule_effort_mismatch(
             archetypes=_ALL_ARCHETYPES,
             title="High effort is being spent on light editing work",
             action=_action_with_scope(
-                "Lower effortLevel for docs/general-dev sessions -- thinking tokens dominate "
+                "Lower effortLevel for docs and light-edit sessions -- thinking tokens dominate "
                 "output there without a matching increase in edit complexity. (Approximation: "
                 "the thinking share is corpus-wide, not joined to these specific sessions -- "
                 "no report table links effort level to session purpose.)",
@@ -2888,6 +3256,9 @@ def recommend(
 
     if not _meets_min_sample(report, th):
         return []
+    # The view rule (snapshots.view_settings): every rule's scope and "now"
+    # reads the file that decides, never one project's in a view of several.
+    snapshot = for_view(snapshot, view_spans_projects(report))
 
     # v4 wiring round: each of these four modules carries its own RULES
     # (and its own from_config-built thresholds) rather than a native
@@ -2927,7 +3298,6 @@ def recommend(
     recs.extend(_rule_env_subagent_model(report, snapshot, archetype))
     recs.extend(_rule_attribution_deprecated(report, snapshot))
     recs.extend(_rule_agent_report_size(report, th, archetype))
-    recs.extend(_rule_agent_batch_probes(report, th, archetype))
     recs.extend(_rule_plan_rounds(report, th))
     part_recs, covered_agents = _rule_spawn_parts(report, th, archetype, snapshot, units)
     recs.extend(part_recs)
@@ -3019,7 +3389,7 @@ def _patch_value(value, missing: str) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(str(v) for v in value) + "]"
+        return "[" + list_text(value) + "]"
     return str(value)
 
 
@@ -3030,7 +3400,10 @@ def render_patch_set(recs: list[Recommendation]) -> str:
     (e.g. both a TTL switch and ``omitClaudeMd``) into a single diff --
     and a bare settings-key stanza (no path -- see module docstring)
     for genuine top-level settings levers. Contains no path other than
-    ``.claude/agents/<agent_type>.md``.
+    ``.claude/agents/<agent_type>.md``. A new file for Explore or Plan, which
+    Claude Code starts without CLAUDE.md files, gets a comment and an
+    ``omitClaudeMd: true`` line, so the file keeps that start unless its
+    maker leaves the line out.
 
     Fix R13: agent routing now prefers ``rec.agent_type`` (set by every
     per-agent-type rule) over sniffing the agent name back out of
@@ -3043,7 +3416,7 @@ def render_patch_set(recs: list[Recommendation]) -> str:
     """
     lines: list[str] = []
     # agent_type -> ordered {settings_key: rendered_value}, plus whether
-    # any lever contributing to it is managed.
+    # any lever contributing to it is managed or is a new file.
     agent_stanzas: dict[str, dict] = {}
     seen_settings_keys: set[str] = set()
 
@@ -3064,6 +3437,7 @@ def render_patch_set(recs: list[Recommendation]) -> str:
                 if change.target == "agent" and change.agent:
                     stanza = agent_stanzas.setdefault(change.agent, {"managed": False, "keys": {}})
                     stanza["managed"] = stanza["managed"] or scope == "managed"
+                    stanza["new_file"] = stanza.get("new_file", False) or change.new_agent_file
                     stanza["keys"][change.key] = (old_text, new_text)
                     continue
                 if change.key in seen_settings_keys:
@@ -3145,10 +3519,25 @@ def render_patch_set(recs: list[Recommendation]) -> str:
         agent_lines.append(f"+++ {path}")
         if stanza["managed"]:
             agent_lines.append("# managed by policy -- shown for reference only")
+        # A new file replaces the built-in, which is started without CLAUDE.md
+        # files: only a line in the file keeps that.
+        keeps_start = (
+            stanza.get("new_file", False)
+            and starts_without_claude_md(agent_type)
+            and "omitClaudeMd" not in stanza["keys"]
+        )
+        if keeps_start:
+            agent_lines.append(
+                f"# a new file that replaces the built-in {agent_type}; omitClaudeMd: true keeps its start "
+                "without CLAUDE.md files, leave it out to load them"
+            )
         for key, value in stanza["keys"].items():
             old_text, new_text = value if isinstance(value, tuple) else ("(unset)", value)
             agent_lines.append(f"-{key}: {old_text}")
             agent_lines.append(f"+{key}: {new_text}")
+        if keeps_start:
+            agent_lines.append("-omitClaudeMd: (unset)")
+            agent_lines.append("+omitClaudeMd: true")
         agent_lines.append("")
 
     lines = agent_lines + lines
@@ -3160,5 +3549,8 @@ __all__ = [
     "effective_min_sample",
     "recommend",
     "render_patch_set",
+    "current_diet",
+    "known_tools_line",
+    "read_agent_tools",
     "tools_list_offer",
 ]

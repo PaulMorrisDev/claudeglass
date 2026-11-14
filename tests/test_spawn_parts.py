@@ -11,6 +11,7 @@ import shlex
 import pytest
 
 from claudeglass import cli, context_budget, fixes
+from claudeglass import recommend as recommend_mod
 from claudeglass.config import Config
 from claudeglass.elasticity import ElasticityStats, FitResult
 from claudeglass.model import (
@@ -24,7 +25,7 @@ from claudeglass.model import (
     SettingChange,
     Table,
 )
-from claudeglass.recommend import recommend
+from claudeglass.recommend import _row_values, recommend
 from claudeglass.snapshots import Snapshot
 from claudeglass.units import NO_LIMIT_SHARE_HINT, Units
 
@@ -174,7 +175,7 @@ def test_large_claude_md_on_a_custom_agent_suggests_omit_claude_md():
     # The rules the agent needs are moved into its own prompt before the
     # flag is set; the command, which only sets the flag, says so.
     prompt = rec.fixes[0]["prompt"]
-    assert prompt.index("List the rules reviewer needs") < prompt.index("set omitClaudeMd to true")
+    assert prompt.index('List the rules "reviewer" needs') < prompt.index("set omitClaudeMd to true")
     assert "~/.claude/agents/reviewer.md" in prompt
     assert "only sets the flag" in rec.fixes[0]["command_warning"]
     # The generic spawn-cost advice is not repeated for a covered agent type.
@@ -195,6 +196,16 @@ def test_managed_claude_md_is_excluded_from_the_omit_claude_md_saving():
     labels = {label for label, *_ in rec.evidence}
     assert "Managed policy CLAUDE.md per spawn (still loads)" in labels
 
+
+def test_spawn_claude_md_records_the_claude_md_tokens_per_spawn_without_the_managed_part():
+    acc = _acc("reviewer", claude_md=5000.0)
+    acc.claude_md_by_source = {"Managed": [2000.0] * acc.spawns, "Project": [3000.0] * acc.spawns}
+    recs = _recs(_report(acc), snapshot=_snapshot({"reviewer": {"source": "user"}}), units=Units())
+    rec = next(r for r in recs if r.id == "spawn-claude-md")
+    assert rec.priced_on == 3000.0
+    assert isinstance(rec.saving_basis, str)  # the sentence is its own field
+    plain = _recs(_report(_acc("reviewer")), snapshot=_snapshot({"reviewer": {"source": "user"}}), units=Units())
+    assert next(r for r in plain if r.id == "spawn-claude-md").priced_on == 3000.0
 
 def test_omit_claude_md_never_offered_when_only_managed_claude_md_is_seen():
     acc = _acc("reviewer", claude_md=5000.0)
@@ -239,6 +250,13 @@ def test_unused_skills_are_unconfirmed_and_prompt_only_for_an_existing_file():
 # -- the tools list --------------------------------------------------------
 
 
+def test_spawn_unused_skills_records_the_skills_list_tokens_per_spawn():
+    snap = _snapshot({"reviewer": {"source": "project"}})
+    recs = _recs(_report(_acc("reviewer", claude_md=0.0, skills_used=0)), snapshot=snap, units=Units())
+    rec = next(r for r in recs if r.id == "spawn-unused-skills")
+    assert rec.priced_on == 800.0
+    assert next(e for e in rec.evidence if e[0] == "Skills list per spawn")[1] == rec.priced_on
+
 def _tools_rec(recs, agent_type):
     return next((r for r in recs if r.id == "spawn-tools-list" and r.agent_type == agent_type), None)
 
@@ -264,24 +282,47 @@ def test_tools_list_keeps_the_tools_called_in_at_least_a_tenth_of_the_spawns():
 
 
 def test_a_tool_called_in_under_a_tenth_of_the_spawns_is_left_off_the_list():
-    # Bash in 1 of 20 is 5%: below the tenth, so it is listed as rarely used.
-    acc = _diet_acc("searcher", uses={"Read": 20, "Grep": 20, "Bash": 1})
+    # WebFetch in 1 of 20 is 5%: below the tenth, so it is listed as rarely used.
+    acc = _diet_acc("searcher", uses={"Read": 20, "Grep": 20, "WebFetch": 1})
     recs = _recs(_report(acc), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
     rec = _tools_rec(recs, "searcher")
     assert rec.changes[0].value == ["Grep", "Read"]
-    assert "Rarely used, so left out" in rec.action and "Bash" in rec.action.split("Rarely used")[1]
+    assert "Rarely used, so left out" in rec.action and "WebFetch" in rec.action.split("Rarely used")[1]
     assert "fewer than 10%" in rec.action
+
+
+def test_a_named_agent_keeps_the_tools_that_write_or_run_commands_once_any_run_called_them():
+    # The named agent writes code: Edit, Write and Bash were called by runs on another model than the one the
+    # card is measured on, or by one run in twenty on it. Taking them off its line would break its job.
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "Write": 9000, "Bash": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    snap = _snapshot({"implementer": {"source": "project"}})
+
+    def card(uses, other=None):
+        acc = _diet_acc("implementer", spawns=20, uses=uses, chars=chars)
+        if other:
+            acc.tool_uses["claude-sonnet-5"] = other
+        return _tools_rec(_recs(_report(acc), snapshot=snap, units=Units()), "implementer")
+
+    rec = card({"Read": 20, "Grep": 20}, other={"Edit": 6, "Write": 3, "Bash": 6})
+    assert rec.changes[0].value == ["Bash", "Edit", "Grep", "Read", "Write"]
+    assert rec.why.endswith("Bash, Edit and Write stay too because some of implementer's runs called them.")
+    assert rec.saving_usd == pytest.approx(0.81)
+    rec = card({"Read": 20, "Grep": 20, "Edit": 1, "Bash": 1})
+    assert rec.changes[0].value == ["Bash", "Edit", "Grep", "Read"]
+    assert "Write" in rec.action.split("Rarely used")[1]
+    assert rec.why.endswith("Bash and Edit stay too because some of implementer's runs called them.")
+    assert rec.saving_usd == pytest.approx(1.1138, abs=1e-4)
 
 
 def test_the_card_notes_the_tools_claude_code_adds_and_asks_for_a_before_and_after_check():
     recs = _recs(_report(_diet_acc("searcher")), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
     rec = _tools_rec(recs, "searcher")
-    assert "StructuredOutput and SubagentHandback" in rec.action
+    assert "StructuredOutput, SubagentHandback and advisor" in rec.action
     assert "one spawn before and one after on the same model" in rec.action
     # They are never on the line itself, or in the rarely used list.
     assert "StructuredOutput" not in rec.changes[0].value
     prompt = rec.fixes[0]["prompt"]
-    assert "StructuredOutput and SubagentHandback" in prompt
+    assert "StructuredOutput, SubagentHandback and advisor" in prompt
 
 
 def test_the_card_is_priced_from_the_diet_table_and_is_the_only_one_to_carry_a_saving():
@@ -303,6 +344,18 @@ def test_the_card_is_priced_from_the_diet_table_and_is_the_only_one_to_carry_a_s
     assert "part of the tools list saving, not on top of it" in skills.saving_basis
     assert skills.estimated_saving
 
+
+def test_spawn_tools_list_records_the_tokens_it_takes_out_of_each_start():
+    recs = _recs(_report(_diet_acc("searcher")), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
+    rec = _tools_rec(recs, "searcher")
+    said = re.search(r"takes about ([\d,]+) tokens out of each start", rec.why)
+    assert said is not None
+    assert rec.priced_on == pytest.approx(float(said.group(1).replace(",", "")), abs=0.5)
+    # With no units the card still names the tokens.
+    bare = _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=_snapshot({"searcher": {"source": "user"}})), "searcher")
+    assert bare.priced_on == rec.priced_on
+    # A card that prices nothing on tokens leaves it None.
+    assert Recommendation().priced_on is None
 
 def test_the_shared_tool_prefix_is_not_counted_at_the_write_price_by_every_sibling():
     # The same agent type, once where every spawn wrote the tool prefix and
@@ -363,6 +416,95 @@ def test_the_tools_list_card_is_priced_on_the_model_that_recorded_tools_not_the_
     assert rec.saving_usd == pytest.approx(row["saving_usd"])
 
 
+def test_tools_that_write_or_run_commands_are_never_rare_once_any_run_called_them():
+    # Edit and PowerShell are offered to every spawn and each was called by
+    # one spawn on another model than the one the card is measured on (and by
+    # none on it), so the measured family alone would call them rare.
+    sonnet = "claude-sonnet-5"
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "PowerShell": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+
+    def card(agent_type, *, other_family):
+        acc = _diet_acc(agent_type, spawns=20, uses={"Read": 20, "Grep": 20}, chars=chars)
+        if other_family:
+            acc.tool_uses[sonnet] = {"Edit": 1, "PowerShell": 1}
+        return _diet_row(_report(acc), agent_type)
+
+    plain = card("workflow-subagent", other_family=False)
+    assert {"Edit", "PowerShell"} <= set(plain["rare_tools"].split(", "))
+    row = card("workflow-subagent", other_family=True)
+    assert set(row["rare_tools"].split(", ")) == {"NotebookEdit", "WebFetch"}
+    assert row["keep_tools"] == "Edit, Grep, PowerShell, Read"
+    # The saving comes from the final keep list, so it only goes down.
+    assert 0 < row["saving_usd"] < plain["saving_usd"]
+    # Any other agent type keeps them too.
+    other = card("searcher", other_family=True)
+    assert other["keep_tools"] == "Edit, Grep, PowerShell, Read"
+    assert {"Edit", "PowerShell"}.isdisjoint(other["rare_tools"].split(", "))
+
+
+def test_the_why_counts_the_tools_that_cleared_the_bar_not_the_ones_a_rule_added():
+    # Read and Grep were called in every spawn. Edit and PowerShell were called
+    # by one spawn on another model, which the workflow rule keeps on the line.
+    sonnet = "claude-sonnet-5"
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "PowerShell": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    acc = _diet_acc("workflow-subagent", spawns=20, uses={"Read": 20, "Grep": 20}, chars=chars)
+    acc.tool_uses[sonnet] = {"Edit": 1, "PowerShell": 1}
+    report = _report(acc)
+    rec = _tools_rec(_recs(report, units=Units()), "workflow-subagent")
+    assert "tools: Edit, Grep, PowerShell, Read" in rec.action
+    assert "called 2 of the tools it was offered in at least 10% of them" in rec.why
+    assert "Edit and PowerShell stay too because workflow agents called them" in rec.why
+    # An agent type the rule does not touch says nothing of the kind.
+    plain = _tools_rec(_recs(_report(_diet_acc("searcher")), units=Units()), "searcher")
+    assert "called 3 of the tools it was offered" in plain.why and "stay too" not in plain.why
+
+
+def _workflow_rule_rec(*called):
+    # Read and Grep were called in every spawn. Each tool in ``called`` was called
+    # by one spawn on another model, which the workflow rule keeps on the line.
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "PowerShell": 9000, "Write": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    acc = _diet_acc("workflow-subagent", spawns=20, uses={"Read": 20, "Grep": 20}, chars=chars)
+    acc.tool_uses["claude-sonnet-5"] = {name: 1 for name in called}
+    return _tools_rec(_recs(_report(acc), units=Units()), "workflow-subagent")
+
+
+def test_the_why_names_one_tool_the_workflow_rule_kept_in_the_singular():
+    rec = _workflow_rule_rec("PowerShell")
+    assert rec.why.endswith(" PowerShell stays too because workflow agents called it.")
+    assert "stay too" not in rec.why and "called them" not in rec.why
+    # The same sentence reaches the card's fix prompt and the project's bundle prompt.
+    prompt = rec.fixes[0]["prompt"]
+    assert "PowerShell stays too because workflow agents called it." in prompt
+    assert "stay too" not in prompt
+    bundle = fixes.project_prompt([rec])["prompt"]
+    assert "PowerShell stays too because workflow agents called it." in bundle
+    assert "stay too" not in bundle
+
+
+def test_the_why_names_three_tools_the_workflow_rule_kept_in_the_plural():
+    rec = _workflow_rule_rec("Edit", "PowerShell", "Write")
+    assert rec.why.endswith(" Edit, PowerShell and Write stay too because workflow agents called them.")
+    assert "Edit, PowerShell and Write stay too because workflow agents called them." in rec.fixes[0]["prompt"]
+
+
+def test_one_run_that_said_it_did_not_use_claude_md_is_not_counted_as_runs():
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    report = _with_rules(_report(_acc("reviewer")), "reviewer", used=0, unused=1)
+    rec = next(r for r in _recs(report, snapshot=snap) if r.id == "spawn-claude-md")
+    assert " The one run that said, said it didn't use your CLAUDE.md." in rec.why
+    assert "1 of the 1" not in rec.why
+
+
+def test_the_why_counts_a_tool_called_often_that_the_known_line_lacks():
+    # Bash was called in 2 of 20 spawns, but the line the agent has now lacks it.
+    # The card never adds it, and it still cleared the bar, so the why counts it.
+    snap = _snapshot({"searcher": {"source": "user", "tools": ["Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]}})
+    rec = _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units()), "searcher")
+    assert rec.changes[0].value == ["Grep", "Read"]
+    assert "Bash isn't on its tools line, so it isn't added" in rec.action
+    assert "called 3 of the tools it was offered in at least 10% of them" in rec.why
+
+
 def test_the_model_with_the_most_tool_snapshots_is_the_one_a_tools_list_is_measured_on():
     haiku, sonnet = "claude-haiku-4-5", "claude-sonnet-5"
     acc = _diet_acc("searcher", spawns=40, uses={"Read": 8, "Grep": 8}, family=sonnet, snapshots=8)
@@ -416,6 +558,80 @@ def test_a_tools_list_already_in_the_agent_file_is_not_offered_again():
     assert _tools_rec(recs, "searcher") is None
     snap = _snapshot({"searcher": {"source": "user", "tools": "Read, Grep, Bash"}})
     assert _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units()), "searcher") is None
+
+
+_BIG_CHARS = {"Read": 1500, "Grep": 1200, "Bash": 9000, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000}
+
+
+def test_a_line_that_already_left_the_big_tools_off_gets_no_card():
+    # RevIXO #908: the file now lists Read, Grep, Bash and WebFetch, so of the
+    # rarely used tools only WebFetch (2,000 tokens) is still sent: under the
+    # 5,000-token bar. Skill is gone from the line too, so no skills card.
+    line = ["Read", "Grep", "Bash", "WebFetch"]
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    recs = _recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units())
+    assert _tools_rec(recs, "searcher") is None
+    assert not any(r.id == "spawn-unused-skills" for r in recs)
+
+
+def test_an_unknown_current_line_counts_every_tool_as_present():
+    for snap in (None, _snapshot({"searcher": {"source": "user"}}), _snapshot({"other": {"source": "user"}})):
+        recs = _recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units())
+        rec = _tools_rec(recs, "searcher")
+        assert rec is not None and rec.changes[0].value == ["Bash", "Grep", "Read"]
+        assert any(r.id == "spawn-unused-skills" for r in recs)
+
+
+def test_a_known_line_reprices_the_card_from_the_rare_tools_still_on_it():
+    # Only NotebookEdit and Skill are still on the line: 16,000 + 4,000 chars
+    # of definitions (5,000 tokens) and the 1,200-token skills list.
+    line = "Read, Grep, Bash, Agent(helper-a, helper-b), NotebookEdit, Skill"
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    report = _report(_diet_acc("searcher"))
+    full = _tools_rec(_recs(report, units=Units()), "searcher")
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    assert rec is not None and "WebFetch" not in rec.action.split("Rarely used")[1]
+    assert "NotebookEdit" in rec.action and "Skill" in rec.action
+    assert rec.saving_usd < full.saving_usd
+    assert "5,000 of tool definitions" in rec.why and "1,200 of the skills list" in rec.why
+    assert any(r.id == "spawn-unused-skills" for r in _recs(report, snapshot=snap, units=Units()))
+
+
+def test_the_card_never_adds_a_tool_the_line_does_not_have():
+    # Bash is called in 2 of 20 spawns, so the diet keeps it, but the file's
+    # line has no Bash: the card does not put it back.
+    line = ["Read", "Grep", "NotebookEdit", "WebFetch", "Skill"]
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(_diet_acc("searcher")), snapshot=snap, units=Units()), "searcher")
+    assert rec.changes[0].value == ["Grep", "Read"]
+    assert "tools: Grep, Read" in rec.action and "Bash isn't on its tools line, so it isn't added" in rec.action
+
+
+def test_mcp_entries_on_the_line_match_by_server_prefix():
+    servers = {"playwright": (0, 25_000.0, 800.0, 300.0), "sentry": (0, 20_000.0, 500.0, 200.0)}
+    line = "Read, Grep, Bash, mcp__playwright__browser_click, mcp__other"
+    snap = _snapshot({"searcher": {"source": "user", "tools": line}})
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers=servers)), snapshot=snap, units=Units())
+    rec = _tools_rec(recs, "searcher")
+    assert "mcp__playwright__*" in rec.action and "mcp__sentry__*" not in rec.action
+    mcp = next(r for r in recs if r.id == "spawn-unused-mcp")
+    assert "playwright" in mcp.action and "sentry" not in mcp.action
+    # With no mcp__ entry for either server there is nothing to withhold.
+    snap = _snapshot({"searcher": {"source": "user", "tools": "Read, Grep, Bash"}})
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers=servers)), snapshot=snap, units=Units())
+    assert not any(r.id == "spawn-unused-mcp" for r in recs)
+
+
+def test_advisor_is_in_neither_the_kept_nor_the_rare_list():
+    chars = {**_BIG_CHARS, "advisor": 2000}
+    acc = _diet_acc("searcher", chars=chars, uses={"Read": 20, "Grep": 20, "advisor": 20})
+    row = _diet_row(_report(acc), "searcher")
+    assert "advisor" not in row["keep_tools"].split(", ") and "advisor" not in row["rare_tools"].split(", ")
+    acc = _diet_acc("searcher", chars=chars, uses={"Read": 20, "Grep": 20})
+    row = _diet_row(_report(acc), "searcher")
+    assert "advisor" not in row["rare_tools"].split(", ")
+    assert context_budget.ALWAYS_ADDED == frozenset(context_budget.AGENT_ANSWER_TOOLS) | {"advisor"}
+    assert "advisor" not in context_budget.AGENT_ANSWER_TOOLS
 
 
 def test_a_builtin_agent_gets_a_prompt_to_create_a_same_named_file():
@@ -519,6 +735,12 @@ def test_unused_mcp_names_a_server_only_at_two_percent_of_spawns_and_five_dollar
     assert not any(r.id == "spawn-unused-mcp" for r in recs)
 
 
+def test_spawn_unused_mcp_leaves_priced_on_none_because_its_saving_adds_servers():
+    big = (0, 25_000.0, 800.0, 300.0)
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": big})), units=Units())
+    rec = next(r for r in recs if r.id == "spawn-unused-mcp" and r.agent_type == "searcher")
+    assert rec.priced_on is None
+
 def test_unused_mcp_goes_per_server_and_is_a_breakdown_not_an_addition():
     servers = {"playwright": (0, 25_000.0, 800.0, 300.0), "sentry": (0, 20_000.0, 500.0, 200.0), "tiny": (0, 200.0, 20.0, 50.0)}
     recs = _recs(_report(_diet_acc("searcher", spawns=50, servers=servers)), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
@@ -614,7 +836,7 @@ def test_a_claude_md_is_sized_over_the_spawns_that_loaded_it():
     assert rec is not None
     assert any(label == "Size per spawn" and value == pytest.approx(3000.0) for label, value, *_ in rec.evidence)
     assert any(label == "Agent types given it" and value == "2 of 2" for label, value, *_ in rec.evidence)
-    assert "About 3,000 tokens" in rec.why
+    assert "about 3,000 tokens of the project's CLAUDE.md" in rec.why
 
 
 def test_a_type_that_loaded_no_claude_md_is_not_counted_as_given_it():
@@ -639,6 +861,20 @@ def test_the_shared_claude_md_is_compared_on_one_model_over_the_spawns_that_load
     rec = _shared_rec(_recs(_report(one, two)))
     assert rec is not None
     assert any(label == "Size per spawn" and value == pytest.approx(3000.0) for label, value, *_ in rec.evidence)
+
+
+def test_the_shared_claude_md_why_names_the_source_it_is_about():
+    one, two = _acc("a", claude_md=0.0), _acc("b", claude_md=0.0)
+    for acc in (one, two):
+        acc.claude_md_by_source = {"AutoMem": [3000.0] * acc.spawns, "Project": [3000.0] * acc.spawns}
+    recs = _recs(_report(one, two))
+    shared = [r for r in recs if r.id == "spawn-shared-claude-md"]
+    memory = next(r for r in shared if "Auto memory" in r.title)
+    assert "Auto memory (MEMORY.md)" in memory.why
+    assert "project instruction text" not in memory.why
+    project = next(r for r in shared if "Auto memory" not in r.title)
+    assert "project instruction text" not in project.why
+    assert "tokens of " in project.why and "Context files" in project.why
 
 
 # -- recommendation key --------------------------------------------------
@@ -827,3 +1063,668 @@ def test_runs_that_said_they_did_not_use_claude_md_are_cited():
     rec = next(r for r in _recs(report, snapshot=snap) if r.id == "spawn-claude-md")
     assert ("Runs that said they didn't use CLAUDE.md", 3, "habits.habits_agents", "reviewer") in rec.evidence
     assert "3 of the 4 runs that said, said they didn't use your CLAUDE.md." in rec.why
+
+
+def test_a_tie_between_runs_that_used_and_did_not_use_claude_md_is_held_back():
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    recs = _recs(_with_rules(_report(_acc("reviewer")), "reviewer", used=1, unused=1), snapshot=snap)
+    assert not any(r.id == "spawn-claude-md" for r in recs)
+
+
+def test_claude_md_saving_usd_is_the_figure_in_estimated_saving():
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    rec = next(r for r in _recs(_report(_acc("reviewer")), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    # 3,000 tokens x 10 spawns x 3.75 USD per million.
+    assert rec.saving_usd == pytest.approx(0.1125)
+
+
+def test_a_writer_agent_with_no_rules_reports_gets_an_info_card_that_moves_the_rules_first():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 8
+    snap = _snapshot({"reviewer": {"source": "user"}})
+    rec = next(r for r in _recs(_report(acc), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert rec.why.startswith("8 of its 10 spawns edited files")
+    assert "move the rules it needs into its agent file first, then omitClaudeMd" in rec.why
+    assert rec.action.startswith("First move the CLAUDE.md rules reviewer needs into its agent file")
+    assert rec.saving_usd == pytest.approx(0.1125)
+
+
+def test_an_agent_whose_tools_line_names_a_file_tool_is_a_writer_even_before_any_spawn_edited():
+    snap = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Write"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer")), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert "move the rules it needs into its agent file first, then omitClaudeMd" in rec.why
+    assert "edited files" not in rec.why
+
+
+def test_a_file_tool_the_disallowed_tools_line_withholds_does_not_make_an_agent_a_writer():
+    withheld = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Edit", "Write"],
+                                       "disallowedTools": ["Edit", "Write"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer", read_only=10)), snapshot=withheld) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+    assert "move the rules it needs" not in rec.why
+    # One file tool left on the line is still a way to edit.
+    left = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Edit", "Write"], "disallowedTools": ["Edit"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer")), snapshot=left, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert "move the rules it needs into its agent file first, then omitClaudeMd" in rec.why
+
+
+def test_an_agent_with_no_tools_line_whose_spawns_edited_is_a_writer_whatever_its_deny_line_says():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 8
+    snap = _snapshot({"reviewer": {"source": "user", "disallowedTools": ["Edit", "Write", "MultiEdit", "NotebookEdit"]}})
+    rec = next(r for r in _recs(_report(acc), snapshot=snap, units=Units()) if r.id == "spawn-claude-md")
+    assert rec.severity == "info"
+    assert rec.why.startswith("8 of its 10 spawns edited files")
+
+
+def test_a_read_only_agent_keeps_its_severity():
+    snap = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Grep"]}})
+    rec = next(r for r in _recs(_report(_acc("reviewer", read_only=10)), snapshot=snap) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+    assert "move the rules it needs" not in rec.why
+
+
+def test_a_read_only_tools_line_keeps_its_severity_even_after_a_stray_edit():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 1
+    snap = _snapshot({"reviewer": {"source": "user", "tools": ["Read", "Grep"]}})
+    rec = next(r for r in _recs(_report(acc), snapshot=snap) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+    assert "edited files" not in rec.why
+    assert "move the rules it needs" not in rec.why
+
+
+def _with_spawn_write(report, agent_type, mean_first_call):
+    """Add the agents section's spawn-write row spawn-cost is gated on."""
+    report.sections.append(
+        Section(
+            key="agents",
+            title="Agents",
+            tables=[
+                Table(
+                    name="topology_spawn_write",
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="spawns", label="Spawns"),
+                        Column(key="mean_first_call", label="Mean first call"),
+                    ],
+                    rows=[[agent_type, 20, mean_first_call]],
+                )
+            ],
+        )
+    )
+    return report
+
+
+def test_a_tools_line_already_in_place_stops_the_generic_spawn_cost_card_too():
+    def fired(snap):
+        report = _with_spawn_write(_report(_diet_acc("searcher")), "searcher", 50_000.0)
+        recs = _recs(report, snapshot=snap, units=Units())
+        return {r.id for r in recs if r.agent_type == "searcher"}
+
+    # Control: with no line, the tools list is offered and spawn-cost would fire without it.
+    assert "spawn-tools-list" in fired(_snapshot({"searcher": {"source": "user"}}))
+    snap = _snapshot({"searcher": {"source": "user", "tools": ["Read", "Grep", "Bash"]}})
+    ids = fired(snap)
+    assert "spawn-tools-list" not in ids and "spawn-cost" not in ids
+
+
+def test_a_writer_that_reports_it_did_not_use_the_rules_keeps_its_severity():
+    acc = _acc("reviewer")
+    acc.edit_spawns = 8
+    report = _with_rules(_report(acc), "reviewer", used=0, unused=3)
+    rec = next(r for r in _recs(report, snapshot=_snapshot({"reviewer": {"source": "user"}})) if r.id == "spawn-claude-md")
+    assert rec.severity == "advice"
+
+
+def _task_prompt_rec(acc):
+    return next(r for r in _recs(_report(acc)) if r.id == "spawn-task-prompt")
+
+
+def test_a_task_prompt_mostly_from_one_run_names_it_and_its_share():
+    acc = _acc("reviewer", claude_md=0.0, task=6000.0)
+    acc.run_keys = ["wf_big"] * 8 + ["wf_a", "wf_b"]
+    rec = _task_prompt_rec(acc)
+    assert "80% of it came from one workflow run, wf_big." in rec.why
+    row = _row_values(_report(acc), "agent_startup", "agent_startup_breakdown", "reviewer")
+    assert row["task_prompt_top_run"] == "wf_big" and row["task_prompt_top_share"] == pytest.approx(80.0)
+
+
+def test_a_task_prompt_mostly_from_one_session_says_session():
+    acc = _acc("reviewer", claude_md=0.0, task=6000.0)
+    acc.run_keys = ["sess-big"] * 8 + ["sess-a", "sess-b"]
+    assert "80% of it came from one session, sess-big." in _task_prompt_rec(acc).why
+
+
+def test_a_task_prompt_spread_over_many_runs_names_none():
+    acc = _acc("reviewer", claude_md=0.0, task=6000.0)
+    acc.run_keys = [f"wf_{i}" for i in range(10)]
+    rec = _task_prompt_rec(acc)
+    assert "came from" not in rec.why
+
+
+# -- built-in agents: the same-named file is the lever -----------------------
+
+def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    recs = _recs(_report(builtin), units=Units())
+    for rule in ("spawn-tools-list", "spawn-unused-skills", "spawn-unused-mcp"):
+        (rec,) = [r for r in recs if r.id == rule and r.agent_type == "general-purpose"]
+        assert "A file at ~/.claude/agents/general-purpose.md replaces the built-in" in rec.action, rule
+    (rec,) = [r for r in recs if r.id == "spawn-claude-md" and r.agent_type == "general-purpose"]
+    assert "Create ~/.claude/agents/general-purpose.md (it replaces the built-in general-purpose)" in rec.action
+    assert rec.action.endswith("omitClaudeMd: true.")
+    # A custom agent with a file, and a built-in with an override file, get no such sentence.
+    snap = _snapshot({"general-purpose": {"source": "user"}})
+    recs = _recs(_report(builtin), snapshot=snap, units=Units())
+    assert not any("replaces the built-in" in r.action for r in recs if r.id != "spawn-claude-md")
+    recs = _recs(_report(_diet_acc("searcher", spawns=50, servers={"playwright": big})), units=Units())
+    assert not any("replaces the built-in" in r.action for r in recs)
+
+
+_KEEP_START = (
+    "The built-in {agent} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to keep that. "
+    "Leave it out if you want {agent} to follow your CLAUDE.md rules: each start then carries those files too."
+)
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_a_file_that_replaces_explore_or_plan_is_told_to_keep_their_start_without_claude_md(agent):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    note = (
+        f"A file at ~/.claude/agents/{agent}.md replaces the built-in {agent}, so make the change there. "
+        + _KEEP_START.format(agent=agent)
+    )
+    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == agent]
+    cards = [r for r in recs if r.id in ("spawn-unused-skills", "spawn-unused-mcp")]
+    assert {r.id for r in cards} == {"spawn-unused-skills", "spawn-unused-mcp"}
+    for rec in cards:
+        assert note in rec.action, rec.id
+    assert recommend_mod.starts_without_claude_md(agent)
+    assert recommend_mod.claude_md_choice(agent) == _KEEP_START.format(agent=agent)
+    # A built-in with a file of its own is no longer replaced, so it is told nothing of the kind.
+    recs = _recs(_report(builtin), snapshot=_snapshot({agent: {"source": "user"}}), units=Units())
+    assert not any("replaces the built-in" in r.action for r in recs)
+
+
+def test_a_file_that_replaces_another_built_in_is_not_told_to_set_omit_claude_md():
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    for rule in ("spawn-unused-skills", "spawn-unused-mcp"):
+        (rec,) = [r for r in _recs(_report(builtin), units=Units()) if r.id == rule and r.agent_type == "general-purpose"]
+        assert "replaces the built-in general-purpose, so make the change there." in rec.action, rule
+        assert "omitClaudeMd" not in rec.action, rule
+    assert not recommend_mod.starts_without_claude_md("general-purpose")
+    assert not recommend_mod.starts_without_claude_md(None)
+
+
+_SKILLS_UNDOCUMENTED = (
+    "Whether that also drops the skills list from its startup isn't documented, so check the Skills list column "
+    "after a few new spawns."
+)
+
+
+def _skills_action(agent, snapshot=None):
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, skills_used=0)
+    recs = _recs(_report(builtin), snapshot=snapshot, units=Units())
+    (rec,) = [r for r in recs if r.id == "spawn-unused-skills" and r.agent_type == agent]
+    return rec.action
+
+
+def test_the_skills_card_asks_whether_the_list_drops_before_it_says_a_file_replaces_the_built_in():
+    # "that" is the change just named, so the note about the file and CLAUDE.md files comes after the question.
+    assert _skills_action("Explore") == (
+        "Give Explore a tools list that leaves Skill out, or, to change nothing else, add Skill to its "
+        "disallowedTools. " + _SKILLS_UNDOCUMENTED + " A file at ~/.claude/agents/Explore.md replaces the "
+        "built-in Explore, so make the change there. The built-in Explore starts without your CLAUDE.md files. "
+        "Set omitClaudeMd: true in the file to keep that. Leave it out if you want Explore to follow your "
+        "CLAUDE.md rules: each start then carries those files too."
+    )
+    assert _skills_action("general-purpose") == (
+        "Leave Skill off the tools list for general-purpose, which stops it being sent the skills list. To change "
+        "nothing else, add Skill to its disallowedTools instead. " + _SKILLS_UNDOCUMENTED + " A file at "
+        "~/.claude/agents/general-purpose.md replaces the built-in general-purpose, so make the change there."
+    )
+    # An agent with a file of its own is given no note, so its card is as it was.
+    assert _skills_action("searcher", _snapshot({"searcher": {"source": "user"}})) == (
+        "Leave Skill off the tools list for searcher, which stops it being sent the skills list. To change "
+        "nothing else, add Skill to its disallowedTools instead. " + _SKILLS_UNDOCUMENTED
+    )
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_every_sentence_about_claude_md_for_explore_and_plan_is_short(agent):
+    """The sentences this part adds, in the card's note, the fix's explainer and its prompt, stay within the
+    project's 25 words (the older "is built into Claude Code; ..." sentence is not one of them)."""
+    omit = SettingChange(target="agent", key="omitClaudeMd", agent=agent, value=True, new_agent_file=True)
+    other = SettingChange(target="agent", key="model", agent=agent, value="sonnet", new_agent_file=True)
+    rec = Recommendation(id="spawn-cost", title="x", agent_type=agent, changes=[other])
+    bare = dict(fixes.explainer_for(rec, omit))["Where and who it affects"]
+    where = dict(fixes.explainer_for(rec, other))["Where and who it affects"]
+    prompt = fixes.prompt_for(rec, other)
+    added = [
+        recommend_mod.claude_md_choice(agent),
+        recommend_mod._built_in_note(agent, "user"),
+        where.removeprefix(bare),
+        prompt.split(" in its frontmatter.", 1)[1].split(" Write its prompt", 1)[0],
+    ]
+    assert all(text.strip() for text in added)
+    for text in added:
+        for sentence in text.split(". "):
+            assert len(sentence.split()) <= 25, (len(sentence.split()), sentence)
+
+
+def _mcp_patch_set(agent, snapshot=None):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    recs = _recs(_report(builtin), snapshot=snapshot, units=Units())
+    return recommend_mod.render_patch_set([r for r in recs if r.agent_type == agent and r.id == "spawn-unused-mcp"])
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_the_patch_set_for_a_new_explore_or_plan_file_keeps_their_start_without_claude_md(agent):
+    assert _mcp_patch_set(agent) == (
+        f"--- .claude/agents/{agent}.md\n"
+        f"+++ .claude/agents/{agent}.md\n"
+        f"# a new file that replaces the built-in {agent}; omitClaudeMd: true keeps its start without CLAUDE.md "
+        "files, leave it out to load them\n"
+        "-disallowedTools: unknown (no config snapshot yet)\n"
+        "+disallowedTools: [mcp__playwright]\n"
+        "-omitClaudeMd: (unset)\n"
+        "+omitClaudeMd: true\n"
+    )
+
+
+def test_the_patch_set_for_another_stanza_has_no_omit_claude_md_pair():
+    text = _mcp_patch_set("general-purpose")
+    assert "omitClaudeMd" not in text and "#" not in text
+    # Explore with a file of its own is not a new file.
+    text = _mcp_patch_set("Explore", snapshot=_snapshot({"Explore": {"source": "user"}}))
+    assert "omitClaudeMd" not in text and "#" not in text
+
+
+def test_a_managed_stanza_for_a_new_explore_file_keeps_its_managed_comment_first():
+    change = SettingChange(
+        target="agent", key="disallowedTools", agent="Explore", value=["Edit"], current=None, new_agent_file=True
+    )
+    rec = Recommendation(
+        id="spawn-tools-list", severity="info", category="settings", archetypes=(), title="t", action="a",
+        lever=None, scope="managed", agent_type="Explore", changes=[change],
+    )  # fmt: skip
+    lines = recommend_mod.render_patch_set([rec]).splitlines()
+    assert lines[2] == "# managed by policy -- shown for reference only"
+    assert lines[3].startswith("# a new file that replaces the built-in Explore;")
+    assert lines[-1] == "+omitClaudeMd: true"
+
+
+def test_a_stanza_that_sets_omit_claude_md_itself_is_left_as_it_is():
+    changes = [
+        SettingChange(target="agent", key=key, agent="Explore", value=value, current=None, new_agent_file=True)
+        for key, value in (("disallowedTools", ["Edit"]), ("omitClaudeMd", False))
+    ]
+    rec = Recommendation(
+        id="spawn-tools-list", severity="info", category="settings", archetypes=(), title="t", action="a",
+        lever=None, agent_type="Explore", changes=changes,
+    )  # fmt: skip
+    text = recommend_mod.render_patch_set([rec])
+    assert "#" not in text and text.count("omitClaudeMd") == 2
+
+
+@pytest.mark.parametrize("agent", ["general-purpose", "claude", "searcher", None])
+def test_the_choice_about_claude_md_is_empty_for_an_agent_that_is_sent_it(agent):
+    assert recommend_mod.claude_md_choice(agent) == ""
+
+
+@pytest.mark.parametrize("agent", sorted(recommend_mod._BUILTIN_AGENT_TYPES - recommend_mod._NOT_OVERRIDABLE))
+@pytest.mark.parametrize("writer", [False, True])
+def test_the_folder_a_built_in_agents_card_names_is_the_one_its_fix_writes_to(agent, writer):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    if writer:
+        builtin.edit_spawns = 8
+    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == agent and r.changes]
+    # Explore and Plan are not sent CLAUDE.md, so they get no card for it.
+    assert {r.id for r in recs} >= {"spawn-unused-skills", "spawn-unused-mcp"}
+    for rec in recs:
+        where = fixes.fix_file(rec, rec.changes[0])
+        assert where == f"~/.claude/agents/{agent}.md"
+        assert where in rec.action, rec.id
+    # The project prompt files the tools card (the diet leaves Explore, Plan and the guide alone) under that path.
+    tools = _tools_rec(recs, agent)
+    if tools is not None:
+        assert f"## ~/.claude/agents/{agent}.md" in fixes.project_prompt(recs)["prompt"]
+
+
+def test_a_built_in_writer_is_told_to_carry_its_rules_into_the_new_file_first():
+    writer = _diet_acc("general-purpose", spawns=50, claude_md=6000.0)
+    writer.edit_spawns = 8
+    (rec,) = [r for r in _recs(_report(writer), units=Units()) if r.id == "spawn-claude-md"]
+    assert rec.severity == "info"
+    assert rec.action.index("the CLAUDE.md rules general-purpose needs") < rec.action.index("omitClaudeMd: true")
+    assert "replaces the built-in general-purpose" in rec.action
+
+
+# -- the tools line: cut off by the hook, or naming a tool by an old name -------
+
+#: A tools line as an older hook stored it: cut at 64 characters, 61 and "...".
+_CUT_LINE = "Read, Grep, Skill, NotebookEdit, WebFetch, Glob, LS, TodoWrite, NotebookRead"[:61] + "..."
+
+
+def _orchestrator(**kwargs):
+    uses = {"Read": 20, "Grep": 20, "Agent": 4}
+    chars = {"Read": 1500, "Grep": 1200, "Agent": 2000, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000}
+    return _diet_acc("orchestrator", uses=uses, chars=chars, **kwargs)
+
+
+def test_a_tools_line_the_hook_cut_off_gives_the_card_of_no_line_at_all():
+    assert len(_CUT_LINE) == 64
+    report = _report(_diet_acc("searcher"))
+    cut = _tools_rec(_recs(report, snapshot=_snapshot({"searcher": {"source": "user", "tools": _CUT_LINE}}), units=Units()), "searcher")
+    bare = _tools_rec(_recs(report, snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units()), "searcher")
+    assert cut.changes[0].value == bare.changes[0].value == ["Bash", "Grep", "Read"]
+    assert cut.saving_usd == bare.saving_usd and cut.saving_usd > 0
+    assert (cut.action, cut.why, cut.estimated_saving) == (bare.action, bare.why, bare.estimated_saving)
+    # The price path agrees: a cut line leaves the diet row as it came.
+    row = _diet_row(report, "searcher")
+    assert recommend_mod.current_diet(row, _CUT_LINE) == row
+    assert recommend_mod.tools_list_offer("searcher", row, current=_CUT_LINE) == recommend_mod.tools_list_offer("searcher", row)
+
+
+def test_a_tools_line_that_names_task_keeps_it_on_the_suggested_line():
+    line = "Task, Read, Grep, Skill, NotebookEdit, WebFetch"
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(_orchestrator()), snapshot=snap, units=Units()), "orchestrator")
+    assert rec.changes[0].value == ["Task", "Grep", "Read"]
+    assert "tools: Task, Grep, Read" in rec.action and "Agent" not in rec.action.split("Rarely used")[0]
+    # Task is Agent under its old name, so the price is that of a line saying Agent.
+    named = _snapshot({"orchestrator": {"source": "user", "tools": line.replace("Task", "Agent")}})
+    other = _tools_rec(_recs(_report(_orchestrator()), snapshot=named, units=Units()), "orchestrator")
+    assert other.changes[0].value == ["Agent", "Grep", "Read"]
+    assert rec.saving_usd == other.saving_usd and rec.saving_usd > 0
+    row = _diet_row(_report(_orchestrator()), "orchestrator")
+    assert recommend_mod.current_diet(row, line)["saving_usd"] == recommend_mod.current_diet(row, line.replace("Task", "Agent"))["saving_usd"]
+
+
+def test_an_agent_entry_with_an_allowlist_is_not_widened_on_the_suggested_line():
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": ["Agent(worker, reviewer)", "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]}})
+    rec = _tools_rec(_recs(_report(_orchestrator()), snapshot=snap, units=Units()), "orchestrator")
+    assert rec.changes[0].value == ["Agent(worker, reviewer)", "Grep", "Read"]
+    assert "tools: Agent(worker, reviewer), Grep, Read" in rec.action
+
+
+def test_a_deleted_user_override_of_a_built_in_in_an_older_snapshot_does_not_drive_the_cards():
+    # general-purpose's override file was deleted. Another project's older
+    # snapshot still lists it, with a tools line, but the newest says it is gone.
+    from claudeglass import snapshots
+
+    def snap(slug, ts, agents):
+        data = {"schema": 2, "ts": ts, "project_slug": slug, "agents": agents, "effective": {}, "effective_agents": {}}
+        return Snapshot(path=None, ts=ts, data=data)
+
+    stale = snap("a", "20260920T000000Z", {"general-purpose": {"source": "user", "tools": ["Read"]}})
+    newest = snap("b", "20260923T000000Z", {})
+    report = _report(_diet_acc("general-purpose", spawns=50))
+    stale_only = _tools_rec(_recs(report, snapshot=stale, units=Units()), "general-purpose")
+    merged = snapshots.with_every_project_agents([stale, newest])
+    rec = _tools_rec(_recs(report, snapshot=merged, units=Units()), "general-purpose")
+    # The built-in is given every tool, so its card keeps the tools it called.
+    assert stale_only is None
+    assert rec is not None and rec.changes[0].value == ["Bash", "Grep", "Read"]
+    assert "replaces the built-in" in rec.action
+
+
+# -- an Agent entry the hook cut inside its parentheses -----------------------
+
+_CUT_AGENT_ENTRY = ("Agent(" + "worker-one, " * 8)[:61] + "..."
+
+
+def test_no_tools_card_is_given_when_a_kept_tools_only_entry_was_cut_inside_its_parentheses():
+    # Writing the base name back would let the agent start any agent type.
+    assert len(_CUT_AGENT_ENTRY) == 64
+    line = [_CUT_AGENT_ENTRY, "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    report = _report(_orchestrator())
+    recs = _recs(report, snapshot=snap, units=Units())
+    assert _tools_rec(recs, "orchestrator") is None
+    # The price path counts it nowhere: the row, the offer and the tuning amount.
+    row = _diet_row(report, "orchestrator")
+    diet = recommend_mod.current_diet(row, line)
+    assert diet["rare_tools"] == "" and not diet["saving_usd"]
+    assert recommend_mod.tools_list_offer("orchestrator", row, current=line) is None
+    from claudeglass import tuning
+
+    stats = context_budget.ContextBudgetStats()
+    stats.agents["orchestrator"] = _orchestrator()
+    assert tuning._startup_diet_usd(stats, {"orchestrator": line}) == {}
+    assert tuning._startup_diet_usd(stats)["custom"] > 0
+    # The skills card does not depend on the tools line being writable.
+    assert any(r.id == "spawn-unused-skills" and r.agent_type == "orchestrator" for r in recs)
+
+
+def test_a_cut_entry_for_a_tool_that_is_not_kept_changes_nothing():
+    cut = ("WebFetch(" + "domain:example.com, " * 6)[:61] + "..."
+    assert len(cut) == 64
+    report = _report(_diet_acc("searcher"))
+    plain = ["Read", "Grep", "Bash", "Skill", "NotebookEdit", "WebFetch"]
+    snap = _snapshot({"searcher": {"source": "user", "tools": plain}})
+    base = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    snap = _snapshot({"searcher": {"source": "user", "tools": [*plain[:-1], cut]}})
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "searcher")
+    assert rec is not None
+    assert (rec.changes[0].value, rec.saving_usd, rec.action) == (base.changes[0].value, base.saving_usd, base.action)
+
+
+# -- calls recorded as Task and as Agent are one tool -------------------------
+
+_ROSTER_CHARS = {
+    "Read": 1500, "Grep": 1200, "Skill": 4000, "NotebookEdit": 16000, "WebFetch": 8000, "Task": 2000, "Agent": 2000,
+}
+_TASK_LINE = "Task, Read, Grep, Skill, NotebookEdit, WebFetch"
+
+
+def test_calls_recorded_as_task_keep_the_agent_the_line_names_and_it_is_not_also_left_out():
+    acc = _diet_acc("orchestrator", uses={"Read": 20, "Grep": 20, "Task": 4}, chars=_ROSTER_CHARS)
+    report = _report(acc)
+    row = _diet_row(report, "orchestrator")
+    assert "Agent" in row["keep_tools"].split(", ") and "Task" not in row["keep_tools"].split(", ")
+    assert not {"Agent", "Task"} & set(row["rare_tools"].split(", "))
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": _TASK_LINE}})
+    rec = _tools_rec(_recs(report, snapshot=snap, units=Units()), "orchestrator")
+    assert sorted(rec.changes[0].value) == ["Grep", "Read", "Task"]
+    assert "Agent" not in rec.action.split("Rarely used")[1].split("Claude Code adds")[0]
+    # The removal is priced once: the same as the line without the spawning tool.
+    without = recommend_mod.current_diet(row, "Read, Grep, Skill, NotebookEdit, WebFetch")
+    assert rec.saving_usd == pytest.approx(without["saving_usd"])
+
+
+def test_task_and_agent_calls_together_clear_the_bar_that_neither_clears_alone():
+    uses = {"Read": 20, "Grep": 20, "Task": 1, "Agent": 1}
+    report = _report(_diet_acc("orchestrator", uses=uses, chars=_ROSTER_CHARS))
+    row = _diet_row(report, "orchestrator")
+    assert "Agent" in row["keep_tools"].split(", ")
+    assert not {"Agent", "Task"} & set(row["rare_tools"].split(", "))
+
+
+def test_calls_recorded_as_task_count_for_a_line_that_says_agent():
+    chars = {name: size for name, size in _ROSTER_CHARS.items() if name != "Agent"}
+    acc = _diet_acc("orchestrator", uses={"Read": 20, "Grep": 20, "Task": 4}, chars=chars)
+    line = "Agent, Read, Grep, Skill, NotebookEdit, WebFetch"
+    snap = _snapshot({"orchestrator": {"source": "user", "tools": line}})
+    rec = _tools_rec(_recs(_report(acc), snapshot=snap, units=Units()), "orchestrator")
+    assert sorted(rec.changes[0].value) == ["Agent", "Grep", "Read"]
+
+
+# -- R3: deny first ---------------------------------------------------------
+
+
+def _tools_card_for(line=None, denied=None, **acc_kwargs):
+    entry = {"source": "user"}
+    if line is not None:
+        entry["tools"] = line
+    if denied is not None:
+        entry["disallowedTools"] = denied
+    report = _report(_diet_acc("searcher", **acc_kwargs))
+    recs = _recs(report, snapshot=_snapshot({"searcher": entry}), units=Units())
+    return recs, _tools_rec(recs, "searcher")
+
+
+def _rare_part(card):
+    return card.action.split("Rarely used")[1].split("Claude Code adds")[0]
+
+
+def test_a_denied_rare_tool_adds_nothing_to_the_tools_cards_saving():
+    _open_recs, open_card = _tools_card_for()
+    _denied_recs, card = _tools_card_for(denied="WebFetch")
+    assert "WebFetch" in _rare_part(open_card) and "WebFetch" not in _rare_part(card)
+    assert 0 < card.saving_usd < open_card.saving_usd
+    # The same price as a known line that already lacks the tool.
+    line = ["Read", "Grep", "Bash", "Skill", "NotebookEdit"]
+    _line_recs, lacking = _tools_card_for(line=line)
+    assert card.saving_usd == pytest.approx(lacking.saving_usd)
+
+
+def test_a_denied_tool_is_not_put_on_the_suggested_line():
+    # Bash is called in 2 of 20 spawns, so the diet keeps it, but the file withholds it.
+    _recs_denied, card = _tools_card_for(denied="Bash")
+    assert card.changes[0].value == ["Grep", "Read"]
+    assert "tools: Grep, Read" in card.action
+
+
+def test_skill_on_disallowed_tools_gives_no_skills_card_and_takes_nothing_off_the_tools_card():
+    recs, card = _tools_card_for(denied=["Skill"])
+    assert not any(r.id == "spawn-unused-skills" for r in recs)
+    assert "Skill" not in _rare_part(card)
+    assert "skills list" not in card.why
+    # Without the deny line the skills card is there.
+    open_recs, _open_card = _tools_card_for()
+    assert any(r.id == "spawn-unused-skills" for r in open_recs)
+
+
+_SERVERS = {"github": (0, 25_000.0, 800.0, 300.0), "sentry": (0, 20_000.0, 500.0, 200.0)}
+
+
+def test_a_denied_server_is_not_on_the_mcp_card():
+    for denied in ("mcp__github", ["mcp__github__*"], ["Read", "mcp__github"]):
+        recs, _card = _tools_card_for(denied=denied, spawns=50, servers=_SERVERS)
+        (mcp,) = [r for r in recs if r.id == "spawn-unused-mcp"]
+        assert "sentry" in mcp.action and "github" not in mcp.action, denied
+    # mcp__* withholds them all, so there is no card.
+    recs, _card = _tools_card_for(denied="mcp__*", spawns=50, servers=_SERVERS)
+    assert not any(r.id == "spawn-unused-mcp" for r in recs)
+    # One denied tool of a server leaves the server on the card.
+    recs, _card = _tools_card_for(denied="mcp__github__create_issue", spawns=50, servers=_SERVERS)
+    (mcp,) = [r for r in recs if r.id == "spawn-unused-mcp"]
+    assert "github" in mcp.action and "sentry" in mcp.action
+
+
+def test_a_denied_server_is_not_priced_into_the_tools_card():
+    _open_recs, open_card = _tools_card_for(spawns=50, servers=_SERVERS)
+    _recs_denied, card = _tools_card_for(denied="mcp__github", spawns=50, servers=_SERVERS)
+    assert "mcp__github__*" in _rare_part(open_card) and "mcp__github__*" not in _rare_part(card)
+    assert card.saving_usd < open_card.saving_usd
+
+
+def test_the_price_path_and_the_tuning_export_read_the_deny_line_as_the_card_does():
+    from claudeglass import tuning
+
+    row = _diet_row(_report(_diet_acc("searcher")), "searcher")
+    open_diet = recommend_mod.current_diet(row, None)
+    denied = recommend_mod.current_diet(row, None, "WebFetch")
+    assert "WebFetch" in open_diet["rare_tools"] and "WebFetch" not in denied["rare_tools"]
+    assert 0 < denied["saving_usd"] < open_diet["saving_usd"]
+    # Every rare tool denied: nothing to leave out, so no offer.
+    every = ["NotebookEdit", "WebFetch", "Skill"]
+    assert recommend_mod.current_diet(row, None, every)["rare_tools"] == ""
+    assert recommend_mod.tools_list_offer("searcher", row, current=None, disallowed=every) is None
+    stats = context_budget.ContextBudgetStats()
+    stats.agents["searcher"] = _diet_acc("searcher")
+    full = tuning._startup_diet_usd(stats)["custom"]
+    assert tuning._startup_diet_usd(stats, {}, {"searcher": "WebFetch"})["custom"] == pytest.approx(denied["saving_usd"])
+    assert tuning._startup_diet_usd(stats, {}, {"searcher": "WebFetch"})["custom"] < full
+    assert tuning._startup_diet_usd(stats, {}, {"searcher": every}) == {}
+
+
+def test_the_tuning_context_reads_the_deny_line_from_the_merged_snapshot(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from claudeglass import tuning
+
+    folder = tmp_path / "snapshots"
+    folder.mkdir()
+    doc = {"ts": "20260901T100000Z", "schema": 2, "project_slug": "slug:abc",
+           "agents": {"searcher": {"source": "user", "tools": ["Read", "Grep"], "disallowedTools": "Skill, Write"},
+                      "other": {"source": "user"}}}
+    (folder / "20260901T100000Z.json").write_text(json.dumps(doc), encoding="utf-8")
+    ctx = tuning._Ctx.__new__(tuning._Ctx)
+    ctx.config_dir = tmp_path
+    ctx.corpus = SimpleNamespace(sessions=[])
+    assert ctx.agent_tools == {"searcher": ["Read", "Grep"]}
+    assert ctx.agent_denied == {"searcher": ["Skill", "Write"]}
+
+
+def test_the_single_mcp_tool_on_a_kept_server_is_suggested_as_that_tool_and_not_the_whole_server():
+    line = "mcp__github__create_issue, Read, WebFetch"
+    servers = {"github": (5, 25_000.0, 800.0, 300.0)}
+    recs, card = _tools_card_for(line=line, uses={"Read": 20}, chars={"Read": 1500, "WebFetch": 40000},
+                                 spawns=20, servers=servers)
+    assert card is not None
+    assert "mcp__github__create_issue" in card.changes[0].value and "mcp__github__*" not in card.changes[0].value
+    assert "tools: Read, mcp__github__create_issue." in card.action and "mcp__github__*" not in card.action.split("Rarely used")[0]
+
+
+def test_a_tool_the_deny_line_withholds_is_not_said_to_be_missing_from_the_tools_line():
+    # No tools line, and the tools line has the tool: either way it is the deny line that keeps it off.
+    line = ["Read", "Grep", "Bash", "Skill", "WebFetch", "NotebookEdit"]
+    for kw in ({"denied": "Bash"}, {"line": line, "denied": "Bash"}):
+        _recs_denied, card = _tools_card_for(**kw)
+        assert " Bash is on its disallowedTools line, so it isn't added." in card.action, kw
+        assert "tools line" not in card.action.split("Rarely used")[1].replace("disallowedTools line", ""), kw
+    # Two withheld tools, with the neighbour's plural handling.
+    _recs_two, card = _tools_card_for(denied=["Bash", "Grep"])
+    assert "are on its disallowedTools line, so they aren't added." in card.action
+    # A tool really absent from a tools line keeps the tools-line sentence.
+    _recs_lacking, card = _tools_card_for(line=["Read", "Grep", "Skill", "WebFetch", "NotebookEdit"])
+    assert " Bash isn't on its tools line, so it isn't added." in card.action
+    assert "disallowedTools line, so" not in card.action
+    # Both at once: one tool withheld, another absent.
+    _recs_mixed, card = _tools_card_for(line=["Read", "Skill", "WebFetch", "NotebookEdit"], denied="Bash")
+    assert " Bash is on its disallowedTools line, so it isn't added." in card.action
+    assert " Grep isn't on its tools line, so it isn't added." in card.action
+
+
+def test_a_plugin_agents_tools_card_is_information_only():
+    acc = _diet_acc("pr-review-toolkit:code-reviewer", spawns=20, uses={"Read": 20, "Grep": 20})
+    recs = _recs(_report(acc), snapshot=_snapshot({}), units=Units())
+    rec = _tools_rec(recs, "pr-review-toolkit:code-reviewer")
+    assert rec.severity == "info" and rec.changes == [] and rec.fixes == []
+    assert fixes.project_prompt([rec])["left_out"]["info"] == 1
+
+
+
+# -- N3: the why names only run-called tools that are on the line --------------
+
+_N3_CHARS = {"Read": 1500, "Grep": 1200, "Edit": 9000, "Write": 9000, "Bash": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+
+
+def _n3_card(entry, uses, other):
+    acc = _diet_acc("implementer", spawns=20, uses=uses, chars=_N3_CHARS)
+    acc.tool_uses["claude-sonnet-5"] = other
+    return _tools_rec(_recs(_report(acc), snapshot=_snapshot({"implementer": {"source": "project", **entry}})), "implementer")
+
+
+def test_the_why_does_not_say_a_tool_stays_when_the_agents_tools_line_lacks_it():
+    rec = _n3_card({"tools": ["Read", "Grep", "Bash", "NotebookEdit", "WebFetch"]}, {"Read": 20, "Grep": 20}, {"Edit": 6, "Bash": 6})
+    assert "Edit isn't on its tools line, so it isn't added." in rec.action
+    assert rec.why.endswith("Bash stays too because some of implementer's runs called it.")
+
+
+def test_the_why_does_not_say_a_tool_stays_when_the_deny_line_withholds_it():
+    rec = _n3_card({"disallowedTools": ["Bash"]}, {"Read": 20, "Grep": 20, "Edit": 8}, {"Bash": 4})
+    assert "Bash is on its disallowedTools line, so it isn't added." in rec.action
+    assert "stays too" not in rec.why and "stay too" not in rec.why

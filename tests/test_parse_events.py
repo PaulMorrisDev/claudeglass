@@ -1227,6 +1227,39 @@ def test_request_log_lines_leave_no_unknown_event_before_the_reply(tmp_path: Pat
     assert sum(result.diagnostics.ignored_line_types.get(t, 0) for t in _REQUEST_LOG_TYPES) == len(_REQUEST_LOG_TYPES)
 
 
+_SESSION_FACT_LINES = [
+    ("tools-used", {"tools": ["PowerShell", "ToolSearch", "mcp__acme-crm__lookup"]}),
+    ("session-owner", {"accountUuid": "9f1c2a7e-account", "organizationUuid": "4b7d0e1a-organisation"}),
+]
+
+
+@pytest.mark.parametrize(("line_type", "fields"), _SESSION_FACT_LINES)
+def test_a_session_fact_line_is_dropped_not_unknown(line_type, fields):
+    assert events.classify_line(ignorable_line(line_type, **fields)) is None
+
+
+def test_session_fact_lines_are_counted_as_ignored_and_keep_no_id_or_tool_name(tmp_path: Path):
+    """Claude Code 2.1.32x writes a ``tools-used`` and a ``session-owner``
+    line. The tools are read from the tool calls, and an account's and an
+    organisation's ids are never kept."""
+    path = tmp_path / "session.jsonl"
+    lines = [user_str_line("hi")]
+    lines += [ignorable_line(line_type, **fields) for line_type, fields in _SESSION_FACT_LINES]
+    lines.append(turn_line(message_id="msg_1"))
+    from helpers import write_jsonl
+
+    write_jsonl(path, lines)
+
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="session"))
+
+    assert "unknown_line_types" not in result.parser_notes
+    assert not [event for event in result.events if event.kind == EventKind.UNKNOWN]
+    assert result.diagnostics.ignored_line_types.get("tools-used") == 1
+    assert result.diagnostics.ignored_line_types.get("session-owner") == 1
+    for kept in ("9f1c2a7e", "4b7d0e1a", "acme-crm"):
+        assert kept not in repr(result)
+
+
 def _tool(name: str, description: str = "d", **extra) -> dict:
     return {"name": name, "description": description, **extra}
 

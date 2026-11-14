@@ -34,6 +34,10 @@ CWD = "C:\\Dev\\app"
     ("echo hi > /dev/null", []),
     ("echo x > $OUT", []),
     ('git commit -m "fix > bug"', []),
+    # A message in "$( ... )" is text: a write it quotes is not made, and a real write after it is
+    ("git commit -m \"$(cat <<'EOF'\nsay \"x; echo y > src/a.py\" now\nEOF\n)\"", []),
+    ("git commit -m \"$(printf '%s' 'a 27\" b; echo y > src/a.py')\"", []),
+    ("git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor\nEOF\n)\"\necho y > src/b.py", ["C:/Dev/app/src/b.py"]),
     ("# echo x > f\nls", []),
     ("cd $DIR && echo x > f.txt", []),
 ])
@@ -100,6 +104,10 @@ def test_a_command_that_moves_or_removes_files_changes_them_in_bash(command):
     "git branch merge-notes",
     "git commit -m 'merge it' && git push",
     "git commit -m \"$(cat <<'EOF'\nrm -rf build\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF'\nsay \"x; mv a b\" before it\nEOF\n)\"",
+    "git commit -m \"$(printf '%s' 'a 27\" b; rm -rf build')\"",
+    "git commit -m \"`cat <<'EOF'\nFind \"x; rm -rf build\" it\nEOF\n`\"",
+    "git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor\nrm -rf build\nEOF\n)\"",
     "echo 'rm -rf build'",
     "grep -r mv src",
     "npm test 2>&1",

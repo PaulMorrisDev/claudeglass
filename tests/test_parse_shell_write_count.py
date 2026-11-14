@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -24,14 +25,16 @@ def _ts(second: int) -> str:
     return f"2026-09-18T12:{second // 60:02d}:{second % 60:02d}.000Z"
 
 
-def _turn(tmp_path, blocks, results, cwd=REPO):
+def _turn(tmp_path, blocks, results, cwd=REPO, first_cwd=None):
+    """The one reply that makes ``blocks``, on a line whose ``cwd`` is ``cwd``;
+    ``first_cwd`` is the working folder of the session's first line."""
     path = tmp_path / "t.jsonl"
     reply = turn_line(content=list(blocks), timestamp=_ts(1), cwd=cwd)
     reply["message"]["stop_reason"] = "tool_use"
     final = turn_line(content=[{"type": "text", "text": "done"}], timestamp=_ts(3))
     final["message"]["stop_reason"] = "end_turn"
     write_jsonl(path, [
-        user_str_line("go", timestamp=_ts(0)),
+        user_str_line("go", timestamp=_ts(0), **({"cwd": first_cwd} if first_cwd else {})),
         reply,
         user_block_line(list(results), timestamp=_ts(2)),
         final,
@@ -336,3 +339,234 @@ def test_the_counts_are_plain_numbers_and_do_not_depend_on_the_salt(tmp_path, sa
     ], [_ok("t1"), _ok("t2")])
     assert (turn.edit_call_count, turn.edit_doc_count, turn.shell_change_count) == (1, 0, 1)
     assert all(type(n) is int for n in (turn.edit_call_count, turn.edit_doc_count, turn.shell_change_count))
+
+
+# -- the part of it aimed at code (``Turn.shell_code_write_count``) --------------------
+
+
+@pytest.mark.parametrize("command", [
+    "echo x > src/a.py",
+    "sed -i 's/a/b/' src/a.py",
+    "echo x > notes.json",
+    "echo x > app/reports/views.py",
+    "echo x > docs/conf.py",
+])
+def test_a_shell_write_to_code_counts_as_a_code_write(tmp_path, salt, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()])
+    assert turn.shell_code_write_count == 1
+    assert turn.shell_write_count == 1
+
+
+@pytest.mark.parametrize("command", [
+    "cat > review-1.md <<'EOF'\nfindings\nEOF",
+    "echo x >> notes.txt",
+    "echo '{}' > audit-report.json",
+    "echo '{}' > ledger.jsonl",
+    "echo x > reports/out.csv",
+    "echo x > docs/a.html",
+    "echo x > /home/me/scratchpad/run.py",
+    # A log, a table of results or a line-per-record ledger is a document wherever it sits.
+    "echo x >> progress.log",
+    "echo x >> verify.csv",
+    "printf 'a,b' >> results.tsv",
+    "echo '{}' >> progress.jsonl",
+    "echo x >> src/run.log",
+])
+def test_a_shell_write_to_a_document_is_not_a_code_write(tmp_path, salt, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()])
+    assert turn.shell_code_write_count == 0
+    assert turn.shell_write_count == 1
+
+
+def test_a_shell_write_to_temp_is_not_a_code_write(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash(f"echo x > {TEMP_SLASHED}/a.py")], [_ok()])
+    assert turn.shell_code_write_count == 0
+
+
+def test_only_code_targets_are_counted_when_a_command_writes_both(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo a > review.md && echo b > src/b.py")], [_ok()])
+    assert turn.shell_write_count == 2
+    assert turn.shell_code_write_count == 1
+
+
+def test_a_code_write_that_never_ran_is_taken_back(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo x > src/a.py")],
+                 [tool_result_block("t1", "The user doesn't want to proceed with this tool use.", is_error=True)])
+    assert turn.shell_code_write_count == 0
+
+
+# -- where the work sits: only the folders below the working folder name a document ------
+
+#: A project whose own path holds a folder with a document name.
+_UNDER_A_DOCUMENT_FOLDER = [
+    "/home/ana/docs/shop",
+    "/srv/plans/api",
+    "C:/Users/ana/reports/etl",
+    "C:\\Users\\Ana\\Reports\\etl",
+    "/home/ana/scratchpad/shop",
+]
+
+
+def _inside(cwd: str, rest: str) -> str:
+    return cwd.replace("\\", "/") + "/" + rest
+
+
+@pytest.mark.parametrize("cwd", _UNDER_A_DOCUMENT_FOLDER)
+@pytest.mark.parametrize("command", [
+    "echo '{}' > package.json",
+    "echo '<p>' > web/index.html",
+    "echo x > src/app.py",
+])
+def test_a_project_under_a_folder_named_like_a_document_folder_still_has_its_code_writes(tmp_path, salt, cwd, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()], cwd=cwd)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 1
+
+
+@pytest.mark.parametrize("cwd", _UNDER_A_DOCUMENT_FOLDER)
+def test_an_edit_in_a_project_under_a_folder_named_like_a_document_folder_is_a_code_edit(tmp_path, salt, cwd):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": _inside(cwd, "package.json")}),
+        tool_use_block("Write", "t2", {"file_path": _inside(cwd, "web/index.html")}),
+    ], [_ok("t1"), _ok("t2")], cwd=cwd)
+    assert turn.edit_code_count == 2
+
+
+@pytest.mark.parametrize("cwd", _UNDER_A_DOCUMENT_FOLDER)
+@pytest.mark.parametrize("command", [
+    "echo '{}' > reports/summary.json",
+    "echo x > docs/a.html",
+    "echo '{}' > plans/2026/q3/data.json",
+    "echo x > scratchpad/run.py",
+    "echo x > docs/api/notes.md",
+])
+def test_the_projects_own_document_folders_still_hold_documents_wherever_it_sits(tmp_path, salt, cwd, command):
+    turn = _turn(tmp_path, [_bash(command)], [_ok()], cwd=cwd)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 0
+
+
+def test_a_report_a_worktree_agent_writes_into_the_main_checkouts_doc_folders_is_not_a_code_write(tmp_path, salt):
+    worktree = "/home/ana/shop/.claude/worktrees/fix-1"
+    turn = _turn(tmp_path, [
+        _bash("echo '{}' > /home/ana/shop/docs/api/spec.json"),
+        tool_use_block("Write", "t2", {"file_path": "/home/ana/shop/reports/2026/q3.json"}),
+        tool_use_block("Edit", "t3", {"file_path": "/home/ana/shop/src/app.py"}),
+    ], [_ok(), _ok("t2"), _ok("t3")], cwd=worktree)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 0
+    assert turn.edit_code_count == 1
+
+
+def test_a_report_written_after_the_session_moved_into_reports_is_still_a_document(tmp_path, salt):
+    # Claude Code carries a `cd` in the main session: later lines record the new folder, but the folders
+    # that make a file a document are measured from where the session began.
+    root = "/home/ana/shop"
+    turn = _turn(tmp_path, [
+        _bash("echo '{}' > summary.json"),
+        tool_use_block("Write", "t2", {"file_path": root + "/reports/out.json"}),
+        tool_use_block("Write", "t3", {"file_path": root + "/reports/sub/app.py"}),
+    ], [_ok(), _ok("t2"), _ok("t3")], cwd=root + "/reports", first_cwd=root)
+    assert turn.shell_write_count == 1 and turn.shell_code_write_count == 0
+    assert turn.edit_code_count == 1  # reports/sub/app.py: code; the json is a report
+
+
+def test_an_edit_into_the_projects_own_reports_folder_is_not_a_code_edit(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Write", "t1", {"file_path": "/home/ana/docs/shop/reports/out.json"}),
+    ], [_ok("t1")], cwd="/home/ana/docs/shop")
+    assert turn.edit_code_count == 0
+
+
+@pytest.mark.parametrize(("target", "cwd", "code"), [
+    # Inside the working folder: the folders below it decide.
+    ("/home/ana/docs/shop/package.json", "/home/ana/docs/shop", True),
+    ("/home/ana/docs/shop/docs/package.json", "/home/ana/docs/shop", False),
+    ("/home/ana/docs/shop/docs/api/spec.json", "/home/ana/docs/shop", False),
+    ("/home/ana/docs/shop/src/docs/spec.json", "/home/ana/docs/shop", False),
+    ("/home/ana/docs/shop/src/docs.json", "/home/ana/docs/shop", True),
+    # Case and slash direction do not tell two spellings of one folder apart.
+    ("C:/Users/ana/reports/etl/package.json", "c:\\users\\ANA\\Reports\\etl", True),
+    ("c:/users/ana/reports/etl/Reports/a.json", "C:\\Users\\ana\\reports\\etl\\", False),
+    ("/c/Users/ana/reports/etl/package.json", "C:/Users/ana/reports/etl", True),
+    ("/home/ana/docs/shop/package.json", "/home/ana/docs/shop/", True),
+    # A relative target is below the working folder by being relative.
+    ("docs/a.json", "/home/ana/docs/shop", False),
+    ("package.json", "/home/ana/docs/shop", True),
+    ("docs/a.json", None, False),
+    ("package.json", None, True),
+    # Outside the working folder: the folders below the deepest one it shares with the working folder decide.
+    ("/srv/docs/notes.json", "/home/ana/work", False),
+    ("/home/ana/shop/docs/api/spec.json", "/home/ana/shop/.claude/worktrees/x", False),
+    ("/home/ana/shop/reports/2026/q3.json", "/home/ana/shop/.claude/worktrees/x", False),
+    ("/home/ana/shop/src/app.py", "/home/ana/shop/.claude/worktrees/x", True),
+    ("/home/ana/shop/package.json", "/home/ana/shop/.claude/worktrees/x", True),
+    ("C:\\Dev\\shop\\reports\\2026\\q3.json", "C:\\Dev\\shop\\.claude\\worktrees\\x", False),
+    ("c:/dev/shop/docs/api/spec.json", "C:/Dev/Shop/.claude/worktrees/x", False),
+    ("/home/x/scratchpad/build/a.py", "/home/ana/shop", False),
+    ("/srv/other/reports/2026/q3.json", "/home/ana/shop", False),
+    ("/home/ana/docs/other/package.json", "/home/ana/docs/shop", True),
+    ("/home/ana/other/src/app.py", "/home/ana/shop", True),
+    # The accepted leftover: a project under a docs-named folder that shares no parent with the working
+    # folder reads as a document (a missed card, not a false alarm).
+    ("/srv/docs/shop/package.json", "/home/ana/work", False),
+    # With no absolute working folder, the folder the file sits in decides, nothing above it.
+    ("/srv/docs/shop/package.json", None, True),
+    ("/srv/docs/shop/package.json", "", True),
+    ("/srv/docs/shop/package.json", 7, True),
+    ("/srv/docs/notes.json", None, False),
+    ("/srv/plans/api/app.py", None, True),
+    ("/srv/scratchpad/a.py", None, False),
+    ("/srv/scratchpad/job/a.py", None, True),
+    # A working folder that is not absolute names nothing: it is as good as none.
+    ("/srv/docs/shop/package.json", "shop", True),
+    ("/home/ana/work2/package.json", "/home/ana/work", True),
+    # The folder rule is for .json, .html and .htm: the other endings need none.
+    ("/home/ana/work/run.log", "/home/ana/work", False),
+    ("/home/ana/work/data.csv", "/home/ana/work", False),
+    ("/home/ana/work/data.tsv", "/home/ana/work", False),
+    ("/home/ana/work/progress.jsonl", "/home/ana/work", False),
+    ("/home/ana/work/package.json", "/home/ana/work", True),
+    ("/home/ana/work/index.html", "/home/ana/work", True),
+])
+def test_the_folders_that_make_a_json_or_html_file_a_document_are_those_below_the_working_folder(target, cwd, code):
+    assert parse._is_code_write_target(target, parse._temp_prefixes(), cwd) is code
+
+
+def test_a_fresh_parse_measures_every_turn_the_synthetic_ones_included():
+    # None is for a digest an older parser wrote. A turn this parser made, such as the one a compaction
+    # summary adds, wrote no code: 0.
+    path = Path(__file__).parent / "fixtures" / "real" / "session-a" / "55176945d92374c103c39f0aa42a1fffc37c.jsonl"
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert any(turn.is_synthetic for turn in result.turns)
+    assert all(type(turn.shell_code_write_count) is int and type(turn.edit_code_count) is int for turn in result.turns)
+
+
+# -- the edit-tool side of it (``Turn.edit_code_count``) ---------------------------------
+
+
+def test_an_edit_to_code_counts_as_a_code_edit_even_inside_a_worktree_under_claude(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/.claude/worktrees/w/src/a.py"}),
+        tool_use_block("Edit", "t2", {"file_path": "C:/Dev/repo/src/b.py"}),
+    ], [_ok("t1"), _ok("t2")])
+    assert turn.edit_code_count == 2
+
+
+def test_an_edit_to_a_document_or_a_config_file_or_temp_is_not_a_code_edit(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Write", "t1", {"file_path": "~/.claude/agents/x.md"}),
+        tool_use_block("Write", "t2", {"file_path": "C:/Dev/repo/REVIEW.md"}),
+        tool_use_block("Edit", "t3", {"file_path": TEMP_SLASHED + "/x.py"}),
+    ], [_ok("t1"), _ok("t2"), _ok("t3")])
+    assert turn.edit_code_count == 0
+
+
+def test_a_code_edit_that_failed_or_was_denied_is_taken_back(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/a.py"}),
+        tool_use_block("Edit", "t2", {"file_path": "C:/Dev/repo/b.py"}),
+        tool_use_block("Edit", "t3", {"file_path": "C:/Dev/repo/c.py"}),
+    ], [
+        tool_result_block("t1", "File has not been read yet.", is_error=True),
+        tool_result_block("t2", "The user doesn't want to proceed with this tool use.", is_error=True),
+        _ok("t3"),
+    ])
+    assert turn.edit_code_count == 1

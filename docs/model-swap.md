@@ -91,10 +91,11 @@ representative model is resolved through `Pricing.aliases[family]` —
 the public alias table `pricing.py` already exposes — never a
 hardcoded model id. If a future rate card drops a family's bare alias
 entirely, the affected row reports "unknown tier" instead of guessing
-at a stale id.
+at a stale id. Mythos ranks with Fable, at whose prices the rate card lists
+it, so a Mythos main session is offered Opus.
 
-Today's packaged rate card points `fable` and `best` at
-`claude-fable-5-1`, `opus` at `claude-opus-5-5`, `sonnet` and
+Today's packaged rate card points `fable` at
+`claude-fable-5-2`, `opus` and `best` at `claude-opus-5-5`, `sonnet` and
 `sonnet[1m]` at `claude-sonnet-5-5`, and `haiku` at
 `claude-haiku-5-5`. The `sonnet` aliases moved from
 `claude-sonnet-5` to `claude-sonnet-5-5` with the card dated 2026-10-01;
@@ -102,14 +103,17 @@ Today's packaged rate card points `fable` and `best` at
 ran on it are still priced as themselves. The `haiku` alias moved from
 `claude-haiku-4-5-20251001` to `claude-haiku-5-5` with the card dated
 2026-10-30; Haiku 4.5 keeps its own row, so sessions that ran on it are
-still priced as themselves. A rate card of your own sets its own
-aliases.
+still priced as themselves. The `fable` alias moved from
+`claude-fable-5-1` to `claude-fable-5-2`, and `best` moved to
+`claude-opus-5-5`, as Claude Code resolves it, with the card dated 2026-11-12;
+Fable 5.1 keeps its own row, so sessions that ran on it are still priced
+as themselves. A rate card of your own sets its own aliases.
 
 ## The `model_swap` report section
 
 | Table | What it shows |
 |---|---|
-| `model_swap_by_agent_type` | One row per agent type (`"top-level"` for the main conversation, else `TranscriptMeta.agent_type` or `"unknown"`): spawns, priced turns, unpriced turns (unknown model), observed model, observed cost, one `Cost at <model-id>` column per model in `pricing.toml`, the best cheaper alternative (model id and human label), the ceiling saving in USD and %, and the lever text (`settings.json` for top-level, `<type>.md`'s frontmatter for a subagent, `none (the workflow script sets it)` for `workflow-subagent`, `none (Claude Code picks)` for forks and untyped runs). Then, added at the end: `lever_runs`, `lever_priced_turns`, `lever_model` and `lever_cost` (the runs the lever decides; for top-level, every run), `workflow_runs` and `spawn_model_runs` (the runs set elsewhere). The saving is priced on the lever runs only. |
+| `model_swap_by_agent_type` | One row per agent type (`"top-level"` for the main conversation, else `TranscriptMeta.agent_type` or `"unknown"`): spawns, priced turns, unpriced turns (unknown model), observed model, observed cost, one `Cost at <model-id>` column per model in `pricing.toml`, the best cheaper alternative (model id and human label), the ceiling saving in USD and %, and the lever text (`settings.json` for top-level, `<type>.md`'s frontmatter for a subagent, `none (the workflow script sets it)` for `workflow-subagent`, `none (Claude Code picks)` for forks and untyped runs). Then, added at the end: `lever_runs`, `lever_priced_turns`, `lever_model` and `lever_cost` (the runs the lever decides; for top-level, every main session not left out, below), `workflow_runs` and `spawn_model_runs` (the runs set elsewhere), and for top-level `before_change_runs`, `settled_runs`, `picked_runs` and `own_model_runs` (the main sessions left out). The saving is priced on the lever runs only. |
 | `model_swap_summary` | One row: the corpus-wide ceiling if every subagent type whose agent-file runs are on Fable or Opus moved one tier down. Its observed cost and saving cover those runs only. Excludes the top-level row and any Fable/Opus agent type that's already at or below its next tier's cost at today's volumes. |
 | `model_swap_agent_file_runs` | Report tier. One row per named subagent type with at least one `agent file` run: runs, priced turns, observed model and cost, and a `Cost at <model-id>` column per model, for those runs only. The what-if engine prices an agent's model change from this table. |
 | `model_swap_agent_models` | Not built by `build_section`: `report.build_report` appends it. One row per group of agents and finding, for agents that ran on a larger model than their work needed. See [the section below](#agents-that-ran-on-a-larger-model-than-their-work-needed). |
@@ -128,6 +132,12 @@ Every row's "best cheaper alternative" state is one of:
   alternative is empty and the saving `0.0`, so no card, Savings lever,
   goal or quick action offers it; the `Cost at <model-id>` columns still
   show what Haiku would have cost.
+- **before_change**, **picked**, **own_model** and **left_out** — the
+  top-level row has no main session left for the lever. Every one not
+  already on Sonnet or smaller started before its project moved there,
+  ran on a larger model though its project's setting said Sonnet or
+  smaller, or, in a view of several projects, ran in a project that sets
+  its own model. `left_out` is a mix of those reasons. The saving is `0.0`.
 - **unknown_tier** — the observed model's family isn't recognised, or
   the rate card has no alias for the next family down.
 - **no_data** — no priced turns for this agent type.
@@ -136,6 +146,25 @@ Every row's "best cheaper alternative" state is one of:
   The label says how many of each. No `.md` advice.
 - **no_lever** — `workflow-subagent`, `fork` or `unknown`: no agent file
   sets the model at all.
+
+A main session counts by the model it ran on. The top-level lever leaves
+out, and counts on the row, a session already on Sonnet or smaller
+(`settled_runs`), one that started before its project's setting moved to
+Sonnet or smaller (`before_change_runs`), one that ran on a larger model
+though its project's setting said Sonnet or smaller when it started
+(`picked_runs`), and, in a view of several projects, one in a project
+whose own settings file sets `model` (`own_model_runs`), which a change to
+your user settings can't reach. A project that follows your user settings
+reads them from every snapshot after its own latest one. While
+`ANTHROPIC_MODEL` is set in a project's latest snapshot (by name only,
+`change_points.model_env_set`), its setting picks no session's model, so no
+session counts as picked against it or as from before a move of it; the
+transcripts decide alone, and the Models check says "The main session
+would have cost less on <model>, but ANTHROPIC_MODEL picks its model, so
+there is no setting to change." The Changes page's outcome rows still
+read whether the setting agreed, as they did. The main-model
+card, the Models check, the what-if and the profile goal read the same
+setting, so none of them offers a change the saving doesn't count.
 
 Only `cheaper_available` ever carries a non-zero saving, so the table
 never implies a saving where none exists.
@@ -285,8 +314,20 @@ A run gets a verdict only when its dominant model is above Sonnet:
 - `inherited`: a writer that nothing chose a model for.
 - `asked`: a writer whose call named the model.
 - `decide-apply`: a `decider` with at least
-  `decide_apply_min_edit_turns` (default 3) write turns, whoever chose
-  its model. It decided and also applied the changes.
+  `decide_apply_min_edit_turns` (default 3) code write turns, whoever
+  chose its model. It decided and also applied the changes. A code write
+  turn is one with a shell command that wrote to code
+  (`Turn.shell_code_write_count` above 0) or an edit-tool call aimed at
+  code (`Turn.edit_code_count` above 0), whichever tool did the writing and
+  whether or not the path is under `.claude`. Code is not a document (`.md`,
+  `.rst`, `.txt`, `.adoc`), not a log, `.csv`, `.tsv` or `.jsonl` file
+  anywhere, not a `.json`, `.html` or `.htm` file under `plans/`, `reports/`
+  or `docs/`, not a file under `scratchpad/` or temp, and not a report or
+  ledger `.json`. Those folders are the ones below the folder the session
+  began in and the file shares with it, so a repository that sits under a
+  folder named `docs` keeps its code writes. An agent that only wrote its
+  review and a ledger isn't flagged. A run whose stored digest came from a
+  parser that did not count these (its transcript is gone) is left out.
 
 A writer chosen by `file` gets none. Neither does an `integrates`
 agent, a decider with fewer write turns, or any agent on Sonnet,
@@ -321,12 +362,13 @@ price for.
 | `cost_on_sonnet_usd` | the same replies priced at Sonnet. Empty for `decide-apply` |
 | `saving_usd` | cost minus cost on Sonnet, never below 0. Empty for `decide-apply` |
 | `saving_pct` | that saving as a share of cost. Empty for `decide-apply` |
-| `write_turns` | write turns across these agents |
+| `write_turns` | write turns across these agents (for `decide-apply`, the replies that wrote code) |
 | `workflow_runs` | how many separate workflow runs they came from; 0 for Agent-tool agents |
 | `first_seen` | the date (`YYYY-MM-DD`) of the earliest agent's first reply |
 | `last_seen` | the date of the latest agent's first reply |
-| `later_compliant` | for `inherited` rows, the later writers on Sonnet or smaller (see "When a card looks fixed"); 0 on the other rows |
+| `later_compliant` | the later writers on Sonnet or smaller (see "When a card looks fixed"). Empty on a `decide-apply` row and on a workflow `asked` row: not measured |
 | `env_var_set` | `yes` or `no`: whether `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's environment variable names. The same on every row |
+| `sessions_measured` | `9 of 82`: the sessions of the window whose replies this version read, on a `decide-apply` row. The column is there only when some, but fewer than half, were (the rest are digests an older version wrote, whose transcripts are gone, which the verdict leaves out) and a `decide-apply` row stands; the card then cites it as "Sessions measured" |
 
 ### The three rules
 
@@ -344,7 +386,7 @@ applies.
 | Rule | Severity | Variant | Reads rows |
 |---|---|---|---|
 | `agent-model-inherited` | `advice`, or `info` once `later_compliant` reaches `later_compliant_for_info` | `fixed` when `info` | `inherited` |
-| `agent-model-asked` | `info` | none | `asked` |
+| `agent-model-asked` | `info` | `fixed` once `later_compliant` reaches `later_compliant_for_info` | `asked` |
 | `agent-decide-apply` | `info` | none | `decide-apply` |
 
 The thresholds are `AgentModelThresholds` fields, read from
@@ -352,7 +394,7 @@ The thresholds are `AgentModelThresholds` fields, read from
 
 | Field | Default | Meaning |
 |---|---|---|
-| `later_compliant_for_info` | 3 | an `inherited` card drops from advice to info once this many later writers of the same kind ran on Sonnet or smaller |
+| `later_compliant_for_info` | 3 | an `inherited` card drops from advice to info once this many later writers of the same kind ran on Sonnet or smaller. An `asked` card of an Agent-tool type gets variant `fixed` at this count of later calls of that type that named Sonnet or smaller |
 | `unknown_min_edit_turns` | 2 | an agent with no role word counts as a writer at this many write turns |
 | `decide_apply_min_edit_turns` | 3 | a deciding agent counts as also changing code at this many write turns |
 
@@ -409,6 +451,20 @@ that this looks fixed. Its action becomes copying the rule to
 live in only one project's notes. It keeps its saving. A new flagged
 agent moves the start of the count, so the card returns to advice
 until enough writers follow it.
+
+An `asked` row's `later_compliant` is stricter: it counts only later
+writers of the same Agent-tool type whose own call named a model on
+Sonnet or smaller. A run that named none and inherited a Sonnet main
+session doesn't count, and neither does another agent type. Workflow
+agents carry no script identity, so a workflow `asked` row is not
+measured: `later_compliant` is empty. A `decide-apply` row isn't
+measured either. A cell that isn't measured has no "Later compliant
+writers" line in the card's evidence; it is never shown as 0. At
+`later_compliant_for_info` or more, the `asked` card keeps `info` and
+its saving, takes variant `fixed`, and says how many later calls of
+this agent type named Sonnet or a smaller model and that it looks fixed.
+It does not suggest CLAUDE.md. Its prompt only asks Claude to check where
+Opus is still set and to change nothing.
 
 ### `CLAUDE_CODE_SUBAGENT_MODEL`
 

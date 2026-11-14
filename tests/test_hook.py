@@ -298,7 +298,8 @@ def test_hook_flattens_nested_agent_frontmatter(home, project):
     assert verifier["model"] == "sonnet"
     assert verifier["effort"] == "medium"
     assert verifier["maxTurns"] == 80
-    assert verifier["disallowedTools"] == "Write, Edit, NotebookEdit"
+    # A comma line is kept as the list of its entries.
+    assert verifier["disallowedTools"] == ["Write", "Edit", "NotebookEdit"]
     # description is redacted to a length marker, never the raw text.
     assert verifier["description"].startswith("str(")
     assert "Read-only source verifier" not in json.dumps(snapshot)
@@ -306,6 +307,47 @@ def test_hook_flattens_nested_agent_frontmatter(home, project):
     implementer = agents["claude-implementer"]
     assert implementer["model"] == "sonnet"
     assert "experimental.cacheTtl" not in implementer
+
+
+def _write_agent(home, name, *frontmatter):
+    """An agent file under the user's agents folder with these frontmatter lines."""
+    lines = ["---", f"name: {name}", *frontmatter, "---", "Body.", ""]
+    (home / ".claude" / "agents" / f"{name}.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
+
+
+def test_a_long_comma_tools_line_is_kept_whole_as_a_list_of_entries_each_cut_on_its_own(home, project):
+    config_dir = home / ".claude" / "claudeglass"
+    names = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite"]
+    entries = names + ["Agent(worker-one, worker-two, worker-three, worker-four, worker-five, worker-six)"]
+    entries += [f"mcp__{'x' * 70}__tool", "mcp__github__create_issue", "/a/path/tool", "mcp__sentry__*"]
+    line = ", ".join(entries)
+    assert len(line) > 199
+    _write_agent(home, "overseer", f"tools: {line}", "disallowedTools: Write, mcp__sentry")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    assert _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin).returncode == 0
+    overseer = _latest_snapshot(config_dir)["agents"]["overseer"]
+    stored = overseer["tools"]
+    assert isinstance(stored, list) and len(stored) == len(entries)
+    assert stored[: len(names)] == names
+    # One cap for every recorded name: an entry over it is cut, a path is masked.
+    assert max(len(item) for item in stored) <= 64
+    assert stored[len(names)].endswith("...") and stored[len(names)].startswith("Agent(worker-one")
+    assert stored[len(names) + 1].endswith("...") and stored[len(names) + 1].startswith("mcp__xxx")
+    assert stored[len(names) + 2] == "mcp__github__create_issue"
+    assert stored[len(names) + 3] == f"<redacted path/url, str({len('/a/path/tool')})>"
+    assert stored[-1] == "mcp__sentry__*"
+    assert overseer["disallowedTools"] == ["Write", "mcp__sentry"]
+
+
+def test_a_short_comma_tools_line_and_a_yaml_list_are_stored_the_same_way(home, project):
+    config_dir = home / ".claude" / "claudeglass"
+    _write_agent(home, "plain", "tools: Read, Grep")
+    _write_agent(home, "listed", "tools:", "  - Read", "  - Grep")
+    _write_agent(home, "inline", "tools: [Read, Grep]")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    assert _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin).returncode == 0
+    agents = _latest_snapshot(config_dir)["agents"]
+    assert agents["plain"]["tools"] == agents["listed"]["tools"] == agents["inline"]["tools"] == ["Read", "Grep"]
 
 
 def test_env_names_only_never_values(home, project):
@@ -1348,7 +1390,11 @@ def test_content_layers_claude_md_rules_commands_and_skills(home, project):
     assert claude_md["project_root_imports"] == 0
     assert claude_md["project_local_imports"] == 0
 
-    assert content["rules"] == {"count": 2, "bytes": len("rule one") + len("rule two")}
+    assert content["rules"] == {
+        "count": 2,
+        "bytes": len("rule one") + len("rule two"),
+        "unscoped_bytes": len("rule one") + len("rule two"),
+    }
     assert content["commands"] == {"count": 1, "bytes": len("command body")}
     assert content["skills"]["project"]["names"] == ["my-skill"]
     assert content["skills"]["project"]["total_bytes"] == len("skill body")
@@ -1552,6 +1598,42 @@ def test_content_layers_mcp_json_and_claude_config_dir_flag(home, project):
     assert content["claude_config_dir_set"] is True
 
 
+def test_content_layers_rules_record_unscoped_bytes_apart_from_paths_scoped(home, project):
+    config_dir = home / ".claude" / "claudeglass"
+    rules_dir = project / ".claude" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "always.md").write_text("always on", encoding="utf-8")
+    (rules_dir / "scoped.md").write_text("---\npaths:\n  - src/**\n---\nonly for src", encoding="utf-8")
+    (rules_dir / "inline.md").write_text("---\npaths: [a/**]\n---\nx", encoding="utf-8")
+    # A list written with its items at column 0 is scoped too.
+    (rules_dir / "flush.md").write_text("---\npaths:\n- src/**\n---\nbody", encoding="utf-8")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    result = _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin)
+    assert result.returncode == 0
+    rules = _latest_snapshot(config_dir)["content_layers"]["rules"]
+    assert rules["count"] == 4
+    assert rules["unscoped_bytes"] == len("always on")
+
+
+def test_content_layers_rules_with_an_unclosed_frontmatter_count_as_unscoped(home, project):
+    """An opening ``---`` with no closing one is no frontmatter to Claude Code, so a
+    column-0 ``paths:`` line below it is body text and the rule loads at the start."""
+    config_dir = home / ".claude" / "claudeglass"
+    rules_dir = project / ".claude" / "rules"
+    rules_dir.mkdir(parents=True)
+    forgotten = "---\npaths:\n  - src/**\nbody that follows"
+    rule_in_body = "---\nA rule that opens with a rule line\npaths: src/** is where it applies\n"
+    (rules_dir / "forgotten.md").write_text(forgotten, encoding="utf-8", newline="\n")
+    (rules_dir / "body.md").write_text(rule_in_body, encoding="utf-8", newline="\n")
+    (rules_dir / "scoped.md").write_text("---\npaths: [a/**]\n---\nx", encoding="utf-8")
+    stdin = json.dumps({"session_id": "s", "cwd": str(project)})
+    result = _run_hook(config_dir=config_dir, cwd=project, stdin_text=stdin)
+    assert result.returncode == 0
+    rules = _latest_snapshot(config_dir)["content_layers"]["rules"]
+    assert rules["count"] == 3
+    assert rules["unscoped_bytes"] == len(forgotten) + len(rule_in_body)
+
+
 def test_content_layers_absent_content_degrades_to_zero_counts(home, project):
     config_dir = home / ".claude" / "claudeglass"
     stdin = json.dumps({"session_id": "s", "cwd": str(project)})
@@ -1559,7 +1641,7 @@ def test_content_layers_absent_content_degrades_to_zero_counts(home, project):
     assert result.returncode == 0
     snapshot = _latest_snapshot(config_dir)
     content = snapshot["content_layers"]
-    assert content["rules"] == {"count": 0, "bytes": 0}
+    assert content["rules"] == {"count": 0, "bytes": 0, "unscoped_bytes": 0}
     assert content["commands"] == {"count": 0, "bytes": 0}
     assert content["mcp_json"] == {"present": False, "names": []}
     assert content["managed_mcp_present"] is False
@@ -1596,6 +1678,22 @@ def test_snapshot_project_key_matches_the_hooks_stored_slug():
     spec.loader.exec_module(hook)
     raw = hook._project_slug("/home/alice/my-project")
     assert snap_mod.snapshot_project_key(raw) == hook._redact_slug(raw)
+
+
+def test_the_hooks_name_cap_cut_marker_and_entry_split_are_the_packages_copies():
+    """The hook keeps its own copies of what ``snapshots.py`` reads back to tell a
+    cut or masked name from a whole one; a drift stops the cut-off detection
+    silently."""
+    from claudeglass import snapshots as snap_mod
+
+    hook = _load_hook_module()
+    assert hook._MAX_NAME_CHARS == snap_mod.NAME_CAP
+    cut = hook._clip_name("x" * 200)
+    assert len(cut) == snap_mod.NAME_CAP and cut.endswith(snap_mod.NAME_CUT) and snap_mod.cut_off_name(cut)
+    assert hook._clip_name("/home/u/x").startswith(snap_mod.NAME_REDACTED)
+    assert hook._clip_name("https://example.com/x").startswith(snap_mod.NAME_REDACTED)
+    for line in ("Read, Grep", "Agent(a, b), Read", "Agent(a, (b, c)), , Read,", "", " , ", "Bash(cat x, y"):
+        assert hook._split_tool_line(line) == snap_mod.split_tool_line(line), line
 
 
 @pytest.mark.parametrize("raw", ["C--Dev-x", "c--Dev-x", "c--dev-X", "-home-alice-x", "c-Users-x", "x--y", ""])
@@ -1683,3 +1781,36 @@ def test_hook_health_managed_dir_matches_the_snapshot_hooks(monkeypatch, platfor
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setenv("ProgramFiles", r"C:\fake-program-files")
     assert hook_health._real_managed_settings_dir() == hook.default_managed_settings_dir()
+
+
+def test_the_hook_keeps_an_agent_name_up_to_the_longest_the_rule_takes(tmp_path):
+    from claudeglass.profiles import schema
+
+    hook = _load_hook_module()
+    assert hook._MAX_AGENT_NAME_CHARS == schema.AGENT_NAME_MAX
+    assert hook._MAX_NAME_CHARS == 64  # every other name keeps its cap
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    long_ok = "w" * 90 + "-writer"
+    too_long = "x" * 200
+    (agents / "a.md").write_text(f"---\nname: {long_ok}\ntools: Read, Edit\n---\n", encoding="utf-8")
+    (agents / "b.md").write_text(f"---\nname: {too_long}\n---\n", encoding="utf-8")
+    (agents / "c.md").write_text("---\nname: /home/u/x\n---\n", encoding="utf-8")
+    names = set(hook._load_agents(agents, "user"))
+    assert long_ok in names and schema.agent_name_problem(long_ok) is None
+    [cut] = [n for n in names if n.startswith("x")]
+    assert len(cut) == 128 and cut.endswith("...") and schema.agent_name_problem(cut) is not None
+    assert any(n.startswith("<redacted path/url") for n in names)
+
+
+def test_a_writer_whose_name_has_65_to_128_characters_is_resolved_not_called_unusable(tmp_path):
+    from claudeglass.profiles import roles
+
+    hook = _load_hook_module()
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    name = "code-" + "w" * 70 + "-writer"
+    (agents / "a.md").write_text(f"---\nname: {name}\ntools: Read, Edit\n---\n", encoding="utf-8")
+    recorded = {n: {"tools": f.get("tools")} for n, f in hook._load_agents(agents, "user").items()}
+    assert roles.unusable_writers(recorded) == 0
+    assert roles.writers(recorded) == (name,)

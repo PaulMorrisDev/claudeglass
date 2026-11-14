@@ -1629,7 +1629,7 @@ def test_privacy_phase_8_tables_the_store_and_the_export_hold_counts_and_words_n
             assert word not in blob, (name, word)
 
 
-def test_privacy_a_split_run_count_is_a_number_under_a_session_never_the_run(tmp_path: Path):
+def test_privacy_a_split_run_count_is_a_number_under_a_session_never_the_run(tmp_path: Path, monkeypatch):
     # An agent run that began from a long brief, summarised its context,
     # and has a private type, a path and words in everything it said: the
     # coach state keeps a count of each reason under the session's key.
@@ -1645,6 +1645,8 @@ def test_privacy_a_split_run_count_is_a_number_under_a_session_never_the_run(tmp
     )
     payload = _agent_stop(session, secrets[2], agent_type=f"{secrets[3]}-reviewer")
     assert CATALOGUE["coaching"]["thresholds"]["split_brief_chars"] == line
+    # split_run is off live and keeps no count then: open the switch to see what a count holds.
+    monkeypatch.setitem(CATALOGUE["coaching"], "off_live", [])
     assert _keep_run(tmp_path, payload) is True
     assert list(_pending(tmp_path).values()) == [{"compaction": 1, "brief": 1}]
     kept = (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8")

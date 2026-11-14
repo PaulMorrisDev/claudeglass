@@ -278,7 +278,7 @@ test('A5: the first message after a /clear leaves the new session\'s heartbeat, 
   expect(presentOf(world, 'session-two')).toBeNull()
 
   await $.prompt.submit({ text: 'first after clear', wait: false, origin: { kind: 'composer' } } as never)
-  expect(presentOf(world, 'session-two')).toEqual({ schema: 1, session_id: 'session-two', seen: expect.any(Number), active: 0 })
+  expect(presentOf(world, 'session-two')).toEqual({ schema: 1, session_id: 'session-two', seen: expect.any(Number), active: 0, shows: [] })
   expect(presentOf(world, 'session-two')?.seen).toBeGreaterThanOrEqual(NOW_S)
   expect(faults(world)).toEqual([])
 })

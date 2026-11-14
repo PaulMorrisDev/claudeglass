@@ -8,6 +8,9 @@ sessions after the change, in the most exact way that setting allows:
   replies, priced at the old model's rates (``pricing.price_turn``), or
   with fast mode the other way. The replies themselves would have
   differed on another model, so read it as the price of the same work.
+  An agent's model change is read on the runs of that agent its agent file
+  decides (:func:`agent_file_runs`), not the ones a spawn or a workflow
+  script gave a model of their own.
 - **Simulated** (``"simulated"``): a cache lifetime change, replayed
   under the old lifetime (``ttl.simulate``), or an ``autoCompactWindow``
   the change raised, replayed with the old, smaller window
@@ -19,6 +22,11 @@ sessions after the change, in the most exact way that setting allows:
   (``context_files._Carry``). The size is the change's own CLAUDE.md
   sizes, or else the drop in context at session start from before the
   change to after it.
+  An agent's start-context settings (its tools, skills or MCP servers) are
+  read on that agent's own spawns: the drop in median context at the start
+  of a spawn, from before the change to after it, on the one model family
+  both sides ran on (:func:`agent_start_reading`), carried on every reply of
+  each spawn after the change.
 - **From before** (``"before"``): anything else. Each session after the
   change, at the cost per reply of the sessions before it that did the
   same kind of work, as hard and as big where capture says
@@ -26,7 +34,10 @@ sessions after the change, in the most exact way that setting allows:
 
 A change to several settings at once is headlined by the before method:
 their effects overlap, so the per-setting figures, still listed, don't
-add up. With fewer than ``impact.MIN_SESSIONS`` sessions after the
+add up. A change to an agent's start-context settings never is: it has a
+figure when it names nothing else and every agent it names has a reading
+(their savings add, as different agents' spawns don't overlap), and none
+otherwise. With fewer than ``impact.MIN_SESSIONS`` sessions after the
 change (or before it, for the before method) there is no figure.
 """
 
@@ -34,8 +45,9 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from statistics import median
 
-from . import compaction_sim, impact, ttl
+from . import compaction_sim, impact, model_swap, snapshots, ttl
 from .calibration import FALLBACK
 from .change_points import ChangePoint
 from .context_files import _Carry
@@ -47,6 +59,12 @@ CARRIED_KEYS = frozenset(
     ("claude_md_chars", "skillOverrides", "enabledPlugins", "enabledMcpjsonServers", "disabledMcpjsonServers")
 )
 _CARRIED_PREFIXES = ("mcp_servers", "enabled_plugins")
+#: An agent's settings whose change adds or removes context at the start of
+#: each of its spawns.
+AGENT_START_KEYS = frozenset(("tools", "disallowedTools", "omitClaudeMd", "skills", "mcpServers"))
+#: Spawns of one agent on one model family, on each side, a start-context
+#: reading needs.
+MIN_SPAWNS = 5
 #: Cache lifetime keys, and the transcripts each applies to.
 _TTL_KEYS = ("promptCacheTtl", "subagentPromptCacheTtl", "experimental.cacheTtl", "cacheTtl")
 _TTL_SECONDS = {"5m": ttl.POLICY_5M, "1h": ttl.POLICY_1H}
@@ -163,6 +181,49 @@ def _subs(bundles, agent: str | None) -> list:
     return [sub for b in bundles for sub in b.subs if agent is None or (sub.meta.agent_type or "(unknown)") == agent]
 
 
+def agent_file_runs(bundles, agent: str) -> tuple[list, int]:
+    """``(runs, all)`` for one agent type in ``bundles``: the runs whose model
+    the agent's file decides (``model_swap.model_set_by``), and how many runs
+    of the type there are. A run a spawn or a workflow script gave a model is
+    not the agent file's to change. The one place an agent's model change
+    says which runs it can have changed; ``outcomes`` counts its units here."""
+    every = _subs(bundles, agent)
+    return [run for run in every if model_swap.model_set_by(run) == "agent file"], len(every)
+
+
+def main_setting_runs(change: dict, before_facts, after_facts, bundles: dict, pricing: Pricing) -> tuple[list, int]:
+    """``(runs, all)`` for the main sessions in ``after_facts``: the main
+    transcripts whose model the main session's ``model`` setting decided
+    after ``change``, and how many main transcripts there are. A session
+    counts when the model it ran on is the one the change sets; a project
+    whose sessions before the change ran none on the old setting's model is
+    left out whole. The one place a main model change says which sessions it
+    can have changed; ``outcomes`` counts its units here."""
+    every = [
+        (s, bundles[s.session_id].top)
+        for s in after_facts
+        if s.session_id in bundles and bundles[s.session_id].top is not None
+    ]
+    new = change.get("new")
+    if not (isinstance(new, str) and new.strip()):
+        # The new value names no model (``default``, unset): nothing is left out.
+        return [top for _s, top in every], len(every)
+    old = change.get("old") or _dominant_model([bundles[s.session_id] for s in before_facts if s.session_id in bundles])
+
+    def agrees(value, top) -> bool:
+        return snapshots._settings_model_agrees(value, model_swap._session_model(top), pricing.resolve_model)
+
+    left_out: set[str] = set()
+    if isinstance(old, str) and old.strip():
+        by_project: dict[str, list] = {}
+        for s in before_facts:
+            bundle = bundles.get(s.session_id)
+            if bundle is not None and bundle.top is not None:
+                by_project.setdefault(s.project, []).append(bundle.top)
+        left_out = {project for project, tops in by_project.items() if not any(agrees(old, top) for top in tops)}
+    return [top for s, top in every if s.project not in left_out and agrees(new, top)], len(every)
+
+
 def _priced(result) -> list:
     return [turn for turn in result.turns if turn.turn_index > 0]
 
@@ -183,17 +244,42 @@ def _dominant_model(bundles) -> str:
 # -- one method per kind of key -------------------------------------------------
 
 
-def _repriced_model(change: dict, after, before, pricing: Pricing) -> KeyResult | None:
+def _repriced_model(
+    change: dict, after, before, pricing: Pricing, before_facts=(), after_facts=(), bundles=None
+) -> KeyResult | None:
     agent = change.get("agent")
     old = change.get("old") or (None if agent else _dominant_model(before))
     rates = pricing.resolve_model(old) if old else None
     if rates is None:
         return None
-    results = _subs(after, agent) if agent else _mains(after)
+    if agent:
+        results, every = agent_file_runs(after, agent)
+        if not results:
+            # Nothing the file decides ran since the change: nothing was priced, and nothing is the
+            # cost per reply of the sessions before, which the file's model was never read on.
+            basis = (
+                f"No run of {agent} since this change left the model to its agent file, "
+                "so the change has not changed what you paid."
+            )
+            return KeyResult(change["key"], agent, "repriced", 0.0, 0.0, basis)
+        whose = f"{agent}'s replies"
+        left = ""
+        if len(results) < every:
+            left = f", in the {len(results)} of {every} runs that left the model to its agent file"
+    else:
+        results, every = main_setting_runs(change, before_facts, after_facts, bundles or {}, pricing)
+        if not results:
+            basis = (
+                "No main session since this change ran on the model it sets, "
+                "so the change has not changed what you paid."
+            )
+            return KeyResult(change["key"], None, "repriced", 0.0, 0.0, basis)
+        whose, left = "Main-session replies", ""
+        if len(results) < every:
+            left = f", in the {len(results)} of {every} sessions that ran on the model the change sets"
     paid = _cost(results, pricing)
     without = sum(price_turn(turn, rates).total for result in results for turn in _priced(result))
-    whose = f"{agent}'s replies" if agent else "Main-session replies"
-    return KeyResult(change["key"], agent, "repriced", paid, without, f"{whose} priced at {old}.")
+    return KeyResult(change["key"], agent, "repriced", paid, without, f"{whose} priced at {old}{left}.")
 
 
 def _repriced_fast(change: dict, after, pricing: Pricing) -> KeyResult | None:
@@ -280,6 +366,71 @@ def _carried(key: str, change: dict | None, before_facts, after_facts, after, pr
     )
 
 
+@dataclass(slots=True)
+class AgentStart:
+    """What an agent's spawns started with, before and after a change to its
+    start-context settings, read on one model family."""
+
+    agent: str
+    #: The model family both sides ran on, and the spawns it rests on each side.
+    family: str
+    before_n: int
+    after_n: int
+    #: Median start context per spawn before, less after: positive when the
+    #: change took context off the start.
+    drop_tokens: float
+    #: Median start context per spawn before, on the same family.
+    before_tokens: float
+    #: (session id, index into its ``spawns``) of each spawn after the change
+    #: on that family. The index is also the spawn's index in the bundle's ``subs``.
+    after_spawns: list[tuple[str, int]]
+
+
+def agent_start_reading(agent: str, before_facts, after_facts) -> AgentStart | None:
+    """The drop in start context per spawn of ``agent``, on the model family
+    both sides ran on with the most spawns (ties go to the first name), or
+    ``None`` when they share none or a side has under :data:`MIN_SPAWNS` of it.
+    A start is a different size on each model, so a mix is never compared."""
+    before = [t for s in before_facts for a, t in s.spawns if a == agent and t.startup_tokens]
+    after = [(s.session_id, i, t) for s in after_facts for i, (a, t) in enumerate(s.spawns) if a == agent and t.startup_tokens]
+    shared = Counter(t.model for t in before) & Counter(t.model for _sid, _i, t in after)
+    if not shared:
+        return None
+    family = max(sorted(shared), key=lambda model: shared[model])
+    held_before = [t for t in before if t.model == family]
+    held_after = [(sid, i, t) for sid, i, t in after if t.model == family]
+    if len(held_before) < MIN_SPAWNS or len(held_after) < MIN_SPAWNS:
+        return None
+    before_tokens = median(t.startup_tokens for t in held_before)
+    drop = before_tokens - median(t.startup_tokens for _sid, _i, t in held_after)
+    return AgentStart(
+        agent, family, len(held_before), len(held_after), drop, before_tokens, [(sid, i) for sid, i, _t in held_after]
+    )
+
+
+def carry_on(reading: AgentStart, tokens: float, bundles: dict, pricing: Pricing) -> float:
+    """What carrying ``tokens`` of context on every reply of ``reading``'s
+    spawns after the change costs: negative when ``tokens`` is."""
+    chars = int(round(abs(tokens) * FALLBACK))
+    total = 0.0
+    for session_id, index in reading.after_spawns:
+        sub = bundles[session_id].subs[index]
+        total += _Carry(sub, pricing).cost(chars, 0, len(_priced(sub)))
+    return total if tokens >= 0 else -total
+
+
+def _agent_start(agent: str, keys: list[str], before_facts, after_facts, bundles: dict, pricing: Pricing) -> KeyResult | None:
+    """One agent's start-context settings, however many ``keys`` the change
+    names, read as one drop in the context at the start of its spawns."""
+    reading = agent_start_reading(agent, before_facts, after_facts)
+    if reading is None:
+        return None
+    spawns = {s.session_id: s.spawns for s in after_facts}
+    paid = sum(spawns[session_id][index][1].cost for session_id, index in reading.after_spawns)
+    without = paid + carry_on(reading, reading.drop_tokens, bundles, pricing)
+    return KeyResult("tools" if "tools" in keys else keys[0], agent, "approximate", paid, without, "")
+
+
 def _from_before(before_facts, after_facts) -> tuple[float, float, str] | None:
     """(paid, without, basis): each session after the change at the cost
     per reply of the sessions before it that did the same kind of work."""
@@ -307,13 +458,15 @@ def _from_before(before_facts, after_facts) -> tuple[float, float, str] | None:
     return paid, without, basis
 
 
-def _key_result(key: str, change: dict | None, before_facts, after_facts, before, after, pricing: Pricing) -> KeyResult | None:
+def _key_result(
+    key: str, change: dict | None, before_facts, after_facts, before, after, pricing: Pricing, bundles=None
+) -> KeyResult | None:
     if key in CARRIED_KEYS or key.startswith(_CARRIED_PREFIXES):
         return _carried(key, change, before_facts, after_facts, after, pricing)
     if change is None:
         return None
     if key == "model":
-        return _repriced_model(change, after, before, pricing)
+        return _repriced_model(change, after, before, pricing, before_facts, after_facts, bundles)
     if key == "fastMode":
         return _repriced_fast(change, after, pricing)
     if key in _TTL_KEYS:
@@ -350,9 +503,26 @@ def without_change(
     before = [bundles[s.session_id] for s in before_facts if s.session_id in bundles]
     changes = {(c.get("agent"), c.get("key")): c for c in point.changes if isinstance(c, dict) and "old" in c}
     wanted = list(dict.fromkeys([_plain(label) for label in point.keys] + list(changes)))
+    starts = [(agent, key) for agent, key in wanted if agent and key in AGENT_START_KEYS]
+    if starts:
+        # Context an agent starts with is read on its own spawns, never from
+        # the cost of the sessions before, and not alongside other settings
+        # whose figures would overlap it.
+        if len(starts) < len(wanted):
+            return None
+        rows = [
+            _agent_start(agent, [key for a, key in starts if a == agent], before_facts, after_facts, bundles, pricing)
+            for agent in dict.fromkeys(agent for agent, _key in starts)
+        ]
+        if any(row is None for row in rows):
+            return None
+        paid = sum(s.cost for s in after_facts)
+        return Counterfactual(
+            paid, paid + sum(row.without_usd - row.paid_usd for row in rows), "approximate", "", len(after_facts), rows
+        )
     per_key: list[KeyResult] = []
     for agent, key in wanted:
-        result = _key_result(key, changes.get((agent, key)), before_facts, after_facts, before, after, pricing)
+        result = _key_result(key, changes.get((agent, key)), before_facts, after_facts, before, after, pricing, bundles)
         if result is not None:
             per_key.append(result)
     paid = sum(s.cost for s in after_facts)
@@ -372,6 +542,21 @@ def without_change(
     return Counterfactual(paid, without, "before", basis, len(after_facts), per_key)
 
 
+def key_row(
+    point: ChangePoint, agent: str | None, key: str, before_facts, after_facts, bundles: dict, pricing: Pricing
+) -> KeyResult | None:
+    """The row for one lever ``(agent, key)`` of ``point``, priced as
+    :func:`without_change` prices it, whatever else the point changed.
+    ``None`` with fewer than ``impact.MIN_SESSIONS`` sessions after, or when
+    the method has no row for this change."""
+    if len(after_facts) < impact.MIN_SESSIONS:
+        return None
+    after = [bundles[s.session_id] for s in after_facts if s.session_id in bundles]
+    before = [bundles[s.session_id] for s in before_facts if s.session_id in bundles]
+    changes = {(c.get("agent"), c.get("key")): c for c in point.changes if isinstance(c, dict) and "old" in c}
+    return _key_result(key, changes.get((agent, key)), before_facts, after_facts, before, after, pricing, bundles)
+
+
 def for_impact(corpus, pricing: Pricing, units: Units):
     """A ``without`` callback for :func:`impact.impact`: the
     counterfactual for a change point and its sessions, as a dict, or
@@ -386,13 +571,20 @@ def for_impact(corpus, pricing: Pricing, units: Units):
 
 
 __all__ = [
+    "AGENT_START_KEYS",
+    "AgentStart",
     "CARRIED_KEYS",
     "Counterfactual",
     "FIDELITY_ORDER",
     "FIDELITY_TEXT",
     "KeyResult",
+    "MIN_SPAWNS",
+    "agent_file_runs",
+    "agent_start_reading",
+    "carry_on",
     "for_impact",
     "headline",
+    "key_row",
     "since_line",
     "without_change",
 ]

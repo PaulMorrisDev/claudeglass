@@ -293,6 +293,38 @@ def test_upward_agent_tool_result_and_report_proxy(tmp_path):
     assert stats.report_proxy_by_agent_type["general-purpose"] == [50]  # a 200-char report
 
 
+def test_workflow_agents_are_left_out_of_report_size(tmp_path):
+    """A workflow agent's report goes to the script, not the main session:
+    only the direct Plan sub counts, in the per-type table and the skill
+    roll-up alike."""
+    top, subs, pricing = _build_scenario(tmp_path)
+    direct = _parse(
+        tmp_path,
+        "agent-plan-direct",
+        [turn_line(message_id="pd_1", output_tokens=70, effort="medium")],
+        kind="subagent",
+        agent_id="agent-plan-direct",
+        agent_type="Plan",
+        spawn_depth=1,
+    )
+    workflow = _parse(
+        tmp_path,
+        "agent-plan-wf",
+        [turn_line(message_id="pw_1", output_tokens=9000, effort="medium")],
+        kind="workflow-agent",
+        agent_id="agent-plan-wf",
+        agent_type="Plan",
+        parent_agent_id="agent-a1",
+        spawn_depth=2,
+    )
+    stats = TopologyStats()
+    stats.add_session("sess-1", top, [*subs, direct, workflow], pricing)
+
+    assert stats.report_proxy_by_agent_type["Plan"] == [70]
+    assert stats.report_proxy_by_agent_type["claude-implementer"] == [100, 150]
+    assert stats.skills["grill-me"].report_proxy_values == [100, 150]
+
+
 # -- (c) skill roll-up: direct + spawned = total --------------------------
 
 

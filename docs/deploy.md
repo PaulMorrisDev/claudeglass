@@ -356,6 +356,12 @@ Three layers, from "always runs" to "manual, occasional":
    `service.db` in it on first start without a manual `docker exec ...
    chown` step.
 
+   In this layout the dashboard looks for your own CLAUDE.md, rules,
+   agents and skills in the folder above `--config-dir` (`/data`), not in
+   `/data/claude`, so its CLAUDE.md and skills checks miss them. The `check`
+   and `review` commands take `--claude-root /data/claude` for that; the
+   dashboard has no such flag.
+
    A `--network none` container has no network namespace connectivity
    at all beyond loopback — if `/api/health` still answers `ok: true`
    from inside it, the service provably made no outbound connection to
@@ -458,7 +464,9 @@ that actually delete a row.
   background telemetry, not report data, so every tick prunes them
   regardless of whether `--retention-days`/`config.toml` set anything —
   at `N` when one is set, or a 180-day default
-  (`config.SIGNAL_RETENTION_DEFAULT_DAYS`) otherwise.
+  (`config.SIGNAL_RETENTION_DEFAULT_DAYS`) otherwise. The dashboard's card
+  marks (`card_marks`) and the mod's sensor events are pruned on the same
+  schedule: a card is kept until 180 days after it was last shown or copied.
   `claudeglass capture prune [--dry-run]` runs the identical
   cleanup by hand for anyone not running `serve`.
 - **`serve --purge`** (deliverable 2.e): deletes `<config-dir>/service.db`
@@ -476,11 +484,13 @@ that actually delete a row.
   # Deleted 1 file(s).
   ```
 
-  Safe at any time: the store is always a derived cache, never source
+  Safe at any time: the store is a derived cache, never source
   of truth (`service/store.py`'s module docstring) — the next `serve`
   run simply rebuilds it from the transcripts already on disk, the same
   way a downgrade's drop-and-rebuild (`Store.migrate()`, see "The store's
-  schema version" below) does.
+  schema version" below) does. The card marks (what the dashboard kept of
+  the recommendation cards it showed) cannot be rebuilt that way: they stay
+  on this machine, a rebuild keeps them, and `--purge` deletes them.
 
   If one of the files cannot be deleted (for example a `-wal` sidecar
   still held open by another process), `--purge` deletes everything it
@@ -552,7 +562,12 @@ says what to do.
 ## The store's schema version
 
 `service.db` records the schema version it was written under
-(`meta.schema_version`). Version 11 adds four nullable counts to
+(`meta.schema_version`). Version 12 adds the `card_marks` table, which holds
+what the dashboard showed of each recommendation card (the card, the view it
+was shown in, the settings it named, and when it was first shown, copied and
+landed); it stays on this machine, and `serve --purge` deletes it with the
+rest of `service.db`. Upgrading from 11 creates it in place, and a rebuild
+puts its rows back. Version 11 adds four nullable counts to
 `mod_events` for the mod's tweaks; upgrading from 10 adds the columns in
 place. Version 10 adds the `mod_events` table, which
 holds what the ClaudeGlass mod showed (closed words and counts, read from
@@ -579,8 +594,8 @@ than at UTC's.
   `migrate()` copies `service.db` aside as
   `service.db.bak-<version>-<timestamp>` (and prints where on stderr),
   drops every table and recreates them. The next watcher tick reads the
-  transcripts still on disk again. Your session tags, session ratings
-  and card ratings are put back. Logged "what if" predictions are
+  transcripts still on disk again. Your session tags, session ratings,
+  card ratings and card marks are put back. Logged "what if" predictions are
   re-read from `prediction-log.jsonl` and come back unjudged, so their
   verdicts and seen marks are lost until the dashboard judges them
   again. Transcripts Claude Code has already removed are not rebuilt;

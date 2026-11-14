@@ -518,7 +518,7 @@ def test_build_config_section_renders_none_value_as_unset(tmp_path):
     table = section.tables[0]
     # None the fixture doesn't need to actually trip: confirm the helper
     # itself renders None as "(unset)" and never as the literal "None".
-    assert snap_mod._stringify_config_value(None) == "(unset)"
+    assert snap_mod.config_value_text(None) == "(unset)"
     for row in table.rows:
         assert row[0] != "None"
 
@@ -745,6 +745,48 @@ def test_with_every_project_agents_for_a_picked_project_uses_that_projects_snaps
     assert set(everyone.data["agents"]) == {"implementer", "reviewer"}
 
 
+def test_with_every_project_agents_reads_a_projects_own_setting_as_your_user_settings_across_projects():
+    """Across projects, a setting the newest snapshot's own project files set
+    holds in that project alone: the view reads it as your user settings set it."""
+    other = _schema2_snapshot(
+        "b", ts="20260920T000000Z", effective={"model": "opus"}, effective_provenance={"model": "user"},
+        user_settings={"model": "opus"},
+    )
+    newest = _schema2_snapshot(
+        "a", ts="20260923T000000Z", effective={"model": "sonnet", "effortLevel": "high"},
+        effective_provenance={"model": "project_local", "effortLevel": "user"},
+        user_settings={"model": "opus", "effortLevel": "high"},
+    )
+
+    view = snap_mod.with_every_project_agents([other, newest])
+
+    assert snap_mod.effective_config(view) == {"model": "opus", "effortLevel": "high"}
+    assert snap_mod.effective_provenance(view) == {"model": "user", "effortLevel": "user"}
+    assert newest.data["effective"]["model"] == "sonnet"
+    # One project's own view keeps its own setting.
+    assert snap_mod.effective_config(snap_mod.with_every_project_agents([newest]))["model"] == "sonnet"
+    # With no user setting to fall back on, the setting is unset.
+    bare = _schema2_snapshot(
+        "a", ts="20260923T000000Z", effective={"model": "sonnet"}, effective_provenance={"model": "project_local"},
+        user_settings={},
+    )
+    view = snap_mod.with_every_project_agents([other, bare])
+    assert "model" not in snap_mod.effective_config(view)
+    assert "model" not in snap_mod.effective_provenance(view)
+
+
+def test_spans_projects_counts_projects_not_rows():
+    assert not snap_mod.spans_projects([_schema2_snapshot("a"), _schema2_snapshot("a", ts="20260902T000000Z")])
+    assert snap_mod.spans_projects([_schema2_snapshot("a"), _schema2_snapshot("b")])
+    schema1 = snap_mod.Snapshot(path=Path("x"), ts="20260902T000000Z", data={"schema": 1, "agents": {}})
+    assert not snap_mod.spans_projects([_schema2_snapshot("a"), schema1])
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    canonical = snap_mod.canonical_project_keys(["C--Dev-x"])
+    assert not snap_mod.spans_projects(
+        [_schema2_snapshot(lower), _schema2_snapshot(upper, ts="20260902T000000Z")], canonical
+    )
+
+
 def test_with_every_project_agents_folds_a_projects_drive_letter_keys():
     upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
     canonical = snap_mod.canonical_project_keys(["C--Dev-x"])
@@ -758,6 +800,36 @@ def test_with_every_project_agents_folds_a_projects_drive_letter_keys():
     view = snap_mod.with_every_project_agents([older, newer], canonical)
 
     assert view.data["agents"]["implementer"] == _agent("project", "opus")
+
+
+def test_with_every_project_agents_drops_a_user_agent_the_newest_snapshot_no_longer_lists():
+    """A user-level agent file is read in every session, so the newest
+    snapshot's agents map is the whole list of them: an older project's
+    snapshot that still lists a deleted one does not bring it back. Project
+    agents of other projects are still taken."""
+    stale = _schema2_snapshot(
+        project_slug="a",
+        ts="20260920T000000Z",
+        agents={"general-purpose": _agent("user", "haiku"), "implementer": _agent("project", "haiku")},
+        effective_agents={"general-purpose": _agent("user", "haiku"), "implementer": _agent("project", "haiku")},
+    )
+    newest = _schema2_snapshot(
+        project_slug="b",
+        ts="20260923T000000Z",
+        agents={"helper": _agent("user", "opus")},
+        effective_agents={"helper": _agent("user", "opus")},
+    )
+
+    view = snap_mod.with_every_project_agents([stale, newest])
+
+    assert set(view.data["agents"]) == {"helper", "implementer"}
+    assert set(view.data["effective_agents"]) == {"helper", "implementer"}
+    # An agent the newest snapshot lists is still taken from the newer record.
+    kept = _schema2_snapshot(project_slug="c", ts="20260924T000000Z", agents={"general-purpose": _agent("user", "sonnet")})
+    assert snap_mod.with_every_project_agents([stale, newest, kept]).data["agents"]["general-purpose"] == _agent("user", "sonnet")
+    # With no agents map to go by (a snapshot without one), nothing is dropped.
+    bare = _schema2_snapshot(project_slug="d", ts="20260925T000000Z")
+    assert "general-purpose" in snap_mod.with_every_project_agents([stale, bare]).data["agents"]
 
 
 def test_with_every_project_agents_is_none_without_snapshots():
@@ -935,6 +1007,16 @@ def _model_drift(setting: object, observed: str, resolve: bool = True) -> list:
     return snap_mod.detect_drift(snap, {"model": observed}, resolve_model=resolve_model)
 
 
+def test_no_alias_agrees_with_a_mythos_session():
+    """Mythos ranks with Fable, but no alias names it: ``fable`` and ``best``
+    never agree with a Mythos session, which would hide real drift."""
+    resolve_model = load_pricing().resolve_model
+    assert snap_mod._settings_model_agrees("fable", "claude-mythos-5-2", resolve_model) is False
+    assert snap_mod._settings_model_agrees("best", "claude-mythos-5-2", resolve_model) is False
+    assert snap_mod._settings_model_agrees("claude-mythos-5-2", "claude-mythos-5-2", resolve_model) is True
+    assert snap_mod._settings_model_agrees("fable", "claude-fable-5-2", resolve_model) is True
+
+
 @pytest.mark.parametrize("setting", ["opus", "opus[1m]", "Opus"])
 def test_detect_drift_opus_alias_accepts_an_older_opus(setting):
     """``opus`` follows the newest Opus, so a session that ran an older one
@@ -1004,9 +1086,9 @@ def test_detect_drift_opusplan_flags_other_families(observed):
     assert _model_drift("opusplan", observed) == [("model", "opusplan", observed)]
 
 
-def test_detect_drift_best_reads_as_fable_through_the_rate_card():
-    assert _model_drift("best", "claude-fable-5") == []
-    assert _model_drift("best", "claude-opus-5-5") == [("model", "best", "claude-opus-5-5")]
+def test_detect_drift_best_reads_as_opus_through_the_rate_card():
+    assert _model_drift("best", "claude-opus-5-5") == []
+    assert _model_drift("best", "claude-fable-5-2") == [("model", "best", "claude-fable-5-2")]
 
 
 def test_detect_drift_alias_shaped_value_of_unknown_family_compares_exactly():
@@ -1289,3 +1371,62 @@ def test_profile_marks_ignore_captures_without_a_profile_field(tmp_path):
     fixtures_with_field = [s for s in _load() if "profile_id" in s.data]
     assert len(marks) == len(fixtures_with_field)
     assert snap_mod.load_profile_marks(tmp_path / "missing") == []
+
+
+def test_effort_level_env_set_reads_the_content_layers_flag():
+    assert snap_mod.effort_level_env_set(
+        snap_mod.Snapshot(path=None, ts="x", data={"content_layers": {"effort_level_env_set": True}})
+    ) is True
+    assert snap_mod.effort_level_env_set(snap_mod.Snapshot(path=None, ts="x", data={})) is False
+    assert snap_mod.effort_level_env_set(None) is False
+
+
+def test_env_var_set_reads_both_env_name_lists():
+    def snapshot(**data):
+        return snap_mod.Snapshot(path=None, ts="x", data=data)
+
+    assert snap_mod.env_var_set(snapshot(env_names=["ANTHROPIC_MODEL"]), "ANTHROPIC_MODEL") is True
+    assert snap_mod.env_var_set(snapshot(effective_env_names=["ANTHROPIC_MODEL"]), "ANTHROPIC_MODEL") is True
+    assert snap_mod.env_var_set(snapshot(env_names=["OTHER"], effective_env_names=["OTHER"]), "ANTHROPIC_MODEL") is False
+    assert snap_mod.env_var_set(snapshot(), "ANTHROPIC_MODEL") is False
+    assert snap_mod.env_var_set(None, "ANTHROPIC_MODEL") is False
+    assert snap_mod.MODEL_ENV == "ANTHROPIC_MODEL"
+
+
+# -- R3-VIEW-RULE: in a view of several projects no project's own file is read -------------------
+
+
+def _one(data):
+    return snap_mod.Snapshot(path=None, ts="20261001T000000Z", data={"project_slug": "C--Dev-alpha", **data})
+
+
+def test_a_view_of_several_projects_reads_a_project_files_key_as_your_user_file_sets_it():
+    snap = _one({
+        "effective": {"effortLevel": "high", "autoCompactWindow": 300000, "model": "opus",
+                      "modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+        "effective_provenance": {"effortLevel": "project_shared", "autoCompactWindow": "project_local",
+                                 "model": "managed", "modelSettings": "project_shared"},
+        "user_settings": {"effortLevel": "medium"},
+    })
+    built = snap_mod.with_every_project_agents([snap], several_projects=True)
+    assert snap_mod.effective_config(built) == {"effortLevel": "medium", "model": "opus"}
+    assert snap_mod.effective_provenance(built) == {"effortLevel": "user", "model": "managed"}
+    # The same rule twice changes nothing more.
+    again = snap_mod.for_view(built, True)
+    assert snap_mod.effective_provenance(again) == snap_mod.effective_provenance(built)
+    # A view of that one project reads its file as always.
+    assert snap_mod.effective_provenance(snap_mod.with_every_project_agents([snap])) == snap_mod.effective_provenance(snap)
+
+
+def test_without_your_user_files_values_a_project_files_key_reads_as_unset():
+    snap = _one({"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_shared"}})
+    assert snap_mod.effective_config(snap_mod.for_view(snap, True)) == {}
+
+
+def test_a_view_covers_several_projects_by_project_not_by_drive_letter_key():
+    canonical = snap_mod.canonical_project_keys(["C--Dev-alpha", "c--Dev-alpha", "C--Dev-beta"])
+    assert not snap_mod.several_in_view(["C--Dev-alpha", "c--Dev-alpha"], canonical)
+    assert snap_mod.several_in_view(["C--Dev-alpha", "C--Dev-beta"], canonical)
+    # An all-projects view covers every project the store knows, whatever the window holds.
+    assert snap_mod.several_in_view(["C--Dev-alpha"], canonical, all_projects=True)
+    assert not snap_mod.several_in_view(["C--Dev-alpha"], snap_mod.canonical_project_keys(["C--Dev-alpha"]), all_projects=True)

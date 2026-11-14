@@ -2,10 +2,13 @@
 on the report's own window, looked up in tables the report already
 computes -- no new simulation:
 
-- a model for the main session or an agent: ``model_swap_by_agent_type``
-  for the main session, and ``model_swap_agent_file_runs`` for an agent,
-  since its file's ``model`` decides only the runs started without a
-  model of their own (the same tokens repriced);
+- a model for the main session or an agent: ``model_swap_agent_file_runs``,
+  the runs that setting decides (an agent file's model only the runs
+  started without a model of their own; the main session's only the
+  sessions it counts: not those already on Sonnet or smaller, nor those
+  from before their project moved there), else
+  ``model_swap_by_agent_type`` for a report from before that table had a
+  row for it;
 - ``autoCompactWindow``: ``compaction_sim_by_window`` (sessions replayed
   with that window; EST-P2 -- not estimated past
   ``CompactionSimThresholds().max_compactions_per_session``, the same
@@ -49,6 +52,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import workstyle
 from .compaction_sim import CompactionSimThresholds
 from .units import Units
 
@@ -138,7 +142,12 @@ def _version(model_id: str) -> tuple[int, ...]:
     return tuple(int(n) for n in re.findall(r"\d+", re.sub(r"-\d{8}$", "", model_id)))
 
 
-def _row(key: str, agent: str | None, value, saving: float | None, fidelity: str, basis: str) -> dict:
+def _row(
+    key: str, agent: str | None, value, saving: float | None, fidelity: str, basis: str, priced_on: float | None = None
+) -> dict:
+    """One row. ``priced_on`` is the figure the saving is a share of (an
+    observed cost, or tokens per start), where the estimate has one plain
+    figure, else None; ``basis`` is its sentence."""
     return {
         "key": key,
         "agent": agent,
@@ -146,7 +155,14 @@ def _row(key: str, agent: str | None, value, saving: float | None, fidelity: str
         "saving_usd": round(saving, 6) if saving is not None else None,
         "fidelity": fidelity,
         "basis": basis,
+        "priced_on": priced_on,
     }
+
+
+def _sonnet(value) -> bool:
+    """Whether a model value (``sonnet``, ``sonnet[1m]``, a Sonnet id) is a
+    Sonnet, the one model the main session's counted sessions are for."""
+    return workstyle.model_tier(str(value)) == workstyle.model_tier("sonnet")
 
 
 def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> dict:
@@ -154,6 +170,7 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
     if row is None:
         return _row(key, label, value, None, "none", f"No {agent} runs in this window.")
     runs = ""
+    since = ""
     if agent != TOP and tables.has("model_swap", "model_swap_agent_file_runs"):
         # An agent file's model decides only the runs started without a
         # model of their own; a workflow script or the spawn sets the rest.
@@ -166,6 +183,25 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
                 "spawn itself named it.",
             )
         runs = " started without a model of their own"
+    elif agent == TOP and _sonnet(value) and tables.has("model_swap", "model_swap_agent_file_runs"):
+        # Sonnet for the main session prices only the sessions the report
+        # counts: not those already on Sonnet or smaller, nor those from
+        # before their project moved there. Any other model reprices them
+        # all, as does a report from before that table.
+        file_row = tables.row("model_swap", "model_swap_agent_file_runs", TOP)
+        counted, total = _num(row.get("lever_runs")), _num(row.get("spawns"))
+        if file_row is not None:
+            if counted is not None and total and counted < total:
+                since = f", on {int(counted):,} of its {int(total):,} sessions"
+            row = file_row
+        elif any(_num(row.get(k)) for k in ("before_change_runs", "picked_runs", "own_model_runs")):
+            others = any(_num(row.get(k)) for k in ("settled_runs", "picked_runs", "own_model_runs"))
+            return _row(
+                key, label, value, None, "none",
+                "No main session in this window is left for a settings change to reach."
+                if others
+                else "Every main session in this window started before its project moved to Sonnet or smaller.",
+            )
     # A report without meta.model_ids falls back to matching column names.
     model_ids = getattr(getattr(tables.model, "meta", None), "model_ids", None) or {}
     column = _model_column(row, value, model_ids)
@@ -182,8 +218,9 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
         "ceiling",
         f"Worked out by repricing the replies of {who}'s runs in this window{runs} at {column[len('cost_'):]}. "
         if runs
-        else f"Worked out by repricing {who}'s replies in this window at {column[len('cost_'):]}. "
+        else f"Worked out by repricing {who}'s replies in this window at {column[len('cost_'):]}{since}. "
         "A different model may need more or fewer replies for the same work, which this doesn't capture.",
+        priced_on=observed,
     )
 
 
@@ -203,6 +240,7 @@ def _opusplan(tables: _Tables, value, key: str) -> dict:
         "ceiling",
         "Worked out by repricing the main session's replies after each approved plan at Sonnet's prices. "
         "With opusplan, sessions without a plan run on Sonnet too; their saving isn't counted here.",
+        priced_on=build,
     )
 
 
@@ -211,12 +249,14 @@ def _ttl(tables: _Tables, agents: list[str], value, key: str, label: str | None)
     if column is None:
         return _row(key, label, value, None, "none", "Only 5m and 1h are simulated.")
     saving = 0.0
+    priced_on = 0.0
     found = False
     for agent in agents:
         row = tables.row("ttl", "ttl_by_agent_type", agent)
         observed, new = (_num(row.get("cost_observed")), _num(row.get(column))) if row else (None, None)
         if observed is not None and new is not None:
             saving += observed - new
+            priced_on += observed
             found = True
     if not found:
         return _row(key, label, value, None, "none", "No runs in this window to replay.")
@@ -224,6 +264,7 @@ def _ttl(tables: _Tables, agents: list[str], value, key: str, label: str | None)
         key, label, value, saving, "simulated",
         f"Every cache write in this window replayed with a {value} lifetime: a longer lifetime costs more per "
         "write but rebuilds less after pauses.",
+        priced_on=priced_on,
     )
 
 
@@ -255,6 +296,7 @@ def _compact(tables: _Tables, value, current) -> dict:
         f"Your sessions replayed with summaries at {int(value):,} tokens: about "
         f"{_num(new.get('compactions_per_session')) or 0:.1f} summaries per session. Earlier summaries carry "
         "less context each reply but lose detail.",
+        priced_on=_num(base.get("cost")),
     )
 
 
@@ -301,7 +343,7 @@ def _omit_claude_md(tables: _Tables, context_files: dict, agent: str, label: str
     carried = _claude_md_carry_usd(context_files, agent)
     if carried > floor:
         note += " Carrying it across the rest of each spawn's turns, until it's re-sent, costs still more."
-    return _row("omitClaudeMd", label, True, max(floor, carried), "measured", note)
+    return _row("omitClaudeMd", label, True, max(floor, carried), "measured", note, priced_on=tokens)
 
 
 def _skills(context_files: dict, overrides: dict) -> dict:
@@ -418,7 +460,11 @@ def estimate(
             rows.append(_skills(context_files, value))
         elif key == "enabledPlugins" and isinstance(value, dict):
             rows.append(_plugins(context_files, value))
-        elif key == "effortLevel":
+        elif key == "effortLevel" or (
+            # Per-model effort levels only, as the thinking goal drafts the main session's.
+            key == "modelSettings" and isinstance(value, dict) and value
+            and all(isinstance(v, dict) and set(v) == {"effortLevel"} for v in value.values())
+        ):
             rows.append(_effort(tables, None, value, key))
         elif key == "fastMode" and value is False:
             rows.append(_fast_mode(tables))

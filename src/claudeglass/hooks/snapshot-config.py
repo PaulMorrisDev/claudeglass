@@ -540,6 +540,29 @@ def redact_settings(settings: dict) -> dict:
     return {key: redact_settings_value(key, value) for key, value in settings.items()}
 
 
+#: Agent frontmatter keys that hold a line of tool names. A comma string is
+#: stored as the list of its entries, so each entry is cut on its own and a
+#: long line is kept whole (``Agent(a, b)`` is one entry).
+_AGENT_TOOL_LINE_KEYS = frozenset({"tools", "disallowedTools"})
+
+
+def _split_tool_line(text: str) -> list[str]:
+    """``text`` split at the commas outside parentheses, so
+    ``Agent(a, b), Read`` is two entries."""
+    parts: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
 def redact_agent_frontmatter(parsed: dict) -> dict:
     """Redact one agent's already-flattened frontmatter dict (see
     ``parse_frontmatter``). ``description`` always becomes ``str(len)``;
@@ -558,7 +581,9 @@ def redact_agent_frontmatter(parsed: dict) -> dict:
             # scalars the allowlist elsewhere is built for -- clip/mask
             # each one the same way every other recorded name now is,
             # rather than keeping it fully verbatim and uncapped.
-            if isinstance(value, str):
+            if isinstance(value, str) and key in _AGENT_TOOL_LINE_KEYS:
+                out[key] = [_clip_name(item) for item in _split_tool_line(value)]
+            elif isinstance(value, str):
                 out[key] = _clip_name(value)
             elif isinstance(value, list):
                 out[key] = [_clip_name(item) for item in value]
@@ -687,7 +712,7 @@ def _load_agents(agents_dir: Path, source: str) -> dict:
         parsed = parse_frontmatter(text)
         if not parsed:
             continue
-        name = _clip_name(parsed.get("name") or md_path.stem)
+        name = _clip_name(parsed.get("name") or md_path.stem, _MAX_AGENT_NAME_CHARS)
         entry = redact_agent_frontmatter(parsed)
         entry["source"] = source
         result[name] = entry
@@ -831,13 +856,20 @@ _NAME_LOOKS_LIKE_PATH_OR_URL_RE = re.compile(
 )
 
 
-def _clip_name(value: object) -> str:
+#: An agent's name is kept up to the longest name ClaudeGlass takes in
+#: (``profiles.schema.AGENT_NAME_MAX``), so the dashboard reads the same
+#: name ``apply`` finds in the agent's file. A longer one is cut like any
+#: other name, and the cut name fails that rule as the whole name does.
+_MAX_AGENT_NAME_CHARS = 128
+
+
+def _clip_name(value: object, cap: int = _MAX_NAME_CHARS) -> str:
     text = str(value)
     if _NAME_LOOKS_LIKE_PATH_OR_URL_RE.search(text):
         return f"<redacted path/url, str({len(text)})>"
-    if len(text) <= _MAX_NAME_CHARS:
+    if len(text) <= cap:
         return text
-    return text[: _MAX_NAME_CHARS - 3] + "..."
+    return text[: cap - 3] + "..."
 
 
 # -- schema 2: settings layers ------------------------------------------------
@@ -1282,6 +1314,52 @@ def _count_bytes_for_glob(base: Path, pattern: str) -> tuple[int, int]:
     return count, total
 
 
+def _unscoped_rules_bytes(base: Path) -> int:
+    """Total bytes of the ``*.md`` rules under ``base`` with no ``paths:``
+    frontmatter key. A rule with ``paths:`` loads only when Claude reads a
+    matching file, so only these load at the start of a session. Only the
+    frontmatter's key is read, never its value."""
+    if not base.is_dir():
+        return 0
+    total = 0
+    try:
+        candidates = list(base.glob("*.md"))
+    except OSError:
+        return 0
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            size = candidate.stat().st_size
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not _rule_has_paths(text):
+            total += size
+    return total
+
+
+def _rule_has_paths(text: str) -> bool:
+    """Whether a rule's frontmatter has a top-level ``paths:`` key. Also
+    true for a list whose items sit at column 0, which ``parse_frontmatter``
+    drops (its ``- item`` lines carry no ``key:`` to attach to). An opening
+    ``---`` that is never closed is no frontmatter, as in Claude Code, so a
+    ``paths:`` line below it is body text."""
+    if "paths" in parse_frontmatter(text):
+        return True
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        return False
+    return any(re.match(r"paths\s*:", line) for line in lines[1:end])
+
+
 def _walk_nested_claude_md(root: Path) -> tuple[int, int]:
     """Bounded walk for nested ``CLAUDE.md`` files below (not including)
     ``root`` itself -- the project root's own ``CLAUDE.md``/``CLAUDE.local.md``
@@ -1583,7 +1661,11 @@ def build_content_layers(
             "project_root_imports": _count_claude_md_imports(project_root_claude_md),
             "project_local_imports": _count_claude_md_imports(project_local_claude_md),
         },
-        "rules": {"count": rules_count, "bytes": rules_bytes},
+        "rules": {
+            "count": rules_count,
+            "bytes": rules_bytes,
+            "unscoped_bytes": _unscoped_rules_bytes(cwd_path / ".claude" / "rules"),
+        },
         "commands": {"count": commands_count, "bytes": commands_bytes},
         "skills": {
             "project": _skills_summary(cwd_path / ".claude" / "skills"),

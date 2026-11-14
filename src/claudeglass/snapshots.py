@@ -126,6 +126,40 @@ class Snapshot:
     data: dict = field(default_factory=dict)
 
 
+#: The longest name the config hook records, what it ends a longer one with
+#: (``hooks/snapshot-config.py`` ``_clip_name``: 61 characters plus ``...``),
+#: and the start of what it records for a name shaped like a path or a URL.
+#: Duplicated here, like the hook duplicates ``discovery.slug_for``.
+NAME_CAP = 64
+NAME_CUT = "..."
+NAME_REDACTED = "<redacted path/url"
+
+#: The agent frontmatter keys that hold a line of tool names.
+_TOOL_LINE_KEYS = ("tools", "disallowedTools")
+
+
+def split_tool_line(text: str) -> list[str]:
+    """``text`` split at the commas outside parentheses, so
+    ``Agent(a, b), Read`` is two entries."""
+    parts: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def cut_off_name(text: str) -> bool:
+    """Whether ``text`` is a name the hook cut at its cap."""
+    return len(text) == NAME_CAP and text.endswith(NAME_CUT)
+
+
 # -- loading ----------------------------------------------------------------
 
 
@@ -173,7 +207,60 @@ def load_snapshots(config_dir: Path | str) -> list[Snapshot]:
         result.append(Snapshot(path=path, ts=str(ts), data=data))
 
     result.sort(key=lambda snap: snap.ts)
+    _normalise_tool_lines(result)
     return result
+
+
+def _normalise_tool_lines(snaps: list[Snapshot]) -> None:
+    """Read an agent's ``tools`` and ``disallowedTools`` in the form the hook
+    stores today, a list of entries. An older hook stored a comma string, cut
+    at :data:`NAME_CAP` characters when it was longer: a whole string becomes
+    the list of its entries. This depends on the snapshot alone, so the
+    watcher's store and a read from disk agree whenever each file was read. A
+    cut string stays as it is (:func:`recommend.read_agent_tools` reads it as
+    an unknown line); :func:`same_tool_line` is what forgives it where two
+    snapshots are compared."""
+    for snap in snaps:
+        agents = snap.data.get("agents")
+        if not isinstance(agents, dict):
+            continue
+        for entry in agents.values():
+            if not isinstance(entry, dict):
+                continue
+            for key in _TOOL_LINE_KEYS:
+                value = entry.get(key)
+                if isinstance(value, str) and NAME_REDACTED not in value and not cut_off_name(value):
+                    entry[key] = split_tool_line(value)
+
+
+def is_tool_line_key(key: str) -> bool:
+    """Whether the flattened snapshot ``key`` is an agent's ``tools`` or
+    ``disallowedTools`` line (``agents.<name>.tools``)."""
+    return key.startswith("agents.") and key.endswith(tuple("." + k for k in _TOOL_LINE_KEYS))
+
+
+def same_tool_line(old, new) -> bool:
+    """Whether two stored values of an agent's tools line are the same line.
+    Equal values are. An older hook cut a long comma string at 64 characters
+    (:func:`cut_off_name`), and the hook now stores the whole line as a list,
+    so a cut string and a list whose entries, joined with ``", "``, start with
+    the string's first 61 characters are the same line (spacing aside):
+    writing it whole is not an edit. A change past those 61 characters can't
+    be seen in the cut one. Either may be the cut one."""
+    if _hashable(old) == _hashable(new):
+        return True
+    for cut, whole in ((old, new), (new, old)):
+        if isinstance(cut, str) and cut_off_name(cut) and isinstance(whole, (list, tuple)):
+            squash = functools.partial(re.sub, r"\s+", "")
+            return squash(", ".join(map(str, whole))).startswith(squash(cut[: -len(NAME_CUT)]))
+    return False
+
+
+def same_value(key: str, old, new) -> bool:
+    """Whether the flattened snapshot ``key`` has the same value in two
+    snapshots: equal, or (for a tools line) the same line
+    (:func:`same_tool_line`)."""
+    return same_tool_line(old, new) if is_tool_line_key(key) else _hashable(old) == _hashable(new)
 
 
 # -- timestamp parsing / join -------------------------------------------
@@ -466,6 +553,34 @@ def auto_compact_window_env_set(snapshot: Snapshot | None) -> bool:
     )
 
 
+#: Picks the main session's model over the model setting from any file
+#: (model-config docs: /model, --model, then this, then the setting).
+MODEL_ENV = "ANTHROPIC_MODEL"
+
+
+def env_var_set(snapshot: Snapshot | None, name: str) -> bool:
+    """Whether ``name`` was set when ``snapshot`` was taken: in the hook's
+    own environment (``env_names``) or a settings file's env block
+    (``effective_env_names``). Names only, never values. ``False`` for a
+    snapshot that records neither, so a card reads as it did before."""
+    if snapshot is None:
+        return False
+    names: set[str] = set()
+    for field in ("env_names", "effective_env_names"):
+        value = snapshot.data.get(field)
+        if isinstance(value, list):
+            names.update(str(n) for n in value)
+    return name in names
+
+
+def effort_level_env_set(snapshot: Snapshot | None) -> bool:
+    """Whether ``CLAUDE_CODE_EFFORT_LEVEL`` was set when ``snapshot`` was
+    taken (``content_layers.effort_level_env_set``). It wins over /effort
+    and every effort setting."""
+    layers = snapshot.data.get("content_layers") if snapshot is not None else None
+    return bool(isinstance(layers, dict) and layers.get("effort_level_env_set"))
+
+
 def auto_compact_window(snapshot: Snapshot | None) -> int | None:
     """The auto-compact window, in tokens, a session under ``snapshot``
     runs at: ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` when it's set (clamped to
@@ -654,8 +769,88 @@ def latest_snapshot_per_project(
     return latest
 
 
+#: The settings layers a project's own files hold (as ``change_points``' own).
+#: The settings layers a project's own files are (``.claude/settings.json``
+#: and ``.claude/settings.local.json``).
+PROJECT_LAYERS = _PROJECT_LAYERS = ("project_local", "project_shared")
+
+
+def spans_projects(snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None) -> bool:
+    """Whether ``snapshots`` come from more than one project (rows from
+    before snapshots named their project aside): a view of several projects."""
+    return len(set(latest_snapshot_per_project(snapshots, canonical)) - {_UNKNOWN_PROJECT}) > 1
+
+
+def view_settings(
+    effective: dict, provenance: dict, several_projects: bool, user_settings: dict | None = None
+) -> tuple[dict, dict]:
+    """The view rule (docs/config-layers.md, "Which file a view reads"):
+    the settings a card, check, goal, profile row or fix reads, and so the
+    file its change goes to, is the one that decides the key
+    (``effective_provenance``) -- but a project's own files
+    (:data:`PROJECT_LAYERS`) decide only in a view of that one project.
+
+    With ``several_projects`` a snapshot is one project's, so each key its
+    project files set reads as your user file sets it (``user_settings``,
+    which the config hook records with the same redaction as ``effective``)
+    or, when that file does not set it or ``user_settings`` was not passed,
+    as unset: a card then stays open and a fix goes to your user file.
+    ``modelSettings`` is one file's block (``build_effective_settings``), so
+    it is replaced whole. ``managed`` binds every project and is kept.
+    Returns new dicts; the same rule twice changes nothing more."""
+    if not several_projects or not isinstance(effective, dict) or not isinstance(provenance, dict):
+        return effective, provenance
+    user = user_settings if isinstance(user_settings, dict) else {}
+    effective, provenance = dict(effective), dict(provenance)
+    for key, layer in list(provenance.items()):
+        if layer not in _PROJECT_LAYERS:
+            continue
+        if key in user:
+            effective[key], provenance[key] = user[key], "user"
+        else:
+            effective.pop(key, None)
+            del provenance[key]
+    return effective, provenance
+
+
+def for_view(snapshot: Snapshot | None, several_projects: bool) -> Snapshot | None:
+    """``snapshot`` with :func:`view_settings` applied to its settings, from
+    its own ``user_settings``; ``snapshot`` itself when nothing changes."""
+    if snapshot is None or not several_projects:
+        return snapshot
+    effective, provenance = snapshot.data.get("effective"), snapshot.data.get("effective_provenance")
+    if not isinstance(provenance, dict) or not any(layer in _PROJECT_LAYERS for layer in provenance.values()):
+        return snapshot
+    data = dict(snapshot.data)
+    data["effective"], data["effective_provenance"] = view_settings(
+        effective if isinstance(effective, dict) else {}, provenance, True, data.get("user_settings")
+    )
+    return Snapshot(path=snapshot.path, ts=snapshot.ts, data=data)
+
+
+def several_in_view(
+    view_slugs: Iterable[str], canonical: Mapping[str, str] | None = None, *, all_projects: bool = False
+) -> bool:
+    """Whether a view covers more than one project, for :func:`view_settings`:
+    the projects of ``view_slugs`` (transcript slugs, a project's two
+    drive-letter spellings folded by :func:`snapshot_project_key`) and, for an
+    all-projects view, every project ``canonical``
+    (:func:`canonical_project_keys`) knows, whatever the window holds."""
+    names = {snapshot_project_key(str(slug)) for slug in view_slugs}
+    if all_projects and canonical:
+        names |= set(canonical.values())
+    return len(names) > 1
+
+
+def view_spans_projects(report: object) -> bool:
+    """Whether ``report`` covers more than one project (``meta.projects``):
+    what the advice, the checks and the goals each apply :func:`view_settings`
+    by on entry, for a caller that did not build its settings for the view."""
+    return len(getattr(getattr(report, "meta", None), "projects", ()) or ()) > 1
+
+
 def with_every_project_agents(
-    snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None
+    snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None, *, several_projects: bool = False
 ) -> Snapshot | None:
     """The newest snapshot that records settings, with its ``agents`` and
     ``effective_agents`` widened to every project's latest snapshot
@@ -669,21 +864,49 @@ def with_every_project_agents(
     unset, call them built into Claude Code and point ``apply`` at the
     user folder. A project agent wins over a user agent of the same name
     (Claude Code's own order); otherwise the newer snapshot wins.
-    Settings, provenance and managed keys stay the newest snapshot's.
-    ``None`` when ``snapshots`` is empty.
+    Every session lists all of the user's own agent files, so the base
+    snapshot's agents map, when it has one, is the whole list of them:
+    another project's older snapshot cannot bring back a user agent deleted
+    since (a built-in it overrode would still read as overridden). Settings,
+    provenance and managed keys stay the newest snapshot's, but in a view
+    of several projects -- ``several_projects`` (the caller's view,
+    :func:`several_in_view`) or ``snapshots`` from more than one project
+    (:func:`spans_projects`) -- a setting that snapshot's own project files
+    set reads as your user settings set it (:func:`view_settings`): it holds
+    in that project alone. ``None`` when ``snapshots`` is empty.
     """
     base = next((s for s in reversed(snapshots) if isinstance(s.data.get("effective"), dict)), None)
     if base is None:
         base = snapshots[-1] if snapshots else None
     if base is None:
         return None
+    widened = widen_agents(base, latest_snapshot_per_project(snapshots, canonical).values())
+    return for_view(widened, several_projects or spans_projects(snapshots, canonical))
+
+
+def widen_agents(base: Snapshot, latest: Iterable[Snapshot]) -> Snapshot:
+    """``base`` with its ``agents`` and ``effective_agents`` widened to
+    ``latest``, every project's latest snapshot, as
+    :func:`with_every_project_agents` does for the snapshots it is given (see
+    there for the rules). Split out so a caller that walks a history one
+    snapshot at a time can keep each project's latest and the base as it goes,
+    rather than hand over the whole prefix again at every step."""
     merged: dict[str, dict] = {"agents": {}, "effective_agents": {}}
-    for snap in sorted(latest_snapshot_per_project(snapshots, canonical).values(), key=lambda s: s.ts) + [base]:
+    for snap in sorted(latest, key=lambda s: s.ts) + [base]:
         for section, into in merged.items():
             entries = snap.data.get(section)
             if not isinstance(entries, dict):
                 continue
+            listed = base.data.get(section)
             for name, entry in entries.items():
+                if (
+                    snap is not base
+                    and isinstance(listed, dict)
+                    and name not in listed
+                    and isinstance(entry, dict)
+                    and entry.get("source") == "user"
+                ):
+                    continue
                 held = into.get(name)
                 if (
                     isinstance(held, dict)
@@ -719,7 +942,7 @@ def build_effective_config_table(snapshots: list[Snapshot], canonical: Mapping[s
         eff = effective_config(snap)
         prov = effective_provenance(snap)
         for key in sorted(eff):
-            rows.append([project, key, _stringify_config_value(eff[key]), prov.get(key, "")])
+            rows.append([project, key, config_value_text(eff[key]), prov.get(key, "")])
 
     notes: list[str] = []
     if snapshots and not rows:
@@ -875,11 +1098,11 @@ def build_env_levers_table(snapshots: list[Snapshot], canonical: Mapping[str, st
         effective = {}
 
     rows: list[list] = [
-        [name, name in names, _stringify_config_value(caps.get(name)) if name in caps else ""]
+        [name, name in names, config_value_text(caps.get(name)) if name in caps else ""]
         for name in ENV_LEVER_NAMES
     ]
     rows.extend(
-        [key, key in effective, _stringify_config_value(effective.get(key)) if key in effective else ""]
+        [key, key in effective, config_value_text(effective.get(key)) if key in effective else ""]
         for key in SETTINGS_LEVER_KEYS
     )
 
@@ -993,7 +1216,7 @@ def _model_family(model_id: object, resolve_model) -> object:
 
 def _family_tier(model_id: object, resolve_model) -> int:
     """:func:`workstyle.model_tier` of ``model_id``'s canonical id (so
-    ``"best"`` reads as Fable through the rate card's alias), or ``-1``
+    ``"best"`` reads as Opus through the rate card's alias), or ``-1``
     when it names no known family or isn't a string."""
     family = _model_family(model_id, resolve_model)
     return model_tier(family) if isinstance(family, str) else -1
@@ -1010,7 +1233,9 @@ def _settings_model_agrees(snap_value: object, observed_value: object, resolve_m
       -- agrees with any model of its family, compared through
       :func:`workstyle.model_tier`. An alias follows the newest release,
       so a session on an older model of the same family (``opus`` against
-      ``claude-opus-5`` once ``opus`` means Opus 5.5) isn't drift.
+      ``claude-opus-5`` once ``opus`` means Opus 5.5) isn't drift. No
+      alias names Mythos, so an alias never agrees with a Mythos session
+      although it ranks with Fable.
     - Every other value -- a ``claude-*`` id, a Bedrock or Vertex id, an
       ARN -- is an explicit pin and compares exactly, by canonical id
       (:func:`_model_family`), so a pin moved from Opus 4.1 to 4.5 still
@@ -1027,6 +1252,9 @@ def _settings_model_agrees(snap_value: object, observed_value: object, resolve_m
         if base == "opusplan":
             return _family_tier(observed_value, resolve_model) in _OPUSPLAN_TIERS
         if base and not any(char.isdigit() for char in base):
+            # No alias names Mythos, so an alias never agrees with it.
+            if "mythos" in str(_model_family(observed_value, resolve_model)).lower():
+                return False
             snap_tier = _family_tier(snap_value, resolve_model)
             observed_tier = _family_tier(observed_value, resolve_model)
             if snap_tier >= 0 and observed_tier >= 0:
@@ -1106,8 +1334,8 @@ def build_config_drift_table(
                 [
                     str(session.get("session_id", "")),
                     key,
-                    _stringify_config_value(snap_value),
-                    _stringify_config_value(observed_value),
+                    config_value_text(snap_value),
+                    config_value_text(observed_value),
                 ]
             )
 
@@ -1238,7 +1466,7 @@ def diff_keys(snapshots: list[Snapshot]) -> dict[str, list]:
     result: dict[str, list] = {}
     for key in sorted(all_keys):
         values = [flat.get(key) for flat in flattened]
-        if len({_hashable(v) for v in values}) > 1:
+        if any(not same_value(key, before, after) for before, after in zip(values, values[1:])):
             result[key] = values
     return result
 
@@ -1266,7 +1494,7 @@ def co_changed_keys(snapshot_a: Snapshot, snapshot_b: Snapshot) -> list[str]:
     flat_b = flatten_snapshot(snapshot_b)
     changed = []
     for key in sorted(set(flat_a) | set(flat_b)):
-        if _hashable(flat_a.get(key)) != _hashable(flat_b.get(key)):
+        if not same_value(key, flat_a.get(key), flat_b.get(key)):
             changed.append(key)
     return changed
 
@@ -1384,9 +1612,11 @@ def build_config_diff_table(
         cost = bucket["cost"]
         cc_total = bucket["cc_total"]
         recache_share = (bucket["recache_cc"] / cc_total * 100.0) if cc_total else None
+        value = bucket["value"]
         rows.append(
             [
-                bucket["value"],
+                # A number stays a number; a list or dict reads as text.
+                config_value_text(value) if isinstance(value, (list, tuple, dict)) else value,
                 sessions,
                 bucket["turns"],
                 cost,
@@ -1436,15 +1666,41 @@ def build_config_diff_table(
     )
 
 
-def _stringify_config_value(value: object) -> str:
-    """Render a flattened config value for use as a table row key (fix
-    item 10). A config value can be a bool, number, string, list, dict,
-    or ``None`` (unset) — never guaranteed str/int the way most other
-    tables' row keys are — so this always returns a non-empty string,
-    rather than passing the raw value through.
-    """
+def list_text(values) -> str:
+    """The entries of a list or tuple joined with ``", "``, each as
+    :func:`config_value_text` reads it: ``Bash, Glob, Read``, never a
+    Python list. A list or dict inside one is bracketed, so it stays one
+    entry."""
+    return ", ".join(_entry_text(v) for v in values)
+
+
+def _entry_text(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        return f"[{list_text(value)}]"
+    if isinstance(value, dict):
+        return "{" + _pairs_text(value) + "}"
+    return config_value_text(value)
+
+
+def _pairs_text(value: dict) -> str:
+    return "; ".join(f"{k}: {_entry_text(v)}" for k, v in value.items())
+
+
+def config_value_text(value: object) -> str:
+    """A flattened config value as text for a user or an export (fix item
+    10). A config value can be a bool, number, string, list, dict or
+    ``None`` (unset) — never guaranteed str/int the way most other tables'
+    row keys are — so this always returns a non-empty string, and never
+    raises. A list reads as its entries joined with ``", "`` (``Bash, Glob,
+    Read``, an agent's tools line), a dict as ``key: value`` pairs split by
+    ``"; "``; anything else as ``str()``. Use it wherever a snapshot value
+    reaches text, so there is one way a list reads."""
     if value is None:
         return "(unset)"
+    if isinstance(value, (list, tuple)):
+        return list_text(value) or "(empty list)"
+    if isinstance(value, dict):
+        return _pairs_text(value) or "(none)"
     return str(value)
 
 
@@ -1464,9 +1720,10 @@ def build_config_section(
 
     :func:`build_config_diff_table` itself is unchanged and keeps
     returning the value column verbatim (whatever type the config
-    literally holds) for callers that already depend on that. This
+    literally holds) for callers that already depend on that, apart from
+    a list or dict, which it gives as text (:func:`config_value_text`). This
     function's own table stringifies that first column instead (see
-    :func:`_stringify_config_value`), so every ``Section``'s ``Table``
+    :func:`config_value_text`), so every ``Section``'s ``Table``
     has a first column usable as a row key regardless of the underlying
     config value's type.
 
@@ -1487,7 +1744,7 @@ def build_config_section(
     note and in the effective, layers and groups tables.
     """
     diff_table = build_config_diff_table(sessions_with_metrics, snapshots, key, canonical)
-    rows = [[_stringify_config_value(row[0]), *row[1:]] for row in diff_table.rows]
+    rows = [[config_value_text(row[0]), *row[1:]] for row in diff_table.rows]
     section_table = Table(
         name=diff_table.name,
         title=diff_table.title,
@@ -1506,7 +1763,16 @@ def build_config_section(
 
 
 __all__ = [
+    "config_value_text",
+    "list_text",
+    "NAME_CAP",
+    "NAME_CUT",
+    "NAME_REDACTED",
     "Snapshot",
+    "cut_off_name",
+    "is_tool_line_key",
+    "same_tool_line",
+    "same_value",
     "load_snapshots",
     "records_config",
     "snapshot_for",
@@ -1516,6 +1782,7 @@ __all__ = [
     "canonical_project_keys",
     "project_snapshots",
     "snapshots_for_projects",
+    "split_tool_line",
     "project_chains",
     "flatten_snapshot",
     "managed_keys",
@@ -1530,6 +1797,11 @@ __all__ = [
     "effective_provenance",
     "layers",
     "latest_snapshot_per_project",
+    "spans_projects",
+    "view_settings",
+    "for_view",
+    "several_in_view",
+    "view_spans_projects",
     "build_effective_config_table",
     "build_config_layers_table",
     "build_config_groups_table",

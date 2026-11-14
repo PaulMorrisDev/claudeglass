@@ -72,8 +72,10 @@ def test_metrics_claude_writes_have_a_tag_and_a_note_and_the_rest_have_neither()
         if m.id == "coaching_notes":
             # The one coaching toggle that runs through the capture hook; Stop only keeps the
             # newest reply's time for the cold-return receipt and prints nothing, and SubagentStop
-            # only records that an agent run ended too big (split_run).
-            assert m.hooks == ("UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop")
+            # only records that an agent run ended too big (split_run), so it is listed only while
+            # that hint is on.
+            split = () if "split_run" in cat.LIVE_OFF_HINTS else ("SubagentStop",)
+            assert m.hooks == ("UserPromptSubmit", "PostToolUse", *split, "Stop")
         elif m.group in ("derived", "coaching") or m.id in ("feedback_note", "dashboard_rating"):
             assert not m.hooks, m.id
 
@@ -538,6 +540,39 @@ def test_the_session_note_is_recognised_in_a_transcript(tmp_path):
     assert result.turns[0].cap.task == "bugfix"
 
 
+def test_the_check_line_asks_only_on_a_reply_that_changed_a_file():
+    deep = cat.level_metrics("deep")
+    note = cat.note_text(deep, "main")
+    assert (
+        "check: targeted|full|build|run|manual|none, only if this reply changed a file (how you verified it: "
+        "targeted = ran the tests for the part changed; full = ran the whole test suite; build = only built or "
+        "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check)"
+    ) in note.splitlines()
+    assert len(cat.METRICS_BY_ID["check"].main_line) == 305
+    judge = cat.judge_text(deep)
+    assert (
+        "check: targeted|full|build|run|manual|none, only if Claude changed a file in this exchange (how Claude "
+        "verified it: targeted = ran the tests for the part changed; full = ran the whole test suite; build = "
+        "only built or type-checked; run = ran the program itself to see it work; manual = only read it back; "
+        "none = no check)"
+    ) in judge.splitlines()
+
+
+def test_prior_carries_the_summary_question_and_lost_is_yes_or_no():
+    prior = cat.METRICS_BY_ID["prior"]
+    assert cat.TAG_VOCAB["lost"] == ("yes", "no")
+    assert prior.compact_line == (
+        "lost: yes|no, in your next final reply only (yes = the summary just made left out something this work "
+        "needed, so you read it again or asked)"
+    )
+    assert len(prior.compact_line) == 140
+    # Only prior has one, and the ordinary note and the judge's prompt never carry it.
+    assert [m.id for m in cat.METRICS if m.compact_line] == ["prior"]
+    deep = cat.level_metrics("deep")
+    assert "lost" not in cat.note_text(deep, "main") and "lost" not in cat.judge_text(deep)
+    assert prior.compact_line in json.dumps(cat.export_json(), ensure_ascii=False)
+
+
 def test_the_session_note_offers_fix_for_a_fault_in_earlier_work_and_the_parser_keeps_it():
     assert cat.TAG_VOCAB["shift"] == ("new", "build", "grew", "redo", "fix")
     note = cat.note_text(cat.level_metrics("essentials"), "main")
@@ -674,6 +709,32 @@ def test_the_tag_wording_keeps_to_the_help_rules_where_the_capture_page_shows_it
         for sentence in re.split(r"(?<=[.!?])\s+", what):
             assert len(sentence.split()) <= 25, (metric_id, sentence)
         assert " -- " not in what and not re.search(r"\b(just|simply)\b", what, re.I), what
+
+
+def test_the_live_hints_are_the_three_that_speak():
+    assert cat.live_coaching_hints() == ["drip_feed", "big_paste", "status_poll"], (
+        "The hints that speak changed. Regenerate docs/capture.md. README.md, docs/coaching.md, docs/mod.md and "
+        "docs/hooks.md point to 'claudeglass capture status' and docs/capture.md instead of listing them: check "
+        "that no sentence there lists the hints that speak."
+    )
+
+
+def test_the_coaching_notes_text_names_the_hints_that_speak_and_follows_the_list(monkeypatch):
+    titles = {**cat.TIP_HINT_TITLES, **cat.CLAUDE_ONLY_HINT_TITLES}
+    metric = cat.METRICS_BY_ID["coaching_notes"]
+    live = cat.live_coaching_hints()
+    for hint in cat.COACHING_HINTS:
+        assert (titles[hint] in metric.what) == (hint in live), hint
+    assert "ended too big" not in metric.why and "cache check" not in metric.why
+    for text in (metric.what, metric.why):
+        for sentence in re.split(r"(?<=[.!?])\s+", text):
+            assert len(sentence.split()) <= 25, sentence
+    # Open the switch: the text follows the list, the retired hint stays out.
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", ())
+    what, why = cat._coaching_notes_what(), cat._coaching_notes_why()
+    for hint in cat.COACHING_HINTS:
+        assert (titles[hint] in what) == (hint not in cat.NO_TRIGGER_HINTS), hint
+    assert "ended too big" in why and "cache check" in why
 
 
 def test_a_tag_is_described_by_the_work_on_one_message_not_a_piece_of_work():
@@ -843,3 +904,60 @@ def test_the_catalogue_points_to_the_measured_hook_time_not_a_guess():
     assert sentence in cat.METRICS_BY_ID["coaching_notes"].why
     assert sentence in cat.render_markdown()
     assert "a few tens of milliseconds" not in cat.render_markdown()
+
+
+# -- an entry only while something switched on uses it -----------------------------------------
+
+
+def _entry_matchers(ids) -> dict[str, str]:
+    return {spec[1]: spec[2] for spec in cat.hook_specs(ids)}
+
+
+def test_an_entry_runs_only_while_something_switched_on_uses_it(monkeypatch):
+    # split_run is the one coaching hint that keeps anything when an agent run ends.
+    assert ("SubagentStop" in _entry_matchers(("coaching_notes",))) == ("split_run" not in cat.LIVE_OFF_HINTS)
+    assert "SubagentStop" in _entry_matchers((*cat.level_metrics("essentials"), "coaching_notes"))  # the agent judge's
+    # It comes back by itself once the hint is on again.
+    monkeypatch.setattr(cat, "LIVE_OFF_HINTS", tuple(h for h in cat.LIVE_OFF_HINTS if h != "split_run"))
+    assert "SubagentStop" in _entry_matchers(("coaching_notes",))
+
+
+def test_deep_needs_no_entry_after_a_tool_result_while_haiku_writes_the_tags():
+    deep = cat.level_metrics("deep")
+    assert _entry_matchers(deep)["PostToolUse"] == "|".join(cat.BIG_OUTPUT_TOOLS)
+    assert "PostToolUse" not in _entry_matchers((*deep, cat.HAIKU_TAGGER_HOOK))
+    assert "PostToolUse" not in _entry_matchers(("big_output", cat.HAIKU_TAGGER_HOOK))
+    # Coaching notes still need theirs.
+    assert _entry_matchers((*deep, cat.HAIKU_TAGGER_HOOK, "coaching_notes"))["PostToolUse"] == "|".join(cat.COACHING_TOOLS)
+
+
+# -- the page says what a compaction's note asks and how big it is -------------------------------
+
+
+def test_the_page_names_the_question_asked_after_a_summary():
+    text = cat.render_markdown()
+    prior = cat.METRICS_BY_ID["prior"]
+    assert prior.compact_line and f'The note asks: "{prior.compact_line}"' in text
+    assert "`lost=yes|no`" in text
+    # Every key a note can ask for is on the page the Privacy section points to.
+    for m in cat.METRICS:
+        for line in (m.main_line, m.compact_line):
+            if line:
+                assert f"`{line.split(':', 1)[0]}=" in text, m.id
+
+
+def test_the_levels_table_gives_the_note_after_a_compaction_where_it_is_bigger():
+    text = cat.render_markdown()
+    for level in cat.LEVELS:
+        ids = cat.level_includes(level)
+        sizes = cat.rough_tokens(ids)
+        compact = cat.note_text(ids, "main", source="compact")
+        assert sizes["compact_note"] == (
+            round((len(compact) + cat.NOTE_WRAP_CHARS + len("SessionStart")) / 4) if compact else 0
+        )
+        row = next(line for line in text.splitlines() if line.startswith(f"| {cat.LEVEL_TITLES[level]} |"))
+        assert ("after a compaction" in row) == (sizes["compact_note"] > sizes["session_note"]), level
+    deep = cat.rough_tokens(cat.level_includes("deep"))
+    assert f"~{deep['session_note']} tokens, ~{deep['compact_note']} after a compaction" in text
+    # While Haiku writes the tags there is no note, and no question after a summary.
+    assert cat.rough_tokens(cat.level_includes("deep"), "haiku")["compact_note"] == 0

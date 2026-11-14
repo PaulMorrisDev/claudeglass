@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
@@ -452,7 +452,72 @@ __version__ = "0.16.0"
 #: none of these, so those replies are priced on their partial output
 #: counts and a cold compaction as a cache write, and its copies, UNKNOWN
 #: request-log events and zeroed copies are still in it.
-PARSER_VERSION = 45
+#:
+#: Bumped to 46: a read after ``||`` is the fallback for the read before it,
+#: so ``cat a 2>/dev/null || cat b`` is one ``Turn.shell_read_count``, not
+#: two. A pre-46 digest counts it twice.
+#: Bumped to 47: ``Turn.shell_code_write_count`` and
+#: ``Turn.edit_code_count``, the shell writes and edit-tool calls aimed at
+#: code (not documents, reports, ledgers or scratch files), which
+#: ``agent-decide-apply`` counts instead of every write. A pre-47 digest has
+#: none (``None``: not measured). A transcript still on disk is re-read; one
+#: Claude Code deleted keeps its old digest, and that run is left out of
+#: ``agent-decide-apply``.
+#: Bumped to 48: ``Turn.coach_tips``, the hints whose own tip words the
+#: reply holds. A pre-48 digest has none; a transcript still on disk is
+#: re-read, and one Claude Code deleted keeps its old digest.
+#: Bumped to 49: ``Turn.coach_disowned``, a reply that calls a ClaudeGlass
+#: note a misfire with no tip in it (the mute of ``quiet_output``). A
+#: pre-49 digest has none; a transcript still on disk is re-read, and one
+#: Claude Code deleted keeps its old digest.
+#: Bumped to 50: a reply keeps the tips of every text block and plan it
+#: wrote (``Turn.coach_tips``), not only the last one's; a log, ``.csv``,
+#: ``.tsv`` or ``.jsonl`` file is a document wherever it sits and the folders
+#: that make a ``.json`` or ``.html`` file one are those below the deepest
+#: folder the file shares with the transcript's first ``cwd``
+#: (``Turn.shell_code_write_count``, ``Turn.edit_code_count``);
+#: ``Turn.coach_tip`` is true when any text block holds the label; and
+#: those two counts are ``None`` where a digest has none; a digest carries
+#: the parser version that wrote it (``TranscriptResult.parser_version``,
+#: ``0`` where a digest has none, ``measured.BEFORE_STAMP``). A pre-50 digest
+#: has the older readings of each. A transcript still on disk is re-read; one
+#: Claude Code deleted keeps its old digest. ``measured.FIELD_VERSIONS`` names
+#: the fields each figure leaves out of an older digest; a bump that adds or
+#: redefines one adds it there.
+#: Bumped to 51: a ``||`` fallback that starts on the next line or in a
+#: subshell is one shell read, and a commit or pull-request message inside
+#: ``"$( ... )"`` is text and not commands, and ``git grep``,
+#: ``git ls-files | xargs grep`` and ``Get-ChildItem -Recurse |
+#: Select-String`` are reads (``Turn.shell_read_count``; the write targets
+#: and ``changes_files`` of such a command move with the quoting); a
+#: path in any system's temp folder, found by its shape and not only by the
+#: reading process's own temp folder, is temp
+#: (``Turn.shell_code_write_count``, ``Turn.edit_code_count``). A pre-51
+#: digest has the older readings of each. ``Turn.edit_kind`` and
+#: ``Turn.shell_write_count`` (a write under a system temp folder that the
+#: reading process's own temp folder did not cover) and
+#: ``Turn.shell_change_count`` (a write or change that a stray quote in a
+#: ``"$( ... )"`` message hid or invented) changed too and have no row in
+#: ``measured.FIELD_VERSIONS``, on purpose: gating them would drop every
+#: older session whose transcript is gone from the agent-model cards for a
+#: difference no real data shows (0 of 37,438 real write targets moved).
+#: Bumped to 52: ``Turn.background_waiting``, whether a tool result before
+#: the message that opened the turn had said that work went to the
+#: background with no task notification for it since (the capture hook's
+#: ``status_poll`` condition, kept as a flag), for the coaching moments of
+#: the tuning export and the Capture page. A pre-52 digest has none; a
+#: transcript still on disk is re-read, and one Claude Code deleted keeps its
+#: old digest, which those figures leave out.
+#: Bumped to 53: Claude Code's "Hook script appears to be missing" is read as
+#: ``not-found``; a hook recorded under Claude Code's display name
+#: (``command hook 2``) is labelled with its event (``SubagentStop command
+#: hook 2``); ``tools-used`` and ``session-owner`` lines are ignored and no
+#: longer counted as unknown. No row in ``measured.FIELD_VERSIONS``, on
+#: purpose: no field was added. A session whose transcript is gone keeps the
+#: cause it was read with, and its bare display name is read behind its event
+#: where runs are counted (``parse.hook_run_label``), so a hook's older and
+#: newer runs share a row.
+PARSER_VERSION = 53
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

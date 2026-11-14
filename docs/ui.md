@@ -435,11 +435,11 @@ all-projects report, `loadProjects()`).
 - An unknown project in the address (an old bookmark, a moved folder) is
   checked once (`checkProject`, asking `/api/sessions?limit=1&project=`).
   The dashboard then shows every project, and a toast says why.
-- The menu's note says what follows the pick: your changes, settings and
-  CLAUDE.md files, as well as the window's figures. The latest baseline,
+- The menu's note says what follows the pick: your changes, settings,
+  profiles and CLAUDE.md files, as well as the window's figures. The latest baseline,
   whether your estimates came true, and the hook and statusline checks
-  always cover every project, and Profiles uses your newest settings
-  from any project. In the page:
+  always cover every project.
+  In the page:
   - Your changes lists the changes that apply in the project (those for
     every project and its own), each judged on that project's sessions.
   - Setup › Settings shows only that project's settings and changes,
@@ -526,12 +526,18 @@ that order, each as a heading with a one-line answer beside it.
    of it), taken from what the others leave (`combinedSaving`). A cheaper
    model prices the fewer tokens earlier summaries leave, so the two
    multiply. An action a Savings lever already counts (`LEVER_RULES`) is
-   left out. An inherited agent-model action's saving joins only while
+   left out. A card you ignored takes out its model row or the lever it is
+   the finding of (`LEVER_CARD`). An inherited agent-model action's saving joins only while
    its card is Worth considering, and only where the model lever has no
-   saving for that agent type (`agentModelItems`): a workflow agent's,
+   saving for that agent type (`agentModelItems`). A lever row a card you
+   ignored takes out does not count as that saving, so the inherited action
+   still joins, but at most at the ignored row's saving: ignoring a card
+   never raises the headline, and an agent type is never counted twice. A
+   workflow agent's,
    which has no lever, is a share of all the spend. The other two
-   agent-model cards add nothing. The total is still "at most", and
-   never above the spend.
+   agent-model cards add nothing. A card at For your information level
+   adds nothing either: the headline counts only the changes worth
+   making. The total is still "at most", and never above the spend.
    The previous period comes from `/api/summary?previous=1` for the same
    window and project, so a change compares a summary with a summary.
    The service works the period out in its own days, and `previousPhrase`
@@ -817,9 +823,28 @@ detail scrolls) and the one picked.
   seen from one project). Ignored items leave every other list: the
   Overview's checklist, the Actions badge, search, "Feeds N
   actions" and the checks' links (`groupRecommendations` leaves them out
-  unless asked), and **Start from my recommendations**. The Overview's
-  available saving comes from the report's tables, so it still counts
-  them.
+  unless asked), and **Start from my recommendations**. The models and habits checks
+  no longer lead with an ignored card. The Overview's
+  available saving leaves out what an ignored card is the finding of: its
+  model row, or its lever (`ignoredSavings`).
+- **Copy prompt** (with a project picked): one button above the inbox
+  copies every to-do card's prompt for that project in one go, under a
+  header line per file (`/api/recommendations/prompt`). It leaves out
+  ignored cards, cards whose fix has landed (the "fixed" variant),
+  information-only cards, unconfirmed changes, managed settings and the
+  model changes a card says to try first. The
+  prompt states the setting changes' closing (show me the diff, restart)
+  once, a workflow fix keeps its own diff line, and the
+  note beside the button gives the number of open fixes, then how many
+  files they edit, plus the fixes that span several files or set a
+  standing rule and the ones that touch no file. When a model change is
+  left out, the note says so. If the browser refuses
+  to copy (the Claude Desktop browser pane refuses the Clipboard API, and
+  a page served over plain http has none), the copy is tried again
+  through a selected text field;
+  if that fails too, the prompt is shown under the button, selected, for
+  you to copy. With no project picked there
+  is no button.
 - A notice above the inbox says the figures are provisional while a
   baseline capture window is open. An id the window doesn't have opens
   the first item with a note.
@@ -1050,7 +1075,9 @@ The terminal equivalent is `claudeglass review claude-md|skills`.
 **Answers:** "Do my hooks work, and what do they cost?"
 
 The `hooks` section ([hooks](hooks.md)): one summary row, then each hook
-by its script's file name, costliest first. For each: the events it runs
+by its script's file name (a hook Claude Code records without its command
+is named by its event, as in `SubagentStop command hook`), costliest first.
+For each: the events it runs
 on, failed runs and why (a script not found by a relative path is
 marked), runs seen working, calls it blocked and how many Claude sent
 again unchanged, the context it added and what keeping it cost, and time
@@ -1194,16 +1221,30 @@ the top links to.
 **Answers:** "Which group of settings fits a goal, and what would it
 change?"
 
-**Save my current settings as a profile** comes first. **Create a
+**Save my current settings as a profile** comes first. It keeps your
+settings, each model's own effort level, and your own agents' model, effort,
+most replies and cache lifetime; agents that belong to one project are left
+out, and the line under the button names them ("Left out, because they belong
+to one project: ..."). **Create a
 profile** turns a goal (`/api/profile-goals`) into a table of changes
 with the ones your data supports ticked; each tick asks
 `POST /api/whatif` again. The table's "now" values and each tick's
 estimate use the window and project picked. **Your profiles and the
 built-in ones** marks
-the one the latest baseline suggests. **Show what it changes** opens a
-drawer (`/api/profiles/<id>/diff`, against your newest settings from any
-project, whichever is picked) with a Setting / Now / After / Set in
-table, **Estimated effect**, and "Ask Claude to do it", "Or run this
+the one suggested for the window and project picked
+(`/api/profile-suggestion`, which fills in once the report is ready).
+**Show what it changes** opens a
+drawer (`/api/profiles/<id>/diff`, against the settings of the project
+picked, or your newest from any project with none picked, where with more than one project a
+setting that project's own files set reads as your user settings set it) with a Setting / Now / After / Set in
+table (a model's own setting has the model in its name, "Effort level for
+one model (claude-opus-5-5)"; a value the settings snapshot does not keep
+reads "not recorded" under Now (as does a user agent hidden behind a project agent of
+the same name, which is never "Already set"); "Set in" names the file and, when something
+wins over the change, says so in the same cell: a project file that sets it
+too (only with a project picked), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or
+`CLAUDE_CODE_EFFORT_LEVEL` being set, or a model with an effort level of its
+own), **Estimated effect**, and "Ask Claude to do it", "Or run this
 command" and "Or try it for one session", each with Copy. Then **Best
 setup for each kind of task** (`habits.habits_setups`) and, folded,
 **Edit settings directly**. The page never runs a command and never

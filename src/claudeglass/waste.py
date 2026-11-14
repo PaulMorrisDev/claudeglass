@@ -166,6 +166,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import events as events_mod
+from .hook_costs import unnamed_note
 from .model import Column, EventKind, Recommendation, ReportModel, Section, Table, TranscriptResult, Turn, agent_type_label
 from .parse import load_or_create_salt
 from .pricing import Pricing, price_turn
@@ -350,7 +351,7 @@ def _blocker_lever(kind: str, label: str, agent_type: str) -> str:
     # command label (parse._hook_label).
     return (
         f"Put what {label} enforces into {who}'s instructions (its agent file, or CLAUDE.md for the main "
-        "session), so it doesn't try the blocked call first."
+        "session), so it doesn't try the blocked call first." + unnamed_note(label)
     )
 
 

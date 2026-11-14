@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import fixes as fixes_mod, recommend, report
+from claudeglass import advice, fixes as fixes_mod, recommend, report
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import (
@@ -37,6 +37,7 @@ from claudeglass.recommend import (
     render_patch_set,
 )
 from claudeglass.snapshots import Snapshot
+from claudeglass.units import Units
 
 from helpers import assert_privacy, turn_line, write_jsonl
 
@@ -1064,6 +1065,61 @@ def test_long_context_share_does_not_fire_below_both():
     assert not any(rec.id == "long-context-share" for rec in recs)
 
 
+def test_the_window_cards_cite_the_summary_table_only_when_the_check_passed():
+    summary_losses = Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_summary_losses",
+                title="What summaries left out",
+                columns=[
+                    Column(key="answer", label="Claude's answer"),
+                    Column(key="answers", label="Answers"),
+                    Column(key="evidence_pct", label="With a file read again or a correction", kind="pct"),
+                    Column(key="share_pct", label="Share of answers", kind="pct"),
+                ],
+                rows=[["yes", 12, 66.7, 40.0], ["no", 18, 27.8, 60.0]],
+            )
+        ],
+    )
+    churn = Section(
+        key="compactions",
+        title="Compactions",
+        tables=[_compactions_summary_table({"Compactions per session (mean)": 3.0})],
+    )
+    huge = Section(
+        key="recache",
+        title="Recache",
+        tables=[
+            Table(
+                name="recache_huge_context",
+                title="Huge context",
+                columns=[
+                    Column(key="metric", label="Metric"),
+                    Column(key="count", label="Count"),
+                    Column(key="share_pct", label="Share", kind="pct"),
+                ],
+                rows=[["all", 3, 25.0]],
+            )
+        ],
+    )
+    cited = (
+        "Summaries Claude said lost something the work needed", 40.0, "habits.habits_summary_losses", "yes"
+    )
+    for card, section in (("compaction-churn", churn), ("long-context-share", huge)):
+        plain = recommend_fn(_add_section(_base_report(), section), config=_config(), archetype=None)
+        rec = next(rec for rec in plain if rec.id == card)
+        assert not any(row[2] == "habits.habits_summary_losses" for row in rec.evidence)
+        with_table = recommend_fn(
+            _add_section(_add_section(_base_report(), section), summary_losses), config=_config(), archetype=None
+        )
+        assert cited in next(rec for rec in with_table if rec.id == card).evidence
+    # A card that does not fire stays quiet, table or not.
+    quiet = _add_section(_base_report(), summary_losses)
+    assert not any(rec.id in ("compaction-churn", "long-context-share") for rec in recommend_fn(quiet, config=_config(), archetype=None))
+
+
 # -- baseline-bloat ---------------------------------------------------------
 
 
@@ -1131,7 +1187,10 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
     ]
     # Only what a setting can change competes for "largest".
     raw = recommend._rule_baseline_bloat(r, RecommendThresholds(), snapshot, None)[0]
-    assert "largest estimated share of that baseline is MCP tools" in raw.action
+    assert "largest estimated part of every session's startup is MCP tools you can turn off (see Context files)" in raw.action
+    # The advice text keeps that pointer.
+    assert "The largest estimated part of every session's startup is MCP tools you can turn off (see Context files)." in rec.action
+    assert "that baseline" not in rec.action
 
 
 def test_baseline_bloat_fires_without_snapshot():
@@ -1469,6 +1528,8 @@ def test_agent_report_size_fires_per_agent_type():
     assert fired[0].evidence == [
         ("Mean report size (tokens)", 12_000, "agents.topology_report_proxy", "claude-implementer"),
     ]
+    # advice reads the figure back by its label, so a changed label would drop it.
+    assert "12,000" in fired[0].why and "averages" in fired[0].why
 
 
 def test_agent_report_size_suppressed_for_chat_only():
@@ -1524,113 +1585,10 @@ def _batch_probe_recs(*rows, archetype=None):
     return [rec for rec in recommend_fn(r, config=_config(), archetype=archetype) if rec.id == "agent-batch-probes"]
 
 
-def test_agent_batch_probes_fires_per_agent_type_with_half_the_tables_upper_bound():
-    fired = _batch_probe_recs(
-        ["top-level", 900, 500, 50, 120, 90.0],
-        ["Explore", 400, 190, 30, 55, 12.0],
-        ["claude-implementer", 300, 100, 0, 20, 4.0],
-        ["haiku-sweeper", 400, 20, 0, 3, 40.0],
-    )
-    # The main session's row is yours to prompt; a type with few lookups is left alone.
-    assert [(rec.agent_type, rec.severity, rec.category, rec.lever) for rec in fired] == [
-        ("Explore", "advice", "workflow", None),
-        ("claude-implementer", "advice", "workflow", None),
-    ]
-    explore = fired[0]
-    assert explore.saving_usd == pytest.approx(6.0)
-    assert explore.evidence == [
-        ("Replies it made", 400, "habits.habits_probes", "Explore"),
-        ("Single read-only calls", 190, "habits.habits_probes", "Explore"),
-        ("Of them by shell command", 30, "habits.habits_probes", "Explore"),
-        ("Re-reads a batch would spare", 12.0, "habits.habits_probes", "Explore"),
-    ]
-    # The action is the line to paste, word for word.
-    assert "Batch independent Read/Grep/Glob calls into a single message" in explore.action
-    assert fired[1].saving_usd == pytest.approx(2.0)
-
-
-@pytest.mark.parametrize(
-    "row, why",
-    [
-        (["Explore", 99, 90, 0, 20, 50.0], "under 100 replies"),
-        (["Explore", 400, 99, 0, 20, 50.0], "under a quarter of the replies"),
-        (["Explore", 400, 200, 0, 20, 1.9], "under $1 once halved"),
-        (["Explore", 400, 200, 0, 20, "n/a"], "no figure for the cost"),
-        (["Explore", None, 200, 0, 20, 50.0], "no count of replies"),
-    ],
-)
-def test_agent_batch_probes_stays_quiet_below_its_thresholds_or_without_numbers(row, why):
-    assert _batch_probe_recs(row) == [], why
-
-
-def test_agent_batch_probes_fires_at_exactly_its_thresholds():
-    assert len(_batch_probe_recs(["Explore", 100, 25, 0, 4, 2.0])) == 1
-
-
-def test_agent_batch_probes_needs_the_probes_table_and_its_columns():
-    r = _base_report()
-    assert not any(rec.id == "agent-batch-probes" for rec in recommend_fn(r, config=_config(), archetype=None))
-    section = _probes_section(["Explore", 400, 200, 0, 20, 50.0])
-    del section.tables[0].columns[-1]
-    r = _add_section(_base_report(), section)
-    assert not any(rec.id == "agent-batch-probes" for rec in recommend_fn(r, config=_config(), archetype=None))
-
-
-def test_agent_batch_probes_is_suppressed_for_chat_only():
-    assert _batch_probe_recs(["Explore", 400, 200, 0, 20, 50.0], archetype="chat-only") == []
-
-
-def test_agent_batch_probes_thresholds_come_from_the_config():
-    th = RecommendThresholds.from_config(
-        {"agent_batch_probes_min_replies": 20, "agent_batch_probes_share_pct": 10, "agent_batch_probes_saving_factor": 1}
-    )
-    assert (th.agent_batch_probes_min_replies, th.agent_batch_probes_share_pct) == (20, 10.0)
-    r = _add_section(_base_report(), _probes_section(["Explore", 30, 5, 0, 1, 1.5]))
-    config = Config(thresholds={"recommend": {"agent_batch_probes_min_replies": 20, "agent_batch_probes_share_pct": 10,
-                                              "agent_batch_probes_saving_factor": 1}})
-    recs = recommend_fn(r, config=config, archetype=None)
-    (rec,) = [rec for rec in recs if rec.id == "agent-batch-probes"]
-    assert rec.saving_usd == pytest.approx(1.5)
-
-
-def test_agent_batch_probes_halves_the_cache_reads_of_the_spared_replies_not_their_whole_cost(tmp_path):
-    from types import SimpleNamespace as NS
-
-    from claudeglass import habits
-    from claudeglass.model import TranscriptMeta
-    from claudeglass.parse import parse_transcript
-    from claudeglass.pricing import load_pricing, price_turn
-    from helpers import tool_result_block, tool_use_block, user_block_line, user_str_line
-    from test_habits import MODEL, _lookup, _reply, _said, _ts
-
-    def parse(name, lines, **meta):
-        path = tmp_path / name
-        write_jsonl(path, lines)
-        return parse_transcript(path, TranscriptMeta(path=str(path), **meta))
-
-    pricing = load_pricing(path=Path(__file__).parent / "fixtures" / "pricing_min.toml")
-    top = parse("top.jsonl", [
-        _said(0, "find it"),
-        _reply(1, tool_use_block("Agent", "toolu_A", {"prompt": "find it"})),
-        user_block_line([tool_result_block("toolu_A", "found it")], timestamp=_ts(20)),
-        _reply(21, text="Found it."),
-    ], kind="top-level")
-    sub = parse("agent-a1.jsonl", [
-        user_str_line("find it", timestamp=_ts(2)),
-        *_lookup(3, 0), *_lookup(5, 1), *_lookup(7, 2), _reply(9, text="src/f0.py"),
-    ], kind="subagent", agent_id="agent-a1", agent_type="Explore", tool_use_id="toolu_A")
-    bundle = NS(top=top, subs=[sub], session_id="s1", project_dir="p", slug="p")
-    section = habits.section_from(habits.collect(NS(sessions=[bundle]), pricing))
-
-    config = Config(thresholds={"recommend": {
-        "agent_batch_probes_min_replies": 3, "agent_batch_probes_share_pct": 10, "agent_batch_probes_min_saving_usd": 0,
-    }})
-    recs = recommend_fn(_add_section(_base_report(), section), config=config, archetype=None)
-    (rec,) = [rec for rec in recs if rec.id == "agent-batch-probes"]
-    spared = [price_turn(t, pricing.resolve_model(MODEL)) for t in sub.turns[1:3]]
-    # The tool results are written again by a batched message: only the re-reads are spared, and half of those.
-    assert rec.saving_usd == pytest.approx(0.5 * sum(p.cache_read_cost for p in spared))
-    assert rec.saving_usd < 0.5 * sum(p.total for p in spared)
+def test_agent_batch_probes_is_no_longer_a_card_however_many_single_lookups_a_type_made():
+    # Dropped: it did not predict batching misses (the habits_probes table stays, as a measurement).
+    assert _batch_probe_recs(["Explore", 400, 200, 30, 20, 50.0], ["claude-implementer", 300, 100, 0, 20, 4.0]) == []
+    assert not hasattr(RecommendThresholds(), "agent_batch_probes_min_replies")
 
 
 # -- plan-rounds -------------------------------------------------------------
@@ -1931,7 +1889,7 @@ def test_effort_mismatch_fires_with_evidence_per_purpose_row():
                     name="sessions_by_purpose",
                     title="Sessions by purpose",
                     columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
-                    rows=[["docs-or-light-edit", 4], ["general-dev", 3], ["review", 2]],
+                    rows=[["docs-or-light-edit", 6], ["general-dev", 3], ["review", 2]],
                 )
             ],
         ),
@@ -1963,15 +1921,18 @@ def test_effort_mismatch_fires_with_evidence_per_purpose_row():
     # one evidence tuple for the thinking-share condition plus one per
     # contributing purpose row -- each citing its own exact cell (the
     # bug this module's docstring documents fixing).
-    assert ("High-effort thinking share of output", 40.0, "agents.topology_effort_tokens", "high") in rec.evidence
-    assert ("docs-or-light-edit sessions in corpus", 4, "sessions.sessions_by_purpose", "docs-or-light-edit") in rec.evidence
-    assert ("general-dev sessions in corpus", 3, "sessions.sessions_by_purpose", "general-dev") in rec.evidence
+    assert ("Thinking share at high effort", 40.0, "agents.topology_effort_tokens", "high") in rec.evidence
+    assert ("Output tokens at high effort", 10_000, "agents.topology_effort_tokens", "high") in rec.evidence
+    assert ("docs-or-light-edit sessions in corpus", 6, "sessions.sessions_by_purpose", "docs-or-light-edit") in rec.evidence
+    # general-dev is not light work, so it is not cited.
     assert len(rec.evidence) == 3
     # R22: this rule can't join the thinking-share group-by to the
     # purpose group-by by session (no report table carries both), so
     # the approximation is disclosed in the action text rather than
     # presented as a genuine per-session join.
-    assert "not only the light ones" in rec.changes[0].note
+    # No snapshot is given, so effortLevel is not known to be a project, local or managed key: the card
+    # asks for /effort, which Claude Code saves per model, and offers no change.
+    assert rec.changes == [] and rec.variant == "session"
     # No snapshot given -- _lever_scope has nothing to consult, so this
     # defaults to "user" rather than raising.
     assert rec.scope == "user"
@@ -1993,7 +1954,7 @@ def test_effort_mismatch_scope_follows_effort_levels_own_provenance():
                     name="sessions_by_purpose",
                     title="Sessions by purpose",
                     columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
-                    rows=[["docs-or-light-edit", 4], ["general-dev", 3]],
+                    rows=[["docs-or-light-edit", 4], ["general-dev", 2]],
                 )
             ],
         ),
@@ -2106,6 +2067,86 @@ def test_effort_mismatch_does_not_fire_below_thinking_share():
     )
     recs = recommend_fn(r, config=_config(), archetype=None)
     assert not any(rec.id == "effort-mismatch" for rec in recs)
+
+
+def _effort_mismatch_report(purpose_rows, effort_rows):
+    r = _add_section(
+        _base_report(),
+        Section(
+            key="sessions",
+            title="Sessions",
+            tables=[
+                Table(
+                    name="sessions_by_purpose",
+                    title="Sessions by purpose",
+                    columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
+                    rows=purpose_rows,
+                )
+            ],
+        ),
+    )
+    return _add_section(
+        r,
+        Section(
+            key="agents",
+            title="Agents",
+            tables=[
+                Table(
+                    name="topology_effort_tokens",
+                    title="Effort tokens",
+                    columns=[
+                        Column(key="effort", label="Effort"),
+                        Column(key="turns", label="Turns"),
+                        Column(key="output_tokens", label="Output tokens"),
+                        Column(key="thinking_tokens", label="Thinking tokens"),
+                        Column(key="thinking_share", label="Thinking share", kind="pct"),
+                    ],
+                    rows=effort_rows,
+                )
+            ],
+        ),
+    )
+
+
+def _fires_effort_mismatch(r):
+    return any(rec.id == "effort-mismatch" for rec in recommend_fn(r, config=_config(), archetype=None))
+
+
+def test_effort_mismatch_fallback_does_not_count_general_dev_as_light():
+    r = _effort_mismatch_report([["general-dev", 9]], [["high", 100, 10_000, 4_000, 40.0]])
+    assert not _fires_effort_mismatch(r)
+
+
+def test_effort_mismatch_fallback_needs_docs_to_be_more_than_half_of_sessions():
+    effort = [["xhigh", 100, 10_000, 4_000, 40.0]]
+    assert not _fires_effort_mismatch(_effort_mismatch_report([["docs-or-light-edit", 2], ["general-dev", 28]], effort))
+    assert not _fires_effort_mismatch(_effort_mismatch_report([["docs-or-light-edit", 5], ["general-dev", 5]], effort))
+    assert _fires_effort_mismatch(_effort_mismatch_report([["docs-or-light-edit", 6], ["general-dev", 5]], effort))
+
+
+def test_effort_mismatch_fallback_pools_high_xhigh_and_max_by_output_tokens():
+    purposes = [["docs-or-light-edit", 6], ["review", 2]]
+    r = _effort_mismatch_report(
+        purposes,
+        [["high", 10, 2_000, 200, 10.0], ["xhigh", 10, 6_000, 3_000, 50.0], ["max", 10, 2_000, 1_400, 70.0]],
+    )
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    # One tuple per pooled row, each citing its own cell: the pooled 46% is in no row.
+    shares = {row: v for label, v, _s, row in rec.evidence if label.startswith("Thinking share at ")}
+    outputs = {row: v for label, v, _s, row in rec.evidence if label.startswith("Output tokens at ")}
+    assert shares == {"high": 10.0, "xhigh": 50.0, "max": 70.0}
+    assert outputs == {"high": 2_000, "xhigh": 6_000, "max": 2_000}
+    # The card gives the pooled, output-weighted percent.
+    snapshot = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {}})
+    (card,) = [c for c in advice.finish([rec], r, snapshot, Units()) if c.id == "effort-mismatch"]
+    assert "46% of Claude's output was thinking" in card.why
+
+
+def test_effort_mismatch_fallback_fires_without_a_high_row():
+    r = _effort_mismatch_report([["docs-or-light-edit", 6]], [["xhigh", 100, 10_000, 4_000, 40.0]])
+    assert _fires_effort_mismatch(r)
+    low = _effort_mismatch_report([["docs-or-light-edit", 6]], [["medium", 100, 10_000, 9_000, 90.0]])
+    assert not _fires_effort_mismatch(low)
 
 
 # -- discovery-share ----------------------------------------------------
@@ -3329,6 +3370,74 @@ def test_effort_mismatch_reads_easy_work_at_high_effort_directly():
     assert rec.title == "High effort is being spent on easy work"
 
 
+def _easy_cycles_on(day: str, n: int, effort: str = "high"):
+    from datetime import datetime, timezone
+
+    from claudeglass.habits import CycleFact
+    from claudeglass.model import CaptureTag
+
+    return [
+        CycleFact(session_id="s", ts=datetime.fromisoformat(day).replace(tzinfo=timezone.utc), week="", cost=1.0,
+                  turns=1, tag=CaptureTag(level="easy"), effort=effort, output_cost=1.0, thinking_cost=0.6)
+        for _ in range(n)
+    ]
+
+
+def test_effort_mismatch_cites_the_newest_tag_when_old():
+    from datetime import datetime, timezone
+
+    from claudeglass import habits
+    from claudeglass.habits import CycleFact, Habits
+
+    def section(newest_message: str):
+        cycles = _easy_cycles_on("2026-10-23", 5) + _easy_cycles_on("2026-10-22", 5, effort="xhigh")
+        cycles.append(CycleFact(session_id="s", ts=datetime.fromisoformat(newest_message).replace(tzinfo=timezone.utc),
+                                week="", cost=1.0, turns=1))
+        return habits.section_from(Habits(cycles=cycles, tz="UTC"))
+
+    table = next(t for t in section("2026-11-08").tables if t.name == "habits_effort_fit")
+    assert table.columns[-1].key == "newest_tag" and table.columns[-1].label == "Newest tag"
+    assert {row[0]: row[-1] for row in table.rows} == {"easy:high": "2026-10-23", "easy:xhigh": "2026-10-22"}
+
+    r = _add_section(_base_report(), section("2026-11-08"))
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    # Once, for the first cited row, however many rows are cited.
+    assert [e for e in rec.evidence if e[0] == "Newest tag behind this"] == [
+        ("Newest tag behind this", "2026-10-23", "habits.habits_effort_fit", "easy:high"),
+    ]
+    assert len(rec.evidence) == 5
+
+    # While the tags are fresh the cells are empty and there is no row.
+    fresh = next(t for t in section("2026-10-25").tables if t.name == "habits_effort_fit")
+    assert {row[-1] for row in fresh.rows} == {""}
+    r = _add_section(_base_report(), section("2026-10-25"))
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+    assert not any(e[0] == "Newest tag behind this" for e in rec.evidence)
+
+
+def test_effort_mismatch_names_no_old_date_when_a_cited_row_is_fresh():
+    from datetime import datetime, timezone
+
+    from claudeglass import habits
+    from claudeglass.habits import CycleFact, Habits
+
+    def card(second_row_day: str):
+        cycles = _easy_cycles_on("2026-10-23", 5) + _easy_cycles_on(second_row_day, 5, effort="xhigh")
+        cycles.append(CycleFact(session_id="s", ts=datetime(2026, 11, 8, tzinfo=timezone.utc), week="", cost=1.0, turns=1))
+        r = _add_section(_base_report(), habits.section_from(Habits(cycles=cycles, tz="UTC")))
+        return next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "effort-mismatch")
+
+    # Both rows are cited, and half the evidence was tagged the day before the newest message.
+    fresh = card("2026-11-07")
+    assert {e[3] for e in fresh.evidence} == {"easy:high", "easy:xhigh"}
+    assert not any(e[0] == "Newest tag behind this" for e in fresh.evidence)
+    # When every cited row is old the row cites the latest of their dates.
+    old = card("2026-10-25")
+    assert [e for e in old.evidence if e[0] == "Newest tag behind this"] == [
+        ("Newest tag behind this", "2026-10-25", "habits.habits_effort_fit", "easy:xhigh"),
+    ]
+
+
 @pytest.mark.parametrize("cycles", [
     _easy_cycles(4),
     _easy_cycles(5, thinking=0.2),
@@ -3337,3 +3446,83 @@ def test_effort_mismatch_reads_easy_work_at_high_effort_directly():
 def test_effort_mismatch_direct_path_needs_enough_easy_high_effort_thinking(cycles):
     r = _add_section(_base_report(), _habits_section(cycles))
     assert not any(rec.id == "effort-mismatch" for rec in recommend_fn(r, config=_config(), archetype=None))
+
+
+# -- R3-VIEW-RULE: the file that decides, read only in a view of that one project -----------------
+
+
+def _effort_report_on(model_cell, projects):
+    """The light-work effort report with the main session on ``model_cell``, for ``projects``."""
+    r = _base_report()
+    r = _add_section(r, Section(key="sessions", title="Sessions", tables=[Table(
+        name="sessions_by_purpose", title="Sessions by purpose",
+        columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
+        rows=[["docs-or-light-edit", 6], ["general-dev", 3], ["review", 2]])]))
+    r = _add_section(r, Section(key="agents", title="Agents", tables=[Table(
+        name="topology_effort_tokens", title="Effort tokens",
+        columns=[Column(key="effort", label="Effort"), Column(key="turns", label="Turns"),
+                 Column(key="output_tokens", label="Output tokens"), Column(key="thinking_tokens", label="Thinking tokens"),
+                 Column(key="thinking_share", label="Thinking share", kind="pct")],
+        rows=[["high", 100, 10_000, 4_000, 40.0]])]))
+    r = _add_section(r, Section(key="model_swap", title="Model swap", tables=[Table(
+        name="model_swap_by_agent_type", title="Model swap",
+        columns=[Column(key="agent_type", label="Agent type"), Column(key="observed_model", label="Observed model"),
+                 Column(key="best_cheaper_alternative_model", label="Alternative"),
+                 Column(key="saving_usd", label="Saving", kind="money")],
+        rows=[["top-level", model_cell, None, None]])]))
+    r.meta.projects = tuple(projects)
+    return r
+
+
+def _effort_card(data, projects, model_cell="claude-opus-5-5"):
+    snap = Snapshot(path=None, ts="2026-10-20T00:00:00Z", data={"agents": {}, **data})
+    recs = recommend_fn(_effort_report_on(model_cell, projects), config=_config(), archetype=None, snapshot=snap)
+    return next((rec for rec in recs if rec.id == "effort-mismatch"), None)
+
+
+_PROJECT_FLAT = {"effortLevel": "project_shared"}
+
+
+def test_in_a_view_of_several_projects_a_project_files_medium_does_not_close_the_effort_card():
+    """R3-1, the reviewer's input through recommend(): one project's file says nothing of the others."""
+    card = _effort_card({"effective": {"effortLevel": "medium"}, "effective_provenance": _PROJECT_FLAT}, ["alpha", "beta"])
+    assert card is not None
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])
+
+
+def test_in_a_view_of_several_projects_the_effort_card_names_no_projects_file():
+    """R3-1: with the snapshot's project at flat high, the card's fix is the user one the check and goal give."""
+    card = _effort_card({"effective": {"effortLevel": "high"}, "effective_provenance": _PROJECT_FLAT}, ["alpha", "beta"])
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])
+
+
+def test_in_a_view_of_several_projects_your_user_files_entry_still_closes_the_effort_card():
+    """Guard: your user file is read in every project, so its own entry for the model decides there."""
+    data = {
+        "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+        "effective_provenance": {"effortLevel": "project_shared", "modelSettings": "user"},
+        "user_settings": {"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+    }
+    assert _effort_card(data, ["alpha", "beta"]) is None
+
+
+@pytest.mark.parametrize("layer, scope", [("project_shared", "repo"), ("project_local", "project-local")])
+def test_in_one_project_the_project_files_flat_level_still_decides_the_effort_card(layer, scope):
+    """Guard: in a view of one project its own file decides, and the fix goes there."""
+    assert _effort_card({"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": layer}}, ["alpha"]) is None
+    card = _effort_card({"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": layer}}, ["alpha"])
+    assert [(c.key, c.value, c.scope) for c in card.changes] == [("effortLevel", "medium", scope)]
+
+
+def test_a_project_files_own_entry_for_the_model_gets_the_effort_cards_change():
+    """The project file's own entry for the model beats an entry in your user file, so /effort, which
+    saves to your user file, would change nothing: the change goes to that entry in that file."""
+    data = {"effective": {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+            "effective_provenance": {"modelSettings": "project_shared"}}
+    card = _effort_card(data, ["alpha"])
+    assert [(c.key, c.value, c.scope) for c in card.changes] == [
+        ("modelSettings", {"claude-opus-5-5": {"effortLevel": "medium"}}, "repo")
+    ]
+    # In a view of several projects that file is one project's: the user path, as for the flat level.
+    card = _effort_card(data, ["alpha", "beta"])
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])

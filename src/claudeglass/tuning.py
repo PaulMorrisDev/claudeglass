@@ -15,21 +15,26 @@ file that fails the checks prints nothing.
 
 What is never in it: names, paths, hashes, session ids, project slugs,
 skill names, custom agent names (they count as ``custom``), model ids
-(they count as a family), and any text of yours or Claude's. Every map's
+other than the packaged rate card's (a model is named by the id of the
+packaged rate-card row ClaudeGlass prices it with, or ``other`` when no row
+prices it), and any text of yours or Claude's. Every map's
 keys come from a closed set built from the catalogues here, never from
 the data, so a key can't carry anything either. A problem line names the
 key path and the check, never the value or the key it found.
 
 The spec tree is the single list of what may appear. A block is a function
-that takes the shared :class:`_Ctx` and returns a dict, registered with
+that takes the shared :class:`_Ctx` and returns a dict (or None, which leaves an
+optional block out), registered with
 :func:`_block` beside the spec node that describes it; adding one means
 adding one registration with ``required=False``, so documents made before
 it still validate. The ``cost_centres``, ``project_files`` and
-``compactions`` blocks (Phase 8) are such blocks, and the keys Phase 8 added
+``compactions`` blocks (Phase 8) and the ``cards`` block (what became of the
+cards the dashboard showed) are such blocks, and the keys Phase 8 added
 inside older blocks (``agents.probes``, ``agents.report_turns``,
 ``agents.launches``, ``agents.model_choice``,
 ``prompting.plans.builds`` and ``prompting.plans.asks``) are optional the
-same way.
+same way. So is ``hint_occasions``, which is there while coaching notes are on,
+and ``capture_checks``, which is there when the capture questions and tags left something to count.
 Money keys end in ``_usd`` and hold list-price amounts.
 
 Window: the corpus the caller passes is the window (the callers load it with
@@ -37,7 +42,10 @@ Window: the corpus the caller passes is the window (the callers load it with
 first; ``build`` doesn't). ``days`` and ``today`` fill the header and bound
 Haiku's judge calls (read from files here) and the overhead block's hook
 runs and costs: the last ``days`` days, counting ``today`` whole, from local
-midnight in the config's time zone as the corpus's window starts.
+midnight in the config's time zone as the corpus's window starts. When the
+dashboard's store holds sessions of the window whose transcripts are gone, the
+caller passes a ``covered.Coverage`` and the ``coverage`` block says what the
+document covers.
 
 A map lists only the words that were counted, so a missing word reads as
 zero. The caller passes the dashboard's session ratings and tip-card answers
@@ -50,27 +58,38 @@ from __future__ import annotations
 import json
 import math
 import re
+import statistics
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, timedelta
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from . import PARSER_VERSION, __version__
+from . import backtest as backtest_mod
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
+from . import capture_checks as capture_checks_mod
+from . import change_points as change_points_mod
 from . import claude_md_review, classify
 from . import compaction as compaction_mod
 from . import context_budget as context_budget_mod
 from . import context_files as context_files_mod
 from . import cost_centres as cost_centres_mod
+from . import covered as covered_mod
 from . import discovery
 from . import coaching as coaching_mod
 from . import events as events_mod
 from . import habits as habits_mod
 from . import handoff as handoff_mod
-from . import haiku_tags, helptext, hook_health, limits
+from . import impact as impact_mod
+from . import hint_occasions as hint_occasions_mod
+from . import haiku_tags, helptext, hook_health, limits, measured
+from . import ignores as ignores_mod
+from . import outcomes as outcomes_mod
 from . import pieces as pieces_mod
+from . import pricing as pricing_mod
 from . import prompting as prompting_mod
 from . import ratings as ratings_mod
 from . import recache, recommend
@@ -78,7 +97,8 @@ from . import rework as rework_mod
 from . import snapshots as snapshots_mod
 from .calibration import Calibration
 from .capture_tags import CHANGE_PATTERN, GROUNDED_KEYS
-from .model import EventKind
+from .profiles import schema as profile_schema
+from .model import EventKind, scheduled_main_session
 from .pricing import price_turn
 from .report import _agent_file_models, _dominant_transcript_model
 from .topology import LAUNCH_WORDS
@@ -86,8 +106,10 @@ from .topology import LAUNCH_WORDS
 KIND = "claudeglass-tuning"
 FORMAT = 1
 #: The most a document may be, serialised (:func:`dumps`) as UTF-8. The
-#: real ones are a few tens of kilobytes.
-MAX_BYTES = 256 * 1024
+#: real ones are a few tens of kilobytes; the fullest one the description
+#: allows, with every count and amount as wide as it can print, is about
+#: 306 KB.
+MAX_BYTES = 320 * 1024
 
 #: No count or amount is anywhere near this; a bigger one is a mistake or
 #: a forgery.
@@ -118,6 +140,9 @@ class TuningError(ValueError):
 #: Who wrote a tag: Claude in its reply, or Haiku (the tagger, or the
 #: fallback for a reply Claude left without one).
 WRITERS = ("claude", *catalogue.JUDGE_WRITERS)
+#: The tag keys ``tags.words`` counts, with their words: every key but ``lost``. Claude may write ``lost`` on any
+#: reply, but only the one that answers a summary is read, and ``capture_checks.lost`` is where it is counted.
+WORD_VOCAB = {key: words for key, words in catalogue.TAG_VOCAB.items() if key != "lost"}
 LEVELS = (*catalogue.LEVELS, catalogue.CUSTOM_LEVEL)
 #: The tips Claude is asked to relay.
 HINTS = tuple(prompting_mod.TIP_HINTS)
@@ -589,17 +614,39 @@ class _Ctx:
     block first asks for it."""
 
     def __init__(
-        self, corpus, config, pricing, config_dir, days: int, today: date, claude_root, ratings=None, tip_feedback=None
+        self,
+        corpus,
+        config,
+        pricing,
+        config_dir,
+        days: int,
+        today: date,
+        claude_root,
+        ratings=None,
+        tip_feedback=None,
+        coverage=None,
+        projects_roots=None,
+        mod_events=None,
+        card_marks=None,
+        outcomes=None,
     ):
         self.corpus = corpus
         self.config = config
         self.pricing = pricing
         self.config_dir = config_dir
         self.claude_root = claude_root
+        # The folders of project folders the export read, where a session's folder is found when the
+        # config folder is not beside them (a container).
+        self.projects_roots = projects_roots
+        # The store's mod sensor events, for the coaching moments the mod showed (only counts reach the document).
+        self.mod_events = mod_events or []
         self.days = days
         self.today = today
         self.ratings = ratings or {}
         self.tip_feedback = tip_feedback or {}
+        self.coverage = coverage
+        self.card_marks = card_marks
+        self.outcomes = outcomes
         # Local midnight in the config's zone, where the corpus's --days window starts.
         self.start = discovery.local_midnight(today - timedelta(days=days - 1), config.tz)
 
@@ -658,6 +705,35 @@ class _Ctx:
             return {}
         canonical = snapshots_mod.canonical_project_keys({b.slug for b in self.corpus.sessions if b.slug})
         return _agent_file_models(snapshots_mod.with_every_project_agents(snapshots, canonical))
+
+    def _agent_line(self, key: str) -> dict[str, object]:
+        """Each agent file's ``key`` line by agent type, from the same
+        snapshot as :attr:`agent_files`; empty without one."""
+        snapshots = snapshots_mod.load_snapshots(self.config_dir) if self.config_dir else []
+        if not snapshots:
+            return {}
+        canonical = snapshots_mod.canonical_project_keys({b.slug for b in self.corpus.sessions if b.slug})
+        merged = snapshots_mod.with_every_project_agents(snapshots, canonical)
+        agents = merged.data.get("agents") if merged is not None else None
+        return {
+            name: entry[key] for name, entry in (agents.items() if isinstance(agents, dict) else ())
+            if isinstance(entry, dict) and key in entry
+        }
+
+    @cached_property
+    def agent_tools(self) -> dict[str, object]:
+        """Each agent file's ``tools`` line by agent type, from the same
+        snapshot as :attr:`agent_files`; empty without one. Read to tell
+        which rarely used tools a tools list would still leave out, never
+        exported."""
+        return self._agent_line("tools")
+
+    @cached_property
+    def agent_denied(self) -> dict[str, object]:
+        """Each agent file's ``disallowedTools`` line by agent type, read
+        as :attr:`agent_tools` is: a tool it withholds is not left out by a
+        tools list, because the agent is never sent it."""
+        return self._agent_line("disallowedTools")
 
     @cached_property
     def compactions(self) -> tuple[compaction_mod.CompactionStats, dict[str, float]]:
@@ -766,6 +842,11 @@ def build(
     claude_root: str | Path | None = None,
     ratings: dict | None = None,
     tip_feedback: dict | None = None,
+    coverage: "covered_mod.Coverage | None" = None,
+    projects_roots: list[Path] | None = None,
+    mod_events: list[dict] | None = None,
+    card_marks: "CardMarks | None" = None,
+    outcomes: "OutcomeInputs | None" = None,
 ) -> dict:
     """The export document for ``corpus`` (already loaded for the last
     ``days`` days, Haiku's tags put on its turns). ``config_dir`` is where
@@ -774,10 +855,26 @@ def build(
     when not given. ``ratings`` are the dashboard's session ratings by
     session id (``Store.all_feedback``) and ``tip_feedback`` its tip-card
     answers (``Store.tip_feedback``), counted as the dashboard counts them;
-    none of their words reach the document. Raises :class:`TuningError` if
-    what it built doesn't validate, which would be a bug here."""
+    none of their words reach the document. ``coverage``
+    (``covered.Coverage``), given when the dashboard's store holds sessions of
+    the window whose transcripts are gone, fills the ``coverage`` block;
+    without it the block is left out. ``projects_roots`` are the
+    folders of project folders the corpus was read from, where a session's
+    own folder is looked for (the project-files block). ``mod_events`` are the
+    store's mod sensor events (``Store.read_mod_events``), for the coaching
+    moments the mod showed; none of their words reach the document. ``card_marks``
+    (:class:`CardMarks`), given when the dashboard's store has a ``card_marks``
+    table, fills the ``cards`` block; without it the block is left out. ``outcomes``
+    (:class:`OutcomeInputs`), given with it and the store's predictions, fills the ``outcomes``
+    block; without it the block is left out.
+    Raises :class:`TuningError` if what it built doesn't validate, which would
+    be a bug here."""
     days = max(1, int(days))
-    ctx = _Ctx(corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback)
+    ctx = _Ctx(
+        corpus, config, pricing, config_dir, days, today, claude_root, ratings, tip_feedback,
+        coverage=coverage, projects_roots=projects_roots,
+        mod_events=mod_events, card_marks=card_marks, outcomes=outcomes,
+    )
     version = _VERSION_RE.match(__version__)
     doc: dict = {
         "kind": KIND,
@@ -788,11 +885,32 @@ def build(
         "window_days": days,
     }
     for name, (_node, builder, _required) in _BLOCKS.items():
-        doc[name] = builder(ctx)
+        value = builder(ctx)
+        # An optional block's builder gives None when it has nothing to say.
+        if value is not None:
+            doc[name] = value
     problems = validate(doc)
     if problems:
         raise TuningError(problems)
     return doc
+
+
+# -- coverage ----------------------------------------------------------------------------------
+
+
+@_block("coverage", _counts("sessions", "read", "stored", "older"), required=False)
+def _coverage(ctx: _Ctx) -> dict | None:
+    """What the document covers, when the dashboard's store holds sessions
+    of the window whose transcripts are gone: the window's ``sessions``,
+    those ``read`` from transcripts on disk, those ``stored`` (read from
+    the store's digests), the ``older`` of the document's sessions an older
+    version read, which the newer figures leave out
+    (``measured.older_sessions``). Left out otherwise."""
+    c = ctx.coverage
+    if c is None:
+        return None
+    older, _covered = measured.older_sessions(ctx.corpus.sessions)
+    return {"sessions": c.sessions, "read": c.read, "stored": c.stored, "older": older}
 
 
 # -- capture -----------------------------------------------------------------------------------
@@ -1037,7 +1155,7 @@ _SHIFT_COUNTS = ("cycles", "corrections", "adjustments", "rework")
             "words": Obj(
                 {
                     key: Obj({writer: _count_map(words) for writer in WRITERS})
-                    for key, words in catalogue.TAG_VOCAB.items()
+                    for key, words in WORD_VOCAB.items()
                 }
             ),
             "grounding": Map(Changes(), Count(), limit=_MAX_CHANGES),
@@ -1071,7 +1189,7 @@ def _tags(ctx: _Ctx) -> dict:
     mistakes Claude admitted by kind, who caught them and who wrote the
     tag. ``feedback`` counts your /cg-feedback answers."""
     tagged: Counter = Counter()
-    words: dict[str, dict[str, Counter]] = {key: {w: Counter() for w in WRITERS} for key in catalogue.TAG_VOCAB}
+    words: dict[str, dict[str, Counter]] = {key: {w: Counter() for w in WRITERS} for key in WORD_VOCAB}
     grounding: Counter = Counter()
     for s in ctx.sessions:
         for turn in s.replies:
@@ -1080,7 +1198,7 @@ def _tags(ctx: _Ctx) -> dict:
                 continue
             writer = ctx.writer_of(turn)
             tagged[writer] += 1
-            for key, vocab in catalogue.TAG_VOCAB.items():
+            for key, vocab in WORD_VOCAB.items():
                 for word in _words_of(getattr(cap, key, None)):
                     if word in vocab:
                         words[key][writer][word] += 1
@@ -1120,7 +1238,7 @@ def _tags(ctx: _Ctx) -> dict:
                         answers[key][word] += 1
             from_text.update(key for key in fb.from_text if key in catalogue.FEEDBACK_ANSWER_KEYS)
     by_key = {}
-    for key, vocab in catalogue.TAG_VOCAB.items():
+    for key, vocab in WORD_VOCAB.items():
         by_writer = {writer: _tally(words[key][writer], vocab) for writer in WRITERS}
         by_key[key] = {writer: counted for writer, counted in by_writer.items() if counted}
     return {
@@ -1199,17 +1317,11 @@ def _cache_ttl_s(replies: list) -> int:
     return _TTL_1H_S if any(t.cc_1h > 0 for t in replies[-_TTL_REPLIES:]) else _TTL_5M_S
 
 
-def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
-    """``([cold returns, cache-write tokens], [wake-ups, cache-write
-    tokens])`` over the main sessions' replies. No report-side count
-    existed, so this mirrors the capture hook's. A cold return is a
-    message you typed after a gap longer than the cache the reply before it
-    wrote lasts (``_cold_hint``), with a context of ``cold_min_tokens`` or
-    more, and not a wait for a usage limit or a gap across a compaction. A
-    wake-up is a reply that starts at a background task's notice an hour or
-    more after the reply before it. The tokens are the cache writes of the
-    reply that followed."""
-    cold, wake = [0, 0], [0, 0]
+def _break_turns(ctx: _Ctx) -> Iterator[tuple[_Session, str, Any, Any]]:
+    """``(session, kind, reply before, turn)`` for each break in the main
+    sessions' replies: ``kind`` is ``"cold"`` for a cold return and
+    ``"wake"`` for a wake-up (see :func:`_breaks`). The one place the rule is
+    written, for the pieces block and the figures block both."""
     minimum = ctx.thresholds["cold_min_tokens"]
     for s in ctx.sessions:
         before: list = []
@@ -1233,12 +1345,27 @@ def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
                     and gap > _cache_ttl_s(before)
                     and last.ctx + last.output_tokens >= minimum
                 ):
-                    cold[0] += 1
-                    cold[1] += turn.cache_creation_tokens
+                    yield s, "cold", last, turn
                 elif habits_mod.is_wake_up(turn, gap):
-                    wake[0] += 1
-                    wake[1] += turn.cache_creation_tokens
+                    yield s, "wake", last, turn
             before.append(turn)
+
+
+def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
+    """``([cold returns, cache-write tokens], [wake-ups, cache-write
+    tokens])`` over the main sessions' replies. No report-side count
+    existed, so this mirrors the capture hook's. A cold return is a
+    message you typed after a gap longer than the cache the reply before it
+    wrote lasts (``_cold_hint``), with a context of ``cold_min_tokens`` or
+    more, and not a wait for a usage limit or a gap across a compaction. A
+    wake-up is a reply that starts at a background task's notice an hour or
+    more after the reply before it. The tokens are the cache writes of the
+    reply that followed."""
+    cold, wake = [0, 0], [0, 0]
+    for _s, kind, _last, turn in _break_turns(ctx):
+        count = cold if kind == "cold" else wake
+        count[0] += 1
+        count[1] += turn.cache_creation_tokens
     return cold, wake
 
 
@@ -1406,7 +1533,9 @@ def _agents(ctx: _Ctx) -> dict:
     tools list, is what that saves over the window at list prices, by the
     same types (:func:`_startup_diet_usd`). ``probes`` counts the
     agents' replies, those that made one read-only call and nothing else,
-    those by shell command, and the runs of two or more in a row.
+    those by shell command, and the runs of two or more lookup replies in a
+    row (a reply whose shell command chains several reads is in a run but is
+    not a single call).
     ``report_turns`` counts the main session's replies to a background
     agent's or a workflow's report by what they did
     (``habits.REPORT_KINDS``). ``launches`` count the runs by how they were
@@ -1462,10 +1591,11 @@ def _agents(ctx: _Ctx) -> dict:
         "types": _tally(types, AGENT_TYPES),
         "models": {word: {"runs": models[word][0], "cost_usd": _num(models[word][1])} for word in MODELS if word in models},
     }
-    diet = _startup_diet_usd(ctx.startup)
+    diet = _startup_diet_usd(ctx.startup, ctx.agent_tools, ctx.agent_denied)
     if diet:
         block["startup_diet_usd"] = diet
-    agents = ctx.habits.agents
+    # An agent whose digest an older parser wrote has no single-lookup figures: out of the count and its base.
+    agents = habits_mod._probed(ctx.habits.agents)
     if any(fact.probe_calls for fact in agents):
         block["probes"] = {
             "calls": sum(fact.calls for fact in agents),
@@ -1480,7 +1610,7 @@ def _agents(ctx: _Ctx) -> dict:
             "runs": len({a.run or id(a) for a in group}),
             "agents": len(group),
             "replies": sum(a.calls for a in group),
-            "single": sum(a.probe_calls for a in group),
+            "single": sum(a.probe_calls for a in habits_mod._probed(group)),
             "start_reads": sum(a.start_tokens * a.calls for a in group),
             "compactions": sum(a.compactions for a in group),
             "compacted": sum(1 for a in group if a.compactions),
@@ -1531,19 +1661,27 @@ def _model_choice(ctx: _Ctx) -> list[dict]:
     return rows
 
 
-def _startup_diet_usd(stats) -> dict[str, float]:
+def _startup_diet_usd(stats, agent_tools: dict | None = None, agent_denied: dict | None = None) -> dict[str, float]:
     """What a tools list is worth over the window, by agent type: the
     saving of each ``agent_startup_diet`` row the dashboard would give a
     tools list card for (:func:`recommend.tools_list_offer`), at list
     prices. Built-in types by name, every other type summed as ``custom``.
+    ``agent_tools`` is each agent file's ``tools`` line and ``agent_denied``
+    its ``disallowedTools`` line: the card leaves out only the rarely used
+    tools still offered, and so does this.
     Amounts only: no agent's name, tool or file is in it."""
     section = context_budget_mod.build_startup_section(stats)
     table = next((t for t in section.tables if t.name == "agent_startup_diet"), None)
     saved: Counter = Counter()
     for row in table.rows if table is not None else []:
         values = dict(zip((column.key for column in table.columns), row))
+        current = (agent_tools or {}).get(values["agent_type"])
+        denied = (agent_denied or {}).get(values["agent_type"])
+        values = recommend.current_diet(values, current, denied)
         usd = values.get("saving_usd")
-        if recommend.tools_list_offer(values["agent_type"], values) is None or not isinstance(usd, (int, float)):
+        if recommend.tools_list_offer(
+            values["agent_type"], values, current=current, disallowed=denied
+        ) is None or not isinstance(usd, (int, float)):
             continue
         saved[values["agent_type"] if values["agent_type"] in AGENT_TYPES else "custom"] += usd
     return {word: _num(saved[word]) for word in AGENT_TYPES if saved.get(word, 0) > 0}
@@ -1713,7 +1851,9 @@ def _project_files(ctx: _Ctx) -> dict:
     if not data:
         return {"total": 0, "files": []}
     if ctx.config_dir:
-        rows, _local = claude_md_review.project_file_rows(ctx.config_dir, data)
+        rows, _local = claude_md_review.project_file_rows(
+            ctx.config_dir, data, projects_roots=getattr(ctx, "projects_roots", None)
+        )
     else:
         rows = context_files_mod.project_files(data)
     newest = context_files_mod.monday_of(data.get("newest") or "")
@@ -1800,6 +1940,1164 @@ def _compactions(ctx: _Ctx) -> dict:
     return block
 
 
+# -- cards -------------------------------------------------------------------------------------
+
+#: The rule ids the service can send (``Recommendation.id``), as the scan in
+#: ``tests/helpers.py`` finds them; a card of any other rule (a newer build's)
+#: counts as ``other``.
+CARD_RULES = (
+    "agent-decide-apply", "agent-model-asked", "agent-model-inherited", "agent-report-size", "baseline-bloat",
+    "batch-instructions", "cache-read-dominance", "compaction-churn", "compaction-window", "data-quality",
+    "discovery-share", "effort-mismatch", "env-attribution-deprecated", "env-disable-prompt-caching",
+    "env-max-output-tokens", "env-subagent-model", "env-tool-search", "hook-block-resent", "hook-context-carry",
+    "hook-failures", "limit-pressure", "long-context-share", "long-tool-waits", "mcp-unused-server", "model-tier",
+    "model-tier-main", "notification-invalidation", "plan-handoff", "plan-rounds", "pricing-coverage", "run-split",
+    "saver-tool-roi", "spawn-claude-md", "spawn-cost", "spawn-shared-claude-md", "spawn-task-prompt",
+    "spawn-tools-list", "spawn-unused-mcp", "spawn-unused-skills", "subagent-volume", "tool-output-carry",
+    "tool-skill-name-only", "ttl-switch", "unused-skill", "unused-skills", "wasted-turns", "window-budget", "other"
+)
+#: Who a card is about: ``none`` for no agent, ``main`` for the main session,
+#: a built-in agent type as itself, and every other agent ``custom``.
+CARD_AGENTS = ("none", "main", *AGENT_TYPES)
+#: The most (rule, agent) rows the block keeps; ``shown`` still counts the rest.
+CARD_ROWS_KEPT = 40
+
+
+@dataclass(frozen=True)
+class CardMarks:
+    """What ``build`` reads for the ``cards`` block: the dashboard's
+    ``card_marks`` rows (``Store.card_marks``), the project folders the export
+    covers, and whether it covers every project."""
+
+    rows: list
+    folders: frozenset
+    every_project: bool
+
+
+def _card_agent(agent_type) -> str:
+    """The class of agent a card is about: only a word of :data:`CARD_AGENTS`
+    leaves here, so a custom agent's name never does."""
+    if not agent_type:
+        return "none"
+    if agent_type == "top-level":
+        return "main"
+    return agent_type if isinstance(agent_type, str) and agent_type in AGENT_TYPES else "custom"
+
+
+_CARD_ROW = Obj(
+    {
+        "rule": Word(CARD_RULES),
+        "agent": Word(CARD_AGENTS),
+        "shown": Count(),
+        "copied": Count(),
+        "bundled": Count(),
+        "ignored": Count(),
+        "landable": Count(),
+        "landed": Count(),
+        "exact": Count(),
+        "median_days": Count(),
+        "answers": Map(catalogue.TIP_CARD_VOCAB, Count()),
+    },
+    required=("rule", "agent", "shown", "copied", "bundled", "ignored", "landable", "landed", "exact"),
+)
+
+
+@_block(
+    "cards",
+    Obj({"shown": Count(), "rows": Arr(_CARD_ROW, limit=CARD_ROWS_KEPT)}, required=("shown", "rows")),
+    required=False,
+)
+def _cards(ctx: _Ctx) -> dict | None:
+    """What became of the recommendation cards the dashboard showed, by rule
+    and class of agent, from its ``card_marks`` rows: how many were shown,
+    copied (``bundled``: copied only in the project's all-fixes prompt, which
+    ``copied`` counts too), ignored now (read from the ignores file, as the
+    dashboard reads it), could land (the card names a setting), landed (it left
+    the list and every setting it names moved, judged by the dashboard when the
+    list was drawn again) and how many of those landed to the card's own value,
+    the days from first shown to landed in the middle, and how the cards were
+    rated. Left out when there is no dashboard store to read; otherwise a block
+    even with nothing in it, since a dashboard that showed no card is not one
+    that isn't there. Counts and fixed words only: no card key, project,
+    agent name, setting or time reaches the document. A row counts when it was
+    first shown in the window and belongs to the export's projects: an
+    every-project row with every project, a project row with a folder the
+    export covers."""
+    marks = ctx.card_marks
+    if marks is None:
+        return None
+    stored = ignores_mod.load(ctx.config_dir) if ctx.config_dir else {}
+    groups: dict[tuple[str, str], list] = {}
+    kept = 0
+    for row in marks.rows:
+        shown = snapshots_mod._parse_ts(row.get("first_shown_at"))
+        if shown is None or shown < ctx.start:
+            continue
+        if row.get("project") == ignores_mod.ALL_PROJECTS:
+            if not marks.every_project:
+                continue
+        elif not set(row.get("folders") or ()) & marks.folders:
+            continue
+        rule = row.get("rule_id")
+        word = rule if rule in CARD_RULES else "other"
+        groups.setdefault((word, _card_agent(row.get("agent_type"))), []).append((row, shown))
+        kept += 1
+    out = []
+    for (rule, agent), members in groups.items():
+        item = {
+            "rule": rule, "agent": agent, "shown": len(members), "copied": 0, "bundled": 0, "ignored": 0,
+            "landable": 0, "landed": 0, "exact": 0,
+        }
+        days = []
+        for row, shown in members:
+            if row.get("copied_at") or row.get("bundled_at"):
+                item["copied"] += 1
+            if row.get("bundled_at") and not row.get("copied_at"):
+                item["bundled"] += 1
+            project = None if row.get("project") == ignores_mod.ALL_PROJECTS else row.get("project")
+            if any(ignores_mod._match(projects, row.get("card_key"), project) is not None for projects in stored.values()):
+                item["ignored"] += 1
+            if row.get("changes"):
+                item["landable"] += 1
+                landed = snapshots_mod._parse_ts(row.get("landed_at"))
+                if landed is not None:
+                    item["landed"] += 1
+                    item["exact"] += 1 if row.get("landed_exact") else 0
+                    days.append(max(0, math.floor((landed - shown).total_seconds() / 86400)))
+        if item["landed"]:
+            item["median_days"] = statistics.median_low(days)
+        answers: Counter = Counter()
+        for key in {row.get("card_key") for row, _shown in members}:
+            answer = (ctx.tip_feedback.get(("recommendation", key)) or {}).get("answer")
+            if answer in catalogue.TIP_CARD_VOCAB:
+                answers[answer] += 1
+        if answers:
+            item["answers"] = _tally(answers, catalogue.TIP_CARD_VOCAB)
+        out.append(item)
+    out.sort(key=lambda item: (-item["shown"], item["rule"], item["agent"]))
+    return {"shown": kept, "rows": out[:CARD_ROWS_KEPT]}
+
+
+# -- hint occasions ----------------------------------------------------------------------------
+
+#: What each hint's row holds, in the order they are written.
+_HINT_COUNT_KEYS = ("occasions", "sessions", "noted", "notes", "glass", "mod_sessions", "older")
+
+
+@_block(
+    "hint_occasions",
+    Obj(
+        {
+            "on_hours": Count(),
+            "hints": Map(hint_occasions_mod.HINTS, _counts(*_HINT_COUNT_KEYS)),
+            "muted": Arr(Word(hint_occasions_mod.HINTS), limit=len(hint_occasions_mod.HINTS)),
+            "silent": Arr(Word(hint_occasions_mod.HINTS), limit=len(hint_occasions_mod.HINTS)),
+        },
+        required=("on_hours", "hints", "muted", "silent"),
+    ),
+    required=False,
+)
+def _hint_occasions(ctx: _Ctx) -> dict | None:
+    """Whether a coaching hint could have fired (``hint_occasions``): for
+    each hint that can speak, the messages where the hook's own trigger held
+    (``occasions``), the sessions with one where the hook is the one to
+    speak, how many of those got a hook note for it (``noted``), the hook's
+    notes in all, the mod's own notes (``glass``), the sessions where the mod
+    ran on a surface that draws the hint line itself, and, for the status
+    check, the sessions left out because their digest does not measure it.
+    ``on_hours`` is how much of the window coaching notes were on, ``muted``
+    the hints you muted and ``silent`` the hints the Capture page would say
+    gave no tip. Left out while coaching notes are off. Every hint is there,
+    zeros included, so a missing one cannot read as zero (``capture.hints``
+    leaves out an all-zero row). Counts and three fixed words: no session, no
+    message, no note."""
+    from datetime import datetime, timezone
+
+    occ = hint_occasions_mod.collect(
+        ctx.corpus,
+        ctx.config,
+        config_dir=ctx.config_dir,
+        thresholds=ctx.thresholds,
+        since=ctx.start,
+        until=datetime.now(timezone.utc),
+        mod_events=ctx.mod_events,
+        claude_root=ctx.claude_root,
+    )
+    if occ is None:
+        return None
+    return {
+        "on_hours": occ.on_hours,
+        "hints": {hint: {key: getattr(count, key) for key in _HINT_COUNT_KEYS} for hint, count in occ.hints.items()},
+        "muted": list(occ.muted),
+        "silent": list(hint_occasions_mod.silent(occ)),
+    }
+
+
+def _hint_occasions_lines(block: dict) -> list[str]:
+    """The plain lines for the ``hint_occasions`` block: each hint that had a
+    moment or a note, the sessions the mod may have shown tips in, the
+    sessions left out of status checks and what the Capture page would say."""
+    labels = hint_occasions_mod.LABELS
+    rows = block["hints"]
+    lines = [
+        f"Coaching moment, {labels[hint]}: {_n(row['sessions'], 'session')} had one, "
+        f"and {row['noted']:,} of them got a tip."
+        for hint, row in rows.items()
+        if row["sessions"] or row["notes"]
+    ]
+    if not lines:
+        lines.append("Coaching moments: none in the window.")
+    mod = sum(row["mod_sessions"] for row in rows.values())
+    if mod:
+        lines.append(f"{_n(mod, 'more session')} had the mod running, which may show these tips itself.")
+    older = rows["status_poll"]["older"]
+    if older:
+        lines.append(
+            f"{_n(older, 'session')} left out of status checks: an older version read them and their transcripts are gone."
+        )
+    if block["silent"]:
+        lines.append(
+            f"The Capture page would say no tip came for {' and '.join(labels[hint] for hint in block['silent'])}."
+        )
+    return lines
+
+
+# -- figures (K1 group 3) ---------------------------------------------------------------------
+
+#: Where a reply ran: ``cost_centres.CENTRES`` without ``start``, so a main session's first reply
+#: counts with its own place.
+PLACES = ("main", "direct", "workflow")
+#: The context a reply read: under 100,000; 100,000 to 200,000; over 200,000.
+CONTEXT_SIZES = ("under_100k", "to_200k", "over_200k")
+_CONTEXT_BOUNDS = (99_999, 200_000)
+#: How many tokens the context grew from one reply to the next.
+GROWTH_SIZES = ("to_500", "to_1k", "to_2k", "to_5k", "to_10k", "to_20k", "to_50k", "over_50k")
+_GROWTH_BOUNDS = (500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000)
+#: How many replies followed a summary before the next one, or before the session ended.
+FOLLOWED = ("to_10", "to_20", "to_50", "to_100", "to_200", "over_200")
+_FOLLOWED_BOUNDS = (10, 20, 50, 100, 200)
+#: How many replies answered a message: 0 to 9, 10 to 29, 30 to 99, 100 or more.
+STRETCHES = ("under_10", "to_30", "to_100", "over_100")
+_STRETCH_BOUNDS = (9, 29, 99)
+#: What the reply before a cold return left in the context: under 150,000 and up.
+RETURN_SIZES = ("under_150k", "to_200k", "to_300k", "to_500k", "over_500k")
+_RETURN_BOUNDS = (149_999, 200_000, 300_000, 500_000)
+#: The weeks the models part keeps amounts for: the latest weeks with any reply, the same weeks for
+#: every model.
+FIGURE_WEEKS = 8
+#: The most models the models part names: the dearest ``MODELS_KEPT - 1``, and ``other`` for the rest.
+MODELS_KEPT = 8
+#: The rate card ClaudeGlass ships, never the user's own, and the ids of its rows: the only model ids a
+#: document may name, and ``other``.
+_PACKAGED = pricing_mod.load_packaged_pricing()
+MODEL_WORDS = (*sorted(pricing_mod.load_packaged_pricing().models), "other")
+
+
+def _model_word(model: str | None) -> str:
+    """A model id as a word of ``MODEL_WORDS``: the packaged card's id it resolves to (an alias, a
+    ``[1m]``, a Bedrock or Vertex form and a dated id are their row's id), else ``other`` (no row, or a
+    newer release the card prices as an older one, ``ResolvedRates.newer_version``)."""
+    resolved = _PACKAGED.resolve_model(model)
+    return "other" if resolved is None or resolved.newer_version else resolved.canonical_id
+
+
+_REPLY_CELL = Obj(
+    {
+        "replies": Count(),
+        "cost_usd": Num(),
+        "sonnet_usd": Num(),
+        "measured_replies": Count(),
+        "lookups": Count(),
+        "lookup_usd": Num(),
+        "lookup_sonnet_usd": Num(),
+    },
+    required=("replies", "measured_replies", "lookups"),
+)
+_AFTER_SIDE = _counts("messages", "corrections", "tagged", "fixes")
+_FIGURES = Obj(
+    {
+        "reply_cost": Map(PLACES, Map(CONTEXT_SIZES, _REPLY_CELL)),
+        "growth": Obj(
+            {
+                "by_reply": Map(GROWTH_SIZES, _counts("replies", "tokens")),
+                "by_session": Map(GROWTH_SIZES, _counts("sessions", "replies")),
+                "shrinks": Count(),
+            },
+            required=("by_reply", "by_session", "shrinks"),
+        ),
+        "summaries": Obj(
+            {
+                "summaries": Count(),
+                "auto": Count(),
+                "sized": Count(),
+                "pre_tokens": Count(),
+                "post_tokens": Count(),
+                "unmeasured": Count(),
+                "followed_to_next": _count_map(FOLLOWED),
+                "followed_to_end": _count_map(FOLLOWED),
+                "request_usd": Num(),
+                "write_usd": Num(),
+                "read_saving_usd": Num(),
+                "paid_back": Count(),
+            },
+            required=(
+                "summaries", "auto", "sized", "pre_tokens", "post_tokens", "unmeasured", "followed_to_next",
+                "followed_to_end",
+            ),
+        ),
+        "after_summary": Obj(
+            {
+                "sessions": Count(),
+                "unmeasured": Count(),
+                "stretches": Map(STRETCHES, Obj({"summarised": _AFTER_SIDE, "plain": _AFTER_SIDE})),
+            },
+            required=("sessions", "unmeasured", "stretches"),
+        ),
+        "models": Map(
+            MODEL_WORDS,
+            Obj(
+                {"replies": Count(), "cost_usd": Num(), "weekly_usd": Map(Weeks(), Num(), limit=FIGURE_WEEKS)},
+                required=("replies",),
+            ),
+            limit=MODELS_KEPT,
+        ),
+        "returns": Map(
+            RETURN_SIZES,
+            Obj(
+                {
+                    "returns": Count(),
+                    "context_tokens": Count(),
+                    "rewritten_tokens": Count(),
+                    "rebuilt": Count(),
+                    "rewrite_usd": Num(),
+                },
+                required=("returns", "context_tokens", "rewritten_tokens", "rebuilt"),
+            ),
+        ),
+    }
+)
+
+
+@_block("figures", _FIGURES, required=False)
+def _figures(ctx: _Ctx) -> dict | None:
+    """The figures the plan's decisions rest on, which no page shows (K1 group 3): cost per reply by
+    where it ran and the context it read, context growth per reply, what a summary cost and saved and
+    the replies that followed it, corrections after a summary against messages after as long a stretch
+    without one, spend by model and week, and the cold returns by the context they came back to.
+    Counts, token sums and list-price amounts; a model is a packaged rate card id or ``other``."""
+    if not ctx.sessions:
+        return None
+    reply_cost, models = _figure_spend(ctx)
+    parts = {
+        "reply_cost": reply_cost,
+        "growth": _figure_growth(ctx),
+        "summaries": _figure_summaries(ctx),
+        "after_summary": _figure_after_summary(ctx),
+        "models": models,
+        "returns": _figure_returns(ctx),
+    }
+    block = {name: part for name, part in parts.items() if part}
+    return block or None
+
+
+def _after_summary(turn) -> bool:
+    """Whether a summary was applied just before this reply (the marker of the boundary)."""
+    return EventKind.COMPACT_BOUNDARY in turn.preceding_event_kinds
+
+
+def _figure_spend(ctx: _Ctx) -> tuple[dict, dict]:
+    """The ``reply_cost`` and ``models`` parts, in one pass that prices each turn once. A reply is a
+    turn with ``turn_index > 0``, not synthetic and with a context, which leaves out the estimated
+    summary request and any zero-usage copy a digest from before parser 45 holds. ``models`` takes every
+    priced turn, the summary requests too, as the report's usage by week does. Without a rate card the
+    amounts, and the weeks that hang on them, are left out and the counts stay."""
+    pricing = ctx.pricing
+    sonnet_id = pricing.aliases.get("sonnet") if pricing is not None else None
+    sonnet = pricing.models.get(sonnet_id) if sonnet_id else None
+    cells: dict[str, dict[str, Counter]] = {}
+    models: dict[str, dict] = {}
+    for s in ctx.sessions:
+        for tr in (s.top, *s.subs):
+            place = cost_centres_mod._centre_of(tr)
+            gauged = measured.measures(tr, "shell_read_count")
+            for turn in tr.turns:
+                if turn.turn_index <= 0:
+                    continue
+                cost = price_turn(turn, pricing.resolve_model(turn.model)).total if pricing is not None else 0.0
+                entry = models.setdefault(_model_word(turn.model), {"replies": 0, "cost": 0.0, "weeks": Counter()})
+                entry["cost"] += cost
+                if not turn.is_synthetic:
+                    entry["replies"] += 1
+                week = _iso_week(habits_mod._week(capture_mod._moment(turn.ts), ctx.config.tz))
+                # A week counts for a model when it had a reply there, priced or not: a model the card
+                # has no row for costs 0 but still ran, and must not read as unused.
+                if week and (cost or not turn.is_synthetic):
+                    entry["weeks"][week] += cost
+                if turn.is_synthetic or turn.ctx <= 0:
+                    continue
+                cell = cells.setdefault(place, {}).setdefault(_bucket(turn.ctx, _CONTEXT_BOUNDS, CONTEXT_SIZES), Counter())
+                at_sonnet = price_turn(turn, sonnet).total if sonnet is not None else 0.0
+                cell["replies"] += 1
+                cell["cost"] += cost
+                cell["sonnet"] += at_sonnet
+                if gauged:
+                    cell["measured"] += 1
+                    if habits_mod._is_probe(turn):
+                        cell["lookups"] += 1
+                        cell["lookup"] += cost
+                        cell["lookup_sonnet"] += at_sonnet
+    reply_cost: dict = {}
+    for place in PLACES:
+        row: dict = {}
+        for size in CONTEXT_SIZES:
+            cell = cells.get(place, {}).get(size)
+            if not cell:
+                continue
+            item = {"replies": cell["replies"], "measured_replies": cell["measured"], "lookups": cell["lookups"]}
+            if pricing is not None:
+                item["cost_usd"] = _num(cell["cost"])
+                item["lookup_usd"] = _num(cell["lookup"])
+                if sonnet is not None:
+                    item["sonnet_usd"] = _num(cell["sonnet"])
+                    item["lookup_sonnet_usd"] = _num(cell["lookup_sonnet"])
+            row[size] = item
+        if row:
+            reply_cost[place] = row
+    # The dearest MODELS_KEPT - 1 named models; every other word folds into "other".
+    ranked = sorted(
+        (word for word in models if word != "other"),
+        key=lambda word: (-models[word]["cost"], -models[word]["replies"], word),
+    )
+    kept = ranked[: MODELS_KEPT - 1]
+    folded = [word for word in models if word not in kept]
+    # The latest FIGURE_WEEKS weeks with any reply, the same weeks for every model.
+    recent = set(sorted({week for entry in models.values() for week in entry["weeks"]})[-FIGURE_WEEKS:])
+    out: dict = {}
+    for word in MODEL_WORDS:
+        if word not in kept and not (word == "other" and folded):
+            continue
+        group = [word] if word != "other" else folded
+        replies = sum(models[w]["replies"] for w in group)
+        cost = sum(models[w]["cost"] for w in group)
+        if not replies and not cost:
+            continue
+        item = {"replies": replies}
+        if pricing is not None:
+            weeks: Counter = Counter()
+            for w in group:
+                weeks.update(models[w]["weeks"])
+            item["cost_usd"] = _num(cost)
+            item["weekly_usd"] = {week: _num(weeks[week]) for week in sorted(weeks) if week in recent}
+        out[word] = item
+    return reply_cost, out
+
+
+def _figure_growth(ctx: _Ctx) -> dict | None:
+    """How much the context grew from one reply to the next in the main sessions (a scheduled one is
+    left out): the rises by size, the sessions by their mean rise, and the falls. The reply after a
+    summary, and the one after the estimated request that wrote it, have no rise: the context was
+    replaced. A fall is a ``/clear`` or a summary the markers missed."""
+    by_reply = {word: [0, 0] for word in GROWTH_SIZES}
+    by_session = {word: [0, 0] for word in GROWTH_SIZES}
+    shrinks = 0
+    for s in ctx.sessions:
+        if scheduled_main_session(s.top):
+            continue
+        previous = None
+        count = total = 0
+        for turn in s.top.turns:
+            if turn.turn_index <= 0:
+                continue
+            if turn.is_synthetic:
+                if turn.estimated == "compaction":
+                    previous = None
+                continue
+            if turn.ctx <= 0:
+                continue
+            if previous is not None and not _after_summary(turn):
+                delta = turn.ctx - previous.ctx
+                if delta < 0:
+                    shrinks += 1
+                else:
+                    cell = by_reply[_bucket(delta, _GROWTH_BOUNDS, GROWTH_SIZES)]
+                    cell[0] += 1
+                    cell[1] += delta
+                    count += 1
+                    total += delta
+            previous = turn
+        if count:
+            cell = by_session[_bucket(total / count, _GROWTH_BOUNDS, GROWTH_SIZES)]
+            cell[0] += 1
+            cell[1] += count
+    if not shrinks and not any(cell[0] for cell in by_reply.values()):
+        return None
+    return {
+        "by_reply": {word: {"replies": cell[0], "tokens": cell[1]} for word, cell in by_reply.items() if cell[0]},
+        "by_session": {word: {"sessions": cell[0], "replies": cell[1]} for word, cell in by_session.items() if cell[0]},
+        "shrinks": shrinks,
+    }
+
+
+def _figure_summaries(ctx: _Ctx) -> dict | None:
+    """What the main sessions' summaries cost, what they saved and how many replies followed them. The
+    records are the ``compactions`` block's own. A session whose digest is from before the summary
+    request was measured (``measured``) adds its records to ``unmeasured`` and nothing else. The saving
+    is what each later reply reads less, at the session's dominant model's cache-read rate. A summary
+    paid back when the replies that followed it reach the mean break-even: the request and the cache
+    written after it, over what one reply saves."""
+    stats, _main_cost = ctx.compactions
+    # ``ctx.compactions`` folds the sessions in ``ctx.sessions``' order, each main transcript before its
+    # agents', and makes one record per boundary of a transcript in order (none for a scheduled one). So a
+    # session id two bundles share (a project folder copied, or read from two roots) holds each bundle's
+    # records one after the other, and each takes its own off the front of the list.
+    records: dict[str, list] = {}
+    for record in stats.records:
+        if record.kind not in compaction_mod.AGENT_KINDS:
+            records.setdefault(record.session_id, []).append(record)
+    pricing = ctx.pricing
+    count = auto = sized = pre = post = unmeasured = 0
+    request = write = saving = 0.0
+    to_next: Counter = Counter()
+    to_end: Counter = Counter()
+    followed_all: list[int] = []
+    for s in ctx.sessions:
+        top = s.top
+        if scheduled_main_session(top):
+            continue
+        priced = compaction_mod._priced_turns(top)
+        starts = [i for _event, i in compaction_mod._correlate_compactions_to_turn_index(top, priced)]
+        ahead = records.get(top.meta.session_id, [])
+        found, ahead[: len(starts)] = ahead[: len(starts)], []
+        if not found:
+            continue
+        if not measured.measures(top, "estimated"):
+            unmeasured += len(found)
+            continue
+        model = _dominant_transcript_model(top)
+        rates = pricing.resolve_model(model) if pricing is not None and model else None
+        if pricing is not None:
+            request += sum(
+                price_turn(t, pricing.resolve_model(t.model)).total for t in top.turns if t.estimated == "compaction"
+            )
+        read_rate = rates.rates.cache_read / 1_000_000 if rates is not None else 0.0
+        for k, record in enumerate(found):
+            count += 1
+            auto += int(record.trigger == "auto")
+            if record.next_turn_write_cost is not None and compaction_mod._join_is_tight(record):
+                write += record.next_turn_write_cost
+            closed = k + 1 < len(found)
+            if starts[k] is None:
+                followed = 0
+            else:
+                end = (starts[k + 1] if starts[k + 1] is not None else len(priced)) if closed else len(priced)
+                followed = max(0, end - starts[k])
+            (to_next if closed else to_end)[_bucket(followed, _FOLLOWED_BOUNDS, FOLLOWED)] += 1
+            followed_all.append(followed)
+            if record.pre_tokens is not None and record.post_tokens is not None:
+                sized += 1
+                pre += record.pre_tokens
+                post += record.post_tokens
+                saving += max(0, record.pre_tokens - record.post_tokens) * read_rate
+    if not count and not unmeasured:
+        return None
+    block: dict = {
+        "summaries": count,
+        "auto": auto,
+        "sized": sized,
+        "pre_tokens": pre,
+        "post_tokens": post,
+        "unmeasured": unmeasured,
+        "followed_to_next": _tally(to_next, FOLLOWED),
+        "followed_to_end": _tally(to_end, FOLLOWED),
+    }
+    if pricing is not None:
+        block["request_usd"] = _num(request)
+        block["write_usd"] = _num(write)
+        block["read_saving_usd"] = _num(saving)
+        if count and sized and saving > 0:
+            even = ((request + write) / count) / (saving / sized)
+            block["paid_back"] = sum(1 for followed in followed_all if followed >= even)
+    return block
+
+
+def _summary_in(turn) -> bool:
+    """Whether a summary fell at this reply: its estimated request, or the reply that follows the boundary."""
+    return turn.estimated == "compaction" or _after_summary(turn)
+
+
+def _figure_after_summary(ctx: _Ctx) -> dict | None:
+    """Corrections after a summary, against messages after as long a stretch without one. The unit is
+    the message that ends a stretch of work: the stretch is the replies to the message before it, and
+    it is ``summarised`` when a summary fell in it. A message reads as a correction by the rule of
+    ``tags.shift`` (the parser's flag, or one queued while Claude worked); ``tagged`` and ``fixes``
+    are the shift word the cycle settled on, where capture is on. The main sessions that summarised at
+    least once, a scheduled one left out; one whose digest is from before the flags were measured is
+    counted in ``unmeasured`` and nothing else. A comparison of rates, which proves nothing alone."""
+    cells = {word: {"summarised": Counter(), "plain": Counter()} for word in STRETCHES}
+    sessions = unmeasured = 0
+    for s in ctx.sessions:
+        top = s.top
+        if scheduled_main_session(top) or not compaction_mod._compaction_events(top):
+            continue
+        if not measured.measures(top, "estimated", "queued_correction"):
+            unmeasured += 1
+            continue
+        sessions += 1
+        for previous, cycle in zip(s.cycles, s.cycles[1:]):
+            stretch = sum(1 for t in previous.turns if not t.is_synthetic)
+            summarised = any(_summary_in(t) for t in previous.turns[1:]) or _summary_in(cycle.turns[0])
+            row = cells[_bucket(stretch, _STRETCH_BOUNDS, STRETCHES)]["summarised" if summarised else "plain"]
+            row["messages"] += 1
+            row["corrections"] += int(
+                bool(cycle.turns[0].human_correction or any(t.queued_correction for t in cycle.turns))
+            )
+            settled = cycle.settled
+            if settled is not None and settled.shift:
+                row["tagged"] += 1
+                row["fixes"] += int(settled.shift in ("redo", "fix"))
+    if not sessions and not unmeasured:
+        return None
+    return {
+        "sessions": sessions,
+        "unmeasured": unmeasured,
+        "stretches": {
+            word: {
+                side: {key: int(row[key]) for key in ("messages", "corrections", "tagged", "fixes")}
+                for side, row in sides.items()
+                if row["messages"]
+            }
+            for word, sides in cells.items()
+            if any(row["messages"] for row in sides.values())
+        },
+    }
+
+
+def _figure_returns(ctx: _Ctx) -> dict | None:
+    """The cold returns of ``_breaks``, by the context the reply before each left: how many, the
+    context they came back to, the tokens written again and what writing them cost, and how many of
+    them ``recache.detect`` also flags as a rebuild. The sums equal ``pieces.cold_returns``."""
+    thresholds = recache.RecacheThresholds.from_config(ctx.config.thresholds)
+    flagged: dict[int, set[str]] = {}
+    cells = {word: Counter() for word in RETURN_SIZES}
+    cost = {word: 0.0 for word in RETURN_SIZES}
+    for s, kind, last, turn in _break_turns(ctx):
+        if kind != "cold":
+            continue
+        if id(s) not in flagged:
+            flagged[id(s)] = {t.message_id for t in recache.detect(s.top.turns, thresholds)}
+        left = last.ctx + last.output_tokens
+        word = _bucket(left, _RETURN_BOUNDS, RETURN_SIZES)
+        cells[word]["returns"] += 1
+        cells[word]["context_tokens"] += left
+        cells[word]["rewritten_tokens"] += turn.cache_creation_tokens
+        cells[word]["rebuilt"] += int(turn.message_id in flagged[id(s)])
+        if ctx.pricing is not None:
+            cost[word] += price_turn(turn, ctx.pricing.resolve_model(turn.model)).cache_write_cost
+    out: dict = {}
+    for word in RETURN_SIZES:
+        if not cells[word]["returns"]:
+            continue
+        item = {key: int(cells[word][key]) for key in ("returns", "context_tokens", "rewritten_tokens", "rebuilt")}
+        if ctx.pricing is not None:
+            item["rewrite_usd"] = _num(cost[word])
+        out[word] = item
+    return out or None
+
+
+_CONTEXT_WORDS = {"under_100k": "under 100K tokens of context", "to_200k": "from 100K to 200K", "over_200k": "over 200K"}
+_RETURN_WORDS = {
+    "under_150k": "under 150K", "to_200k": "to 200K", "to_300k": "to 300K", "to_500k": "to 500K", "over_500k": "over 500K",
+}  # fmt: skip
+#: The sessions whose mean rise a reply is over 10,000 tokens.
+_FAST_GROWTH = ("to_20k", "to_50k", "over_50k")
+
+
+def _model_label(word: str) -> str:
+    return "other models" if word == "other" else pricing_mod.model_name(word)
+
+
+def _lookup_mean(reply_cost: dict, places: tuple[str, ...], key: str) -> float | None:
+    """The mean ``key`` amount of the lookups in ``places``, ``None`` with no lookup or a cell without it."""
+    cells = [cell for place in places for cell in (reply_cost.get(place) or {}).values()]
+    lookups = sum(cell["lookups"] for cell in cells)
+    if not lookups or not all(key in cell for cell in cells):
+        return None
+    return sum(cell[key] for cell in cells) / lookups
+
+
+def _figures_lines(block: dict) -> list[str]:
+    lines: list[str] = []
+    reply_cost = block.get("reply_cost") or {}
+    for place in PLACES:
+        row = reply_cost.get(place) or {}
+        parts = [
+            f"{_usd(row[size]['cost_usd'] / row[size]['replies'])} {_CONTEXT_WORDS[size]}"
+            for size in CONTEXT_SIZES
+            if size in row and "cost_usd" in row[size] and row[size]["replies"]
+        ]
+        if parts:
+            lines.append(f"Cost per reply, {cost_centres_mod.CENTRE_LABELS[place].lower()}: {_list(parts)}.")
+    in_agents = ("direct", "workflow")
+    main, agent = _lookup_mean(reply_cost, ("main",), "lookup_usd"), _lookup_mean(reply_cost, in_agents, "lookup_usd")
+    if main and agent:
+        line = f"One read-only lookup cost {_usd(main)} a reply in the main session and {_usd(agent)} in an agent"
+        main_sonnet = _lookup_mean(reply_cost, ("main",), "lookup_sonnet_usd")
+        agent_sonnet = _lookup_mean(reply_cost, in_agents, "lookup_sonnet_usd")
+        both = f", or {_usd(main_sonnet)} and {_usd(agent_sonnet)} at Sonnet's rates" if main_sonnet and agent_sonnet else ""
+        lines.append(f"{line}{both}.")
+    growth = block.get("growth") or {}
+    replies = sum(cell["replies"] for cell in (growth.get("by_reply") or {}).values())
+    if replies:
+        tokens = sum(cell["tokens"] for cell in growth["by_reply"].values())
+        lines.append(
+            f"Context grew by {_n(round(tokens / replies), 'token')} a reply on average in the main session, "
+            f"over {_n(replies, 'reply', 'replies')}."
+        )
+        fast = sum(growth["by_session"].get(word, {}).get("sessions", 0) for word in _FAST_GROWTH)
+        if fast:
+            lines.append(f"{_n(fast, 'session')} grew by over 10,000 tokens a reply on average.")
+    summaries = block.get("summaries") or {}
+    if (
+        summaries.get("summaries")
+        and summaries.get("sized")
+        and summaries.get("read_saving_usd", 0) > 0
+        and "request_usd" in summaries
+        and "write_usd" in summaries
+    ):
+        cost = (summaries["request_usd"] + summaries["write_usd"]) / summaries["summaries"]
+        saved = summaries["read_saving_usd"] / summaries["sized"]
+        lines.append(
+            f"Each summary cost about {_usd(cost)} and saved {_usd(saved)} on every later reply, "
+            f"so it paid back after about {_n(round(cost / saved), 'reply', 'replies')}."
+        )
+        if "paid_back" in summaries:
+            many = summaries["summaries"]
+            lines.append(
+                f"{summaries['paid_back']:,} of {_n(many, 'summary', 'summaries')} "
+                f"{'was' if many == 1 else 'were'} followed by that many replies."
+            )
+    if summaries.get("unmeasured"):
+        lines.append(
+            f"{_n(summaries['unmeasured'], 'summary', 'summaries')} left out of these figures: "
+            "an older version read their sessions."
+        )
+    after = block.get("after_summary") or {}
+    both_sides = [sides for sides in (after.get("stretches") or {}).values() if "summarised" in sides and "plain" in sides]
+    after_messages = sum(sides["summarised"]["messages"] for sides in both_sides)
+    plain_messages = sum(sides["plain"]["messages"] for sides in both_sides)
+    if after_messages and plain_messages:
+        lines.append(
+            f"After a summary, {sum(sides['summarised']['corrections'] for sides in both_sides):,} of "
+            f"{_n(after_messages, 'next message')} read as a correction, against "
+            f"{sum(sides['plain']['corrections'] for sides in both_sides):,} of {plain_messages:,} "
+            "after a stretch as long without one."
+        )
+    models = block.get("models") or {}
+    if any("cost_usd" in entry for entry in models.values()):
+        ranked = sorted(models.items(), key=lambda kv: (-kv[1].get("cost_usd", 0.0), kv[0]))
+        spend = [f"{_model_label(word)} {_usd(entry.get('cost_usd', 0.0))}" for word, entry in ranked[:5]]
+        lines.append(f"Spend by model: {_list(spend)}.")
+        weeks = {week for entry in models.values() for week in entry.get("weekly_usd", {})}
+        idle = [
+            _model_label(word) for word, entry in ranked if word != "other" and "weekly_usd" in entry and not entry["weekly_usd"]
+        ]
+        if weeks and idle:
+            lines.append(f"Not used in the file's last {_n(len(weeks), 'week')}: {_list(idle)}.")
+    returns = block.get("returns") or {}
+    if returns:
+        parts = [f"{returns[word]['returns']:,} {_RETURN_WORDS[word]}" for word in RETURN_SIZES if word in returns]
+        lines.append(f"Cold returns by context: {_list(parts)}.")
+    return lines
+
+
+# -- outcomes (VF1) ---------------------------------------------------------------------------
+
+#: The settings a profile can change, named as a profile names them with the one dot of
+#: ``experimental.cacheTtl`` written as an underscore (a closed word is never a path); every other key
+#: counts as ``other``.
+OUTCOME_LEVERS = (
+    *sorted(
+        key.replace(".", "_")
+        for key in set(profile_schema.SETTINGS_ALLOWLIST) | set(profile_schema.AGENT_ALLOWLIST)
+    ),
+    "other",
+)
+#: The most (rule, agent) rows and (lever, agent) rows the block keeps; ``landed`` still counts the rest.
+OUTCOME_CARD_ROWS = 8
+OUTCOME_LEVER_ROWS = 4
+
+
+@dataclass(frozen=True)
+class OutcomeInputs:
+    """What ``build`` reads for the ``outcomes`` block: the dashboard's
+    ``card_marks`` rows (``read_card_marks``), the store's logged predictions
+    (``read_predictions``), the project folders the export covers and whether
+    it covers every project."""
+
+    card_rows: list
+    predictions: list
+    folders: frozenset
+    every_project: bool
+
+
+_OUTCOME_AMOUNTS = ("predicted_usd", "saved_usd", "lost_usd")
+_OUTCOME_COUNTS = ("landed", "measured", "half_or_more", "too_little_data", "guard_holds", "guard_worse")
+_OUTCOME_ROW_FIELDS: dict[str, Node] = {
+    "agent": Word(CARD_AGENTS),
+    **{name: Count() for name in _OUTCOME_COUNTS},
+    **{name: Num() for name in _OUTCOME_AMOUNTS},
+}
+_OUTCOME_CARD = Obj({"rule": Word(CARD_RULES), **_OUTCOME_ROW_FIELDS}, required=("rule", "agent", *_OUTCOME_COUNTS))
+_OUTCOME_LEVER = Obj(
+    {"lever": Word(OUTCOME_LEVERS), **_OUTCOME_ROW_FIELDS}, required=("lever", "agent", *_OUTCOME_COUNTS)
+)
+
+
+@dataclass
+class _Fix:
+    """One fix to read: whether it is a card or a profile change, the rule or
+    setting word and class of agent it is counted under, the change point it
+    turned into, the lever it names and what its card or profile predicted."""
+
+    kind: str
+    name: str
+    agent: str
+    point: change_points_mod.ChangePoint
+    lever: tuple
+    prediction: outcomes_mod.Prediction
+    rank: int = 0
+
+
+def _outcome_row_in_view(row: dict, inputs: OutcomeInputs) -> bool:
+    """Whether a card row belongs to the export's projects: an every-project row
+    with every project, a project row with a folder the export covers (as the
+    ``cards`` block counts them)."""
+    if row.get("project") == ignores_mod.ALL_PROJECTS:
+        return inputs.every_project
+    return bool(set(row.get("folders") or ()) & inputs.folders)
+
+
+def _outcome_rows(readings: list, name: str, limit: int) -> list[dict]:
+    """The rows of one kind of fix, grouped by ``(word, agent class)``, the most
+    landed first, cut to ``limit``. The three amounts are written only for a row
+    with a measured fix."""
+    groups: dict[tuple[str, str], list] = {}
+    for fix, reading in readings:
+        groups.setdefault((fix.name, fix.agent), []).append(reading)
+    out = []
+    for (word, agent), group in groups.items():
+        measured = [r for r in group if r.verdict in ("half_or_more", "under_half")]
+        item = {
+            name: word,
+            "agent": agent,
+            "landed": len(group),
+            "measured": len(measured),
+            "half_or_more": sum(1 for r in group if r.verdict == "half_or_more"),
+            "too_little_data": sum(1 for r in group if r.verdict == "too_little_data"),
+            "guard_holds": sum(1 for r in group if r.guard == "holds"),
+            "guard_worse": sum(1 for r in group if r.guard == "worse"),
+        }
+        if measured:
+            gains = [r.measured_usd for r in measured]
+            item["predicted_usd"] = _num(sum(r.predicted_usd for r in measured))
+            item["saved_usd"] = _num(sum(g for g in gains if g > 0))
+            item["lost_usd"] = _num(sum(-g for g in gains if g < 0))
+        out.append(item)
+    out.sort(key=lambda item: (-item["landed"], item[name], item["agent"]))
+    return out[:limit]
+
+
+@_block(
+    "outcomes",
+    Obj(
+        {
+            "landed": Count(),
+            "short_export": Count(),
+            "controls": _counts("judged", "worse"),
+            "cards": Arr(_OUTCOME_CARD, limit=OUTCOME_CARD_ROWS),
+            "levers": Arr(_OUTCOME_LEVER, limit=OUTCOME_LEVER_ROWS),
+        },
+        required=("landed", "short_export", "controls", "cards", "levers"),
+    ),
+    required=False,
+)
+def _outcomes(ctx: _Ctx) -> dict | None:
+    """What became of the fixes that landed (``outcomes``): the cards the
+    dashboard showed whose settings moved, and the profile changes whose
+    estimate was logged, each matched to the change it turned into. Rows of
+    several views of one card are one fix. Each fix is read once
+    (``outcomes.read_fix``): how many landed, were measured against what the
+    card or profile estimated (and how many saved at least half), had too
+    little data, and whether the main session's corrections and rework held, by
+    rule or setting and class of agent; with the amounts over the measured
+    ones. ``controls`` is how often the same check read ``worse`` a fortnight
+    earlier, where nothing was changed, and ``short_export`` how many fixes
+    landed too soon after the window's start to have a before side. Left out
+    when there is no dashboard store to read, or nothing landed and nothing was
+    predicted: the corpus is not read then. Counts, amounts and fixed words
+    only: no card key, project, agent name, setting value, time or ratio
+    reaches the document, and neither does the figure a saving was priced on."""
+    inputs = ctx.outcomes
+    if inputs is None:
+        return None
+    rows = [
+        row for row in inputs.card_rows
+        if row.get("landed_at") and row.get("changes") and _outcome_row_in_view(row, inputs)
+    ]
+    predictions = [p for p in inputs.predictions if p.get("source") == "whatif"]
+    if not rows and not predictions:
+        return None
+    points = change_points_mod.change_points(ctx.config_dir, ctx.corpus) if ctx.config_dir else []
+    fixes: dict[tuple, _Fix] = {}
+    for row in rows:
+        landed = snapshots_mod._parse_ts(row.get("landed_at"))
+        levers = [
+            outcomes_mod.lever_of(change) for change in row["changes"] if isinstance(change, dict) and change.get("key")
+        ]
+        if landed is None or not levers:
+            continue
+        view_keys = (
+            set()
+            if row.get("project") == ignores_mod.ALL_PROJECTS
+            else {key for folder in row.get("folders") or () for key in snapshots_mod.snapshot_project_keys(folder)}
+        )
+        point = outcomes_mod.match_point(levers, view_keys, landed, points)
+        if point is None or point.ts < ctx.start:
+            continue
+        rule = row.get("rule_id")
+        word = rule if rule in CARD_RULES else "other"
+        agent_type = row.get("agent_type")
+        fix = _Fix(
+            "card", word, _card_agent(agent_type), point, outcomes_mod.lever_for(levers),
+            outcomes_mod.Prediction(row.get("saving_usd"), row.get("priced_on")), outcomes_mod.view_rank(point, view_keys),
+        )
+        # Rows of several views that match one change point are one fix: the row whose view is the
+        # point's own is the one read, else the every-project row; the first of equals wins.
+        ident = ("card", *outcomes_mod.fix_key(word, agent_type, point))
+        if ident not in fixes or fix.rank > fixes[ident].rank:
+            fixes[ident] = fix
+    export_keys = {key for folder in inputs.folders for key in snapshots_mod.snapshot_project_keys(folder)}
+    for prediction in predictions:
+        point = backtest_mod._match_point(prediction, points)
+        if point is None or point.ts < ctx.start:
+            continue
+        if not (inputs.every_project or not point.project or point.project in export_keys):
+            continue
+        measure_key = prediction.get("measure_key")
+        word = str(measure_key).replace(".", "_")
+        word = word if word in OUTCOME_LEVERS else "other"
+        agent = prediction.get("agent") or None
+        fix = _Fix(
+            "profile", word, _card_agent(agent), point, (agent, str(measure_key).split(".")[-1]),
+            outcomes_mod.Prediction(prediction.get("predicted_usd"), prediction.get("priced_on")),
+        )
+        fixes.setdefault(("profile", *outcomes_mod.fix_key(word, agent, point)), fix)
+    readings: list[tuple[_Fix, outcomes_mod.Reading]] = []
+    if fixes:
+        sessions = impact_mod.session_facts(ctx.corpus, ctx.pricing)
+        bundles = {bundle.session_id: bundle for bundle in ctx.corpus.sessions}
+        # The sides end at the window's end; its start is where a before side runs short.
+        end = discovery.local_midnight(ctx.today + timedelta(days=1), ctx.config.tz)
+        for fix in fixes.values():
+            agent, key = fix.lever
+            readings.append((
+                fix,
+                outcomes_mod.read_fix(
+                    fix.point, agent, key, fix.prediction, sessions, points, bundles, ctx.pricing, end, ctx.start
+                ),
+            ))
+    return {
+        "landed": len(readings),
+        "short_export": sum(1 for _fix, r in readings if r.short_export),
+        "controls": {
+            "judged": sum(1 for _fix, r in readings if r.control != "too_little_data"),
+            "worse": sum(1 for _fix, r in readings if r.control == "worse"),
+        },
+        "cards": _outcome_rows([item for item in readings if item[0].kind == "card"], "rule", OUTCOME_CARD_ROWS),
+        "levers": _outcome_rows([item for item in readings if item[0].kind == "profile"], "lever", OUTCOME_LEVER_ROWS),
+    }
+
+
+def _outcomes_lines(block: dict) -> list[str]:
+    landed = block["landed"]
+    if not landed:
+        return ["Fixes that landed: none in this window."]
+    rows = [*block["cards"], *block["levers"]]
+
+    def total(key: str) -> float:
+        return sum(row.get(key, 0) for row in rows)
+
+    measured, half = int(total("measured")), int(total("half_or_more"))
+    waiting = int(total("too_little_data"))
+    # The fixes the rows count that were neither measured nor waiting for sessions: not measurable here.
+    cannot = int(total("landed")) - measured - waiting
+    shown = int(total("landed"))
+    if shown < landed:
+        # The rows are cut: the counts below are of the fixes they hold, not of every fix that landed.
+        lead = f"Of the {shown:,} this file breaks down, "
+        if measured:
+            tail = lead + (
+                f"{measured:,} {'was' if measured == 1 else 'were'} measured and {half:,} saved at least half "
+                "of what was estimated."
+            )
+        elif not cannot:
+            tail = lead + "none has had enough sessions on both sides to measure yet."
+        elif not waiting:
+            tail = lead + "none can be measured from your sessions."
+        else:
+            tail = lead + (
+                f"none is measured yet: {_n(waiting, 'fix needs', 'fixes need')} more sessions, "
+                f"and {cannot:,} can't be measured."
+            )
+    elif measured:
+        tail = f"Measured so far: {measured:,}, of which {half:,} saved at least half of what the card or profile estimated."
+    elif not cannot:
+        tail = "None has had enough sessions on both sides to measure yet."
+    elif not waiting:
+        tail = "None of them can be measured from your sessions."
+    else:
+        tail = f"None is measured yet: {_n(waiting, 'fix needs', 'fixes need')} more sessions, and {cannot:,} can't be measured."
+    lines = [f"Fixes that landed: {landed:,}. {tail}"]
+    short = block["short_export"]
+    if short:
+        lines.append(
+            f"{_n(short, 'fix', 'fixes')} landed too soon after this window's start to measure. "
+            f"Export more days to read {'it' if short == 1 else 'them'}."
+        )
+    left_out = landed - int(total("landed"))
+    if left_out > 0:
+        lines.append(
+            f"{_n(left_out, 'more fix is', 'more fixes are')} not broken down in this file, "
+            f"so the counts below leave {'it' if left_out == 1 else 'them'} out."
+        )
+    if measured:
+        net, estimated = total("saved_usd") - total("lost_usd"), total("predicted_usd")
+        lines.append(
+            f"Over the same work they saved {_usd(net)}, against {_usd(estimated)} estimated."
+            if net >= 0
+            else f"Over the same work they cost {_usd(-net)} more, against {_usd(estimated)} estimated."
+        )
+    holds, worse = int(total("guard_holds")), int(total("guard_worse"))
+    lines.append(
+        f"Corrections and rework after a fix: {holds:,} held, {worse:,} got worse, "
+        f"{int(total('landed')) - holds - worse:,} had too few sessions to tell."
+    )
+    controls = block["controls"]
+    if controls["judged"]:
+        lines.append(f"The same check at an earlier date read worse {controls['worse']:,} of {controls['judged']:,} times.")
+    return lines
+
+
+# -- capture checks (Q1 part G) ---------------------------------------------------------------
+
+_MOMENT_SIDE = _counts("answers", "evidence")
+_PIECE_SETUP = _counts("pieces", "reworked")
+_CAPTURE_CHECKS = Obj(
+    {
+        "lost": Obj(
+            {"cycles": Count(), "evidence": Count(), "yes": _MOMENT_SIDE, "no": _MOMENT_SIDE},
+            required=("cycles", "evidence", "yes", "no"),
+        ),
+        "breaks": Obj(
+            {
+                "cycles": Count(),
+                "reused": Count(),
+                "prior": Map(catalogue.TAG_VOCAB["prior"], _counts("answers", "reused")),
+            },
+            required=("cycles", "reused"),
+        ),
+        "check": Map(catalogue.TAG_VOCAB["check"], _counts("cycles", "redone")),
+        "level": Map(catalogue.TAG_VOCAB["level"], _counts("pieces", "reworked", "admitted")),
+        "level_effort": Map(catalogue.TAG_VOCAB["level"], Map(capture_checks_mod.EFFORTS, _PIECE_SETUP)),
+        "level_family": Map(catalogue.TAG_VOCAB["level"], Map(capture_checks_mod.FAMILIES, _PIECE_SETUP)),
+    }
+)
+
+
+@_block("capture_checks", _CAPTURE_CHECKS, required=False)
+def _capture_checks(ctx: _Ctx) -> dict | None:
+    """What the questions capture asks at a moment, and what Claude's words
+    were worth, as counts (Q1 part G). ``lost``: the cycles that answer a
+    summary, those with a file read again or a correction (the evidence of
+    ``capture_checks.lost_check``), and the same for each answer Claude gave.
+    ``breaks``: the messages that came back after an hour on 20,000 tokens,
+    those that read or edited a file touched before it, and each ``prior``
+    word given with its own reused count. ``check``: the messages that
+    changed something, by the check Claude said it ran, and how many were
+    redone. ``level``: the pieces of work by the hardest level Claude tagged,
+    with those reworked and those with an admitted mistake; ``level_effort``
+    and ``level_family`` split them by the effort and the model family most
+    of their turns had. Nothing here is a verdict: no group is big enough to
+    build a tip on. Left out when there is nothing to count; an empty map is
+    left out."""
+    h = ctx.habits
+    block: dict = {}
+    answers = h.summary_answers
+    if answers:
+        lost = capture_checks_mod.lost_check(answers)
+        block["lost"] = {
+            "cycles": len(answers),
+            "evidence": sum(answer.evidence for answer in answers),
+            "yes": {"answers": lost.yes, "evidence": lost.yes_evidence},
+            "no": {"answers": lost.no, "evidence": lost.no_evidence},
+        }
+    breaks = _break_answers(ctx)
+    if breaks:
+        by_prior: dict[str, dict[str, int]] = {}
+        for answer in breaks:
+            if answer.prior in catalogue.TAG_VOCAB["prior"]:
+                row = by_prior.setdefault(answer.prior, {"answers": 0, "reused": 0})
+                row["answers"] += 1
+                row["reused"] += int(answer.reused)
+        block["breaks"] = {"cycles": len(breaks), "reused": sum(answer.reused for answer in breaks)}
+        if by_prior:
+            block["breaks"]["prior"] = by_prior
+    levels = catalogue.TAG_VOCAB["level"]
+    parts = {
+        "check": _in_order(capture_checks_mod.redone_by_check(h.cycles), catalogue.TAG_VOCAB["check"]),
+        "level": _in_order(capture_checks_mod.pieces_by_level(h.work_pieces), levels),
+        "level_effort": _in_order(
+            capture_checks_mod.level_by_effort(h.work_pieces, ctx.cycles_by_id),
+            levels,
+            lambda row: _in_order(row, capture_checks_mod.EFFORTS),
+        ),
+        "level_family": _in_order(
+            capture_checks_mod.level_by_family(h.work_pieces, ctx.cycles_by_id),
+            levels,
+            lambda row: _in_order(row, capture_checks_mod.FAMILIES),
+        ),
+    }
+    block.update({name: part for name, part in parts.items() if part})
+    return block or None
+
+
+def _in_order(found: dict, words: tuple[str, ...], inner: Callable[[dict], dict] = lambda row: row) -> dict:
+    """``found`` in the order of ``words``, each row put through ``inner``, so a file reads the same way twice."""
+    return {word: inner(found[word]) for word in words if word in found}
+
+
+def _break_answers(ctx: _Ctx) -> list:
+    """The break answers of every main session that is not a scheduled run."""
+    return [
+        answer
+        for s in ctx.sessions
+        if not scheduled_main_session(s.top)
+        for answer in capture_checks_mod.break_answers(s.top, s.cycles)
+    ]
+
+
+def _capture_checks_lines(block: dict) -> list[str]:
+    lost = block.get("lost") or {}
+    yes, no = lost.get("yes") or {}, lost.get("no") or {}
+    answered = yes.get("answers", 0) + no.get("answers", 0)
+    if not answered:
+        return []
+    return [
+        f"Claude answered the summary question {_n(answered, 'time')}: yes {yes['answers']:,} "
+        f"({yes['evidence']:,} with a file read again or a correction), no {no['answers']:,} ({no['evidence']:,})."
+    ]
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -1842,6 +3140,25 @@ def _total(node) -> int:
     return int(node) if isinstance(node, (int, float)) and not isinstance(node, bool) else 0
 
 
+def coverage_lines(block: dict | None, *, of_file: bool = False) -> list[str]:
+    """The plain lines for a document's ``coverage`` block, none without
+    one: the sessions the figures cover, those read from what the dashboard
+    kept, and those of them the newer figures leave out. ``of_file`` words
+    them for a reader of a file another machine made (``summary_text``)."""
+    if not block:
+        return []
+    covered = block["read"] + block["stored"]
+    return [
+        line
+        for line in (
+            covered_mod.gone_sentence(covered, block["sessions"], of_file=of_file),
+            covered_mod.stored_sentence(block["stored"], block["sessions"], of_file=of_file),
+            measured.older_sentence(block["older"], covered),
+        )
+        if line
+    ]
+
+
 def summary_text(doc) -> str:
     """Plain lines about ``doc``, a block each, for the summary command.
     Validates first and raises :class:`TuningError`, so a file that fails
@@ -1853,6 +3170,7 @@ def summary_text(doc) -> str:
         f"Tuning figures made on {doc['generated_on']} for the last {_n(doc['window_days'], 'day')}, "
         f"by ClaudeGlass {doc['tool_version']}."
     ]
+    lines += coverage_lines(doc.get("coverage"), of_file=True)
     for lines_of, name in (
         (_capture_lines, "capture"),
         (_prompting_lines, "prompting"),
@@ -1863,6 +3181,11 @@ def summary_text(doc) -> str:
         (_cost_centres_lines, "cost_centres"),
         (_project_files_lines, "project_files"),
         (_compactions_lines, "compactions"),
+        (_cards_lines, "cards"),
+        (_hint_occasions_lines, "hint_occasions"),
+        (_figures_lines, "figures"),
+        (_outcomes_lines, "outcomes"),
+        (_capture_checks_lines, "capture_checks"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])
@@ -2124,6 +3447,35 @@ def _compactions_lines(block: dict) -> list[str]:
     return lines
 
 
+def _cards_lines(block: dict) -> list[str]:
+    if not block["shown"]:
+        return ["Dashboard cards: none shown in this window."]
+    rows = block["rows"]
+
+    def total(key: str) -> int:
+        return sum(row[key] for row in rows)
+
+    copied, bundled, ignored, landable = total("copied"), total("bundled"), total("ignored"), total("landable")
+    line = f"Dashboard cards: {_n(block['shown'], 'card')} shown, {copied:,} copied and {ignored:,} ignored."
+    if bundled:
+        line += f" {_n(bundled, 'card')} {'was' if bundled == 1 else 'were'} copied only in the prompt for every open fix."
+    lines = [line]
+    if landable:
+        lines.append(
+            f"Of {_n(landable, 'card')} that change a setting, {total('landed'):,} left the list after you changed it, "
+            f"{total('exact'):,} to the card's own value."
+        )
+    by_rule: Counter = Counter()
+    answers: Counter = Counter()
+    for row in rows:
+        by_rule[row["rule"]] += row["shown"]
+        answers.update(row.get("answers") or {})
+    lines.append(f"Most shown: {_top(by_rule, 3)}.")
+    if answers:
+        lines.append(f"Your ratings of them: {_top(answers, 4)}.")
+    return lines
+
+
 def _project_files_lines(block: dict) -> list[str]:
     files = block["files"]
     if not files:
@@ -2146,6 +3498,7 @@ __all__ = [
     "FORMAT",
     "KIND",
     "MAX_BYTES",
+    "OutcomeInputs",
     "TuningError",
     "build",
     "dumps",

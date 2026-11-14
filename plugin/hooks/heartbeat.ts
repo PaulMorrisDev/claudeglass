@@ -2,10 +2,10 @@ import type { GlassSnap } from '../types'
 import type { Io } from './io'
 import { live, touch } from './live'
 import { seconds } from './sensor'
-import { configDir } from './settings'
+import { coachingApplies, configDir, getSettings } from './settings'
 
 // <config dir>/mod/present/<session id>.json:
-//   {"schema": 1, "session_id": "<id>", "seen": <epoch seconds>, "active": <epoch seconds>}
+//   {"schema": 1, "session_id": "<id>", "seen": <epoch seconds>, "active": <epoch seconds>, "shows": ["hint"]}
 // One file per session, written whole when the session starts and again every
 // minute while it runs, so the capture hook can tell the mod is running for this
 // session and leave the notes the mod delivers to it (it counts a file seen within
@@ -14,7 +14,14 @@ import { configDir } from './settings'
 // the account's 5-hour limit, so only that one splits it (checkParallel). The
 // engine can't remove a file, so when the session ends the file is written once
 // more with `seen` and `active` at 0, which reads as not running; ClaudeGlass
-// deletes files a day old.
+// deletes files a day old. `shows` is what this copy of the mod shows the user: "hint" once the
+// line under the prompt (hint.ts) has been rendered, so the capture hook hands the mod the hints that line
+// carries only where it is drawn (the desktop app never draws it: the list stays empty and the hook keeps
+// them). "status" is listed with it once the terminal hint line has been drawn, because the status line the
+// plan tip uses is drawn in the terminal too. Both are listed only while coaching applies (the mod's settings
+// say it is on, and for this project): the mod draws no hint otherwise, and an empty list leaves the hints with
+// the hook. The list is worked out at each write, and a write follows at once when it changes. A file without
+// the key comes from an older copy of the mod.
 
 export const BEAT_EVERY_MS = 60 * 1000
 /** Another session counts as running when its file was seen this recently (the capture hook's ten minutes). */
@@ -26,17 +33,38 @@ const PLAIN_ID = /^[A-Za-z0-9-]{1,64}$/
 
 type Handle = { cancel: () => void }
 
+/** What the host has drawn, and what `shows` said when the file was last written (null before the first write). */
+const drawn = new Set<string>()
+let written: string | null = null
+
+/** Records that the host drew `what` ("hint"); the next message or beat lists it, if coaching applies, at once. */
+export function noteDrawn(what: string): void {
+  drawn.add(what)
+}
+
+/** What this copy of the mod shows: what has been drawn, while coaching applies. Nothing when the settings can't be read. */
+async function shownNow(io: Io): Promise<string[]> {
+  if (drawn.size === 0) return []
+  try {
+    return coachingApplies(await getSettings(io)) ? [...drawn] : []
+  } catch {
+    return []
+  }
+}
+
 let timer: Handle | null = null
 
 /** The file's content for a session seen at `seen` whose last request was at `active` (epoch seconds; 0 for none). */
-export function presentFile(id: string, seen: number, active = 0): string {
-  return JSON.stringify({ schema: 1, session_id: id, seen, active })
+export function presentFile(id: string, seen: number, active = 0, shows: string[] = []): string {
+  return JSON.stringify({ schema: 1, session_id: id, seen, active, shows })
 }
 
-async function write(io: Io, id: string, seen: number, active: number): Promise<void> {
+async function write(io: Io, id: string, seen: number, active: number, shows: string[]): Promise<void> {
   if (!PLAIN_ID.test(id)) return
+  // Noted before the write, so a write that fails is not tried again at every message: the timer's next beat does.
+  written = shows.join()
   try {
-    await io.writeFile(`${await configDir(io)}/mod/present/${id}.json`, presentFile(id, seen, active))
+    await io.writeFile(`${await configDir(io)}/mod/present/${id}.json`, presentFile(id, seen, active, shows))
   } catch {
     // The heartbeat is a courtesy; a failed write is tried again in a minute.
   }
@@ -91,14 +119,16 @@ export async function beat(io: Io, snap: GlassSnap, force = false): Promise<void
   if (snap.sessionId === null) return
   const now = await io.now()
   await checkParallel(io, snap)
-  if (!force && now - snap.lastBeat < BEAT_EVERY_MS) return
+  const shows = await shownNow(io)
+  if (!force && shows.join() === written && now - snap.lastBeat < BEAT_EVERY_MS) return
   snap.lastBeat = now
-  await write(io, snap.sessionId, seconds(now), snap.lastTs === null ? 0 : seconds(snap.lastTs))
+  await write(io, snap.sessionId, seconds(now), snap.lastTs === null ? 0 : seconds(snap.lastTs), shows)
 }
 
 /** Writes the heartbeat every minute from now on, for whichever session is current, until `leave`. Starts over if already running. */
 export function keepBeating(io: Io): void {
   stopBeating()
+  drawn.clear()
   timer = io.every(BEAT_EVERY_MS, () => {
     void (async () => {
       try {
@@ -121,5 +151,7 @@ export function stopBeating(): void {
 export async function leave(io: Io, id: string): Promise<void> {
   stopBeating()
   looked = null
-  await write(io, id, 0, 0)
+  drawn.clear()
+  written = null
+  await write(io, id, 0, 0, [])
 }

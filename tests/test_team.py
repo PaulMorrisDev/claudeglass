@@ -335,6 +335,22 @@ def test_validate_team_document_rejects_uppercase_machine_id():
     assert reason is not None
 
 
+def test_validate_team_document_rejects_a_machine_id_with_a_trailing_line_break():
+    """``$`` also matches before a final line break, so "0123456789ab\n" passed a ``^...$`` pattern."""
+    doc = _valid_doc(machine_id="0123456789ab\n")
+    reason = team.validate_team_document(doc)
+    assert reason is not None
+    assert "machine_id" in reason
+    assert team.validate_team_document(_valid_doc(machine_id="0123456789ab")) is None
+
+
+def test_save_team_document_rejects_a_machine_id_with_a_trailing_line_break(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    with pytest.raises(ValueError):
+        team.save_team_document(config_dir, _valid_doc(machine_id="0123456789ab\n"))
+
+
 @pytest.mark.parametrize("bad_machine_id", [123456789012, None, 12.5, ["a"], {"a": 1}])
 def test_validate_team_document_rejects_non_string_machine_id(bad_machine_id):
     doc = _valid_doc(machine_id=bad_machine_id)

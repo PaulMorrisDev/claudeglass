@@ -127,7 +127,10 @@ def _words(value) -> str:
     if isinstance(value, (list, tuple)):
         # A capture list ([capture] coaching, feedback): its metrics' names.
         names = [
-            capture_catalogue.METRICS_BY_ID[v].title if v in capture_catalogue.METRICS_BY_ID else str(v) for v in value
+            capture_catalogue.METRICS_BY_ID[v].title
+            if isinstance(v, str) and v in capture_catalogue.METRICS_BY_ID
+            else snapshots_mod.list_text([v])
+            for v in value
         ]
         return ", ".join(names) if names else "none"
     if isinstance(value, float) and value.is_integer():
@@ -322,6 +325,8 @@ def _changed_keys(before: snapshots_mod.Snapshot, after: snapshots_mod.Snapshot)
     changed = sorted(
         k for k in set(old) | set(new)
         if json.dumps(old.get(k), sort_keys=True, default=str) != json.dumps(new.get(k), sort_keys=True, default=str)
+        # A tools line an older hook cut off, written whole, is not an edit.
+        and not (snapshots_mod.is_tool_line_key(k) and snapshots_mod.same_tool_line(old.get(k), new.get(k)))
     )
     if any(k.startswith("effective.") for k in changed):
         changed = [k for k in changed if not k.startswith(("user_settings.", "project_settings."))]
@@ -1045,6 +1050,192 @@ def applies_to(point: ChangePoint, project: str | Collection[str]) -> bool:
     return point.project in project
 
 
+def session_start(bundle) -> datetime | None:
+    """When ``bundle``'s session started, as its change points are dated: its
+    main transcript's first priced reply (a transcript point is dated by the
+    first session with the new value, the same way), else its first reply
+    with a time. ``None`` with no main transcript or no time."""
+    top = bundle.top
+    if top is None:
+        return None
+    for turns in (_priced_turns(top), top.turns):
+        start = next((t for t in (_parse_iso(turn.ts) for turn in turns) if t is not None), None)
+        if start is not None:
+            return start
+    return None
+
+
+def _main_entry(point: ChangePoint, key: str) -> dict | None:
+    return next((c for c in point.changes if c.get("key") == key and not c.get("agent")), None)
+
+
+#: The provenance of ``model`` in a project's own snapshot when the project
+#: follows your user settings: they set it, or nothing does.
+FOLLOWS_USER = (None, "user")
+
+
+def main_model_now(snapshots: list[snapshots_mod.Snapshot], keys: Collection[str]) -> tuple[object, object] | None:
+    """The main session's ``model`` setting now in the project that goes by
+    ``keys``, as :func:`settings_model_crossings` reads it, and the layer
+    that holds it (``effective_provenance``'s name; ``"user"`` for your
+    user settings): a project whose own latest snapshot takes ``model``
+    from another layer (its own files, managed settings) has that value;
+    any other has your user settings' model in the newest snapshot of any
+    project that records them. ``None`` with no snapshot to read."""
+    wanted = set(keys)
+    own = [snap for snap in snapshots if str(snap.data.get("project_slug") or "") in wanted]
+    if own:
+        layer = snapshots_mod.effective_provenance(own[-1]).get("model")
+        if layer not in FOLLOWS_USER:
+            return snapshots_mod.effective_config(own[-1]).get("model"), layer
+    users = [snap for snap in snapshots if isinstance(snap.data.get("user_settings"), dict)]
+    if users:
+        return users[-1].data["user_settings"].get("model"), "user"
+    if own:
+        return snapshots_mod.effective_config(own[-1]).get("model"), "user"
+    return None
+
+
+def settings_model_crossings(
+    snapshots: list[snapshots_mod.Snapshot], keys: Collection[str], floor: Callable[[object], bool]
+) -> tuple[tuple[datetime, bool] | None, list[tuple[datetime, bool]]]:
+    """Where the main session's ``model`` setting stood against ``floor``
+    (a test of a model value, ``model_swap.at_main_floor``: Sonnet or
+    smaller) in the project that goes by ``keys`` (every key it carries,
+    ``snapshots.snapshot_project_keys``), and each time it crossed it: the
+    first snapshot read, as (its time, whether it had the model at or below
+    ``floor``), ``None`` with none; and each crossing after it, oldest
+    first, as (time, whether it moved down). Before the first snapshot the
+    setting is not known. Read from its own snapshots' effective model; a
+    change that stays on one side (``sonnet`` to ``haiku``, ``opus`` to
+    ``fable``) is no crossing, and a value that is not a model name (a list,
+    a number, a dict) reads as no model set. A project with no snapshot of
+    its own reads your user settings' model in every snapshot instead, the
+    project-less (schema 1) ones included. One with snapshots of its own
+    reads them, and while it follows your user settings (its latest own
+    snapshot so far takes ``model`` from them or sets none) also your user
+    settings' model in each later snapshot of another project or of none:
+    a project is snapshotted only when a session starts in it, and your
+    user settings are often changed while you work in another. One whose
+    own files set ``model`` reads its own snapshots alone. Before a
+    project's first own snapshot its setting is not known. An apply or
+    undo shows in the next snapshot, taken when the next session starts."""
+    wanted = set(keys)
+    own = [snap for snap in snapshots if str(snap.data.get("project_slug") or "") in wanted]
+    if own:
+        values, held = [], None
+        for snap in snapshots:
+            if str(snap.data.get("project_slug") or "") in wanted:
+                held = snap
+                values.append((snap.ts, snapshots_mod.effective_config(snap).get("model")))
+            elif (
+                held is not None
+                and snapshots_mod.effective_provenance(held).get("model") in FOLLOWS_USER
+                and isinstance(snap.data.get("user_settings"), dict)
+            ):
+                # The project follows your user settings: another project's
+                # snapshot shows where they stand now.
+                values.append((snap.ts, snap.data["user_settings"].get("model")))
+    else:
+        values = [
+            (snap.ts, snap.data["user_settings"].get("model"))
+            for snap in snapshots
+            if isinstance(snap.data.get("user_settings"), dict)
+        ]
+    first, crossings, previous = None, [], False
+    for ts, value in values:
+        when = _parse_backup_ts(ts) or _parse_iso(ts)
+        if when is None:
+            continue
+        below = bool(floor(value))
+        if first is None:
+            first = (when, below)
+        elif below != previous:
+            crossings.append((when, below))
+        previous = below
+    return first, crossings
+
+
+def transcript_points(corpus) -> list[ChangePoint]:
+    """Every point the sessions' transcripts show (:func:`_transcript_points`),
+    oldest first, before :func:`change_points` drops the keys a recorded
+    change explains: the Changes page lists a change once, but the main
+    model's card reads what the sessions ran, whatever else changed then.
+    ``[]`` without a ``corpus``."""
+    if corpus is None:
+        return []
+    return sorted((point for _since, point in _transcript_points(corpus)), key=lambda p: p.ts)
+
+
+def transcript_model_crossings(
+    points: list[ChangePoint], keys: Collection[str], floor: Callable[[object], bool]
+) -> list[tuple[datetime, bool]]:
+    """Each of ``points`` where the sessions' transcripts of the project that
+    goes by ``keys`` showed its main model cross ``floor`` (a transcript
+    point whose old and new model are on different sides), oldest first, as
+    (time, whether it moved down). A new model on the same side (a newer
+    Sonnet id after an older one) is no crossing."""
+    wanted = set(keys)
+    crossings = []
+    for point in points:
+        entry = _main_entry(point, "model") if point.source == "transcript" and point.project in wanted else None
+        if entry is None:
+            continue
+        down = bool(floor(entry.get("new")))
+        if down != bool(floor(entry.get("old"))):
+            crossings.append((point.ts, down))
+    return sorted(crossings)
+
+
+def model_env_set(snapshots: list[snapshots_mod.Snapshot], keys: Collection[str]) -> bool:
+    """N5: whether ANTHROPIC_MODEL was set (``snapshots.env_var_set``, by
+    name only) in the latest snapshot of the project that goes by ``keys``,
+    else in the newest snapshot. Then the variable, not the model setting,
+    picks that project's main-session model (model-config docs: /model,
+    --model, then the variable, then the setting)."""
+    wanted = set(keys)
+    own = [snap for snap in snapshots if str(snap.data.get("project_slug") or "") in wanted]
+    pool = own or snapshots
+    return bool(pool) and snapshots_mod.env_var_set(pool[-1], snapshots_mod.MODEL_ENV)
+
+
+def sets_own_model(snapshots: list[snapshots_mod.Snapshot], keys: Collection[str]) -> bool:
+    """Whether the project that goes by ``keys`` sets its main session's
+    ``model`` in its own files: the provenance of ``model`` in its latest
+    own snapshot is a project layer (``settings.json`` or
+    ``settings.local.json`` in the project). ``False`` with no snapshot of
+    its own."""
+    wanted = set(keys)
+    own = [snap for snap in snapshots if str(snap.data.get("project_slug") or "") in wanted]
+    return bool(own) and snapshots_mod.effective_provenance(own[-1]).get("model") in snapshots_mod.PROJECT_LAYERS
+
+
+def model_runs(points: list[ChangePoint], corpus) -> dict[int, list]:
+    """For each transcript point that changes the model, by its index in
+    ``points``, the sessions of the run that made it: the first
+    :data:`SUSTAINED_SESSIONS` of its project from the point's time on whose
+    dominant model is the one the point moved to (:func:`_session_signature`,
+    the tracker's own reading). ``{}`` without a ``corpus``."""
+    if corpus is None:
+        return {}
+    sessions = []
+    for bundle in corpus.sessions:
+        sig = _session_signature(bundle)
+        if sig is not None:
+            sessions.append((sig, bundle))
+    sessions.sort(key=lambda item: item[0].start)
+    runs: dict[int, list] = {}
+    for index, point in enumerate(points):
+        if point.source != "transcript" or "model" not in point.keys:
+            continue
+        entry = _main_entry(point, "model")
+        model = entry.get("new") if entry is not None else None
+        runs[index] = [
+            bundle for sig, bundle in sessions if sig.key == point.project and sig.start >= point.ts and sig.model == model
+        ][:SUSTAINED_SESSIONS]
+    return runs
+
+
 __all__ = [
     "ChangePoint",
     "SUSTAINED_SESSIONS",
@@ -1052,6 +1243,14 @@ __all__ = [
     "applies_to",
     "change_points",
     "latest",
+    "model_runs",
     "project_key",
+    "session_start",
+    "FOLLOWS_USER",
+    "main_model_now",
+    "sets_own_model",
+    "settings_model_crossings",
     "summary",
+    "transcript_model_crossings",
+    "transcript_points",
 ]

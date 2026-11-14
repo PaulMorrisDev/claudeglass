@@ -101,7 +101,10 @@ observed model (the model-swap table's own per-agent-type column) is
 Opus 5.5 or a Fable model: thinking can't be turned down on those
 models, so the lever has nothing to show for itself there (V26).
 
-Any other key says "not estimated" rather than guessing. Changes
+Any other key says "not estimated" rather than guessing. In a
+profile's drawer the estimate prices only what the chosen target
+changes: the rows of its diff, leaving out a key your policy locks or
+one already set to the value. Picking another target redraws it. Changes
 overlap, so a total of several rows is rough. Each profile's detail
 shows the same estimate.
 
@@ -195,8 +198,25 @@ and the estimate itself is scaled by the mean ratio of what was
 measured to what was predicted across those judged points.
 
 Setup › Profiles also shows one card per profile with the settings it
-changes by their plain labels. Opening one shows a table of Setting /
-Now / After / Set in for the scope you pick, then three ways to use it:
+changes by their plain labels. One card is marked "Suggested for you", with
+a line under the cards saying why ("19 of 78 sessions in this window ran a
+workflow script."). It is worked out live for the window and project picked
+(`baseline.suggest_for_model`: `suggest()`'s rule below, on that report's
+tables), so it changes with the pick; it is not the record `init` stored. A
+view with fewer than 5 sessions (`baseline.SUGGEST_MIN_SESSIONS`) gets no
+suggestion at all. Opening a card shows a table of Setting /
+Now / After / Set in for the scope you pick, read from the picked project's
+own newest settings. With none picked they are the machine's newest, and on
+a machine with more than one project a setting that the newest project's own
+files set reads as your user settings set it: a project's own setting holds
+in that project alone. "Set in" names
+the file the change is written to and, when something wins over it, says so
+in the same cell: a project file that sets the key too (only when a project
+is picked, since otherwise the settings are whichever project's were
+recorded last), `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_EFFORT_LEVEL`
+or `ANTHROPIC_MODEL` being set, or a model with an effort level of its own.
+A row that sets `effortLevel` for your user settings says Opus 5.5 and later
+ignore it there, and the prompt says the same. Then three ways to use it:
 a prompt that asks Claude to make the changes and show you the diff
 first (`fixes.profile_prompt`), the `claudeglass apply <id>
 --dry-run` command, and a one-session `--launch` trial that changes no
@@ -204,14 +224,42 @@ Claude Code settings file (it writes only its own overlay under
 `<config-dir>/profiles/`). "Save my current settings as a profile"
 saves your latest
 config snapshot's allowlisted, non-managed values as a user profile
-(`POST /api/profiles/from-current`), and "Edit settings directly" is a
-form built from `GET /api/profile-schema`. None of these change your
+(`POST /api/profiles/from-current`; see below), and "Edit settings
+directly" is a form built from `GET /api/profile-schema`. None of these change your
 Claude Code config; only running the command, or Claude acting on the
 prompt with your permission, does. Either way, restart Claude Code
 afterwards: it reads settings and agent files when it starts, so a
 session that is already open keeps the old ones. The dashboard says so
 under the prompt and command, the prompt asks Claude to remind you, and
 `apply` prints it after the change.
+
+#### Save my current settings
+
+"Save my current settings as a profile" writes the profile
+`my-current-settings` (or the `id` and `name` it is given; a second save
+asks before replacing the first). It keeps, from the latest config
+snapshot:
+
+- every allowlisted setting that is set and not managed by your
+  organisation, each checked on its own, so one value out of range drops
+  only itself;
+- `modelSettings`, a model at a time: each model's entry is checked
+  alone, so a model with no effort level recorded, or an id the schema
+  refuses, drops only itself. The snapshot keeps a model's `effortLevel`
+  and nothing else of its entry, so a model's compact window is not
+  saved;
+- each of **your own** agents (the files in `~/.claude/agents`) with the
+  `model`, `effort`, `maxTurns` and `"experimental.cacheTtl"` it sets. The
+  snapshot calls the last two `max_turns` and `experimental_cache_ttl`
+  (`diff._EFFECTIVE_AGENT_FIELD` maps them).
+
+Agents that belong to one project are left out: `apply` patches an
+agent's file in the folder of the scope it is run at, and at its default
+(user) scope a project agent has no file there, so a profile naming one
+was refused whole, settings included. The save returns their names as
+`skipped_project_agents` and the status line says "Left out, because they
+belong to one project: {names}." A profile keeps no scope; applying it
+picks one, as for any profile.
 
 A profile only ever names a lever this project can already trace back
 to a real, observable effect in a report — never an invented setting —
@@ -220,8 +268,8 @@ config layer or report table that justifies it.
 
 ## What a profile is
 
-A profile is a TOML document with up to eight top-level keys: `id`,
-`name`, `for`, `archetype`, `settings`, `agents`, `env`, `notes`. See
+A profile is a TOML document with up to nine top-level keys: `id`,
+`name`, `for`, `archetype`, `settings`, `agents`, `roles`, `env`, `notes`. See
 Appendix A7 of the v0.3 plan for the illustrative shape; `schema.py`'s
 `Profile` frozen dataclass is the in-memory form (`for` is renamed
 `for_`, since `for` is a Python keyword, and a loaded-from-file
@@ -236,6 +284,7 @@ see "What a profile cannot do" below).
 | `archetype` | one of the seven workstyle archetypes, or absent | The `workstyle.detect_archetype` corpus shape this profile targets. |
 | `settings` | table | `settings.json`-layer overrides — see the settings table below. |
 | `agents` | table of `agents.<name>` sub-tables | Per-agent frontmatter overrides — see the agent table below. |
+| `roles` | table of `roles.<role>` sub-tables | The same overrides, aimed at a role instead of an agent name. The only role is `writer`, the agent that writes code. See "`roles.<role>`" below. |
 | `env` | table | Environment variable name/value pairs (allowlisted names only — see "What a profile cannot do"), written into the target settings file's own `"env"` object by `apply` (see "Environment variables" below). |
 | `notes` | string | Free text citing the real report table/column that justifies this profile's settings. Never fabricated numbers. |
 
@@ -251,10 +300,10 @@ excluded, since it is excluded from equality too).
 
 ## The allowlist: what a profile may contain
 
-`SETTINGS_ALLOWLIST`, `AGENT_ALLOWLIST` and `ENV_ALLOWLIST` in
-`schema.py` are the single source of truth. `validate()`'s rejection
-messages are built from these three dicts; the tables below are copied
-from them by hand, so update both together. A profile naming any
+`SETTINGS_ALLOWLIST`, `MODEL_SETTINGS_ALLOWLIST`, `AGENT_ALLOWLIST` and
+`ENV_ALLOWLIST` in `schema.py` are the single source of truth.
+`validate()`'s rejection messages are built from these dicts; the tables
+below are copied from them by hand, so update both together. A profile naming any
 other key is rejected outright.
 
 ### `settings` (top-level `settings.json` overlay keys)
@@ -265,6 +314,9 @@ plugin off, or hides one skill, leaves every other entry alone.
 `skillOverrides` sets how Claude sees a skill: `on` (listed with its
 description), `name-only` (listed by name, which costs fewer tokens),
 `user-invocable-only` (only you can start it, with `/name`) or `off`.
+
+`modelSettings` holds a model's own effort level and compact window, keyed
+by model id (see "Per-model settings" below).
 
 | Key | Type | Allowed values | Doc reference |
 |---|---|---|---|
@@ -283,8 +335,60 @@ description), `name-only` (listed by name, which costs fewer tokens),
 | `cleanupPeriodDays` | int | 0–3,650 | `docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike` |
 | `includeCoAuthoredBy` | bool | — | `docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike` |
 | `fastMode` | bool | — | `docs/config-layers.md#redaction-rule-settings-and-agent-frontmatter-alike` |
+| `modelSettings` | map of model id to that model's own settings | `effortLevel`: `low`, `medium`, `high`, `xhigh`; `autoCompactWindow`: `"auto"` or 100,000–1,000,000 | `docs/profiles.md#settings-top-level-settingsjson-overlay-keys` |
+
+Claude Code does not keep `max` as a saved effort level, so the flat
+`effortLevel` accepts it here but a session only gets it from `/effort
+max`; the per-model `effortLevel` does not accept it.
+
+#### Per-model settings
+
+`modelSettings` is a table of model id to a table of that model's own
+settings, the same shape as the `modelSettings` object in
+`settings.json`. In a profile file it is written as an inline table:
+
+```toml
+[settings]
+modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWindow" = 300000 }, "claude-sonnet-4-6" = { "autoCompactWindow" = "auto" } }
+```
+
+- The two keys are `MODEL_SETTINGS_ALLOWLIST`: `effortLevel` (`low`,
+  `medium`, `high` or `xhigh`) and `autoCompactWindow` (`"auto"`, the
+  window Claude Code tunes for the model, or a number of tokens from
+  100,000 to 1,000,000). Any other key is rejected as
+  `settings.modelSettings.<id>.<key>: unknown key`.
+- An id is 1–64 letters, digits, `-`, `_` or brackets (so
+  `claude-sonnet-4-6[1m]` is fine); a dot is not allowed, which keeps a
+  diff row's dotted key (`settings.modelSettings.<id>.<key>`) readable.
+- Within one settings file, a model's entry replaces the flat setting of
+  the same name for that model only (Claude Code's own rule).
+- `apply` merges per model and key by key: a profile that sets one
+  model's `effortLevel` leaves that model's window, any key of its entry
+  this tool has no name for, and every other model as they were. A
+  profile with no `modelSettings` leaves the file's alone.
+  `--launch` carries it like any other settings key.
+- The diff has one row per model and key. The snapshot keeps a model's
+  `effortLevel` and nothing else of its entry, so a row for a model's
+  window whose model has an entry reads "not recorded" under "Now": the
+  window may be set, this tool just cannot see it. The prompt says "(now: not
+  recorded)" and "Show the file changes" "not recorded" for it, in place of
+  "not set" and "(unset)". An agent's rows at user scope read the same when a
+  project agent of the same name hides the user's: only the project agent's
+  values are recorded, so they are not used as the user file's. The estimate does not
+  simulate it ("This change isn't simulated."). To set one from the
+  command line: `claudeglass apply --set
+  modelSettings.claude-opus-5-5.effortLevel=medium --dry-run`; the value
+  is read as that key's type (`auto` stays text, digits become a number),
+  and several `--set` items for one model share its entry.
 
 ### `agents.<name>` (per-agent frontmatter overrides)
+
+`<name>` is the agent's name as Claude Code knows it. It holds only
+letters, digits, single dots, underscores and hyphens, starts with a
+letter or digit, and has at most 128 characters. Any other name is
+refused, so the name is always one file in the agents folder and one word
+in a prompt. A plugin's agent (`my-plugin:reviewer`) is refused: it has no
+file in your agents folders.
 
 | Key | Type | Allowed values | Doc reference |
 |---|---|---|---|
@@ -304,6 +408,76 @@ as a nested `[agents.<name>.experimental]` table with a `cacheTtl` key
 — both forms normalise to the dotted key in the loaded `Profile`.
 Giving both with different values is rejected; a nested `experimental`
 table holding any key other than `cacheTtl` is rejected.
+
+### `roles.<role>` (the agent that writes code, by role)
+
+A shipped profile cannot know what a user calls their agents, so it names
+a role instead of an agent. `[roles.writer]` holds the same keys as an
+`agents.<name>` table (the table above, same checks, same
+`"experimental.cacheTtl"` forms; an error is reported as
+`roles.writer.<key>`). `schema.ROLES` is `("writer",)`; any other role name
+is rejected with `roles.<name>: unknown role (expected one of writer)`.
+`dump_profile` writes the `[roles.writer]` block after the agent blocks,
+in the allowlist's key order, and writes nothing for an empty one.
+
+`profiles/roles.py` says which of the user's own agents the `writer` role
+goes to. An agent is a writer when both hold:
+
+- its **name** says so: it contains one of the writer words
+  `agent_roles` knows (implement, fix, build, test, write, apply, migrate,
+  refactor, and their forms: `implementer`, `fixer`, `builder`, `tester`,
+  `claude-implementer`). The agent's description and body are never read.
+  A name with no such word (`helper`, `scribe`) is never a writer, a
+  name that decides (`reviewer`, `researcher`) is not one either, and
+  neither is a name that also holds a role word of another class
+  (`fix-verifier`, `build-checker`, `test-auditor`, `integrator`: the
+  second word says what the agent is). A word `agent_roles` does not know
+  (`test-architect`) says nothing;
+- its **tools** let it edit files: its `tools` line (less its
+  `disallowedTools` line) offers `Edit`, `Write`, `MultiEdit` or
+  `NotebookEdit`. A tools line that is not known (no line, cut off, or no
+  config snapshot) counts as every tool.
+
+An agent whose name breaks that rule is never a writer. It is left out and
+counted, never named, in the drawer and in `apply`'s output.
+
+`roles.resolve(profile, agents)` copies the role's keys onto every writer
+it finds. An agent the profile also names in `[agents.<name>]` keeps its
+own value for any key it sets (explicit wins, key by key). A role that
+finds no writer adds nothing. Every writer gets the change: with a
+`tester` and an `implementer`, both are changed, and the dashboard and
+`apply` say so before anything is written.
+
+Where the agents come from:
+
+- **Dashboard** (`GET /api/profiles/<id>/diff`): the agents the latest
+  config snapshot recorded, those from `~/.claude/agents` for the user
+  target and those from the project's `.claude/agents` for either project
+  target. `GET /api/profiles/<id>` (the card) reads both together,
+  returns `agents` as resolved, `own_agents` and `roles` as written, and
+  counts only the resolved keys. "Start from" copies `own_agents` and
+  `roles`, so the copy resolves its role wherever it is used, like the
+  original. The estimate follows the drawer's target (see the diff
+  route). When no snapshot has
+  recorded the user's agents, the role's keys are left out and the drawer
+  says the agents have not been recorded yet. At a project target the
+  drawer reads the picked project's own agents; with no project picked it
+  cannot know which project the command will be run in, so it leaves the
+  role's keys out and asks for one project to be picked.
+- **`apply`**: the `*.md` files under the target scope's agents folder
+  (`<claude-root>/agents` or `<project>/.claude/agents`), subfolders
+  included as Claude Code reads them, read with
+  `frontmatter.parse_frontmatter`. The agent's name is the frontmatter
+  `name`, else the file name. A file with no frontmatter (or one that does
+  not parse) is not an agent and is skipped. `apply` patches
+  `<agents folder>/<name>.md` only, so a writer whose file is in a
+  subfolder or is not named after the agent is found but left as it is,
+  and named in one sentence.
+
+What the user is told: with no writer at the target, one sentence in the
+drawer (and in `apply`'s output) that no agent file changes and that the
+settings still apply; when the other target has a writer, which target to
+pick. With several writers, one sentence naming them.
 
 ### `env` (environment variable names)
 
@@ -339,13 +513,23 @@ real report table/column rather than an invented number.
 | id | `for` | archetype | key settings | justification (report table/column) |
 |---|---|---|---|---|
 | `interactive-chat` | chat, quick-question, pairing, docs | `chat-only` | `effortLevel=medium`, `promptCacheTtl=5m` | `ttl.ttl_by_agent_type`'s top-level `gap_p50_s`/`gap_p90_s`/`recommendation`/`lever` row (chat-only turn gaps rarely clear the 1h TTL break-even); `scorecard.dimensions` (no `cache_efficiency`/`context_hygiene`/`agent_efficiency` evidence to justify a higher tier). |
-| `discovery-scrape` | data-exploration, web-research, database-exploration | `single-model` | `effortLevel=low`, `subagentPromptCacheTtl=5m`, `autoCompactWindow=100000`; `agents.Explore.effort=low`, `agents.Explore."experimental.cacheTtl"=5m` | `classify.classify_purpose`'s `local-llm-pipeline` signature and `phases.phases_summary`'s "discovery" row `cost_share_pct`; `recache.recache_huge_context.share_pct` / `scorecard.dimensions`' context-hygiene p90 proxy for the tightened `autoCompactWindow`. |
+| `discovery-scrape` | data-exploration, web-research, database-exploration | `single-model` | `effortLevel=low`, `subagentPromptCacheTtl=5m`, `autoCompactWindow=100000` | `classify.classify_purpose`'s `local-llm-pipeline` signature and `phases.phases_summary`'s "discovery" row `cost_share_pct`; `recache.recache_huge_context.share_pct` / `scorecard.dimensions`' context-hygiene p90 proxy for the tightened `autoCompactWindow`. |
 | `planning-requirements` | planning, requirements, architecture | `single-model` | `effortLevel=high`, `promptCacheTtl=1h` | `agents.topology_effort_tokens`'s `thinking_share` column (the deliberate opposite case to the effort-mismatch rule: a planning session's high thinking-token share is doing real work); `sessions.sessions_by_purpose`'s "planning" row for the longer per-turn gap justifying 1h. |
-| `implementation-heavy` | implementation, refactor, test-triage, review | `plan-high-implement-low` | `effortLevel=medium`, `subagentPromptCacheTtl=5m`; `agents.claude-implementer.model=sonnet`, `.effort=medium`, `.maxTurns=60`, `.omitClaudeMd=false`, `."experimental.cacheTtl"=5m` | `agents.topology_spawn_write`'s `mean_first_call` column and `agent_startup.agent_startup_breakdown`'s `removable_tools` column (recommend.py's spawn-cost rule thresholds — `omitClaudeMd` is left `false` deliberately, since the rule only recommends flipping it once a specific corpus clears the thresholds); `ttl.ttl_by_agent_type`'s per-agent-type lever text. |
-| `overseer-fanout` | fanout, multi-agent-coordination | `overseer-fanout` | `effortLevel=high`, `subagentPromptCacheTtl=5m`; `agents.claude-implementer.effort=medium`, `.maxTurns=60` | `agents.topology_report_proxy`'s `mean_proxy` column (agent-report-size rule); `agents.topology_spawn_write`'s `mean_first_call` column (spawn-cost rule) for the top/implementer effort split. |
-| `overnight-batch` | overnight-run, unattended-batch | `overseer-fanout` | `subagentPromptCacheTtl=1h`, `autoCompactWindow=300000`, `cleanupPeriodDays=30`; `agents.verification-runner."experimental.cacheTtl"=1h` | `classify.classify_mode`'s "overnight" mode (Claude worked on its own for two hours or more at night while you were away, and at least 30% of its working time was at night); `ttl.ttl_by_agent_type`'s `gaps_over_1h`/`gap_p90_s` columns; `compactions.compactions_summary`'s "Compactions per session (mean)" / dropped-token-share rows for the raised `autoCompactWindow`. |
+| `implementation-heavy` | implementation, refactor, test-triage, review | `plan-high-implement-low` | `effortLevel=medium`, `subagentPromptCacheTtl=5m`; `roles.writer.model=sonnet`, `.effort=medium`, `.maxTurns=60` | `agents.topology_spawn_write`'s `mean_first_call` column and `agent_startup.agent_startup_breakdown`'s `removable_tools` column (recommend.py's spawn-cost rule thresholds); `ttl.ttl_by_agent_type`'s per-agent-type lever text for the 5m `subagentPromptCacheTtl`, which Claude Code reads before any agent file's `experimental.cacheTtl`. |
+| `overseer-fanout` | fanout, multi-agent-coordination | `overseer-fanout` | `effortLevel=high`, `subagentPromptCacheTtl=5m`; `roles.writer.effort=medium`, `.maxTurns=60` | `agents.topology_report_proxy`'s `mean_proxy` column (agent-report-size rule); `agents.topology_spawn_write`'s `mean_first_call` column (spawn-cost rule) for the top/writer effort split. |
+| `overnight-batch` | overnight-run, unattended-batch | `overseer-fanout` | `subagentPromptCacheTtl=1h`, `autoCompactWindow=300000`, `cleanupPeriodDays=30`; no agent or role block | `classify.classify_mode`'s "overnight" mode (Claude worked on its own for two hours or more at night while you were away, and at least 30% of its working time was at night); `ttl.ttl_by_agent_type`'s `gaps_over_1h`/`gap_p90_s` columns; `compactions.compactions_summary`'s "Compactions per session (mean)" / dropped-token-share rows for the raised `autoCompactWindow`. |
 | `plan-then-build` | plan-then-build | `single-model` | `promptCacheTtl=1h`; no model change | `habits.habits_by_shape`'s `plan_build` row (`share` column: main sessions that approve a plan with `ExitPlanMode`, then edit files in the same session); `plan_handoff.plan_handoff_summary`'s `tokens_carried_median`/`saving_usd` for the `/clear`-after-the-plan habit its notes describe. Not `implementation-heavy`, whose archetype hands the build to a cheaper model or agent. |
-| `workflow-ultracode` | workflow-run, scripted-multi-phase, ops | `workflow-heavy` | `subagentPromptCacheTtl=5m`; `agents.claude-implementer.maxTurns=40`, `."experimental.cacheTtl"=5m` | `workflows.workflows_summary`'s "Total workflow runs" row and `workflows.workflows_detail`'s per-run `agent_count`/`phases` columns; `ttl.ttl_by_agent_type`'s per-agent-type lever (short-gap scripted phases). |
+| `workflow-ultracode` | workflow-run, scripted-multi-phase, ops | `workflow-heavy` | `subagentPromptCacheTtl=5m`; `roles.writer.maxTurns=40` | `workflows.workflows_summary`'s "Total workflow runs" row and `workflows.workflows_detail`'s per-run `agent_count`/`phases` columns; `ttl.ttl_by_agent_type`'s per-agent-type lever (short-gap scripted phases). |
+
+No shipped profile names an agent: the three that change the agent
+that writes code use `[roles.writer]`, so they fit whatever the user
+calls that agent, and a built-in agent such as `Explore` has no file for
+`apply` to patch. The earlier per-agent cache lifetime lines are gone because
+`subagentPromptCacheTtl`, set to the same value in the same profile,
+outranks every agent file's `experimental.cacheTtl`
+(`docs/concepts.md`), and `omitClaudeMd = false` is Claude Code's
+default (it changes nothing on a new agent and undoes a trim on a trimmed
+one).
 
 `list_profiles() -> list[Profile]` returns all eight, in
 `CATALOGUE_IDS` order (the table above lists `plan-then-build` next to
@@ -443,6 +627,14 @@ still returns it directly, and `baseline._suggested_profile` suggests
 it before calling `suggest()` when at least half the window's sessions
 are overnight (`sessions_by_mode`).
 
+The dashboard's live suggestion (`baseline.suggest_for_model`) gives the same
+id as `baseline._suggested_profile` and adds one plain sentence for the branch
+that decided it: overnight runs, a structural purpose (a workflow script,
+several agents at once, a local model pipeline), planning then building in
+one session, the kind of task Claude tagged, a purpose
+(`baseline.PURPOSE_WORDS`), or the archetype. The stored reason `init` prints
+is unchanged.
+
 ## Diffing a profile against a project's effective config
 
 `diff.py` is a pure, filesystem-free module: it never reads a project,
@@ -476,8 +668,12 @@ such as `settings.effortLevel`, `agents.claude-implementer.effort`, or
 have no "current value" a snapshot can trace), `proposed_value` (the
 profile's own value), `target_file` (where the value currently lives,
 derived from `provenance`/`effective_agents[name].source` — see the
-design note below), and `managed` (whether `managed_keys` currently
-governs this key).
+design note below), `managed` (whether `managed_keys` currently
+governs this key) and `recorded`. A profile's `modelSettings` gives one
+row per model and key, keyed `settings.modelSettings.<id>.<key>`, read
+from `effective["modelSettings"][id][key]`; its `recorded` is `False`
+when the snapshot has an entry for that model that lacks the key (the
+hook keeps only `effortLevel`), and `True` for every other row.
 
 ### `render_unified_diff`
 
@@ -670,7 +866,8 @@ Every flag is described in [`docs/cli.md`](cli.md#apply).
 `<profile>` is a catalogue id or a path to a profile TOML file.
 `--set` instead builds a one-off profile (id `one-off`) from the given
 keys (under `agents.NAME` with `--agent`) and validates it through
-`schema.load_dict`, so the allowlist and ranges are the same. It calls
+`schema.load_dict`, so the allowlist and ranges are the same. A model's
+own setting is `--set modelSettings.<model>.<key>=VALUE`. It calls
 `plan_apply(..., mark_active=False)`: the active-profile marker is left
 alone.
 
@@ -859,3 +1056,32 @@ key set would be a guess about the rest of that agent's configuration.
 file holding exactly the keys the profile sets. `--force` controls only
 this behaviour — it has no effect on the git-tracked-file refusal
 above, which is `--allow-tracked`'s job specifically.
+
+This applies to an agent a profile **names** (`[agents.<name>]`) whose file is found nowhere under the agents folder. A
+profile's `[roles.writer]` is resolved first (see "`roles.<role>`"
+above) against the agent files that exist at the scope, so a role is
+never refused for a missing agent and `--force` never creates a file for
+one. The writer file a role reaches is still an agent file like any
+other: if git tracks it (a project agent usually is), the apply is
+refused without `--allow-tracked`. With
+no agent named like a writer that can edit files, the profile's settings
+still apply and `apply` prints "No agent in `<folder>` is named like
+implementer, fixer or builder and can edit files. The changes for the
+agent that writes code are left out." (`ApplyPlan.role_notes`, printed
+after the change explanations in `--dry-run` and in a real apply). With
+several writers it prints one sentence naming them. A writer `apply`
+cannot patch (its file is in a subfolder or not named after the agent) is
+named in "Left as it is, because the file is in a subfolder or not named
+after the agent: `<name>`." (or "Left as they are, ...: `<a>` and `<b>`."),
+and the no-writer sentence is printed only when no such agent exists at
+all.
+
+An agent a profile **names** gets the same treatment when its file is not
+`<agents folder>/<name>.md` but is found elsewhere under the folder
+(Claude Code reads the folder recursively and names an agent by its
+frontmatter, as the config hook does): it is the user's own agent, so it is
+never refused and `--force` makes no second file for it. It is left as it
+is and named in the same sentence, and the settings and the other agents
+still apply. Only an agent found nowhere is refused. This is what lets a
+profile from "Save my current settings" apply when one of the agents it
+saved lives in a subfolder.

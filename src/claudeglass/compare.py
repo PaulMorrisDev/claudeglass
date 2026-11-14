@@ -670,7 +670,10 @@ def _build_co_changed_table(
     changed = [key for key in snapshots_mod.co_changed_keys(rep_a, rep_b) if key != arm_a.key]
     flat_a = snapshots_mod.flatten_snapshot(rep_a)
     flat_b = snapshots_mod.flatten_snapshot(rep_b)
-    rows = [[key, str(flat_a.get(key)), str(flat_b.get(key))] for key in changed]
+    rows = [
+        [key, snapshots_mod.config_value_text(flat_a.get(key)), snapshots_mod.config_value_text(flat_b.get(key))]
+        for key in changed
+    ]
     notes = [
         f"Representative snapshots: Arm A={rep_a.ts}, Arm B={rep_b.ts} (the snapshot most of each arm's own "
         "sessions actually joined to). A given session's own joined snapshot may differ from this "

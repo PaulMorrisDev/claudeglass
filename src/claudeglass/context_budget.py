@@ -28,8 +28,8 @@ Five tables (:func:`build_section`, section key ``"context_budget"``):
   small per-module accumulators), split into the shared prefix the call
   read from cache, what the session wrote itself and the first prompt
   that went in uncached, next to estimated buckets in tokens for human
-  prompt, skills listing, memory files (the CLAUDE.md family and rules from
-  the config snapshot, plus the auto memory the sessions' first calls
+  prompt, skills listing, memory files (the user and project CLAUDE.md files and the rules
+  with no ``paths:`` list from the config snapshot, plus the auto memory the sessions' first calls
   carried), your own custom agents and MCP tools, then Claude Code's own
   system prompt and built-in tools (:func:`startup_sizes`, measured from
   the first call's record) and a residual "everything else" bucket (P0
@@ -141,7 +141,7 @@ from . import desktop_servers
 from . import snapshots as snapshots_mod
 from . import tool_search
 from .calibration import Calibration, FirstCall, model_family
-from .capture_catalogue import AGENT_ANSWER_TOOLS
+from .capture_catalogue import AGENT_ANSWER_TOOLS, AGENT_TOOLS
 from .compaction_sim import CLAUDE_CODE_AUTOCOMPACT_BUFFER_TOKENS
 from .events import BUILT_IN_TOOLS, tool_server
 from .model import Column, Event, EventKind, Section, Table, TranscriptResult, Turn
@@ -320,7 +320,9 @@ def _skills_listing_est_tokens(
 def _memory_files_est_tokens(
     snapshot: Snapshot | None, calibration: Calibration | None = None, auto_memory_tokens: float = 0.0
 ) -> float | None:
-    """CLAUDE.md family bytes + rules bytes, as tokens on the corpus's
+    """User and project CLAUDE.md bytes + unscoped rules bytes (paths:-scoped
+    rules and nested CLAUDE.md files load only on demand, so they are left
+    out), as tokens on the corpus's
     most common model (bytes treated the same as chars for this
     approximation -- see the module docstring), plus ``auto_memory_tokens``:
     the project's auto memory (``MEMORY.md``), which Claude Code loads in
@@ -342,12 +344,13 @@ def _memory_files_est_tokens(
             claude_md.get("user_bytes"),
             claude_md.get("project_root_bytes"),
             claude_md.get("project_local_bytes"),
-            claude_md.get("nested_bytes"),
         )
         if isinstance(value, (int, float))
     )
     rules = content.get("rules") or {}
-    rules_bytes = rules.get("bytes")
+    # Only unscoped rules load at the start; a snapshot from before the
+    # hook recorded ``unscoped_bytes`` counts all rule bytes.
+    rules_bytes = rules.get("unscoped_bytes", rules.get("bytes"))
     total_bytes = claude_md_bytes + (rules_bytes if isinstance(rules_bytes, (int, float)) else 0)
     return (calibration or Calibration()).text_tokens(total_bytes) + auto_memory_tokens
 
@@ -563,6 +566,9 @@ _LATE_STARTUP_SUBKINDS = frozenset({"mcp_instructions_delta", "agent_listing_del
 #: Tools that only search or read. A subagent that used nothing else
 #: counts towards :class:`_AgentStartupAcc`'s ``read_only_spawns``.
 _READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "ToolSearch"})
+#: The tools that change files. A spawn that called one counts towards
+#: :class:`_AgentStartupAcc`'s ``edit_spawns``.
+_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 #: A subagent counts as a fork (it inherited the parent's conversation
 #: and prompt cache) when its first turn reads at least this share of the
@@ -589,9 +595,18 @@ REMOVABLE_USE_SHARE = 0.10
 TOOLS_MODEL_MIN_SPAWNS = 5
 
 #: The tools Claude Code adds to an agent whatever its ``tools:`` says
-#: (a workflow agent's answer and a handback), so no allowlist removes
-#: them.
-_ALWAYS_OFFERED = frozenset(AGENT_ANSWER_TOOLS)
+#: (a workflow agent's answer, a handback and the advisor), so no allowlist
+#: removes them and none is ever put on a suggested line. Not
+#: ``AGENT_ANSWER_TOOLS``: advisor is not an answer, and a run that ends on
+#: it is not finished.
+ALWAYS_ADDED = frozenset(AGENT_ANSWER_TOOLS) | {"advisor"}
+
+#: The agent type every unnamed workflow agent runs as, and the tools that
+#: write files or run commands: an agent's tools card never calls one rare
+#: once any of that agent's runs, on any model, called it (a writer on
+#: another model than the measured one would otherwise be missed).
+_WORKFLOW_AGENT = "workflow-subagent"
+_WRITER_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"})
 
 #: Rows of ``agent_startup_tools`` kept per agent type, largest first.
 _TOOL_ROWS_PER_AGENT = 12
@@ -706,9 +721,17 @@ class _AgentStartupAcc:
     mcp_used_spawns: int = 0
     claude_md_spawns: int = 0
     read_only_spawns: int = 0
-    #: The first turn's model's 5-minute cache-write list price (USD per
-    #: million tokens), per measured spawn whose model is on the rate card,
-    #: with the model family it came from beside it.
+    #: Spawns that called a tool that changes files (:data:`_EDIT_TOOLS`).
+    edit_spawns: int = 0
+    #: Per measured spawn, in step with ``startup_tokens``: the workflow run
+    #: it ran under, or its session when it ran outside one (``""`` when
+    #: neither is known).
+    run_keys: list[str] = field(default_factory=list)
+    #: The first turn's model's cache-write list price (USD per million
+    #: tokens), weighted by that call's own 5-minute/1-hour split, or the
+    #: 5-minute price when the call recorded no split, per measured spawn
+    #: whose model is on the rate card, with the model family it came from
+    #: beside it.
     write_prices: list[float] = field(default_factory=list)
     write_price_models: list[str] = field(default_factory=list)
     #: ... and the same model's cache-read price, beside each write price
@@ -773,6 +796,41 @@ class _AgentStartupAcc:
             family = max(sorted(named), key=lambda name: named[name])
         return family, [index for index, name in enumerate(self.models) if name == family]
 
+    def offered_tools(self, family: str) -> dict[str, _ToolOffer]:
+        """``tools`` on ``family`` with ``Task`` (the old name of ``Agent``,
+        :data:`~claudeglass.capture_catalogue.AGENT_TOOLS`) counted as
+        ``Agent``: a window that spans the rename offered one tool under two
+        names, and it is judged against the bar once. A spawn is offered it
+        under one name, so the spawns never come to more than were measured."""
+        offers = dict(self.tools.get(family, {}))
+        spawns = self.tool_spawns.get(family, 0)
+        current, *old = AGENT_TOOLS
+        for name in old:
+            gone = offers.pop(name, None)
+            if gone is None:
+                continue
+            held = offers.get(current)
+            if held is None:
+                offers[current] = gone
+                continue
+            offered = min(held.offered + gone.offered, spawns) if spawns else held.offered + gone.offered
+            offers[current] = _ToolOffer(
+                offered=offered, used=min(held.used + gone.used, offered), chars=held.chars + gone.chars
+            )
+        return offers
+
+    def called_tools(self, family: str) -> dict[str, int]:
+        """``tool_uses`` on ``family`` (spawns that called each tool) with
+        ``Task`` counted as ``Agent``, as :meth:`offered_tools` does."""
+        uses = dict(self.tool_uses.get(family, {}))
+        spawns = self.tool_spawns.get(family, 0)
+        current, *old = AGENT_TOOLS
+        for name in old:
+            if name in uses:
+                total = uses.get(current, 0) + uses.pop(name)
+                uses[current] = min(total, spawns) if spawns else total
+        return uses
+
     def removable_chars(self, family: str) -> tuple[float, list[tuple[str, int, int, float]]]:
         """Characters per spawn of the tools and MCP servers offered on
         ``family`` that fewer than :data:`REMOVABLE_USE_SHARE` of the spawns
@@ -782,13 +840,14 @@ class _AgentStartupAcc:
         spawns = self.tool_spawns.get(family, 0)
         if not spawns:
             return 0.0, []
+        offers = self.offered_tools(family)
         rows = [
             (key, offer.offered, offer.used, offer.chars / offer.offered)
-            for key, offer in self.tools.get(family, {}).items()
-            if offer.offered and key not in _ALWAYS_OFFERED and rarely_used(offer.used, offer.offered)
+            for key, offer in offers.items()
+            if offer.offered and key not in ALWAYS_ADDED and rarely_used(offer.used, offer.offered)
         ]
         rows.sort(key=lambda row: (-row[3], row[0]))
-        total = sum(self.tools[family][key].chars for key, _o, _u, _c in rows) / spawns
+        total = sum(offers[key].chars for key, _o, _u, _c in rows) / spawns
         return total, rows
 
     def kept_tools(self, family: str) -> list[str]:
@@ -798,11 +857,11 @@ class _AgentStartupAcc:
         it was sent in full or loaded when asked for. Never the tools
         Claude Code adds whatever the list says. Built-in tools first."""
         spawns = self.tool_spawns.get(family, 0)
-        offers = self.tools.get(family, {})
+        offers = self.offered_tools(family)
         servers = self.servers.get(family, {})
         kept: list[str] = []
-        for key, called in self.tool_uses.get(family, {}).items():
-            if key in _ALWAYS_OFFERED:
+        for key, called in self.called_tools(family).items():
+            if key in ALWAYS_ADDED:
                 continue
             if key.startswith("mcp__"):
                 offer = servers.get(key[len("mcp__") : -len("__*")])
@@ -1161,6 +1220,7 @@ class ContextBudgetStats:
         acc.written_tokens.append(first.cache_creation_tokens)
         acc.prompt_tokens.append(first.input_tokens)
         acc.models.append(family)
+        acc.run_keys.append(sub.meta.workflow_run_id or sub.meta.session_id or "")
         acc.later_calls.append(sum(1 for turn in sub.turns if turn.turn_index > 1))
         acc.roster_tokens.append(sizes.agent_roster)
         for part, tokens in parts.items():
@@ -1174,11 +1234,21 @@ class ContextBudgetStats:
             acc.snapshot_spawns += 1
         resolved = pricing.resolve_model(first.model) if pricing is not None else None
         if resolved is not None:
-            acc.write_prices.append(resolved.rates.cache_write_5m)
+            # The first call's own split of 5-minute and 1-hour writes; with
+            # no split (or no write) the 5-minute price, as compaction_sim does.
+            written = first.cc_5m + first.cc_1h
+            write_price = resolved.rates.cache_write_5m
+            if written > 0:
+                write_price = (
+                    first.cc_5m * resolved.rates.cache_write_5m + first.cc_1h * resolved.rates.cache_write_1h
+                ) / written
+            acc.write_prices.append(write_price)
             acc.read_prices.append(resolved.rates.cache_read)
             acc.write_price_models.append(family)
 
         tool_names = {name for turn in sub.turns for name in turn.tool_names}
+        if tool_names & _EDIT_TOOLS:
+            acc.edit_spawns += 1
         if startup.saw_tools:
             acc.tool_spawns[family] = acc.tool_spawns.get(family, 0) + 1
             # The tool definitions are the front of the cached prefix: a
@@ -1593,7 +1663,8 @@ def _build_baseline_table(
             "Agents from plugins are part of the agent roster but not counted here; Claude Code's "
             "Custom agents category includes them. "
             "Memory files (est) adds the auto memory (MEMORY.md) the first calls carried to the "
-            "CLAUDE.md files and rules in your config snapshot. "
+            "CLAUDE.md files and project rules that load at the start. "
+            "Rules with a paths: list and CLAUDE.md files in subfolders are left out. "
             "\"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
             "about them. It adds what keeping them cost, from the same per-server prices as the tool search "
             "section. A server built into the desktop app is shown with its cost and has nothing to remove. "
@@ -2097,6 +2168,27 @@ def _largest_tools(acc: _AgentStartupAcc, family: str, calibration: Calibration)
     return ", ".join(f"{key} {tokens_text(round(tokens))}" for key, tokens in sized[:3]) or None
 
 
+def _largest_run(acc: _AgentStartupAcc, positions: list[int], count: int) -> tuple[float | None, str | None]:
+    """The share (0-100) of this agent type's task prompt tokens that came
+    from its largest single workflow run, or from its largest session when
+    the spawns ran outside workflows, and that run's id. ``(None, None)``
+    when the spawns don't say which run they belong to or have no task
+    prompt."""
+    keys = _picked(acc.run_keys, positions, count)
+    sizes = _picked(acc.parts.get("task_prompt", []), positions, count)
+    if len(keys) != len(sizes):
+        return None, None
+    by_run: dict[str, float] = {}
+    for key, size in zip(keys, sizes):
+        if key:
+            by_run[key] = by_run.get(key, 0.0) + size
+    total = sum(sizes)
+    if not by_run or total <= 0:
+        return None, None
+    top = max(sorted(by_run), key=lambda key: by_run[key])
+    return by_run[top] / total * 100, top
+
+
 def _build_startup_table(stats: ContextBudgetStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
@@ -2133,6 +2225,8 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
         # recommendation rules read them; see ``diet_usd``).
         Column(key="read_price", label="Cache-read price per million tokens", kind="money"),
         Column(key="later_calls", label="Calls after the first", kind="float"),
+        Column(key="task_prompt_top_share", label="Task prompt from the largest run", kind="pct"),
+        Column(key="task_prompt_top_run", label="Largest run (workflow run or session)", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2158,6 +2252,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             + [not_recorded, measured_pct, fmean(prices) if prices else None, managed_claude_md, removable]
             + [_largest_tools(acc, family, stats.calibration)]
             + [read_price, later_calls if acc.later_calls else None]
+            + list(_largest_run(acc, positions, count))
         )
     return Table(
         name="agent_startup_breakdown",
@@ -2177,6 +2272,8 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             "\"Not recorded\".",
             "Forks inherit the parent's conversation and prompt cache, so they are counted but kept "
             "out of the averages.",
+            "\"Task prompt from the largest run\" is the share from one workflow run, or one session "
+            "outside workflows.",
             "\"CLAUDE.md and memory\" includes a managed policy CLAUDE.md (also shown on its own in "
             "the last column). An agent's setting that skips CLAUDE.md files skips only the project's "
             "own ones: a policy CLAUDE.md still loads.",
@@ -2248,6 +2345,8 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         Column(key="read_price", label="Cache-read price per million tokens", kind="money"),
         Column(key="saving_usd", label="Saving across these spawns", kind="money"),
         Column(key="window_days", label="Days in the window", kind="float"),
+        Column(key="rare_sizes", label="Size of each rarely used tool", kind="str"),
+        Column(key="rule_kept_tools", label="Writing or shell tools a run of this agent called", kind="str"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2261,10 +2360,15 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         count = len(acc.startup_tokens)
         _total, rare_rows = acc.removable_chars(family)
         builtin = [row for row in rare_rows if not row[0].startswith("mcp__")]
+        keep = acc.kept_tools(family)
+        called = {key for uses in acc.tool_uses.values() for key in uses} & _WRITER_TOOLS
+        builtin = [row for row in builtin if row[0] not in called]
+        rule_kept = sorted(called - set(keep))
+        keep = sorted(set(keep) | called, key=lambda key: (key.startswith("mcp__"), key))
         servers = acc.rare_servers(family)
         if not builtin and not servers:
             continue
-        tools = acc.tools.get(family, {})
+        tools = acc.offered_tools(family)
         definition_chars = sum(tools[key].chars for key, _o, _u, _c in builtin) / snapped
         definitions = stats.calibration.tool_tokens(definition_chars, family or None) + sum(
             offer.definitions for _name, offer in servers
@@ -2289,12 +2393,20 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
             written_share=written_share,
         )
         rare_names = [key for key, _o, _u, _c in builtin] + [mcp_tool_key(name) for name, _offer in servers]
+        sizes = [
+            f"{key}={stats.calibration.tool_tokens(tools[key].chars / snapped, family or None):.4f}/0/0"
+            for key, _o, _u, _c in builtin
+        ] + [
+            f"{mcp_tool_key(name)}={offer.definitions / snapped:.4f}/{offer.deferred / snapped:.4f}/"
+            f"{offer.instructions / snapped:.4f}"
+            for name, offer in servers
+        ]
         rows.append(
             [
                 agent_type,
                 family or None,
                 snapped,
-                ", ".join(acc.kept_tools(family)),
+                ", ".join(keep),
                 ", ".join(rare_names),
                 definitions,
                 deferred,
@@ -2307,6 +2419,8 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
                 read,
                 usd or None,
                 stats.window_days,
+                ", ".join(sizes),
+                ", ".join(rule_kept),
             ]
         )
     return Table(
@@ -2322,7 +2436,9 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
             "asked for. Tools Claude Code adds whatever the list says are in neither.",
             "Sizes are per spawn. The skills list goes with the Skill tool and the agent list with the Agent "
             "tool. An MCP server's deferred tool names go with its tools; its instructions stay under a "
-            "tools list, so they are not counted in the saving. Deferred built-in tool names are not counted.",
+            "tools list, so they are not counted in the saving. Deferred built-in tool names are not counted. "
+            "\"Size of each rarely used tool\" gives each one's definition, deferred names and instructions per "
+            "spawn. A card uses it to skip tools the agent's file no longer lists.",
             "The saving prices tool definitions as a prefix that sibling spawns share. Only the spawns that wrote it "
             "pay the cache-write price for them. The rest pay the cache-read price. The other parts are written "
             "by each spawn. Every part is then read on each later call. List prices, over the spawns in this window.",
@@ -2404,6 +2520,7 @@ def _build_unused_table(stats: ContextBudgetStats) -> Table:
         Column(key="mcp_used_spawns", label="Spawns that used an MCP tool", kind="int"),
         Column(key="claude_md_tokens", label="CLAUDE.md size", kind="tokens"),
         Column(key="read_only_spawns", label="Spawns that only searched or read", kind="int"),
+        Column(key="edit_spawns", label="Spawns that edited files", kind="int"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -2421,6 +2538,7 @@ def _build_unused_table(stats: ContextBudgetStats) -> Table:
                 acc.mcp_used_spawns,
                 _mean_or_zero(acc.parts.get("claude_md")),
                 acc.read_only_spawns,
+                acc.edit_spawns,
             ]
         )
     return Table(
@@ -2433,6 +2551,8 @@ def _build_unused_table(stats: ContextBudgetStats) -> Table:
             "used when any of its turns called one.",
             "\"Only searched or read\" means every tool the subagent called was one of "
             + ", ".join(sorted(_READ_ONLY_TOOLS))
+            + ". \"Edited files\" means it called "
+            + ", ".join(sorted(_EDIT_TOOLS))
             + ".",
         ],
     )
@@ -2579,6 +2699,7 @@ def build_startup_section(stats: ContextBudgetStats) -> Section:
 
 
 __all__ = [
+    "ALWAYS_ADDED",
     "CLAUDE_MD_SOURCES",
     "ContextBudgetStats",
     "DIET_EXCLUDED",

@@ -24,7 +24,7 @@ folder as ``~`` (``footprint.home_label``).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -190,27 +190,62 @@ def _service(
     return SetupItem("service", label, "off", f"Not set to start when you log on. {keeps}", SERVICE_COMMAND, essential=True)
 
 
+def _stopped_capture(stopped: SetupItem, config_dir: Path, claude_root, capture: CaptureConfig) -> SetupItem:
+    """``stopped`` (capture is off, or its time-box ended), unless coaching
+    notes, the plan check or the rating reminder is on: those run at any
+    level, so their settings.json entries must be there, and a missing one
+    is a problem the line names."""
+    still = replace(capture, level="off", tagger=capture_catalogue.DEFAULT_TAGGER)
+    # Coaching notes, the plan check and the rating reminder do nothing without the entry; the skill works without it.
+    needs_the_entry = capture.coaching_notes_on or any(
+        i in capture.feedback
+        for i in capture_catalogue.FEEDBACK_MESSAGE_IDS
+        if i not in capture_catalogue.FEEDBACK_WORKS_WITHOUT_HOOK
+    )
+    if not needs_the_entry:
+        return stopped
+    health = hook_health.check_capture(
+        hook_health.capture_specs(still.hook_metrics()), claude_root=claude_root, config_dir=config_dir
+    )
+    # An older copy of this tool's own hook file only: the next update or dashboard restart refreshes it.
+    if health.ok or (not health.missing and health.blocked_by is None and len(health.problems) == len(health.outdated)):
+        return stopped
+    reason = "Coaching notes are still on" if capture.coaching_notes_on else "A feedback item on your messages is still on"
+    detail = stopped.detail if capture.is_on else "Capture is off"
+    return SetupItem(
+        "capture",
+        stopped.label,
+        "problem",
+        f"{detail.removesuffix('.')}. {reason}. {_home(health.summary())}",
+        None if health.blocked_by is not None else capture_view.CONNECT_COMMAND,
+        essential=True,
+    )
+
+
 def _capture(config_dir: Path, claude_root, capture: CaptureConfig, now: datetime | None) -> SetupItem:
     label = "Sharper tips (metrics capture)"
+    stopped = None
     if not capture.is_on:
-        return SetupItem(
+        stopped = SetupItem(
             "capture",
             label,
             "off",
             "Turned on, Claude tags each reply with the kind of work it was, so the tips fit how you work.",
             CAPTURE_COMMAND,
         )
-    if capture.expired(now):
-        return SetupItem(
+    elif capture.expired(now) and not capture.light(now):
+        stopped = SetupItem(
             "capture",
             label,
             "off",
             f"Stopped by itself on {capture.until[:10]}, when its time-box ended.",
             CAPTURE_COMMAND,
         )
+    if stopped is not None:
+        return _stopped_capture(stopped, config_dir, claude_root, capture)
     described = capture_view.describe(capture)
     health = hook_health.check_capture(
-        hook_health.capture_specs(capture.hook_metrics()), claude_root=claude_root, config_dir=config_dir
+        hook_health.capture_specs(capture.hook_metrics(now)), claude_root=claude_root, config_dir=config_dir
     )
     if health.ok:
         return SetupItem("capture", label, "ok", f"{described}.")

@@ -353,9 +353,6 @@ var GROUP_TITLES = {
   "agent-report-size": function (n) {
     return "Reports from " + n + " agent types come back large";
   },
-  "agent-batch-probes": function (n) {
-    return n + " agent types look things up one call at a time";
-  },
   "spawn-cost": function (n) {
     return "Spawning " + n + " agent types is expensive before they do any work";
   },
@@ -458,9 +455,93 @@ export function resetFiguresAsOf() {
 // A JSON POST to one of the service's write routes (docs/api.md),
 // through the same envelope handling as every GET.
 export function postJson(url, body) {
-  return fetchJson(url, {
+  return fetchJson(url, jsonPost(body));
+}
+
+function jsonPost(body) {
+  return {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  };
+}
+
+// What the page did with recommendation cards, kept on this machine
+// (POST /api/recommendations/marks): mark is "shown" (a card's title was
+// drawn), "copied" (a button copied its prompt) or "bundle" (the project's
+// all-fixes prompt, which holds these cards, was copied). Nothing is said
+// on screen: the request is the one postJson would send, but it does not go
+// through fetchJson, so a service that is down is not noted (the page is
+// not dimmed, no health poll starts, no "connected again" toast) and a mark
+// that fails is not worth an error. Resolves to whether the service took it.
+export function markCards(mark, keys) {
+  if (!keys || (!keys.length && mark !== "shown")) return Promise.resolve(false);
+  try {
+    return fetch(withWindow("/api/recommendations/marks"), jsonPost({ mark: mark, keys: keys })).then(
+      function (res) {
+        return res.ok;
+      },
+      function () {
+        return false;
+      }
+    );
+  } catch (err) {
+    return Promise.resolve(false);
+  }
+}
+
+// The keys already sent as shown in this page load, by scope, and the
+// ones drawn while the tab was hidden, to send once it is seen again.
+var shownSent = {};
+var shownWaiting = {};
+var shownWatching = false;
+// The most keys one mark can carry: the route's limit (_MAX_IGNORE_KEYS in
+// service/api.py; a test holds the two equal).
+var MARK_KEYS_MAX = 100;
+
+// Cards whose titles the page has just drawn. Each is sent once per scope
+// per page load, and only while the tab is visible: a tab in the
+// background shows nothing. A list with no card left to send still says so
+// once per scope, so the service can check which cards left the list.
+export function markCardsShown(keys) {
+  var scope = scopeKey();
+  var seen = shownSent[scope] || (shownSent[scope] = { keys: {}, sent: false });
+  var fresh = [];
+  (keys || []).forEach(function (key) {
+    if (!seen.keys[key] && fresh.indexOf(key) === -1) fresh.push(key);
+  });
+  if (!fresh.length && ((keys && keys.length) || seen.sent)) return;
+  if (document.visibilityState === "visible") {
+    fresh.forEach(function (key) {
+      seen.keys[key] = true;
+    });
+    seen.sent = true;
+    // In slices the route takes. A slice that did not get through is not
+    // counted as sent, so the next draw of those cards sends it again.
+    var slices = [];
+    for (var at = 0; at < fresh.length; at += MARK_KEYS_MAX) slices.push(fresh.slice(at, at + MARK_KEYS_MAX));
+    if (!slices.length) slices.push([]);
+    slices.forEach(function (slice) {
+      markCards("shown", slice).then(function (ok) {
+        if (ok) return;
+        slice.forEach(function (key) {
+          delete seen.keys[key];
+        });
+        if (!slice.length) seen.sent = false;
+      });
+    });
+    return;
+  }
+  var waiting = shownWaiting[scope] || (shownWaiting[scope] = []);
+  fresh.forEach(function (key) {
+    if (waiting.indexOf(key) === -1) waiting.push(key);
+  });
+  if (shownWatching) return;
+  shownWatching = true;
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState !== "visible") return;
+    var kept = shownWaiting[scopeKey()];
+    shownWaiting = {};
+    if (kept) markCardsShown(kept);
   });
 }

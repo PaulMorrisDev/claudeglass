@@ -114,6 +114,77 @@ def test_on_notes_low_coverage_enough_data_and_expiry():
     assert not any(note.startswith("Enough collected") for note in notes)
 
 
+def test_the_coaching_notes_question_says_when_notes_come_from_the_live_list(monkeypatch):
+    assert "after a tool result" not in capture_view.COACHING_NOTES_ON
+    assert "when you send a message" in capture_view.COACHING_NOTES_ON
+    assert not set(catalogue.live_coaching_hints()) & set(catalogue.TOOL_RESULT_HINTS)
+    monkeypatch.setattr(catalogue, "LIVE_OFF_HINTS", ())
+    assert "after a tool result" in capture_view.coaching_notes_on_text()
+
+
+def test_the_banner_names_the_light_sample():
+    use = _use(cycles=30, tagged_cycles=30)
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light")
+    data = capture_view.view(light, units=API, use=use, now=now)
+    banner = data["banner"]
+    assert data["config"]["after"] == "light" and data["config"]["light"] is True
+    assert banner["on"] is True
+    assert banner["headline"].startswith("Metrics capture: light sample · since 2026-09-21 · 1 session in 5 · ")
+    assert "ended 2026-09-21" not in banner["headline"]
+    assert banner["notes"][:2] == [
+        "The full capture ended on 2026-09-21. Claude now tags the kind, difficulty and size of the work, "
+        "and task changes, in 1 session in 5.",
+        "'claudeglass capture off' stops it. 'claudeglass capture on' starts full capture again.",
+    ]
+    assert not any(note.startswith("Its end time") for note in banner["notes"])
+    assert capture_view.describe(light, now) == "Light sample (since 2026-09-21, 20% of sessions)"
+    # Chosen but not reached yet: the line says what comes next, and the banner is the running one.
+    early = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    assert "then a light sample" in capture_view.describe(light, early)
+    running = capture_view.view(light, units=API, use=use, now=early)
+    assert running["config"]["light"] is False and running["banner"]["headline"].startswith("Metrics capture: Essentials")
+    # The default still stops: the same moment reads as ended, and the line says nothing of a sample.
+    stopped = _on(until="2026-09-21T00:00:00+00:00")
+    assert "ended 2026-09-21" in capture_view.view(stopped, units=API, use=use, now=now)["banner"]["headline"]
+    assert "light" not in capture_view.describe(stopped, now).lower()
+
+
+@pytest.mark.parametrize(
+    ("sample", "share", "phrase"),
+    [(100, 20, "1 session in 5"), (50, 20, "1 session in 5"), (25, 20, "1 session in 5"), (10, 10, "1 session in 10")],
+)
+def test_the_light_sample_names_the_share_the_hook_runs(sample, share, phrase):
+    """The hook runs it in ``min(sample, LIGHT_SAMPLE)`` percent of sessions; each surface says that."""
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light", sample=sample)
+    data = capture_view.view(light, units=API, use=_use(cycles=30, tagged_cycles=30), now=now)
+    assert data["config"]["light_share"] == share
+    assert data["config"]["describe"] == f"Light sample (since 2026-09-21, {share}% of sessions)"
+    banner = data["banner"]
+    assert banner["headline"].startswith(f"Metrics capture: light sample · since 2026-09-21 · {phrase} · ")
+    # The chosen share of the full capture is not a second figure in the headline.
+    assert "% of sessions" not in banner["headline"]
+    assert banner["notes"][0].endswith(f"and task changes, in {phrase}.")
+
+
+def test_a_light_sample_whose_hook_entry_is_missing_says_so():
+    spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
+    health = CaptureHookHealth(
+        settings_path=Path("settings.json"), needed=(spec,), problems=["The command runs a file that is missing."],
+    )
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    light = _on(until="2026-09-21T00:00:00+00:00", after="light")
+    use = _use(cycles=30, tagged_cycles=30)
+    hooks = capture_view.hooks_block(health)
+    notes = capture_view.view(light, units=API, use=use, hooks=health, now=now)["banner"]["notes"]
+    assert hooks["summary"] in notes
+    # The light sample's own two notes stay, and a connected hook adds nothing.
+    assert any(note.startswith("The full capture ended on 2026-09-21") for note in notes)
+    clean = capture_view.view(light, units=API, use=use, now=now)["banner"]["notes"]
+    assert hooks["summary"] not in clean
+
+
 def test_ended_capture_leaves_out_the_hook_cost_and_step_down_notes():
     spec = HookSpec(catalogue.HOOK_SCRIPT, "SessionStart", catalogue.SESSION_START_MATCHER)
     health = CaptureHookHealth(
@@ -902,3 +973,72 @@ def test_the_view_carries_the_overhead_it_is_given_and_none_without():
     block = capture_view.overhead_block(window, hooks_text="x", capture_usd=0.2, coaching_usd=0.0, units=API)
     assert capture_view.view(CaptureConfig(), overhead=block)["overhead"] == block
     assert capture_view.view(CaptureConfig())["overhead"] is None
+
+
+def test_measured_carries_the_signed_out_count_and_the_pause_for_the_judged_line():
+    from claudeglass import haiku_tags
+
+    signed_out = haiku_tags.SignedOut(agent_runs=76, paused=True)
+    measured = capture_view.view(
+        _on(), past=_past(), units=API, use=_use(cycles=8, tagged_cycles=8, reports=76, tagged_reports=0),
+        signed_out=signed_out,
+    )["measured"]
+    assert measured["report_coverage_pct"] == 0.0
+    assert measured["report_signed_out"] == 76
+    assert measured["report_signed_out_text"] == "76 found the claude command signed out"
+    assert measured["judge_paused_text"] == signed_out.note
+    # Judged calls and no pause, or nothing read: nothing to say.
+    for quiet in (haiku_tags.SignedOut(), None):
+        measured = capture_view.view(
+            _on(), past=_past(), units=API, use=_use(cycles=8, tagged_cycles=8, reports=4, tagged_reports=4),
+            signed_out=quiet,
+        )["measured"]
+        assert (measured["report_signed_out"], measured["report_signed_out_text"], measured["judge_paused_text"]) == (0, "", "")
+
+
+# -- a live hint that had moments and gave no tip ----------------------------------------------
+
+
+def _silent_occasions(sessions: int = 2):
+    from claudeglass import hint_occasions
+
+    names = {f"s{n}" for n in range(sessions)}
+    occ = hint_occasions.Occasions(hints={h: hint_occasions.HintCount(sessions=sessions) for h in hint_occasions.HINTS})
+    occ.silent_sessions["big_paste"] = set(names)
+    return occ
+
+
+def _ok_health() -> CaptureHookHealth:
+    return CaptureHookHealth(settings_path=Path("settings.json"))
+
+
+_SILENT = (
+    "2 sessions had a moment for a coaching tip and none came: a big paste 2. "
+    "'claudeglass capture status' checks the capture hook."
+)
+
+
+def test_coaching_notes_say_when_a_live_hint_had_moments_and_gave_no_tip():
+    config = CaptureConfig(coaching=["coaching_notes"])
+    rows = _rows(capture_view.view(config, units=API, hooks=_ok_health(), occasions=_silent_occasions()))
+    assert rows["coaching_notes"]["silent_note"] == _SILENT
+    assert all(row["silent_note"] is None for name, row in rows.items() if name != "coaching_notes")
+    # A missing hook entry is told by the row's chip and command, so this line stays away.
+    stop = HookSpec(catalogue.HOOK_SCRIPT, "UserPromptSubmit", "", False)
+    missing = CaptureHookHealth(settings_path=Path("settings.json"), needed=(stop,), missing=(stop,))
+    rows = _rows(capture_view.view(config, units=API, hooks=missing, occasions=_silent_occasions()))
+    assert rows["coaching_notes"]["needs_hook"] is True and rows["coaching_notes"]["silent_note"] is None
+    # No check of the hook entries, coaching notes off, or no figures: no line.
+    for kwargs in (
+        {"hooks": None, "occasions": _silent_occasions()},
+        {"hooks": _ok_health(), "occasions": None},
+    ):
+        assert _rows(capture_view.view(config, units=API, **kwargs))["coaching_notes"]["silent_note"] is None
+    off = _rows(capture_view.view(CaptureConfig(), units=API, hooks=_ok_health(), occasions=_silent_occasions()))
+    assert off["coaching_notes"]["on"] is False and off["coaching_notes"]["silent_note"] is None
+
+
+def test_one_silent_session_shows_no_line():
+    config = CaptureConfig(coaching=["coaching_notes"])
+    rows = _rows(capture_view.view(config, units=API, hooks=_ok_health(), occasions=_silent_occasions(1)))
+    assert rows["coaching_notes"]["silent_note"] is None

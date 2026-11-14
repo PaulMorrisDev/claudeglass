@@ -471,13 +471,15 @@ def parse_note_codes(text: str) -> tuple[int | None, tuple[str, ...]]:
 #: cost accounting in ``capture.py`` uses them to weigh what a tag
 #: answered. ``why`` and ``admit`` ride on the ``shift`` switch
 #: (``Metric.extra_keys``), so a note that asked for ``shift`` asked for
-#: them. ``found``, ``detour`` and ``useful`` are retired metrics
+#: them. ``lost`` rides on ``prior`` the same way: a compaction's note
+#: lists ``prior`` and adds its line (``Metric.compact_line``). ``found``,
+#: ``detour`` and ``useful`` are retired metrics
 #: (``capture_catalogue.RETIRED_METRIC_IDS``): a note from before the
 #: retirement listed them, and the transcript's tags still count.
 MAIN_TAG_FIELDS = {
     "task": "task", "brief": "brief", "level": "level", "shift": "shift", "why": "shift", "admit": "shift",
     "size": "size", "missing": "missing", "plan": "plan", "skill": "skill", "found": "found", "prior": "prior",
-    "detour": "detour", "check": "check", "out": "big_output", "useful": "web",
+    "lost": "prior", "detour": "detour", "check": "check", "out": "big_output", "useful": "web",
 }
 #: ``out`` is in both: the PostToolUse note after a large result reaches
 #: subagents too, and asks them for it in their ``[result: ...]``. ``fit``

@@ -112,19 +112,60 @@ export function button(label, opts) {
 // an insecure context, a denied permission or any other rejection of
 // the Promise it returns (not just a missing API, which the old
 // try/catch did cover) left the button falsely claiming success.
-// Returns a Promise<boolean> so the caller can tell the two apart.
+// The Clipboard API is the first try. Where it is missing or refused
+// (the Claude Desktop browser pane refuses it; so does a page served over
+// plain http), the deprecated document.execCommand("copy") on a selected
+// textarea is the second. Returns a Promise<boolean> so the caller can
+// tell a copy from a refusal.
 export function copyToClipboard(text) {
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       return navigator.clipboard.writeText(text).then(
         function () { return true; },
-        function () { return false; }
+        function () { return copyBySelection(text); }
       );
     }
   } catch (err) {
     /* clipboard unavailable (insecure context, permissions) -- fall through */
   }
-  return Promise.resolve(false);
+  return Promise.resolve(copyBySelection(text));
+}
+
+// The second try: the text in a temporary textarea that is focused and
+// selected, copied, then removed, with the focus back where it was.
+// Inside a drawer (a modal <dialog>) the rest of the page is inert and
+// cannot take focus, so the textarea joins the open dialog. True only
+// when the textarea held the focus and the selection, and the browser
+// says the copy happened (it says so for an empty selection too).
+function copyBySelection(text) {
+  var area = null;
+  var before = document.activeElement;
+  var copied = false;
+  try {
+    area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.top = "0";
+    area.style.left = "0";
+    area.style.opacity = "0";
+    ((before && before.closest && before.closest("dialog")) || document.body).appendChild(area);
+    area.focus({ preventScroll: true });
+    area.select();
+    copied =
+      document.activeElement === area &&
+      area.selectionStart === 0 &&
+      area.selectionEnd === area.value.length &&
+      document.execCommand("copy") === true;
+  } catch (err) {
+    copied = false;
+  }
+  if (area && area.parentNode) area.parentNode.removeChild(area);
+  try {
+    if (before && before.focus) before.focus({ preventScroll: true });
+  } catch (err) {
+    /* the element it was on has gone */
+  }
+  return copied;
 }
 
 var COPY_FAILED = "Couldn't copy. Select the text and copy it yourself.";
@@ -684,12 +725,13 @@ export function commandBlock(fix, opts) {
 }
 
 // One fixes.build_fix entry. collapsed: a <details> with the fix's
-// title, for a recommendation with several changes.
-export function renderFix(fix, collapsed) {
-  if (!collapsed) return commandBlock(fix, { heading: true });
+// title, for a recommendation with several changes. opts (may be absent)
+// goes to commandBlock: onCopy runs after a copy that worked.
+export function renderFix(fix, collapsed, opts) {
+  if (!collapsed) return commandBlock(fix, { heading: true, onCopy: opts && opts.onCopy });
   var box = el("details", { class: "fix" });
   box.appendChild(el("summary", { text: fixTitle(fix) }));
-  box.appendChild(commandBlock(fix));
+  box.appendChild(commandBlock(fix, opts));
   return box;
 }
 

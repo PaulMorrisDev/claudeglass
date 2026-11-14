@@ -22,7 +22,8 @@ Two kinds of route:
   ``POST`` routes): read straight from ``store``'s own read queries --
   cheap, always fresh.
 - **Report-backed** (``/api/ttl``, ``/api/config-diff``,
-  ``/api/recommendations``, ``/api/report.{md,html,json}``): rebuild a
+  ``/api/recommendations``, ``/api/recommendations/prompt``,
+  ``/api/report.{md,html,json}``): rebuild a
   :class:`~claudeglass.corpus.Corpus` from the store's own
   ``transcripts.digest_blob`` rows via ``service.rebuild.corpus_from_store``
   (a sibling package's module -- imported lazily, inside the function
@@ -114,6 +115,7 @@ from typing import TYPE_CHECKING, Callable
 from .. import __version__ as _TOOL_VERSION
 from .. import baseline as baseline_mod
 from .. import capture_catalogue, classify, coaching, discovery, helptext, hook_health, ignores, invocation, mod_settings
+from .. import card_marks as card_marks_mod
 from .. import ratings as ratings_mod
 from .. import report as report_mod
 from .. import snapshots as snapshots_mod
@@ -129,6 +131,7 @@ from ..config import (
 from ..pricing import PricingError, cache_read_savings_usd, load_pricing
 from ..profiles import catalogue as profile_catalogue
 from ..profiles import diff as profile_diff_mod
+from ..profiles import roles as profile_roles
 from ..profiles import schema as profile_schema
 from ..render.html import render_html
 from ..render.json_out import render_json, to_jsonable
@@ -208,6 +211,11 @@ _ALL_TIME_REACH_DAYS = 90
 PROJECT_FILES_SHOWN = 100
 
 _RESTART_ADVICE = "Restart the dashboard: claudeglass install-service, or stop and start serve."
+
+#: Where saved profiles live by default, as a message names it: never the
+#: real path, which is a local filesystem location (docs/cli.md names the
+#: same default for --config-dir).
+_PROFILES_FOLDER_SHOWN = "~/.claude/claudeglass/profiles"
 
 #: How long the Capture tab's estimates (a replay of your last two
 #: weeks of sessions) are kept before they are worked out again, in the
@@ -406,17 +414,17 @@ def _report_json_commands(text: str) -> str:
     return invocation.rewrite_rendered(text, "json")
 
 
-_SESSION_ID_RE = re.compile(r"^/api/session/([^/]+)$")
-_SESSION_TAGS_RE = re.compile(r"^/api/sessions/([^/]+)/tags$")
-_SESSION_FEEDBACK_RE = re.compile(r"^/api/sessions/([^/]+)/feedback$")
-_PROFILE_DIFF_RE = re.compile(r"^/api/profiles/([^/]+)/diff$")
-_PROFILE_RE = re.compile(r"^/api/profiles/([^/]+)$")
-_SESSION_EXPLAIN_RE = re.compile(r"^/api/session/([^/]+)/explain$")
-_CLAUDE_MD_RE = re.compile(r"^/api/claude-md/([0-9a-f]{16})$")
-_QUICK_ACTION_RE = re.compile(r"^/api/quick-actions/([a-z0-9-]+)$")
+_SESSION_ID_RE = re.compile(r"^/api/session/([^/]+)\Z")
+_SESSION_TAGS_RE = re.compile(r"^/api/sessions/([^/]+)/tags\Z")
+_SESSION_FEEDBACK_RE = re.compile(r"^/api/sessions/([^/]+)/feedback\Z")
+_PROFILE_DIFF_RE = re.compile(r"^/api/profiles/([^/]+)/diff\Z")
+_PROFILE_RE = re.compile(r"^/api/profiles/([^/]+)\Z")
+_SESSION_EXPLAIN_RE = re.compile(r"^/api/session/([^/]+)/explain\Z")
+_CLAUDE_MD_RE = re.compile(r"^/api/claude-md/([0-9a-f]{16})\Z")
+_QUICK_ACTION_RE = re.compile(r"^/api/quick-actions/([a-z0-9-]+)\Z")
 #: A recommendation's key (``Recommendation.key``), as the ignore route
 #: accepts it.
-_REC_KEY_RE = re.compile(r"^[a-z0-9._:-]{1,200}$")
+_REC_KEY_RE = re.compile(r"^[a-z0-9._:-]{1,200}\Z")
 #: At most this many keys in one ignore request (a rule for many agent
 #: types is one item on the dashboard, and one request).
 _MAX_IGNORE_KEYS = 100
@@ -1006,6 +1014,10 @@ def make_handler(
     #: by its key (a calendar window's start moves at local midnight, "since
     #: my last change" at a new change: each a fresh build).
     report_cache: OrderedDict = OrderedDict()
+    #: view (``ignores.ALL_PROJECTS`` or a redacted project slug) -> what the
+    #: landing check last judged it against, ``(store.change_token(), the keys
+    #: its report listed)``: nothing new to judge while it is unchanged.
+    landing_seen: dict = {}
     #: cache key -> the build in progress for it, which later requests
     #: for the same window wait on (see _get_report_model).
     report_building: dict = {}
@@ -1198,18 +1210,40 @@ def make_handler(
                 return snapshot
         return snaps[-1] if snaps else None
 
+    #: project filter -> the snapshot built for it, all for one store
+    #: change token (see _config_snapshot_with_every_project_agents).
+    snapshot_parts: dict = {"token": None, "built": {}}
+
     def _config_snapshot_with_every_project_agents(project=None) -> Snapshot | None:
         """:func:`_latest_config_snapshot` with its agents widened to
         every project's latest snapshot (see
         ``snapshots.with_every_project_agents``), for the "now" value of
         an agent recorded in another project. With a ``project`` filter
         (its raw slugs), only that project's snapshots count, as the
-        report's own advice reads them (``report._settings_snapshots``)."""
+        report's own advice reads them (``report._settings_snapshots``).
+
+        Reading and merging every stored snapshot takes tens of
+        milliseconds on a long-lived store and the Setup page asks three
+        times per draw, so the one built is kept per store change token
+        and project filter, like the report (see _get_report_model): a
+        changed store builds it again. Callers only read it."""
+        token = store.change_token()
+        with report_lock:
+            if snapshot_parts["token"] == token and project in snapshot_parts["built"]:
+                return snapshot_parts["built"][project]
         snaps = _snapshots_from_store()
         if project:
             snaps = snapshots_mod.snapshots_for_projects(snaps, project)
         canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
-        return snapshots_mod.with_every_project_agents(snaps, canonical)
+        # No project picked covers every project the store knows, as the
+        # report built for the same view counts them (the view rule).
+        several = snapshots_mod.several_in_view(project or (), canonical, all_projects=not project)
+        built = snapshots_mod.with_every_project_agents(snaps, canonical, several_projects=several)
+        with report_lock:
+            if snapshot_parts["token"] != token:
+                snapshot_parts["token"], snapshot_parts["built"] = token, {}
+            snapshot_parts["built"][project] = built
+        return built
 
     def _build_report_model(
         window_days: int | None,
@@ -1259,7 +1293,7 @@ def make_handler(
         # its settings still show (report._settings_snapshots) and the
         # report's meta.projects names it, as the CLI's does for a selected
         # folder.
-        projects =tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
+        projects = tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
         window = _window_label(window_days, since, until)
         try:
             overrides = load_session_overrides(options.config_dir)
@@ -1711,14 +1745,29 @@ def make_handler(
         return capture_mod.feedback_usage(corpus, _capture_rates(config))
 
     def _capture_coaching(config):
-        """``capture.coaching_usage`` over the replayed days: the coaching
-        notes the capture hook added, whatever the capture level."""
+        """``(capture.coaching_usage, hint_occasions.collect)`` over the replayed
+        days: the coaching notes the capture hook added, whatever the capture
+        level, and the moments a live hint could have fired, from one corpus."""
         from .. import capture as capture_mod
+        from .. import coaching as coaching_mod
+        from .. import hint_occasions
+        from .. import ratings as ratings_mod
         from . import rebuild
 
-        since = (datetime.now(timezone.utc) - timedelta(days=capture_mod.HISTORY_DAYS)).isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=capture_mod.HISTORY_DAYS)
         corpus = rebuild.corpus_from_store(store, days=capture_mod.HISTORY_DAYS)
-        return capture_mod.coaching_usage(corpus, _capture_rates(config), since=since)
+        usage = capture_mod.coaching_usage(corpus, _capture_rates(config), since=since.isoformat(timespec="seconds"))
+        occasions = hint_occasions.collect(
+            corpus,
+            config,
+            config_dir=options.config_dir,
+            thresholds=ratings_mod.coaching_thresholds(config.thresholds, coaching_mod.read(options.config_dir)),
+            since=since,
+            until=now,
+            mod_events=store.read_mod_events(),
+        )
+        return usage, occasions
 
     def _capture_overhead(config, specs, window):
         """``capture_view.build_overhead`` over ``window``'s sessions: how
@@ -1797,7 +1846,7 @@ def make_handler(
         }
 
     def _capture_view(config) -> dict:
-        from .. import capture_view
+        from .. import capture_view, haiku_tags
 
         capture = config.capture
         soft = (config.billing, str(config.pricing_path))
@@ -1831,11 +1880,20 @@ def make_handler(
                 "feedback", (token, *soft), soft, lambda: _capture_feedback(config), _STALE_REPORT_MAX_AGE_S
             )
             skill = footprint.feedback_skill_state()
-        coaching_use = None
+        coaching_use = occasions = None
         if capture.coaching_notes_on:
+            from .. import hint_occasions
+
             token = store.change_token()
-            coaching_use = _capture_part(
-                "coaching", (token, *soft), soft, lambda: _capture_coaching(config), _STALE_REPORT_MAX_AGE_S
+            # The moments also read the setup's files, the capture log, coaching.json and the project lists: a
+            # change to one of them must not be answered with the part built before it (so it is in ``soft`` too).
+            inputs = hint_occasions.inputs_fingerprint(None, options.config_dir, config)
+            coaching_use, occasions = _capture_part(
+                "coaching",
+                (token, *soft, inputs),
+                (*soft, inputs),
+                lambda: _capture_coaching(config),
+                _STALE_REPORT_MAX_AGE_S,
             )
         brief_skill = None
         if "brief_templates" in capture.coaching:
@@ -1885,11 +1943,17 @@ def make_handler(
         hooks = hook_health.check_capture(
             hook_health.capture_specs(capture.hook_metrics()), config_dir=options.config_dir
         )
+        signed_out = (
+            haiku_tags.signed_out(options.config_dir, since=discovery._parse_bound(capture.enabled_at))
+            if use is not None and capture.enabled_at
+            else None
+        )
         return capture_view.view(
             capture, past=past, units=units, use=use, hooks=hooks, signal_sessions=signal_sessions,
             started_since=started, feedback_use=feedback_use, skill=skill, brief_skill=brief_skill, ratings=ratings,
             statusline=statusline, weekly_cost=weekly_cost, dependent_value=dependent_value,
-            coaching_use=coaching_use, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
+            coaching_use=coaching_use, occasions=occasions, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
+            signed_out=signed_out,
         )
 
     def _capture_conflict(message: str, commands: list[str]) -> tuple[int, dict]:
@@ -1916,9 +1980,9 @@ def make_handler(
         if not isinstance(body, dict) or not body:
             return None, (
                 "request body must be a JSON object with one or more of: level, metrics, sample, until, feedback, "
-                "coaching, tagger"
+                "coaching, tagger, after"
             )
-        allowed = ("level", "metrics", "sample", "until", "feedback", "coaching", "tagger")
+        allowed = ("level", "metrics", "sample", "until", "feedback", "coaching", "tagger", "after")
         unknown = sorted(set(body) - set(allowed))
         if unknown:
             return None, f"unknown key {', '.join(unknown)}; allowed: {', '.join(allowed)}"
@@ -1966,6 +2030,10 @@ def make_handler(
             if body["tagger"] not in capture_catalogue.TAGGERS:
                 return None, f"'tagger' must be one of: {', '.join(capture_catalogue.TAGGERS)}"
             changes["tagger"] = body["tagger"]
+        if "after" in body:
+            if body["after"] not in capture_catalogue.AFTER_CHOICES:
+                return None, f"'after' must be one of: {', '.join(capture_catalogue.AFTER_CHOICES)}"
+            changes["after"] = body["after"]
         return changes, None
 
     def route_capture_post(store, query, body):
@@ -2273,11 +2341,18 @@ def make_handler(
                 "for": list(p.for_),
                 "tasks": list(profile_catalogue.tasks_for(p)),
                 "updated_at": None,
+                "problem": None,
             }
             for p in profile_catalogue.list_profiles()
         ]
-        user_entries = [
-            {
+        # A saved file that fails the checks is listed with why, whether
+        # the store has a row for it (saved before a rule tightened) or not
+        # (the watcher never ingests a file that fails).
+        profiles_dir = Path(options.config_dir) / "profiles"
+        user_entries = []
+        for row in store.profiles():
+            path = profiles_dir / f"{row['id']}.toml"
+            user_entries.append({
                 "id": row["id"],
                 "name": row["name"],
                 "source": "user",
@@ -2285,19 +2360,24 @@ def make_handler(
                 "for": [],
                 "tasks": [],
                 "updated_at": row["updated_at"],
-            }
-            for row in store.profiles()
-        ]
-
-        suggested_profile_id = None
-        latest_baseline = _latest_baseline_row(store)
-        if latest_baseline is not None:
-            try:
-                record = json.loads(latest_baseline["digest_json"])
-            except (TypeError, ValueError, json.JSONDecodeError):
-                record = {}
-            if isinstance(record, dict):
-                suggested_profile_id = record.get("suggested_profile")
+                "problem": _profile_file_problem(path) if path.is_file() else None,
+            })
+        listed = {entry["id"] for entry in user_entries}
+        for path in sorted(profiles_dir.glob("*.toml")) if profiles_dir.is_dir() else ():
+            if path.stem in listed or path.stem in profile_catalogue.CATALOGUE_IDS:
+                continue
+            problem = _profile_file_problem(path)
+            if problem is not None:
+                user_entries.append({
+                    "id": path.stem,
+                    "name": path.stem,
+                    "source": "user",
+                    "archetype": None,
+                    "for": [],
+                    "tasks": [],
+                    "updated_at": None,
+                    "problem": problem,
+                })
 
         # The profile `apply <profile>` last marked active: ignored
         # recommendations are kept per profile.
@@ -2309,11 +2389,26 @@ def make_handler(
         return _ok(
             {
                 "profiles": catalogue_entries + user_entries,
-                "suggested_profile_id": suggested_profile_id,
                 "active_profile_id": None if active_id == ignores.NO_PROFILE else active_id,
                 "active_profile_name": active_name,
             }
         )
+
+    def route_profile_suggestion(store, query, body):
+        # PF1: the suggestion is worked out live from the report for the
+        # picked window and project, not read from the record `init` stored
+        # once. It is a route of its own because the report can take a while
+        # to build and the profile list must not wait for it. Nothing is
+        # suggested for a view with too few sessions.
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        suggestion = baseline_mod.suggest_for_model(_get_report_model(*window, project))
+        suggested_profile_id, suggested_reason = suggestion if suggestion is not None else (None, None)
+        return _ok({"suggested_profile_id": suggested_profile_id, "suggested_reason": suggested_reason})
 
     def route_baseline(store, query, body):
         # v0.3: pair the latest capture with the onboarding capture
@@ -2533,22 +2628,178 @@ def make_handler(
         except (OSError, profile_schema.ProfileError, ValueError):
             return None
 
+    def _broken_profile(profile_id: str):
+        """A 409 saying why, for a saved profile file that exists but no
+        longer passes the checks (a rule tightened since it was saved), so
+        its card's drawer says what to do instead of "unknown profile".
+        ``None`` for anything else."""
+        if not profile_schema._ID_RE.match(profile_id) or profile_id in profile_catalogue.CATALOGUE_IDS:
+            return None
+        path = Path(options.config_dir) / "profiles" / f"{profile_id}.toml"
+        if not path.is_file():
+            return None
+        problem = _profile_file_problem(path)
+        return None if problem is None else _error(409, "conflict", problem)
+
+    def _profile_file_problem(path: Path) -> str | None:
+        """Why the saved profile file at ``path`` can't be used, as the
+        page shows it (its list card and its drawer's 409), or ``None``
+        when it loads. Its own problems name any agent only through
+        ``schema.shown_name``."""
+        try:
+            profile_schema.load_profile(path)
+        except profile_schema.ProfileError as exc:
+            why = "; ".join(exc.problems)
+        except ValueError as exc:  # tomllib.TOMLDecodeError
+            why = f"It isn't valid TOML ({exc})"
+        except OSError:
+            return None
+        else:
+            return None
+        return (
+            f"This profile's file doesn't pass ClaudeGlass's checks, so it can't be used. {why}. "
+            f"Fix or delete {path.name} in ClaudeGlass's profiles folder ({_PROFILES_FOLDER_SHOWN} by default)."
+        )
+
+    def _recorded_agents(snapshot):
+        """The snapshot's ``agents`` map (name -> entry), or ``None`` when
+        there is no snapshot or it records no agents list: the dashboard
+        then knows nothing of the user's agents."""
+        raw = snapshot.data.get("agents") if snapshot is not None else None
+        if not isinstance(raw, dict):
+            return None
+        return {name: entry for name, entry in raw.items() if isinstance(entry, dict)}
+
+    def _agents_from(agents: dict, *sources: str) -> dict:
+        return {name: entry for name, entry in agents.items() if entry.get("source") in sources}
+
+    def _user_agents(agents: dict) -> dict:
+        """The user's own agent files in the recorded map. The hook merges
+        the map with a project agent winning, so a user agent that a
+        project's agent of the same name shadows is recorded only as the
+        project entry (``shadowed_by_project``). ``apply`` at user scope
+        reads the disk and changes that user file, so it counts here too,
+        its tools unknown (the entry's are the project's)."""
+        found = _agents_from(agents, "user")
+        for name, entry in agents.items():
+            if entry.get("shadowed_by_project") and name not in found:
+                found[name] = {"source": "user"}
+        return found
+
+    def _other_scope_note(names: tuple[str, ...], scope: str) -> str:
+        """The sentence added to the no-writer note when the other target
+        file has a writer. The quoted target names are the picker's own
+        labels (``PROFILE_SCOPE_LABELS`` in page-setup.js)."""
+        one = len(names) == 1
+        listed = profile_roles.join_names(names)
+        if scope == "user":
+            if one:
+                return f'Your project agent {listed} writes code. To change it, pick a "This project" target above.'
+            return f'Your project agents {listed} write code. To change them, pick a "This project" target above.'
+        if one:
+            return (
+                f"Your agent {listed} in ~/.claude/agents writes code. "
+                'To change it, pick "Your user settings, every project" above.'
+            )
+        return (
+            f"Your agents {listed} in ~/.claude/agents write code. "
+            'To change them, pick "Your user settings, every project" above.'
+        )
+
+    def _resolve_roles(profile, snapshot, scope: str | None, project=None):
+        """``(profile, notes, writers)``: ``profile`` with its roles folded
+        into the user's own agents, the notes to show, and the agents the
+        writer role went to. ``scope`` is the target file's scope, or
+        ``None`` for the scope-free view (the card, the estimate, "Start
+        from"), which reads user and project agents together and says
+        nothing. ``project`` is the picked project (its raw slugs) or
+        ``None``: a project target with none picked cannot say which
+        project's agents the command will see, so the role's keys are left
+        out and a note asks for one."""
+        if not profile.roles:
+            return profile, (), ()
+        if scope in ("project-local", "repo") and not project:
+            return (
+                profile_roles.resolve(profile, {}).profile,
+                (
+                    "This profile also changes the agent that writes code. "
+                    "Pick one project to see which of its agents changes.",
+                ),
+                (),
+            )
+        recorded = _recorded_agents(snapshot)
+        if recorded is None:
+            # Nothing is known of the user's agents, so no role key is
+            # listed and no "none of your agents" claim is made.
+            folded = profile_roles.resolve(profile, {}).profile
+            if scope is None:
+                return folded, (), ()
+            return (
+                folded,
+                (
+                    "This profile also changes the agent that writes code. "
+                    "Your agents have not been recorded yet, so no agent file is listed here.",
+                ),
+                (),
+            )
+        if scope is None:
+            both = {**_agents_from(recorded, "project"), **_user_agents(recorded)}
+            resolved = profile_roles.resolve(profile, both)
+            return resolved.profile, (), resolved.matched.get("writer", ())
+        here = _user_agents(recorded) if scope == "user" else _agents_from(recorded, "project")
+        resolved = profile_roles.resolve(profile, here)
+        found = resolved.matched.get("writer")
+        if found is None:
+            return resolved.profile, (), ()
+        # A writer whose name fails the agent-name rule is counted, never named.
+        unusable = profile_roles.unusable_writers(here)
+        left_out = (profile_roles.unusable_writers_note(unusable),) if unusable else ()
+        if len(found) > 1:
+            return resolved.profile, (profile_roles.several_writers_note(found), *left_out), found
+        if found:
+            return resolved.profile, left_out, found
+        folder = "~/.claude/agents" if scope == "user" else ".claude/agents"
+        whose = "your agents" if scope == "user" else "this project's agents"
+        note = (
+            "This profile also changes the agent that writes code. "
+            f"None of {whose} in {folder} is named like implementer, fixer or builder and can edit files, "
+            "so no agent file changes."
+        )
+        there = _agents_from(recorded, "project") if scope == "user" else _user_agents(recorded)
+        elsewhere = profile_roles.writers(there)
+        if elsewhere:
+            note += " " + _other_scope_note(elsewhere, scope)
+        return resolved.profile, (note, *left_out), ()
+
     def route_profile_diff(store, query, body):
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
         if profile is None:
-            return _not_found(f"unknown profile: {profile_id!r}")
+            return _broken_profile(profile_id) or _not_found(f"unknown profile: {profile_id!r}")
 
         scope = query.get("scope") or "user"
         if scope not in _VALID_PROFILE_SCOPES:
             return _bad_request(f"'scope' must be one of {_VALID_PROFILE_SCOPES}")
 
+        # PF1: the drawer follows the project picker, so "now", the agents
+        # and what wins over a change are the picked project's own.
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+
         notes: list[str] = []
-        snapshot = _config_snapshot_with_every_project_agents()
+        snapshot = _config_snapshot_with_every_project_agents(project)
+        env_names: set[str] = set()
+        effort_env_set = False
         if snapshot is not None:
             effective = snapshots_mod.effective_config(snapshot)
             provenance = snapshots_mod.effective_provenance(snapshot)
             managed_keys = set(snapshots_mod.managed_keys(snapshot))
+            for field in ("env_names", "effective_env_names"):
+                names = snapshot.data.get(field)
+                if isinstance(names, list):
+                    env_names.update(str(n) for n in names)
+            effort_env_set = snapshots_mod.effort_level_env_set(snapshot)
             # Deviation (mirrors profiles/apply.py's own, documented
             # deviation note): snapshots.py has no effective_agents()
             # accessor, so the schema-2 field is read straight off the
@@ -2559,8 +2810,17 @@ def make_handler(
             effective, provenance, managed_keys, effective_agents = {}, {}, set(), {}
             notes.append("no config snapshot recorded yet; diff computed against an empty effective config")
 
+        written = profile
+        profile, role_notes, role_writers = _resolve_roles(written, snapshot, scope, project)
+
+        # At user scope apply changes the user file of a user agent that a project
+        # agent of the same name hides; the snapshot holds only the project's values.
+        shadowed = frozenset()
+        if snapshot is not None and scope == "user":
+            recorded_agents = _recorded_agents(snapshot) or {}
+            shadowed = frozenset(n for n, e in recorded_agents.items() if e.get("shadowed_by_project"))
         profile_diff = profile_diff_mod.diff_against_effective(
-            profile, effective, effective_agents, provenance, managed_keys
+            profile, effective, effective_agents, provenance, managed_keys, shadowed
         )
         diff_text = profile_diff_mod.render_unified_diff(profile_diff, scope=scope)
         # project_path is deliberately never accepted from the client here
@@ -2573,25 +2833,48 @@ def make_handler(
         apply_cmd, launch_cmd = profile_diff_mod.apply_command(profile.id, scope).split("\n", 1)
         if scope != "user":
             notes.append("Run the command in the project's own folder: --project-dir . means the folder you run it from.")
+        notes.extend(role_notes)
 
-        from ..fixes import LEVER_LABELS, SETTING_TEXT, profile_change_where, profile_prompt
+        from ..fixes import LEVER_LABELS, SETTING_TEXT, profile_change_where, profile_overridden_by, profile_prompt
 
         def _row(row) -> dict:
             parts = row.key.split(".")
-            # agents.<agent>.<key>; the key itself may be dotted (experimental.cacheTtl).
-            name = ".".join(parts[2:]) if row.key.startswith("agents.") else ".".join(parts[1:])
+            # agents.<agent>.<key>: the agent's name and the key may both hold dots.
+            if row.key.startswith("agents."):
+                agent, name = profile_diff_mod.split_agent_key(row.key)
+            else:
+                agent, name = None, ".".join(parts[1:])
+            # settings.modelSettings.<model id>.<key> (a model id has no dot): the
+            # setting is modelSettings.<key> and the id is the row's own ``model``.
+            model = None
+            if row.key.startswith("settings.modelSettings.") and len(parts) == 4:
+                model = parts[2]
+                name = f"modelSettings.{parts[3]}"
+            # The role a row came from: the agent got this key from the
+            # profile's writer role, not from an [agents.<name>] table.
+            from_role = (
+                agent in role_writers
+                and name in written.roles.get("writer", {})
+                and name not in written.agents.get(agent, {})
+            )
             return {
                 "key": row.key,
                 "setting": name,
-                "agent": parts[1] if row.key.startswith("agents.") else None,
+                "agent": agent,
+                "model": model,
+                "role": "writer" if from_role else None,
                 "label": LEVER_LABELS.get(name, name),
                 "description": SETTING_TEXT.get(name, ("", "", ""))[0],
                 "where": profile_change_where(row.key, scope),
+                "overridden_by": profile_overridden_by(
+                    row.key, scope, provenance, env_names, effort_env_set, effective.get("modelSettings"), project is not None
+                ),
                 "current_value": row.current_value,
                 "current_provenance": row.current_provenance,
                 "proposed_value": row.proposed_value,
                 "target_file": row.target_file,
                 "managed": row.managed,
+                "recorded": row.recorded,
             }
 
         settings_rows = [_row(r) for r in profile_diff.rows if r.key.startswith("settings.")]
@@ -2650,8 +2933,13 @@ def make_handler(
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
         if profile is None:
-            return _not_found(f"unknown profile: {profile_id!r}")
-        setting_count = len(profile.settings) + sum(len(v) for v in profile.agents.values()) + len(profile.env)
+            return _broken_profile(profile_id) or _not_found(f"unknown profile: {profile_id!r}")
+        # PF1: the card, the estimate and "Start from" read the agents the
+        # writer role goes to among the user's own (user and project).
+        resolved, _notes, _writers = _resolve_roles(
+            profile, _config_snapshot_with_every_project_agents() if profile.roles else None, None
+        )
+        setting_count = len(resolved.settings) + sum(len(v) for v in resolved.agents.values()) + len(resolved.env)
         return _ok(
             {
                 "id": profile.id,
@@ -2662,7 +2950,11 @@ def make_handler(
                 "tasks": list(profile_catalogue.tasks_for(profile)),
                 "notes": profile.notes,
                 "settings": dict(profile.settings),
-                "agents": {name: dict(keys) for name, keys in profile.agents.items()},
+                "agents": {name: dict(keys) for name, keys in resolved.agents.items()},
+                # What the profile itself names, for "Start from": a copy keeps the role
+                # as a role, not the agents it went to here.
+                "own_agents": {name: dict(keys) for name, keys in profile.agents.items()},
+                "roles": {name: dict(keys) for name, keys in profile.roles.items()},
                 "env": dict(profile.env),
                 "setting_count": setting_count,
             }
@@ -2690,8 +2982,12 @@ def make_handler(
     def route_profiles_from_current(store, query, body):
         """Save the latest snapshot's effective config as a user
         profile: allowlisted keys only, managed keys left out and listed
-        so the UI can say so. Writes only this tool's own profile store,
-        never Claude Code's config."""
+        so the UI can say so. Only the user's own agents are kept: ``apply``
+        patches an agent's file in the user's folder at its default scope,
+        so a project agent in the profile would get the whole profile
+        refused. The project ones left out come back as
+        ``skipped_project_agents``. Writes only this tool's own profile
+        store, never Claude Code's config."""
         body = body if isinstance(body, dict) else {}
         snapshot = _latest_config_snapshot()
         if snapshot is None or not isinstance(snapshot.data.get("effective"), dict):
@@ -2709,18 +3005,49 @@ def make_handler(
             key: effective[key]
             for key in profile_schema.SETTINGS_ALLOWLIST
             if key in effective and key not in managed and effective[key] is not None
-            and _valid({"settings": {key: effective[key]}})
+            and key != "modelSettings" and _valid({"settings": {key: effective[key]}})
         }
+        # Each model's entry is checked alone, so one the schema refuses (no
+        # effort level recorded, an id with a dot) drops only itself.
+        models = effective.get("modelSettings")
+        if "modelSettings" not in managed and isinstance(models, dict):
+            kept_models = {
+                str(model_id): {
+                    sub_key: entry[sub_key]
+                    for sub_key in profile_schema.MODEL_SETTINGS_ALLOWLIST
+                    if entry.get(sub_key) is not None
+                    and _valid({"settings": {"modelSettings": {str(model_id): {sub_key: entry[sub_key]}}}})
+                }
+                for model_id, entry in models.items()
+                if isinstance(entry, dict)
+            }
+            kept_models = {model_id: kept for model_id, kept in kept_models.items() if kept}
+            if kept_models:
+                settings["modelSettings"] = kept_models
         agents: dict = {}
+        skipped_project_agents: list[str] = []
+        # Agents left out because the agent-name rule refuses their names:
+        # counted, never named.
+        skipped_name_agents = 0
         for name, fields in effective_agents.items():
             if not isinstance(fields, dict):
                 continue
-            kept = {
-                key: fields[key]
-                for key in profile_schema.AGENT_ALLOWLIST
-                if fields.get(key) is not None and _valid({"agents": {str(name): {key: fields[key]}}})
-            }
-            if kept:
+            refused = profile_schema.agent_name_problem(name) is not None
+            if fields.get("source") != "user":
+                if fields.get("source") == "project" and not refused:
+                    skipped_project_agents.append(str(name))
+                continue
+            # effective_agents names a few fields its own way (max_turns).
+            kept = {}
+            for key in profile_schema.AGENT_ALLOWLIST:
+                value = fields.get(profile_diff_mod._EFFECTIVE_AGENT_FIELD.get(key, key))
+                # A refused name is tried as a stand-in, to count only an
+                # agent that would otherwise have been saved.
+                if value is not None and _valid({"agents": {"agent" if refused else str(name): {key: value}}}):
+                    kept[key] = value
+            if kept and refused:
+                skipped_name_agents += 1
+            elif kept:
                 agents[str(name)] = kept
         doc = {
             "id": body.get("id") or "my-current-settings",
@@ -2732,6 +3059,8 @@ def make_handler(
         status, payload = _save_user_profile(store, doc, replace=query.get("replace") == "1")
         if status == 201:
             payload["data"]["skipped_managed"] = sorted(k for k in profile_schema.SETTINGS_ALLOWLIST if k in managed)
+            payload["data"]["skipped_project_agents"] = sorted(skipped_project_agents)
+            payload["data"]["skipped_name_agents"] = skipped_name_agents
         return status, payload
 
     def route_profiles_post(store, query, body):
@@ -2905,6 +3234,13 @@ def make_handler(
             None,
         )
         unpriced = {row[0]: {"turns": row[1], "tokens": row[2]} for row in unknown.rows} if unknown else None
+        # While the first scan runs, an older session's transcript may be on disk and about to be read again,
+        # so "its transcripts are gone" would not be true yet: the line waits for the scan, as the banner says.
+        scan, _ = _health_status(
+            watcher_stats() if watcher_stats is not None else None,
+            watcher_state() if watcher_state is not None else None,
+            poll_interval_s=options.poll_interval_s,
+        )
         return _ok(
             to_jsonable(
                 helptext.diagnostics_table(
@@ -2913,6 +3249,7 @@ def make_handler(
                     statusline=statusline,
                     parser_notes=model.parser_notes,
                     unpriced=unpriced,
+                    older=None if scan == "starting" else (model.meta.older_sessions, model.meta.sessions),
                 )
             )
         )
@@ -2933,7 +3270,10 @@ def make_handler(
         # files, which every project reads), as Skills reads them.
         folders = _project_folders(project)
         review = claude_md_review.build_review(
-            options.config_dir, model.context_files or {}, projects=None if folders is None else list(folders)
+            options.config_dir,
+            model.context_files or {},
+            projects=None if folders is None else list(folders),
+            projects_roots=_projects_roots(),
         )
         return claude_md_review, review, _report_units(model), _period_text(*window, name=query.get("window"))
 
@@ -2991,7 +3331,10 @@ def make_handler(
         data = model.context_files or {}
         folders = _project_folders(project)
         rows, local = claude_md_review.project_file_rows(
-            options.config_dir, data, projects=None if folders is None else list(folders)
+            options.config_dir,
+            data,
+            projects=None if folders is None else list(folders),
+            projects_roots=_projects_roots(),
         )
         flagged = {row["hash"]: row["reasons"] for row in context_files.check_rows(rows)}
         units = _report_units(model)
@@ -3038,32 +3381,45 @@ def make_handler(
                 _report_units(model),
                 _period_text(*window, name=query.get("window")),
                 only=_project_folders(project),
+                projects_roots=_projects_roots(),
             )
         )
 
+    def _projects_roots():
+        """The folders of project folders the service reads, as the report
+        does: the configured one, then the extra ones."""
+        return discovery.projects_roots([options.projects_root], options.extra_projects_roots)
+
     def _project_folders(project):
-        """The folders a ``project`` filter stands for (``skills_review``),
-        or ``None`` with no filter."""
-        from .. import skills_review
+        """The folders a ``project`` filter stands for, found under the
+        projects roots the report read, or ``None`` with no filter."""
+        from .. import claude_md_review
 
-        return skills_review.project_folders_for(Path(options.config_dir).parent, project) if project else None
+        return claude_md_review.folders_for_slugs(_projects_roots(), project) if project else None
 
-    def _current_settings(project=None) -> tuple[dict, dict, bool]:
+    def _current_settings(project=None) -> tuple[dict, dict, bool, bool, dict]:
         """The latest snapshot's effective settings as in force, every project's agent
         fields, and (PROF-03) whether ``CLAUDE_CODE_EFFORT_LEVEL`` is set
         -- content_layers' own flag, never a value that could be
-        anything else -- or empty/``False`` when no snapshot is recorded
+        anything else -- whether ``ANTHROPIC_MODEL`` is set (by name
+        only), and each key's layer (N2), or empty/``False`` when no snapshot is recorded
         yet. With a ``project`` filter, that project's own settings and
         agents (:func:`_config_snapshot_with_every_project_agents`)."""
         snapshot = _config_snapshot_with_every_project_agents(project)
         if snapshot is None:
-            return {}, {}, False
+            return {}, {}, False, False, {}
         agents = snapshot.data.get("effective_agents")
-        content_layers = snapshot.data.get("content_layers")
-        env_set = bool(isinstance(content_layers, dict) and content_layers.get("effort_level_env_set"))
+        env_set = snapshots_mod.effort_level_env_set(snapshot)
+        model_env_set = snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV)
         # In force, not as written: CLAUDE_CODE_AUTO_COMPACT_WINDOW beats
         # autoCompactWindow while it's set.
-        return snapshots_mod.effective_config_in_force(snapshot), agents if isinstance(agents, dict) else {}, env_set
+        return (
+            snapshots_mod.effective_config_in_force(snapshot),
+            agents if isinstance(agents, dict) else {},
+            env_set,
+            model_env_set,
+            snapshots_mod.effective_provenance(snapshot),
+        )
 
     def route_profile_goals(store, query, body):
         """Without ``goal``: the goals a profile can start from. With it:
@@ -3088,7 +3444,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, effective_agents, effort_level_env_set = _current_settings(project)
+        effective, effective_agents, effort_level_env_set, model_env_set, provenance = _current_settings(project)
         return _ok(
             goals.draft(
                 goal,
@@ -3099,6 +3455,8 @@ def make_handler(
                 period=_period_text(*window, name=query.get("window")),
                 task=task,
                 effort_level_env_set=effort_level_env_set,
+                model_env_set=model_env_set,
+                provenance=provenance,
                 skip_keys=_ignored_keys(model, query),
             )
         )
@@ -3156,7 +3514,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, _agents, _env_set = _current_settings(project)
+        effective, _agents, _env_set, _model_env_set, _provenance = _current_settings(project)
         units = _report_units(model)
         period = _period_text(*window, name=query.get("window"))
         result = whatif.estimate(
@@ -3184,6 +3542,7 @@ def make_handler(
                     predicted_usd=predicted_usd,
                     predicted_pct=None,
                     fidelity=fidelity,
+                    priced_on=row.get("priced_on"),
                 )
         return _ok(result)
 
@@ -3204,7 +3563,16 @@ def make_handler(
         from .. import quick_actions
 
         model = _get_report_model(*window, project)
-        effective, effective_agents, _env_set = _current_settings(project)
+        # The settings in force and every project's agents come from one merged
+        # snapshot (as _current_settings reads it); the tools lines are in its
+        # agents map, which the cards read.
+        snapshot = _config_snapshot_with_every_project_agents(project)
+        effective, effective_agents = {}, {}
+        if snapshot is not None:
+            effective = snapshots_mod.effective_config_in_force(snapshot)
+            agents = snapshot.data.get("effective_agents")
+            effective_agents = agents if isinstance(agents, dict) else {}
+        agent_files = snapshot.data.get("agents") if snapshot is not None else None
         window_days, since, until, _window_by = window
         since_dt, until_dt = _resolve_window(window_days, since, until)
         return quick_actions, quick_actions.Context(
@@ -3214,10 +3582,15 @@ def make_handler(
             config_dir=Path(options.config_dir),
             effective=effective,
             effective_agents=effective_agents,
+            agents=agent_files if isinstance(agent_files, dict) else {},
             skip_keys=_ignored_keys(model, query),
             only=_project_folders(project),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
+            projects_roots=tuple(_projects_roots()),
+            model_env_set=snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV),
+            effort_level_env_set=snapshots_mod.effort_level_env_set(snapshot),
+            effective_provenance=snapshots_mod.effective_provenance(snapshot) if snapshot is not None else {},
         )
 
     def route_quick_actions(store, query, body):
@@ -3644,6 +4017,101 @@ def make_handler(
             row.update(mark)
         return _ok(rows)
 
+    def route_recommendations_prompt(store, query, body):
+        """One prompt for the open fixes of the project asked about
+        (``fixes.project_prompt``; ``project`` is required): ignored cards,
+        landed fixes, unconfirmed changes, managed settings and model
+        changes to try first are left out."""
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        if project is None:
+            return _bad_request("'project' is required")
+        model = _get_report_model(*window, project)
+        marks = ignores.annotate(
+            model.recommendations,
+            ignores.load(options.config_dir),
+            ignores.active_profile(options.config_dir),
+            _str_query(query, "project"),
+        )
+        skip = {rec.key for rec, mark in zip(model.recommendations, marks) if mark.get("ignored")}
+        from ..fixes import project_prompt
+
+        return _ok(project_prompt(model.recommendations, skip))
+
+    def _judge_landings(view, project, listed):
+        """The landing check (``card_marks.landing``) for one view's cards that
+        its report no longer lists and whose settings the store has a record
+        of: each is set landed, or cleared, from the view's snapshots. Skipped
+        when neither the store nor the list has changed since the view was last
+        judged. A card that is listed is left alone (marking it just cleared
+        it)."""
+        token = (store.change_token(), frozenset(listed))
+        if landing_seen.get(view) == token:
+            return
+        gone = [row for row in store.card_marks(view) if row["changes"] and row["card_key"] not in listed]
+        if gone:
+            snaps = _snapshots_from_store()
+            snapshots_mod._normalise_tool_lines(snaps)
+            if project:
+                snaps = snapshots_mod.snapshots_for_projects(snaps, project)
+            canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
+            cache: dict = {}
+            for row in gone:
+                shown = snapshots_mod._parse_ts(row["first_shown_at"])
+                found = card_marks_mod.landing(row["changes"], snaps, canonical, shown, cache) if shown else None
+                store.set_card_landed(
+                    row["card_key"],
+                    view,
+                    found[0].strftime("%Y-%m-%dT%H:%M:%SZ") if found else None,
+                    found[1] if found else None,
+                )
+        landing_seen[view] = token
+
+    def route_recommendations_marks(store, query, body):
+        """Record what the dashboard did with recommendation cards:
+        ``{"mark": "shown" | "copied" | "bundle", "keys": [...]}``, for the
+        window and project the page was showing. A card is ``shown`` when its
+        title was drawn, ``copied`` when a button copied its prompt, and
+        ``bundle`` when the project's all-fixes prompt (which holds it) was
+        copied. A key this window's report does not list is skipped: the page
+        posts what it drew, and the report may have been rebuilt since. A
+        ``shown`` mark then judges the view's cards that are no longer listed
+        (``_judge_landings``). It writes the store and nothing else: no file
+        in the config folder, no Claude Code setting."""
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        unknown = sorted(set(body) - {"mark", "keys"})
+        if unknown:
+            return _bad_request(f"unknown field {', '.join(unknown)}; known: keys, mark")
+        mark, keys = body.get("mark"), body.get("keys")
+        if mark not in ("shown", "copied", "bundle"):
+            return _bad_request("'mark' must be one of: shown, copied, bundle")
+        if not isinstance(keys, list) or len(keys) > _MAX_IGNORE_KEYS:
+            return _bad_request(f"'keys' must be a list of up to {_MAX_IGNORE_KEYS} recommendation keys")
+        if not keys and mark != "shown":
+            return _bad_request(f"'keys' must name at least one card to mark {mark}")
+        if not all(isinstance(key, str) and _REC_KEY_RE.match(key) for key in keys):
+            return _bad_request("each key must be a recommendation key: a-z, 0-9, '.', '_', ':' or '-'")
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        model = _get_report_model(*window, project)
+        by_key = {rec.key: rec for rec in model.recommendations}
+        view = _str_query(query, "project") or ignores.ALL_PROJECTS
+        rows = [card_marks_mod.card_row(by_key[key]) for key in dict.fromkeys(keys) if key in by_key]
+        if rows:
+            store.mark_cards(rows, mark=mark, project=view, folders=list(project or ()))
+        if mark == "shown":
+            _judge_landings(view, project, set(by_key))
+        return _ok({"mark": mark, "recorded": len(rows)})
+
     def route_recommendations_ignore(store, query, body):
         """Ignore recommendations, or stop ignoring them: ``{"keys":
         [...], "ignored": true|false}``. Each key must be a recommendation
@@ -3705,6 +4173,7 @@ def make_handler(
         "/api/recache": route_recache,
         "/api/compactions": route_compactions,
         "/api/profiles": route_profiles,
+        "/api/profile-suggestion": route_profile_suggestion,
         "/api/baseline": route_baseline,
         "/api/daily-usage": route_daily_usage,
         "/api/ttl": route_ttl,
@@ -3715,6 +4184,7 @@ def make_handler(
         "/api/waste": route_waste,
         "/api/config-diff": route_config_diff,
         "/api/recommendations": route_recommendations,
+        "/api/recommendations/prompt": route_recommendations_prompt,
         "/api/diagnostics": route_diagnostics,
         "/api/profile-schema": route_profile_schema,
         "/api/claude-md": route_claude_md,
@@ -3751,6 +4221,7 @@ def make_handler(
         "/api/whatif": route_whatif,
         "/api/predictions/seen": route_predictions_seen,
         "/api/recommendations/ignore": route_recommendations_ignore,
+        "/api/recommendations/marks": route_recommendations_marks,
         "/api/tip-feedback": route_set_tip_feedback,
     }
     post_patterns: tuple[tuple[re.Pattern, Callable], ...] = (

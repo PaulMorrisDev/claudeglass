@@ -56,7 +56,18 @@ Method, in full (see also ``docs/backtest.md``):
    isn't the same length as the report window open when the prediction
    was made, so read the two totals' *ratio*, not their exact dollar
    difference, as what the verdict is built from.
-5. **Verdict**, one of the closed set ``as_estimated``, ``smaller``,
+5. **A prediction that says what it was priced on** (``priced_on``, the
+   figure the estimate is a share of or multiplies: an observed cost, or
+   the tokens it takes out of each start) is read by :mod:`outcomes`
+   instead of steps 2 to 4: the sessions each side of the change, the
+   measure that fits the lever (the same replies priced both ways, or the
+   context at the start of each agent run) and the estimate priced on the
+   same work, so both totals are for the same units and their ratio is not
+   a matter of how long the after-window ran. Its ``measured_usd`` is the
+   reading's; a lever with no honest measure stays unjudged, and one with
+   too little data waits as in step 6. A prediction logged before the
+   figure was kept (``priced_on`` empty) is judged by steps 2 to 4 as before.
+6. **Verdict**, one of the closed set ``as_estimated``, ``smaller``,
    ``larger``, ``opposite``, ``too_little_data`` (see :func:`_verdict`).
    A prediction whose window is still open (no later change point yet,
    and too little data so far to tell) is left unjudged rather than
@@ -76,7 +87,7 @@ from .pricing import Pricing
 from .units import Units
 
 #: Closed verdict vocabulary persisted to ``predictions.verdict``.
-VERDICTS = ("as_estimated", "smaller", "larger", "opposite", "too_little_data")
+VERDICTS = ("as_estimated", "smaller", "larger", "opposite", "too_little_data", "not_measured")
 
 #: A predicted saving smaller than this (either way) is treated as "predicted
 #: no real effect" -- any measured effect at all is then "larger" than predicted,
@@ -175,6 +186,46 @@ def _exact_saving(prediction: dict, point: ChangePoint, before, after, bundles: 
     return next((row for row in result.per_key if (row.agent or None, row.key) == wanted and row.fidelity != "before"), None)
 
 
+def _judge_priced(
+    prediction: dict, point: ChangePoint, sessions: list[impact.SessionFacts], points: list[ChangePoint],
+    bundles: dict, pricing: Pricing, now: datetime, corpus_start: datetime,
+) -> _Judgement | None:
+    """A prediction that says what it was priced on, read by
+    :func:`outcomes.read_fix`: the measure that fits its lever, the estimate
+    priced on the same work. A reading that cannot be made (the lever has no
+    honest measure, the estimate is too small a share of the start, nothing
+    prices the change) is closed out as ``not_measured`` once nothing later
+    can change it (:data:`outcomes.FINAL_NOTES`, else the after side's 30
+    days); until then ``None``, for the caller to try again. A reading with
+    too little data is ``enough=False``, for the caller to wait on or close out. Otherwise the reading's ratio of measured to predicted,
+    applied to the row's own estimate, goes through :func:`_verdict` as the
+    rate path's figures do."""
+    from . import outcomes  # outcomes reads this module's change-point matching
+
+    reading = outcomes.read_fix(
+        point,
+        prediction.get("agent") or None,
+        str(prediction.get("measure_key")).split(".")[-1],
+        outcomes.Prediction(prediction.get("predicted_usd"), prediction.get("priced_on")),
+        sessions, points, bundles, pricing, now, corpus_start,
+    )
+    if reading.verdict == "not_measured":
+        # Nothing in the sessions can check it. Closed at once when the lever or the estimate decides that,
+        # else once the after side has run out, since more sessions could still change the reading.
+        if reading.note in outcomes.FINAL_NOTES or now >= point.ts + outcomes.AFTER_MAX:
+            return _Judgement("not_measured", None, None, True)
+        return None
+    if reading.verdict == "too_little_data":
+        return _Judgement(None, None, None, False)
+    # The reading priced the estimate on the work after the change, which is a smaller sum than the
+    # estimate the row holds. What it found, as the share of the estimate that came true, goes on the
+    # row's own scale, so its two columns, the verdict and what calibration learns are one ratio.
+    estimate = prediction["predicted_usd"]
+    measured_usd = round(reading.measured_usd / reading.predicted_usd * estimate, 6)
+    label = "no_clear_change" if abs(measured_usd) < _NEGLIGIBLE_USD else "lower" if measured_usd > 0 else "higher"
+    return _Judgement(_verdict(estimate, measured_usd, label), measured_usd, None, True)
+
+
 def _judge_row(
     prediction: dict, before: list[impact.SessionFacts], after: list[impact.SessionFacts], units: Units, exact=None
 ) -> _Judgement:
@@ -233,12 +284,16 @@ def judge_predictions(
     """Match and judge every unjudged prediction that can be, persisting
     each verdict via ``Store.judge_prediction``. Returns how many were
     judged. A prediction that matched a change point but still has too
-    little data, and whose after-window is still open (no later change
-    point bounds it yet; for a change to every project, no later change to
-    every project: :func:`impact.bounds`'s ``following``), is left for a
-    later call rather than forced to ``too_little_data`` early. The first
+    little data, and whose after-window is still open, is left for a later
+    call rather than forced to ``too_little_data`` early. For one that says
+    what it was priced on the window is open until 30 days after the change
+    (:data:`outcomes.AFTER_MAX`); for any other, until a later change point
+    bounds it (for a change to every project, a later change to every
+    project: :func:`impact.bounds`'s ``following``). The first
     call on a store also judges again every prediction an earlier version
     closed out as ``too_little_data`` (:func:`_reopen_too_little_data`)."""
+    from . import outcomes  # outcomes reads this module's change-point matching
+
     now = now or datetime.now(timezone.utc)
     _reopen_too_little_data(store)
     points = change_points_mod.change_points(config_dir, corpus)
@@ -247,6 +302,7 @@ def judge_predictions(
     sessions = impact.session_facts(corpus, pricing)
     bundles = {bundle.session_id: bundle for bundle in corpus.sessions}
     judged = 0
+    corpus_start = min((s.start for s in sessions), default=now)
     for prediction in store.predictions(judged=False):
         point = _match_point(prediction, points)
         if point is None:
@@ -254,17 +310,30 @@ def judge_predictions(
         # impact's own bounds and project, so a back-tested window and an
         # impact comparison of the same change never disagree.
         previous, following, per_project = impact.bounds(points, point, sessions)
-        before, after = impact.sides(
-            point, sessions, previous=previous, following=following, per_project=per_project, now=now
-        )
-        exact = _exact_saving(prediction, point, before, after, bundles, pricing)
-        result = _judge_row(prediction, before, after, units, exact)
-        if not result.enough:
-            if following is None:
-                # The after-window is still open -- more sessions may
-                # yet arrive to judge this by. Try again next time.
+        if prediction.get("priced_on") is not None:
+            result = _judge_priced(prediction, point, sessions, points, bundles, pricing, now, corpus_start)
+            if result is None:
+                # A reading more sessions could still change: try again next time.
                 continue
-            result = _Judgement("too_little_data", None, None, True)
+            if not result.enough:
+                # The reading cuts its own after side (the same lever, what every start carries, the
+                # agent's own keys), which a later change in the project need not do: its window is
+                # closed only once it has run its 30 days.
+                if now < point.ts + outcomes.AFTER_MAX:
+                    continue
+                result = _Judgement("too_little_data", None, None, True)
+        else:
+            before, after = impact.sides(
+                point, sessions, previous=previous, following=following, per_project=per_project, now=now
+            )
+            exact = _exact_saving(prediction, point, before, after, bundles, pricing)
+            result = _judge_row(prediction, before, after, units, exact)
+            if not result.enough:
+                if following is None:
+                    # The after-window is still open -- more sessions may
+                    # yet arrive to judge this by. Try again next time.
+                    continue
+                result = _Judgement("too_little_data", None, None, True)
         store.judge_prediction(
             prediction["id"],
             change_ts=point.iso(),
@@ -293,12 +362,17 @@ def calibration_multipliers(store) -> dict[tuple[str | None, str], float]:
     tool has historically over- or under-estimated for you specifically
     reads adjusted (fidelity ``"calibrated"``) the next time you look --
     a grouping with too few judged points simply has no entry here,
-    which is the prior of 1.0 (:func:`whatif.estimate` leaves it alone)."""
+    which is the prior of 1.0 (:func:`whatif.estimate` leaves it alone).
+
+    It learns only from predictions that say what they were priced on:
+    an earlier one was judged against the cost per session or per spawn of
+    an after-window of another length, so its ratio is biased toward
+    "smaller" by how the two were measured, not by the estimate."""
     groups: dict[tuple[str | None, str], list[float]] = {}
     for row in store.predictions(judged=True):
         predicted = row.get("predicted_usd")
         measured = row.get("measured_usd")
-        if not predicted or measured is None:
+        if not predicted or measured is None or row.get("priced_on") is None:
             continue
         groups.setdefault((row.get("agent"), row.get("measure_key")), []).append(measured / predicted)
     return {key: sum(ratios) / len(ratios) for key, ratios in groups.items() if len(ratios) >= MIN_JUDGED_FOR_CALIBRATION}
@@ -324,6 +398,7 @@ _VERDICT_TEXT = {
     "larger": "Measured effect was larger than estimated.",
     "opposite": "Went the other way from the estimate.",
     "too_little_data": "Not enough sessions after the change to judge it.",
+    "not_measured": "Can't be checked from your sessions.",
 }
 
 

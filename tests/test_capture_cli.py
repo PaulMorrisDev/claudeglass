@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from claudeglass import capture_catalogue as cat
-from claudeglass import cli, footprint, hook_health, installer, setup_flow, signals
-from claudeglass.config import CAPTURE_LOG_NAME, SIGNAL_RETENTION_DEFAULT_DAYS, CaptureConfig, load_capture_log, load_config
+from claudeglass import cli, footprint, hook_health, installer, mod_settings, setup_flow, signals
+from claudeglass.config import CAPTURE_LOG_NAME, SIGNAL_RETENTION_DEFAULT_DAYS, CaptureConfig, load_capture_log, load_config, set_capture
 
 NOW = datetime(2026, 9, 24, 6, 0, tzinfo=timezone.utc)
 ESSENTIALS = hook_health.capture_specs(cat.level_metrics("essentials"))
@@ -275,6 +275,45 @@ def test_check_capture_python_version_is_off_by_default_and_bounded_when_asked(t
     assert calls == [hook_health.stable_python()]  # one interpreter shared by every entry: checked once
 
 
+def _run_launcher(config_dir, payload=None) -> tuple[int, str, str]:
+    """The installed launcher run the way Claude Code runs it (``python -I -S``), in the data folder, on
+    ``payload`` as JSON (nothing on stdin when there is none)."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR")}
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", str(config_dir / "hooks" / cat.HOOK_SCRIPT), "--config-dir", str(config_dir)],
+        input=json.dumps(payload).encode("utf-8") if payload is not None else b"",
+        capture_output=True,
+        env=env,
+        cwd=config_dir,
+        timeout=30,
+    )
+    return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
+
+
+def _big_paste_payload(config_dir) -> dict:
+    """A message that brings a ``big_paste`` note, with the transcript it is judged on (coaching is switched on
+    in the data folder's ``config.toml``)."""
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    moment = (datetime.now(timezone.utc) - timedelta(seconds=100)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    usage = {"input_tokens": 10, "cache_read_input_tokens": 19_990, "cache_creation_input_tokens": 0, "output_tokens": 0}
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant", "timestamp": moment, "message": {"id": "m1", "usage": usage, "content": [{"type": "text", "text": "ok"}]}},
+    ]
+    transcript = config_dir.parent / "s.jsonl"
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s1",
+        "cwd": str(config_dir.parent),
+        "transcript_path": str(transcript),
+        "prompt": "Why does this fail?\n" + "log line\n" * 5_000,
+    }
+
+
 def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypatch):
     config_dir = _claude(tmp_path, {})
     real_replace = os.replace
@@ -286,9 +325,69 @@ def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypat
 
     monkeypatch.setattr(hook_health.os, "replace", _boom)
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    # No catalogue is on disk to disagree with the module, so the module and the launcher are written: a
+    # launcher that is missing makes every hook call exit 2.
     assert [p.name for p in written] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
     assert not (config_dir / "hooks" / cat.CATALOGUE_FILE).exists()
     assert not list((config_dir / "hooks").glob("*.tmp"))
+    assert _run_launcher(config_dir) == (0, "", "")
+
+
+def test_install_hook_files_keeps_the_old_module_and_its_stamp_when_the_catalogue_cannot_be_written(
+    tmp_path, monkeypatch
+):
+    import hashlib
+
+    config_dir = _claude(tmp_path, {})
+    files = hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT]
+    hook_health.install_hook_files(config_dir, files)
+    hooks = config_dir / "hooks"
+    # An earlier install: each file differs from the packaged one but works, and is stamped as this tool's own.
+    older = {
+        cat.CATALOGUE_FILE: json.dumps({**json.loads(_packaged(cat.CATALOGUE_FILE)), "older_copy": True}).encode("utf-8"),
+        cat.HOOK_MODULE: _packaged(cat.HOOK_MODULE) + b"\n# an older copy\n",
+        cat.HOOK_SCRIPT: _packaged(cat.HOOK_SCRIPT) + b"\n# an older copy\n",
+    }
+    manifest = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
+    for name, data in older.items():
+        (hooks / name).write_bytes(data)
+        manifest[name] = hashlib.sha256(data).hexdigest()
+    (hooks / ".manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if Path(dst).name == cat.CATALOGUE_FILE:
+            raise PermissionError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _boom)
+    written = hook_health.install_hook_files(config_dir, files)
+    # Not a new module beside an old catalogue: both stay as they were, with their stamps. The launcher is
+    # still rewritten, and it only starts the module that is there.
+    assert [p.name for p in written] == [cat.HOOK_SCRIPT]
+    assert (hooks / cat.HOOK_MODULE).read_bytes() == older[cat.HOOK_MODULE]
+    assert (hooks / cat.CATALOGUE_FILE).read_bytes() == older[cat.CATALOGUE_FILE]
+    assert (hooks / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    after = json.loads((hooks / ".manifest.json").read_text(encoding="utf-8"))
+    assert after[cat.HOOK_MODULE] == hashlib.sha256(older[cat.HOOK_MODULE]).hexdigest()
+    assert after[cat.CATALOGUE_FILE] == hashlib.sha256(older[cat.CATALOGUE_FILE]).hexdigest()
+    assert after[cat.HOOK_SCRIPT] == hashlib.sha256(_packaged(cat.HOOK_SCRIPT)).hexdigest()
+    assert not list(hooks.glob("*.tmp"))
+    # The older pair still works together under the new launcher.
+    rc, out, err = _run_launcher(config_dir, _big_paste_payload(config_dir))
+    assert (rc, err) == (0, "")
+    assert "big_paste" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_install_hook_files_writes_the_catalogue_before_the_module_whatever_order_it_is_asked_in(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    written = hook_health.install_hook_files(
+        config_dir, [cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE]
+    )
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE, cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    # A module asked for alone does not wait on a catalogue that is not part of this install.
+    again = hook_health.install_hook_files(config_dir, [cat.HOOK_MODULE])
+    assert [p.name for p in again] == [cat.HOOK_MODULE]
 
 
 def test_install_hook_files_writes_the_launcher_its_module_and_the_catalogue(tmp_path):
@@ -524,6 +623,76 @@ def test_on_yes_connects_everything_and_a_second_run_changes_nothing(tmp_path):
     assert hook_health.check_capture(ESSENTIALS).ok
     rc, out = _capture(config_dir, "on", "--yes")
     assert "already Essentials" in out and "already runs the capture hooks" in out
+
+
+def test_capture_on_takes_after(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "on", "--yes", "--after", "light")
+    assert rc == 0
+    assert load_config(config_dir=config_dir).capture.after == "light"
+    assert 'after = "light"' in (config_dir / "config.toml").read_text(encoding="utf-8")
+    # Saying stop writes it back, and a word that is neither is refused by the parser.
+    rc, out = _capture(config_dir, "on", "--yes", "--after", "stop")
+    assert load_config(config_dir=config_dir).capture.after == "stop"
+    with pytest.raises(SystemExit):
+        cli._make_parser().parse_args(["capture", "on", "--after", "never", "--config-dir", str(config_dir)])
+    # Without the flag the choice is left as it was.
+    _capture(config_dir, "on", "--yes", "--after", "light")
+    _capture(config_dir, "on", "--yes", "--sample", "50")
+    assert load_config(config_dir=config_dir).capture.after == "light"
+
+
+def test_status_says_a_light_sample_goes_on_after_the_end(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "essentials"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    assert "Metrics capture: Light sample (since 2020-01-01, 20% of sessions)" in out
+    assert "A light sample goes on" in out and "capture's notes, tags and signals have stopped" not in out
+
+
+def test_status_during_a_light_sample_lists_only_its_keys_and_their_size(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    assert "essentials: task, level, shift, size\n" in out
+    for left_out in ("brief", "prior", "check", "big_output", "session_end", "deep:", "free:"):
+        assert left_out not in out, left_out
+    # The size is the note and the tag of those four keys: no tool note and no agent judge.
+    assert "tokens of note when a session starts" in out and "tokens of tag at the end of each reply" in out
+    assert "large or web tool result" not in out and "subagent run" not in out
+    assert "hasn't judged an agent run" not in out
+    # Full capture, still running, lists everything it asks for.
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "deep"\nuntil = "2099-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, full = _capture(config_dir, "status")
+    assert "large or web tool result" in full and "big_output" in full
+
+
+def test_status_during_a_light_sample_checks_only_its_hook_entries(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n', encoding="utf-8"
+    )
+    rc, out = _capture(config_dir, "status")
+    hooks = next(line for line in out.splitlines() if line.startswith("Hooks: "))
+    assert "after read, search and web results" not in hooks and "when a subagent finishes" not in hooks, hooks
+
+
+@pytest.mark.parametrize(("sample", "share", "phrase"), [(100, 20, "1 session in 5"), (10, 10, "1 session in 10")])
+def test_status_names_the_share_the_light_sample_runs_in(tmp_path, sample, share, phrase):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text(
+        f'[capture]\nlevel = "essentials"\nsample = {sample}\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n',
+        encoding="utf-8",
+    )
+    rc, out = _capture(config_dir, "status")
+    assert f"Metrics capture: Light sample (since 2020-01-01, {share}% of sessions)" in out
+    assert f"and task changes, in {phrase}. " in out
 
 
 def test_levels_up_and_down_sync_the_entries(tmp_path):
@@ -1731,8 +1900,9 @@ def _coaching_hooked(config_dir) -> list[tuple[str, str, bool]]:
 
 
 COACHING_HOOKS = [
-    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next call.
-    ("SubagentStop", "", False),
+    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next
+    # call: only while that hint is on.
+    *([] if "split_run" in cat.LIVE_OFF_HINTS else [("SubagentStop", "", False)]),
     ("UserPromptSubmit", "", False),
     ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
     # cold_return's state is kept by the Stop entry: the one entry that runs in the background.
@@ -1889,3 +2059,648 @@ def test_status_cost_lines_ask_a_subagent_for_nothing(tmp_path):
     # While Haiku writes the tags the hook sends no note after a large result either.
     haiku = "\n".join(cli._capture_cost_lines(cat.level_metrics("deep"), "haiku"))
     assert "after each large or web tool result" not in haiku
+
+
+def _signed_out_tags(config_dir, *, minutes_ago: float = 5, lines=None) -> None:
+    """A tag file whose every call found the claude command signed out."""
+    folder = config_dir / cat.JUDGE_DIR
+    folder.mkdir(exist_ok=True)
+    stamp = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = lines or [
+        {"reply": "msg_1", "agent": "", "err": "no_login"},
+        {"reply": "msg_2", "agent": "", "err": "no_login"},
+        {"reply": "msg_3", "w": cat.JUDGE_FALLBACK_WRITER, "err": "no_login"},
+    ]
+    (folder / f"{stamp[:7]}.jsonl").write_text(
+        "".join(json.dumps({"ts": stamp, **line}) + "\n" for line in lines), encoding="utf-8"
+    )
+
+
+def test_status_adds_the_signed_out_count_and_the_pause_to_the_judged_line(tmp_path):
+    """A tag file whose every call found the claude command signed out: 0% judged, the count beside it and the
+    pause in two sentences (the advice is in the "No verdict" line already)."""
+    from claudeglass import haiku_tags
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    _signed_out_tags(config_dir, lines=[{"reply": f"msg_{n}", "agent": "", "err": "no_login"} for n in range(3)])
+    use = CaptureUsage(sessions=1, subagents=3, cycles=2, tagged_cycles=2, reports=3, tagged_reports=0)
+    lines = cli._capture_usage_lines(
+        use, Units(billing_mode="api"), haiku=False, signed_out=haiku_tags.signed_out(config_dir)
+    )
+    assert (
+        "  Claude tagged 100.0% of your messages; Claude Haiku judged 0.0% of agent runs, and 3 found the claude "
+        "command signed out"
+    ) in lines
+    assert f"  {haiku_tags.SIGNED_OUT_WHAT} {haiku_tags.SIGNED_OUT_RETRY}" in lines
+    assert haiku_tags.SIGNED_OUT_HOW not in "\n".join(lines)
+
+
+def test_status_says_nothing_of_signing_in_when_judged_calls_are_all_there_is(tmp_path):
+    from claudeglass import haiku_tags
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    folder = tmp_path / cat.JUDGE_DIR
+    folder.mkdir()
+    (folder / "2026-09.jsonl").write_text(
+        json.dumps({"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "brief=clear result=done"}) + "\n",
+        encoding="utf-8",
+    )
+    use = CaptureUsage(sessions=1, subagents=1, cycles=2, tagged_cycles=2, reports=1, tagged_reports=1, judged=1)
+    for signed_out in (haiku_tags.signed_out(tmp_path), None):
+        lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False, signed_out=signed_out)
+        assert "  Claude tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
+        assert not any("sign" in line for line in lines)
+
+
+@pytest.mark.parametrize("level", ["essentials", "deep"])
+def test_status_while_the_judge_cannot_sign_in_gives_the_advice_once(tmp_path, level):
+    from claudeglass import haiku_tags
+    from claudeglass.config import set_capture
+
+    config_dir = _claude(tmp_path, {})
+    _api_billing(config_dir)
+    start = _session(config_dir, captured=True)
+    set_capture(config_dir, level=level, now=start - timedelta(hours=1))
+    _signed_out_tags(config_dir, lines=[{"reply": f"msg_{n}", "agent": "", "err": "no_login"} for n in range(2)])
+    rc, out = _capture(config_dir, "status")
+    # What it is and when it tries again, once each; and the advice once, in the "No verdict" line the status
+    # already gave ("isn't signed in" and what to do), so the pause does not say it again.
+    assert out.count(haiku_tags.SIGNED_OUT_WHAT) == 1 and out.count(haiku_tags.SIGNED_OUT_RETRY) == 1
+    assert "No verdict for 2" in out and out.count("keeps its own login") == 1
+    assert haiku_tags.SIGNED_OUT_HOW not in out
+    # Judged lines that came before a sign-out do not hide it, and a judged one after it clears it.
+    _signed_out_tags(
+        config_dir, lines=[{"reply": "msg_1", "agent": "", "err": "no_login"},
+                           {"reply": "msg_2", "agent": "brief=clear result=done"}],
+    )
+    rc, out = _capture(config_dir, "status")
+    assert haiku_tags.SIGNED_OUT_WHAT not in out
+
+
+@pytest.mark.parametrize("enabled_at", ["2026-11-01", "2026-11-01T10:00:00"])
+def test_a_hand_written_start_with_no_time_zone_is_read_as_utc_by_the_haiku_lines(tmp_path, enabled_at):
+    """``config.py`` accepts ``enabled_at`` with no zone and reads it as UTC; so must the lines that count the tag
+    files from it."""
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    _signed_out_tags(config_dir, minutes_ago=2)
+    capture = CaptureConfig(level="essentials", enabled_at=enabled_at)
+    out = "\n".join(cli._haiku_lines(capture, config_dir))
+    assert "No verdict for 2" in out
+
+
+@pytest.mark.parametrize("enabled_at", ["2026-11-01", "2026-11-01T10:00:00"])
+def test_a_hand_written_start_with_no_time_zone_does_not_stop_the_status_measured_lines(tmp_path, enabled_at):
+    from claudeglass import haiku_tags
+
+    config_dir = _claude(tmp_path, {})
+    _api_billing(config_dir)
+    start = _session(config_dir, captured=True)
+    from claudeglass.config import set_capture
+
+    set_capture(config_dir, level="essentials", now=start - timedelta(hours=1))
+    path = config_dir / "config.toml"
+    text = path.read_text(encoding="utf-8")
+    stamp = next(line for line in text.splitlines() if line.startswith("enabled_at"))
+    path.write_text(text.replace(stamp, f'enabled_at = "{enabled_at}"'), encoding="utf-8")
+    _signed_out_tags(config_dir, minutes_ago=2)
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0 and haiku_tags.SIGNED_OUT_WHAT in out
+
+
+# -- M8: a hook entry is written only for a hook file that is on disk --------
+
+
+def _fail_replace_of(monkeypatch, name: str) -> None:
+    """The final rename of ``name`` fails, as it does when Windows holds the file open."""
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if Path(dst).name == name:
+            raise PermissionError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _boom)
+
+
+CONNECT_SENTENCE = (
+    "Could not finish copying the capture hook files (another program may be using one), so settings.json "
+    "was left unchanged. Run 'claudeglass capture connect' again."
+)
+SETUP_SENTENCE = (
+    "Could not finish copying the capture hook files (another program may be using one), so their entries "
+    "were not added to settings.json. Run 'claudeglass capture connect' to add them."
+)
+SNAPSHOT_SENTENCE = (
+    "Could not finish copying the snapshot hook file (another program may be using it), so settings.json "
+    "was left unchanged. Run 'claudeglass init' again."
+)
+
+
+def _setup(config_dir, *extra) -> tuple[int, str]:
+    args = cli._make_parser().parse_args(
+        ["init", "--config-dir", str(config_dir), "--non-interactive", "--connect", "--no-service",
+         "--capture-level", "essentials", *extra]
+    )
+    out = io.StringIO()
+    rc = setup_flow.run(*cli._setup_flow_inputs(args), stdin=io.StringIO(""), stdout=out, now=NOW)
+    return rc, out.getvalue()
+
+
+def _capture_commands_in(settings: dict) -> list[str]:
+    return [entry["command"] for _event, _matcher, entry in _entries(settings) if cat.HOOK_SCRIPT in entry["command"]]
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_capture_connect_writes_no_entry_for_a_launcher_that_could_not_be_installed(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    real_replace = os.replace
+    _fail_replace_of(monkeypatch, missing)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
+    # Every entry would call a file that is not there, and Claude Code treats the exit code 2 as a blocking error.
+    assert _capture_commands_in(_settings(config_dir)) == []
+    assert _settings(config_dir) == {"model": "opus"}
+    assert CONNECT_SENTENCE in out
+    # Run again once the file can be written: it goes through.
+    monkeypatch.setattr(hook_health.os, "replace", real_replace)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert (config_dir / "hooks" / cat.HOOK_SCRIPT).is_file()
+    assert _capture_commands_in(_settings(config_dir))
+
+
+def test_capture_connect_writes_the_entries_when_only_the_catalogue_could_not_be_installed(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _fail_replace_of(monkeypatch, cat.CATALOGUE_FILE)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    # The launcher and its module are there, and the hook falls back to plain wording without the catalogue.
+    assert (config_dir / "hooks" / cat.HOOK_SCRIPT).is_file()
+    assert _capture_commands_in(_settings(config_dir))
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_setup_writes_no_capture_entry_for_a_launcher_that_could_not_be_installed(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_replace_of(monkeypatch, missing)
+    args = cli._make_parser().parse_args(
+        ["init", "--config-dir", str(config_dir), "--non-interactive", "--connect", "--no-service",
+         "--capture-level", "essentials"]
+    )
+    out = io.StringIO()
+    setup_flow.run(*cli._setup_flow_inputs(args), stdin=io.StringIO(""), stdout=out, now=NOW)
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
+    assert _capture_commands_in(_settings(config_dir)) == []
+    # What setup could do was done: the snapshot hook is connected.
+    assert hook_health.check(config_dir, claude_root=config_dir.parent).command is not None
+    # Setup does change settings.json (the snapshot hook), so it does not say it left it unchanged.
+    assert SETUP_SENTENCE in out.getvalue()
+    assert "left unchanged" not in out.getvalue()
+    assert "Changed Claude Code's settings.json." in out.getvalue()
+
+
+def test_refresh_hook_files_restores_a_launcher_that_is_missing_while_its_module_is_there(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_SCRIPT).unlink()
+    refreshed = hook_health.refresh_hook_files(config_dir)
+    assert [p.name for p in refreshed] == [cat.HOOK_SCRIPT]
+    assert (hooks_dir / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    assert hook_health.refresh_hook_files(config_dir) == []
+
+
+def test_refresh_hook_files_leaves_a_missing_launcher_alone_when_its_module_is_missing_too(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_SCRIPT).unlink()
+    (hooks_dir / cat.HOOK_MODULE).unlink()
+    assert hook_health.refresh_hook_files(config_dir) == []
+    assert not (hooks_dir / cat.HOOK_SCRIPT).exists()
+
+
+def test_capture_connect_dry_run_adds_the_message_entry_for_coaching_notes_after_the_time_box(tmp_path):
+    # M6: the entry that carries every message-time hint, with capture's time-box over.
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "essentials"\nuntil = "2026-09-01T00:00:00+00:00"\ncoaching = ["coaching_notes"]\n',
+        encoding="utf-8",
+    )
+    rc, out = _capture(config_dir, "connect", "--dry-run")
+    assert rc == 0, out
+    assert "capture-hook.py when you send a message" in out
+    assert _settings(config_dir) == {"model": "opus"}
+
+
+# -- R5: a saved capture change reaches the mod's settings file at once -------------------------------------------------
+
+
+def _mod_file(config_dir) -> dict:
+    return json.loads(mod_settings.settings_path(config_dir).read_text(encoding="utf-8"))
+
+
+def _mod_file_written(config_dir) -> None:
+    assert mod_settings.write(config_dir, mod_settings.build(config_dir, now=NOW))
+
+
+def test_capture_enable_and_disable_rewrite_the_coaching_block_of_the_mod_settings(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _mod_file_written(config_dir)
+    assert _mod_file(config_dir)["coaching"]["enabled"] is False
+
+    rc, out = _capture(config_dir, "enable", "coaching_notes", "--yes")
+    assert rc == 0, out
+    assert _mod_file(config_dir)["coaching"]["enabled"] is True
+
+    rc, out = _capture(config_dir, "disable", "coaching_notes", "--yes")
+    assert rc == 0, out
+    assert _mod_file(config_dir)["coaching"]["enabled"] is False
+
+
+def test_capture_remove_rewrites_the_coaching_block_it_turns_off(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    _mod_file_written(config_dir)
+    assert _mod_file(config_dir)["coaching"]["enabled"] is True
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert _mod_file(config_dir)["coaching"]["enabled"] is False
+
+
+def test_capture_leaves_the_mod_settings_alone_when_nothing_is_saved(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _mod_file_written(config_dir)
+    path = mod_settings.settings_path(config_dir)
+    before = path.read_text(encoding="utf-8")
+    # A dry run, and a change that is asked about and declined, save nothing.
+    _capture(config_dir, "enable", "coaching_notes", "--dry-run")
+    _capture(config_dir, "enable", "coaching_notes", stdin="n\n")
+    assert path.read_text(encoding="utf-8") == before
+    # Nothing changes in config.toml: nothing is rewritten.
+    _capture(config_dir, "disable", "coaching_notes", "--yes")
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_capture_enable_writes_no_mod_settings_where_the_mod_has_none_yet(tmp_path):
+    # The next report writes the file whole; a capture change makes no file of its own.
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "enable", "coaching_notes", "--yes")
+    assert rc == 0, out
+    assert not mod_settings.settings_path(config_dir).exists()
+
+
+def test_the_feedback_and_brief_switches_refresh_the_mod_settings_too(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    _mod_file_written(config_dir)
+    calls = []
+    real = mod_settings.refresh_coaching
+    monkeypatch.setattr(mod_settings, "refresh_coaching", lambda folder, **kw: calls.append(folder) or real(folder, **kw))
+    for argv in (("brief", "on"), ("brief", "off"), ("feedback", "on"), ("feedback", "off")):
+        _capture(config_dir, *argv, "--yes")
+    assert len(calls) == 4
+
+
+# -- review fixes: the sentences, the module the launcher loads, a file that cannot be created -----------------------
+
+
+def _fail_tmp_write_of(monkeypatch, name: str) -> None:
+    """Creating the temporary file for ``name`` fails, as it does in a hooks folder that refuses new files."""
+    real_write = Path.write_bytes
+
+    def _boom(self, data):
+        if self.name.startswith(name) and self.name.endswith(".tmp"):
+            raise PermissionError("denied")
+        return real_write(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", _boom)
+
+
+def _launcher_without_its_module(config_dir) -> None:
+    """The launcher and the catalogue are on disk; the module the launcher loads is gone."""
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    (config_dir / "hooks" / cat.HOOK_MODULE).unlink()
+
+
+def test_setup_names_what_it_did_when_the_hook_files_could_not_be_copied(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SETUP_SENTENCE in out
+    assert CONNECT_SENTENCE not in out and "left unchanged" not in out
+    assert "Changed Claude Code's settings.json." in out
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_capture_connect_says_its_sentence_when_a_hooks_folder_refuses_the_temporary_file(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _fail_tmp_write_of(monkeypatch, missing)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out
+    assert _settings(config_dir) == {"model": "opus"}
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+@pytest.mark.parametrize("missing", [cat.HOOK_MODULE, cat.HOOK_SCRIPT])
+def test_setup_says_its_sentence_when_a_hooks_folder_refuses_the_temporary_file(tmp_path, monkeypatch, missing):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_tmp_write_of(monkeypatch, missing)
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SETUP_SENTENCE in out
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+def test_install_hook_files_counts_a_file_whose_temporary_file_cannot_be_created_as_not_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    _fail_tmp_write_of(monkeypatch, cat.HOOK_MODULE)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_install_hook_files_does_not_raise_when_even_the_manifest_cannot_be_created(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    real_write = Path.write_text
+
+    def _boom(self, data, *args, **kwargs):
+        if self.name.startswith(".manifest.json"):
+            raise PermissionError("denied")
+        return real_write(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE, cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+
+
+def test_capture_connect_writes_no_entry_for_a_launcher_whose_module_is_gone_and_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _launcher_without_its_module(config_dir)
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out and "Done." not in out
+    assert _settings(config_dir) == {"model": "opus"}
+
+
+def test_capture_connect_removes_no_entry_of_an_older_install_whose_module_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    before = _settings(config_dir)
+    assert _capture_commands_in(before)
+    (config_dir / "hooks" / cat.HOOK_MODULE).unlink()
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "deep"\n', encoding="utf-8")
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out
+    assert _settings(config_dir) == before
+
+
+def test_setup_writes_no_capture_entry_for_a_launcher_whose_module_is_gone_and_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _launcher_without_its_module(config_dir)
+    _fail_replace_of(monkeypatch, cat.HOOK_MODULE)
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SETUP_SENTENCE in out
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+def test_setup_ends_in_a_sentence_when_the_snapshot_hook_cannot_be_copied(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    _fail_replace_of(monkeypatch, "snapshot-config.py")
+    rc, out = _setup(config_dir)
+    assert rc == 2
+    assert SNAPSHOT_SENTENCE in out
+    assert "Traceback" not in out
+    # Nothing was written to settings.json, so nothing in it points at a hook file that is not there.
+    assert _settings(config_dir) == {"model": "opus"}
+    assert "Changed Claude Code's settings.json." not in out
+
+
+def test_snapshot_config_install_hook_ends_in_a_sentence_when_the_file_cannot_be_copied(tmp_path, monkeypatch, capsys):
+    config_dir = _claude(tmp_path, {})
+    _fail_replace_of(monkeypatch, "snapshot-config.py")
+    rc = cli.main(["snapshot-config", "--install-hook", "--config-dir", str(config_dir)])
+    seen = capsys.readouterr()
+    assert rc == 2
+    assert "Could not finish copying the snapshot hook file" in seen.out + seen.err
+    assert "Installed snapshot-config hook" not in seen.out
+
+
+# -- remove takes out the feedback items that do nothing without the entries it removes --------------------------------
+
+
+def test_remove_turns_off_the_plan_check_and_the_rating_reminder_and_says_so(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "level", "deep", "--yes")
+    before = load_config(config_dir=config_dir).capture
+    assert {"feedback_skill", "feedback_note", "plan_check", "feedback_reminder"} <= set(before.feedback)
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert "The plan check and the rating reminder are off too: they run through the hook entries this took out." in out
+    after = load_config(config_dir=config_dir).capture
+    assert "plan_check" not in after.feedback and "feedback_reminder" not in after.feedback
+    # The skill and the survey note stay, and so does the skill file.
+    assert "feedback_skill" in after.feedback and "feedback_note" in after.feedback
+    assert _skill(config_dir).is_file()
+    assert _capture_commands_in(_settings(config_dir)) == []
+
+
+@pytest.mark.parametrize(
+    "item, line",
+    [
+        ("plan_check", "The plan check is off too: it runs through the hook entries this took out."),
+        ("feedback_reminder", "The rating reminder is off too: it runs through the hook entries this took out."),
+    ],
+)
+def test_remove_names_only_the_feedback_items_it_turned_off(tmp_path, item, line):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--yes")
+    set_capture(config_dir, feedback=["feedback_skill", item], now=NOW)
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert line in out
+    assert "off too" not in out.replace(line, "")
+
+
+def test_remove_says_nothing_about_feedback_items_that_were_not_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--yes")
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert "off too" not in out
+
+
+def test_remove_dry_run_leaves_the_feedback_items_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "level", "deep", "--yes")
+    rc, out = _capture(config_dir, "remove", "--dry-run")
+    assert "Dry run: config.toml left unchanged." in out
+    assert {"plan_check", "feedback_reminder"} <= set(load_config(config_dir=config_dir).capture.feedback)
+
+
+# -- a hook file the hook has open for a moment: the replace is tried again -----------------------------------------
+
+
+def _replace_of(monkeypatch, name: str, errors: list) -> list:
+    """The final rename of ``name`` raises the ``errors`` in turn (then works); the sleeps are not waited for.
+    Returns the calls made for ``name``."""
+    real_replace = os.replace
+    calls: list = []
+    pauses: list = []
+
+    def _replace(src, dst):
+        if Path(dst).name == name:
+            calls.append(src)
+            if len(calls) <= len(errors):
+                raise errors[len(calls) - 1]
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _replace)
+    monkeypatch.setattr(hook_health.time, "sleep", pauses.append)
+    return calls
+
+
+def test_install_hook_files_tries_a_refused_replace_again_and_installs_the_file(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    calls = _replace_of(monkeypatch, cat.HOOK_SCRIPT, [PermissionError("open"), PermissionError("open")])
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert len(calls) == 3
+    assert (config_dir / "hooks" / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    assert "Could not finish copying" not in out
+    assert _capture_commands_in(_settings(config_dir))
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_install_hook_files_gives_up_after_twenty_refused_tries(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    calls = _replace_of(monkeypatch, cat.HOOK_MODULE, [PermissionError("open")] * 100)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert len(calls) == 20
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_connect_ends_as_before_when_every_try_is_refused(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "essentials"\n', encoding="utf-8")
+    _replace_of(monkeypatch, cat.HOOK_SCRIPT, [PermissionError("open")] * 100)
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert CONNECT_SENTENCE in out
+    assert _settings(config_dir) == {"model": "opus"}
+
+
+def test_install_hook_files_tries_another_kind_of_error_once(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    calls = _replace_of(monkeypatch, cat.HOOK_MODULE, [OSError("disk full")] * 100)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert len(calls) == 1
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+
+
+# -- what the entries are for, past the end and during a light sample ----------------------------
+
+PAST_THE_END = NOW + timedelta(days=30)  # past the default time-box of 14 days
+
+
+def test_a_light_sample_keeps_the_entry_the_plan_check_and_the_reminder_run_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    rc, out = _capture(config_dir, "on", "--level", "deep", "--after", "light", "--yes")
+    assert rc == 0, out
+    rc, out = _capture(config_dir, "status", now=PAST_THE_END)
+    assert "A light sample goes on" in out
+    assert "  feedback: feedback_skill, feedback_note, feedback_reminder, plan_check\n" in out
+    assert "tokens for the /cg-feedback reminder, at most once every 3 days" in out
+    assert "tokens for the plan check's question, once per approved plan" in out
+    rc, out = _capture(config_dir, "connect", stdin="n\n", now=PAST_THE_END)
+    assert "when a subagent finishes" in out and "when you send a message" not in out
+    assert "can't be captured" not in out
+    rc, out = _capture(config_dir, "connect", "--yes", now=PAST_THE_END)
+    assert sorted((event, bool(entry.get("async"))) for event, _matcher, entry in _capture_entries(config_dir)) == [
+        ("SessionStart", False), ("Stop", True), ("UserPromptSubmit", False),
+    ]
+
+
+def test_past_the_end_only_the_entries_that_still_run_are_needed(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--level", "deep", "--yes")
+    rc, out = _capture(config_dir, "status", now=PAST_THE_END)
+    assert (
+        "Hooks: The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture connect' takes "
+        "them out.\n"
+    ) in out
+    assert "tokens of note when a session starts" not in out
+    assert "tokens for the plan check's question" in out
+    rc, out = _capture(config_dir, "connect", "--yes", now=PAST_THE_END)
+    assert [event for event, _matcher, _entry in _capture_entries(config_dir)] == ["UserPromptSubmit"]
+    # Starting capture again brings its entries back.
+    rc, out = _capture(config_dir, "on", "--level", "deep", "--yes", now=PAST_THE_END)
+    wanted = hook_health.capture_specs(load_config(config_dir).capture.hook_metrics(PAST_THE_END))
+    assert "SessionStart" in {spec.event for spec in wanted}
+    assert hook_health.check_capture(wanted, claude_root=config_dir.parent, config_dir=config_dir).ok
+
+
+def test_with_capture_off_status_names_the_command_that_takes_the_entries_out(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "on", "--yes")
+    _capture(config_dir, "off")
+    rc, out = _capture(config_dir, "status")
+    assert (
+        "Hooks: The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture remove' takes "
+        "them out.\n"
+    ) in out
+    assert "'claudeglass capture connect' takes them out" not in out
+    # The command it names does take them out.
+    assert _capture_entries(config_dir)
+    rc, out = _capture(config_dir, "remove", "--yes")
+    assert rc == 0, out
+    assert _capture_entries(config_dir) == []
+
+
+def test_coaching_notes_alone_need_no_entry_at_an_agents_end(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    # The entry an earlier version wrote for split_run, which is off.
+    settings = _settings(config_dir)
+    settings["hooks"]["SubagentStop"] = [dict(settings["hooks"]["UserPromptSubmit"][0])]
+    (config_dir.parent / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    rc, out = _capture(config_dir, "status")
+    assert "settings.json also runs capture hooks that nothing switched on uses" in out
+    rc, out = _capture(config_dir, "connect", stdin="n\n")
+    assert "- Remove the capture hook that runs capture-hook.py when a subagent finishes.\n" in out
+    assert "Left unchanged." in out and "can't be captured" not in out
+
+
+def test_the_rough_size_says_when_the_note_after_a_compaction_is_bigger():
+    deep = cat.level_includes("deep")
+    rough = cat.rough_tokens(deep)
+    assert rough["compact_note"] > rough["session_note"]
+    assert cli._capture_cost_lines(deep)[0] == (
+        f"about {rough['session_note']} tokens of note when a session starts or is cleared, "
+        f"and about {rough['compact_note']} when it compacts"
+    )
+    standard = cli._capture_cost_lines(cat.level_includes("standard"))[0]
+    assert standard.endswith("tokens of note when a session starts, is cleared or compacts")

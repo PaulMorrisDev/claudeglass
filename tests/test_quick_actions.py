@@ -15,7 +15,8 @@ import pytest
 from claudeglass import agent_models, capture_catalogue, discovery, known_savers, quality, waste
 from claudeglass import quick_actions as qa
 from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
-from claudeglass.model import Recommendation
+from claudeglass.model import Recommendation, SettingChange
+from claudeglass.profiles import goals
 from claudeglass.units import Units
 
 from test_whatif import _model, _table
@@ -28,6 +29,7 @@ _RULE_MODULES = ("recommend.py", "advice.py", "carry.py", "compaction_sim.py", "
                   "run_split.py", "model_swap.py", "waste.py", "elasticity.py", "tool_search.py")
 
 UNITS = Units(billing_mode="api", currency="USD")
+IGNORED_ONLY = "The only change this check would suggest is on a card you ignored."
 FIX_KEYS = {"key", "agent", "explainer", "command", "command_warning", "prompt", "title"}
 
 
@@ -42,9 +44,13 @@ def _ctx(tmp_path, model=None, **kw):
         config_dir=config_dir,
         effective=kw.get("effective", {}),
         effective_agents=kw.get("effective_agents", {}),
+        agents=kw.get("agents", {}),
         skip_keys=kw.get("skip_keys", frozenset()),
         since_ts=kw.get("since_ts"),
         until_ts=kw.get("until_ts"),
+        model_env_set=kw.get("model_env_set", False),
+        effort_level_env_set=kw.get("effort_level_env_set", False),
+        **({"effective_provenance": kw["effective_provenance"]} if "effective_provenance" in kw else {}),
     )
 
 
@@ -216,6 +222,110 @@ def test_models_check_offers_a_fix_per_cheaper_model_with_a_dry_run_command(tmp_
     assert result["table"]["rows"][0][0] == "Main session"
 
 
+def test_the_models_check_says_anthropic_model_wins(tmp_path):
+    from claudeglass import advice
+
+    plain = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}))
+    result = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}, model_env_set=True))
+
+    def main_fixes(res):
+        return [f for f in res["fixes"] if "--set model=" in (f["command"] or "") and "--agent" not in f["command"]]
+
+    assert main_fixes(plain) and not main_fixes(result)
+    # The agent's own model change is not touched by the variable.
+    assert [f["title"] for f in result["fixes"]] == ["Explore: use haiku"]
+    tip = {"title": "ANTHROPIC_MODEL picks your main session's model", "text": advice.MODEL_ENV_WINS}
+    assert tip in result["tips"] and tip not in plain["tips"]
+
+
+_ENV_TIP_TITLE = "ANTHROPIC_MODEL picks your main session's model"
+_BLOCKED_SUMMARY = (
+    "The main session would have cost less on sonnet, but ANTHROPIC_MODEL picks its model, so there is no setting "
+    "to change."
+)
+
+
+def _env_model(*, main_pct=40.0, explore_cheaper=False):
+    """``_full_model`` with the main session's cheaper-model share set, and
+    Explore's cheaper model kept or taken away."""
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-1] = main_pct
+    if not explore_cheaper:
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+    return model
+
+
+def _env_tip(result):
+    from claudeglass import advice
+
+    return [t for t in result["tips"] if t["title"] == _ENV_TIP_TITLE and t["text"] == advice.MODEL_ENV_WINS]
+
+
+def test_the_models_check_says_so_when_the_variable_blocks_the_only_change(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(), effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["status"] == "ok"
+    assert result["summary"] == _BLOCKED_SUMMARY
+    assert "Every agent is already" not in result["summary"]
+    assert len(_env_tip(result)) == 1
+    assert [f for f in result["fixes"] if "Main session" in f["title"]] == []
+
+
+def test_the_models_check_adds_no_variable_tip_for_a_change_it_would_not_draft(tmp_path):
+    """The main session's cheaper model saves less than the goal's bar, so the
+    variable blocks nothing: no tip, and the summary is the unset one."""
+    under = _env_model(main_pct=goals.MIN_SHARE_PCT - 1)
+    result = qa.run("models", _ctx(tmp_path, model=under, effective_agents={"Explore": {}}, model_env_set=True))
+    unset = qa.run("models", _ctx(tmp_path, model=under, effective_agents={"Explore": {}}))
+    assert _env_tip(result) == []
+    assert result["summary"] == unset["summary"] and result["summary"].startswith("Every agent is already")
+    assert result["tips"] == unset["tips"]
+
+
+def test_the_models_check_keeps_the_variable_tip_when_the_setting_already_names_the_model(tmp_path):
+    """Fable sessions, the setting on Opus (the case ``_models_main_picked``
+    says): the variable tip stays beside the "already says" sentences."""
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-4], swap.rows[0][-3] = "claude-fable-5-1", "claude-opus-4-7"
+    swap.rows[1][-3], swap.rows[1][-2] = None, 0
+    _with_session_counts(model, (29, 24, 0, 5), (10, 10, 0, 0))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": "opus"}, model_env_set=True))
+    assert len(_env_tip(result)) == 1
+    assert result["summary"] == (
+        "Your model setting already says opus. 24 main sessions in this window still ran on a larger model."
+    )
+
+
+def test_the_models_check_keeps_an_agent_change_and_the_variable_tip_together(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(explore_cheaper=True),
+                                   effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["Explore: use haiku"]
+    assert len(_env_tip(result)) == 1
+
+
+def test_the_models_check_adds_no_variable_tip_for_an_ignored_main_model_card(tmp_path):
+    model = _env_model()
+    model.recommendations = [_main_sonnet_card()]
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}},
+                                   skip_keys=frozenset({"model-tier-main"}), model_env_set=True))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert _env_tip(result) == []
+    assert [f for f in result["fixes"] if "Main session" in f["title"]] == []
+    # What the variable blocks, an ignored card takes out of too: the check says
+    # what it says without the variable.
+    assert result["summary"] == qa._IGNORED_ONLY
+    # The same with an agent-model card flagged: the "act" branch's sentence.
+    model.recommendations.append(_agent_model_rec("agent-model-inherited", "advice", _INHERITED, prompt="Set the model.",
+                                                  key="agent-model-inherited:workflow-subagent"))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}},
+                                   skip_keys=frozenset({"model-tier-main"}), model_env_set=True))
+    assert result["status"] == "act"
+    assert "The only other change this check would suggest is on a card you ignored." in result["summary"]
+    assert _env_tip(result) == []
+
+
 def test_models_check_says_where_each_agents_model_is_set(tmp_path):
     """A workflow script or a model named at spawn sets some runs' model:
     the table says so per agent, and one tip points those runs to where
@@ -357,6 +467,219 @@ def test_models_check_leaves_an_ignored_agent_model_card_out(tmp_path):
     result = qa.run("models", ctx)
     assert result["status"] == "ok"
     assert [fix["prompt"] for fix in result["fixes"]] == ["Find where these agents are started."]
+
+
+def _main_sonnet_card(value="sonnet"):
+    """The ``model-tier-main`` card as ``advice`` leaves it: one change,
+    the main session's model."""
+    return Recommendation(
+        id="model-tier-main", key="model-tier-main", severity="advice", title="Main session on a cheaper model",
+        changes=[SettingChange(target="settings", key="model", agent=None, value=value)],
+    )
+
+
+def test_models_check_drops_the_model_change_of_an_ignored_card(tmp_path):
+    model = _full_model()
+    model.recommendations = [_main_sonnet_card()]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"}))
+    result = qa.run("models", ctx)
+    assert result["summary"].startswith("1 model change would have cost less. The largest: Explore on haiku")
+    assert "Main session" not in result["summary"]
+    assert [fix["title"] for fix in result["fixes"]] == ["Explore: use haiku"]
+    # Only the ignored card's own value goes: a card that is not ignored changes nothing.
+    assert "Main session on sonnet" in qa.run("models", _ctx(tmp_path, model=model))["summary"]
+
+
+def test_models_check_is_ok_when_the_ignored_card_was_its_only_change(tmp_path):
+    model = _full_model()
+    model.sections[0].tables[0].rows[1][-3] = None  # Explore has no cheaper alternative
+    model.recommendations = [_main_sonnet_card()]
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert result["status"] == "ok" and result["fixes"] == []
+    # Not "every agent is on the cheapest model": Main session is not, its card was ignored.
+    assert result["summary"] == IGNORED_ONLY
+
+
+def _with_session_counts(model, main, other=(10, 10, 0, 0)):
+    """``_full_model`` with the swap table's ``spawns``, ``lever_runs``,
+    ``before_change_runs`` and ``settled_runs`` columns, the main session's
+    row (0) and the other row (1) holding the given counts."""
+    swap = model.sections[0].tables[0]
+    swap.columns += [NS(key="spawns"), NS(key="lever_runs"), NS(key="before_change_runs"), NS(key="settled_runs")]
+    swap.rows[0] += list(main)
+    swap.rows[1] += list(other)
+    return model
+
+
+def _models_cells(result):
+    keys = [c["key"] for c in result["table"]["columns"]]
+    return {row[0]: dict(zip(keys, row)) for row in result["table"]["rows"]}
+
+
+def test_models_check_says_on_how_many_sessions_the_main_saving_is(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_with_session_counts(_full_model(), (29, 24, 0, 5)),
+                                   effective_agents={"Explore": {}}))
+    cells = _models_cells(result)
+    assert cells["Main session"]["saving"] == "40.00 USD on 24 of 29 sessions"
+    assert cells["Explore"]["saving"].endswith("80% less")
+    (tip,) = [t for t in result["tips"] if t["title"] == "Some main sessions aren't counted"]
+    assert tip["text"] == "5 main sessions already ran on Sonnet or smaller. The saving counts the other 24."
+    before = qa.run("models", _ctx(tmp_path, model=_with_session_counts(_full_model(), (29, 7, 22, 0)),
+                                   effective_agents={"Explore": {}}))
+    (tip,) = [t for t in before["tips"] if t["title"] == "Some main sessions aren't counted"]
+    assert tip["text"] == (
+        "22 main sessions started before their project moved to Sonnet or smaller. The saving counts the other 7."
+    )
+
+
+def test_models_check_never_says_none_cheaper_for_a_main_session_it_did_not_count(tmp_path):
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+    _with_session_counts(model, (10, 0, 10, 0))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}}))
+    assert _models_cells(result)["Main session"]["cheaper"] == "none counted"
+    (tip,) = [t for t in result["tips"] if t["title"] == "No main session is counted"]
+    assert tip["text"] == (
+        "10 main sessions started before their project moved to Sonnet or smaller. Nothing is left to price."
+    )
+    counted = _full_model()
+    counted.sections[0].tables[0].rows[0][-3] = None
+    _with_session_counts(counted, (10, 10, 0, 0))
+    result = qa.run("models", _ctx(tmp_path, model=counted, effective_agents={"Explore": {}}))
+    assert _models_cells(result)["Main session"]["cheaper"] == "none cheaper"
+
+
+def test_models_check_offers_no_opusplan_beside_no_main_session_counted(tmp_path):
+    def check(main):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+        _with_session_counts(model, main)
+        model.sections.append(NS(key="plan_handoff", tables=[_table("plan_handoff_summary", [
+            {"scope": "main sessions", "build_usd": 100.0, "build_usd_sonnet": 60.0},
+        ])]))
+        return qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}}))
+
+    none = check((20, 0, 16, 4))
+    assert "opusplan" not in none["summary"]
+    assert all("opusplan" not in fix["title"] for fix in none["fixes"])
+    assert [t["title"] for t in none["tips"] if t["title"] == "No main session is counted"]
+    assert "Main session on opusplan" in check((20, 5, 15, 0))["summary"]
+
+
+def _with_reasons(model, main, other=(10, 10, 0, 0, 0, 0)):
+    """``_full_model`` with the swap table's session counts: ``spawns``,
+    ``lever_runs``, ``before_change_runs``, ``settled_runs``,
+    ``picked_runs`` and ``own_model_runs``, for the main row (0) and the
+    other row (1)."""
+    swap = model.sections[0].tables[0]
+    swap.columns += [NS(key=k) for k in ("spawns", "lever_runs", "before_change_runs", "settled_runs", "picked_runs",
+                                         "own_model_runs")]
+    swap.rows[0] += list(main)
+    swap.rows[1] += list(other)
+    return model
+
+
+def test_models_check_says_what_ran_when_the_setting_already_has_the_cheaper_model(tmp_path):
+    """Above the Sonnet line only (Fable sessions, the setting on Opus). A
+    setting at Sonnet or smaller never meets a priced session (the saving
+    reads the same setting), so nothing says "already says" of it."""
+    def run(main, now, best="claude-opus-4-7"):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[0][-4], swap.rows[0][-3] = "claude-fable-5-1", best
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+        _with_session_counts(model, main, (10, 10, 0, 0))
+        return qa.run("models", _ctx(tmp_path, model=model, effective={"model": now}))
+
+    assert run((29, 24, 0, 5), "opus")["summary"] == (
+        "Your model setting already says opus. 24 main sessions in this window still ran on a larger model."
+    )
+    assert run((2, 1, 0, 1), "opus")["summary"] == (
+        "Your model setting already says opus. 1 main session in this window still ran on a larger model."
+    )
+    for now in ("sonnet", "haiku"):
+        result = run((29, 24, 0, 5), now, best="claude-sonnet-4-5")
+        assert "already says" not in result["summary"], now
+        assert all("Main session" not in fix["title"] for fix in result["fixes"]), now
+
+
+def test_models_check_says_the_picks_and_the_projects_with_their_own_model(tmp_path):
+    def run(main, **ctx):
+        model = _full_model()
+        swap = model.sections[0].tables[0]
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+        if not main[1]:
+            swap.rows[0][-3], swap.rows[0][-2], swap.rows[0][-1] = None, 0, 0
+        _with_reasons(model, main)
+        return qa.run("models", _ctx(tmp_path, model=model, **ctx))
+
+    picks = "{} in this window ran on a larger model though their project's setting said Sonnet or smaller when they started."
+    # Nothing left to price: the check is ok and says what ran.
+    result = run((10, 0, 0, 0, 10, 0))
+    assert (result["status"], result["summary"]) == ("ok", picks.format("10 main sessions"))
+    assert run((1, 0, 0, 0, 1, 0))["summary"] == (
+        "1 main session in this window ran on a larger model though its project's setting said Sonnet or smaller "
+        "when it started."
+    )
+    assert run((5, 0, 0, 0, 0, 5))["summary"] == (
+        "5 main sessions ran in projects that set their own model. Pick one of those projects to see them."
+    )
+    assert run((1, 0, 0, 0, 0, 1))["summary"] == (
+        "1 main session ran in a project that sets its own model. Pick that project to see it."
+    )
+    # Some left to price: the change is offered for those, and the picks are still said.
+    result = run((12, 2, 0, 0, 10, 0))
+    assert result["status"] == "act" and result["summary"].endswith(picks.format("10 main sessions"))
+    assert [fix["title"] for fix in result["fixes"] if "Main session" in fix["title"]]
+    assert "already says" not in result["summary"]
+
+
+def test_models_check_tip_gives_every_reason_and_counts_only_a_priced_saving(tmp_path):
+    def tip(main, saving=40.0):
+        model = _full_model()
+        model.sections[0].tables[0].rows[0][-2] = saving
+        result = qa.run("models", _ctx(tmp_path, model=_with_reasons(model, main), effective_agents={"Explore": {}}))
+        return [t for t in result["tips"] if "main session" in t["title"].lower()]
+
+    (one,) = tip((20, 4, 3, 5, 6, 2))
+    assert one == {"title": "Some main sessions aren't counted", "text": (
+        "5 main sessions already ran on Sonnet or smaller. 3 main sessions started before their project moved to "
+        "Sonnet or smaller. 6 main sessions ran on a larger model under a Sonnet setting. 2 main sessions ran in "
+        "projects that set their own model. The saving counts the other 4.")}
+    (one,) = tip((3, 0, 0, 0, 1, 1))
+    assert one == {"title": "No main session is counted", "text": (
+        "1 main session ran on a larger model under a Sonnet setting. 1 main session ran in a project that sets its "
+        "own model. Nothing is left to price.")}
+    # Sessions counted but no saving (their model has no price to compare): no count of them.
+    (one,) = tip((13, 3, 0, 5, 5, 0), saving=0.0)
+    assert one["text"] == (
+        "5 main sessions already ran on Sonnet or smaller. 5 main sessions ran on a larger model under a Sonnet "
+        "setting.")
+    assert tip((10, 10, 0, 0, 0, 0)) == []
+
+
+def test_models_check_keeps_a_new_value_for_an_ignored_card(tmp_path):
+    """The ignore holds for the value that was ignored; a different value for
+    the same setting is a new finding (``ignores.fingerprint``)."""
+    model = _full_model()
+    model.recommendations = [_main_sonnet_card(value="opusplan")]
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert "Main session on sonnet" in result["summary"]
+
+
+def test_an_ignored_main_session_card_leaves_opusplan_leading(tmp_path):
+    """Ignoring the sonnet change drops only that value: the opusplan offer,
+    a different value for the same setting, still leads."""
+    model = _full_model()
+    model.sections.append(NS(key="plan_handoff", tables=[_table("plan_handoff_summary", [
+        {"scope": "main sessions", "build_usd": 100.0, "build_usd_sonnet": 60.0},
+    ])]))
+    model.recommendations = [_main_sonnet_card(value="sonnet")]
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert "Main session on opusplan" in result["summary"]
+    assert "Main session on sonnet" not in result["summary"]
 
 
 def test_models_check_claims_the_three_agent_model_rule_ids(tmp_path):
@@ -1198,11 +1521,61 @@ def test_the_habits_saving_includes_the_playbook_saving_over_the_window(tmp_path
     result = qa.run("habits", ctx)
     # The recommendation's 4.00, and the habits it doesn't cover: 3.50 over the window.
     assert result["saving_usd"] == pytest.approx(4.0 + 1.75 * 2)
-    assert result["saving"] == f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits."
-    assert result["saving"] == "About 7.50 USD over the last 14 days if you change these habits."
+    assert result["saving"] == (
+        f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits, "
+        "most of it from the card \"Tools often wait on you\"."
+    )
+    assert result["saving"] == (
+        "About 7.50 USD over the last 14 days if you change these habits, most of it from the card \"Tools often wait on you\"."
+    )
     # A covered habit is in the recommendation's saving already: uncovered, it adds its 2.00 a week.
     both = qa.run("habits", _ctx(tmp_path, model=_saving_model(covered=False), **two_weeks))
     assert both["saving_usd"] == pytest.approx(4.0 + 3.75 * 2)
+
+
+def test_the_habits_saving_names_the_playbook_when_it_is_the_largest_part(tmp_path):
+    model = _saving_model(covered=False)
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["saving"].endswith("if you change these habits, most of it from the Work habits playbook.")
+
+
+def test_the_habits_saving_says_none_of_it_is_from_rework(tmp_path):
+    model = _saving_model()
+    model.sections.extend(_rework_model(2, 10).sections[-1:])
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["headline"] and result["saving"].endswith("most of it from the card \"Tools often wait on you\" (none of it from rework).")
+
+
+def test_the_habits_saving_says_at_most_when_the_largest_part_is_an_upper_bound(tmp_path):
+    model = _saving_model()
+    model.recommendations = [Recommendation(
+        id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+        saving_usd=4.0, estimated_saving="At most 4.00 USD", saving_basis="Replays the waits at list price.")]
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["saving"].startswith("At most 7.50 USD")
+    assert 'the card "Tools often wait on you"' in result["saving"]
+    # A plain estimate is "About", whatever the basis says.
+    model.recommendations[0].estimated_saving = "About 4.00 USD"
+    model.recommendations[0].saving_basis = "At most this much: a ceiling."
+    assert qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))["saving"].startswith("About")
+
+
+def test_an_ignored_habit_card_is_not_a_way_a_tip_or_a_fix(tmp_path):
+    model = _full_model()
+    model.recommendations = [
+        Recommendation(id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+                       action="Pre-approve routine tools."),
+        Recommendation(id="cache-read-dominance", key="cache-read-dominance", severity="advice",
+                       title="Cache reads dominate cost", action="Batch work."),
+    ]
+    both = qa.run("habits", _ctx(tmp_path, model=model))
+    assert "2 ways of working" in both["summary"]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"cache-read-dominance"}))
+    result = qa.run("habits", ctx)
+    assert "1 way of working" in result["summary"]
+    assert any("Cache reads" in t["title"] for t in both["tips"]) or any("Cache reads" in f["title"] for f in both["fixes"])
+    assert all("Cache reads" not in t["title"] for t in result["tips"])
+    assert all("Cache reads" not in f["title"] for f in result["fixes"])
 
 
 def test_the_playbook_saving_is_its_own_total_whatever_the_window(tmp_path):
@@ -1884,11 +2257,6 @@ def test_the_agent_reports_check_follows_failed_calls_and_has_no_rule_behind_it(
     assert check.rule_ids == ()
 
 
-def test_the_habits_check_claims_the_batch_probes_card_and_no_other_check_does():
-    claimed = [c.id for c in qa.CHECKS if "agent-batch-probes" in c.rule_ids]
-    assert claimed == ["habits"]
-
-
 def test_agent_reports_without_the_table_has_no_data(tmp_path):
     result = qa.run("agent-reports", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
     assert result["status"] == "no_data" and result["table"] is None and result["tips"] == []
@@ -2113,3 +2481,1025 @@ def test_plan_approval_leaves_the_comparison_out_when_only_fresh_builds_exist(tm
     rows = [_approval_row("cleared", 2, 30, 50_000, 0.04)]
     summary = qa.run("plan-approval", _ctx(tmp_path, model=_plan_approval_model(rows)))["summary"]
     assert "2 builds started fresh." in summary and "against" not in summary
+
+
+def test_tools_leaves_out_of_the_count_the_tools_the_agents_file_no_longer_lists(tmp_path):
+    diet = [{"agent_type": "reviewer", "rare_tools": "Bash, NotebookEdit, mcp__playwright__*",
+             "rare_sizes": "Bash=2000.0000/0/0, NotebookEdit=4000.0000/0/0, mcp__playwright__*=3000.0000/400.0000/0.0000",
+             "dropped_definitions": 9000.0, "dropped_deferred": 400.0, "dropped_skills": 1200.0,
+             "dropped_roster": 0.0}]
+    model = _tools_model(diet_rows=diet)
+    # Unknown line: everything is still sent.
+    result = qa.run("tools", _ctx(tmp_path, model))
+    assert {row[0]: row[-1] for row in result["table"]["rows"]}["reviewer"] == "3 (about 10,600 tokens)"
+    # The file lists Read and NotebookEdit only: just NotebookEdit is left to take out.
+    # The snapshot's agents map holds the line (effective_agents never does).
+    agents = {"reviewer": {"source": "user", "tools": ["Read", "NotebookEdit"]}}
+    result = qa.run("tools", _ctx(tmp_path, model, agents=agents, effective_agents={"reviewer": {"model": "haiku"}}))
+    assert {row[0]: row[-1] for row in result["table"]["rows"]}["reviewer"] == "1 (about 4,000 tokens)"
+
+
+def test_tools_counts_what_the_card_counts_for_a_line_in_the_snapshots_agents_map(tmp_path):
+    """The check and the spawn-tools-list card read the same line, from the
+    snapshot's own ``agents`` map, so the count in the table is the card's."""
+    from test_spawn_parts import _diet_acc, _recs, _report, _snapshot, _tools_rec
+
+    report = _report(_diet_acc("searcher", spawns=40))
+    agents = {"searcher": {"source": "user", "tools": ["Read", "Grep", "NotebookEdit", "WebFetch"]}}
+    card = _tools_rec(_recs(report, snapshot=_snapshot(agents), units=Units()), "searcher")
+    left_out = card.action.split("Rarely used, so left out")[1].split("Claude Code adds")[0]
+    assert "NotebookEdit" in left_out and "WebFetch" in left_out and "Bash" not in left_out
+    ctx = _ctx(tmp_path, report, agents=agents, effective_agents={"searcher": {"source": "user", "model": "haiku"}})
+    cell = {row[0]: row[-1] for row in qa.run("tools", ctx)["table"]["rows"]}["searcher"]
+    assert cell == "2 (about 6,000 tokens)"
+    # With no line recorded the check counts every rarely used tool, as the card does.
+    assert {row[0]: row[-1] for row in qa.run("tools", _ctx(tmp_path, report))["table"]["rows"]}["searcher"].startswith("3 ")
+
+
+def test_tools_counts_nothing_for_an_agent_whose_kept_tool_has_an_allowlist_the_hook_cut(tmp_path):
+    from test_spawn_parts import _CUT_AGENT_ENTRY, _orchestrator, _report
+
+    report = _report(_orchestrator())
+    line = [_CUT_AGENT_ENTRY, "Read", "Grep", "Skill", "NotebookEdit", "WebFetch"]
+    cell = lambda agents: {row[0]: row[-1] for row in qa.run("tools", _ctx(tmp_path, report, agents=agents))["table"]["rows"]}["orchestrator"]
+    assert cell({"orchestrator": {"source": "user", "tools": line}}) == "none"
+    assert cell({"orchestrator": {"source": "user", "tools": ["Agent(a, b)", *line[1:]]}}) != "none"
+
+
+def test_the_habits_saving_is_an_upper_bound_when_the_card_part_is_and_the_playbook_is_larger(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(
+        id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+        action="Pre-approve routine tools.", saving_usd=2.5, estimated_saving="At most $2.50",
+    )]
+    rows = [dict(row, covered_by="", saving_total=None) for row in _PLAYBOOK[:1]]
+    rows[0]["saving_total"] = 3.0
+    model.sections.append(_habits_tables(habits_playbook=rows))
+    result = qa.run("habits", _ctx(tmp_path, model=model, since_ts=0.0, until_ts=14 * 86400.0))
+    assert result["saving"].startswith("At most ")
+    assert "from the Work habits playbook" in result["saving"]
+
+
+def test_models_check_survives_an_ignored_card_whose_value_is_a_list(tmp_path):
+    model = _full_model()
+    model.recommendations = [_main_sonnet_card(), Recommendation(
+        id="spawn-tools-list", key="spawn-tools-list:reviewer", severity="advice", title="t",
+        changes=[SettingChange(target="agent", key="tools", agent="reviewer", value=["Read", "Edit"])],
+    )]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"spawn-tools-list:reviewer", "model-tier-main"}))
+    result = qa.run("models", ctx)
+    assert "Main session" not in result["summary"]
+    assert len(qa.run_all(ctx)) == 20
+
+
+# -- R9: a card you ignored leads no check ------------------------------------
+
+
+def _thinking_rows(model, share):
+    """``_full_model``'s main session spends ``share`` percent of its output thinking."""
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    column = [c.key for c in table.columns].index("thinking_share")
+    for row in table.rows:
+        row[column] = share
+
+
+def _effort_card(**kw):
+    return Recommendation(
+        id="effort-mismatch", key="effort-mismatch:reviewer", severity="advice", title="High effort on easy work",
+        agent_type="reviewer",
+        changes=[SettingChange(target="agent", key="effort", agent="reviewer", value="medium", current="high")],
+        **kw,
+    )
+
+
+def test_the_effort_check_is_ok_when_the_only_card_for_it_is_ignored_and_no_agent_is_over_the_bar(tmp_path):
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    model.recommendations = [_effort_card()]
+    shown = qa.run("effort", _ctx(tmp_path, model=model))
+    assert shown["status"] == "act" and shown["fixes"]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch:reviewer"}))
+    result = qa.run("effort", ctx)
+    assert result["status"] == "ok" and not result["fixes"]
+    row = next(r for r in qa.run_all(ctx) if r["id"] == "effort")
+    assert row["status"] == "ok" and row["fix_count"] == 0
+
+
+def test_the_effort_check_drops_a_thinking_candidate_an_ignored_card_already_suggested(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(
+        id="effort-mismatch", key="effort-mismatch:main", severity="advice", title="High effort on easy work",
+        changes=[SettingChange(target="settings", key="effortLevel", agent=None, value="medium")],
+    )]
+    assert qa.run("effort", _ctx(tmp_path, model=model))["fixes"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch:main"})))
+    assert result["status"] == "ok" and not result["fixes"]
+    # The table still shows the main session over the bar, so "no agent spends more than 20%" would be false.
+    assert result["summary"] == IGNORED_ONLY
+
+
+def _main_effort_card(variant="session", changes=()):
+    """The main session's effort card as advice.py writes it: the user-scope
+    ("session") and env variants carry no change."""
+    return Recommendation(
+        id="effort-mismatch", key="effort-mismatch", severity="advice", category="settings",
+        title="High effort is being spent on light work", why="why", action="action", variant=variant,
+        changes=list(changes),
+    )
+
+
+def _main_on(model, model_id):
+    swap = model.sections[0].tables[0]
+    # _full_model appends its own observed_model column; a row reads the last one.
+    for i, column in enumerate(swap.columns):
+        if column.key == "observed_model":
+            swap.rows[0][i] = model_id
+    return model
+
+
+def test_the_effort_check_sets_the_main_sessions_level_for_the_model_it_ran_on(tmp_path):
+    # On Opus 5.5 a user-level effortLevel does nothing; the per-model entry is what /effort saves.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card()]
+    [fix] = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    assert fix["command"] == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope user --dry-run"
+    )
+
+
+def test_an_ignored_main_effort_card_drops_the_checks_per_model_candidate(tmp_path):
+    # The card has no change, and the candidate's key differs from it, so only the card's own key can match.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card()]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"})))
+    assert result["status"] == "ok" and not result["fixes"]
+    assert result["summary"] == IGNORED_ONLY
+
+
+def test_the_effort_check_offers_no_settings_command_while_the_effort_variable_is_set(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card(variant="env")]
+    fixes = qa.run("effort", _ctx(tmp_path, model=model))["fixes"]
+    assert not [f for f in fixes if f.get("command") and "effortLevel" in f["command"]]
+
+
+def test_a_project_effort_card_is_the_checks_only_main_session_fix(tmp_path):
+    # A project file's effortLevel outranks a user-level per-model entry, so the goal's entry would do nothing.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    change = SettingChange(target="settings", key="effortLevel", value="medium", scope="repo")
+    model.recommendations = [_main_effort_card(variant="", changes=[change])]
+    main = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert [f["key"] for f in main] == ["effortLevel"]
+
+
+@pytest.mark.parametrize("check", [c for c in qa.CHECKS if c.rule_ids], ids=lambda c: c.id)
+def test_an_ignored_card_adds_no_fix_tip_or_title_to_the_check_it_belongs_to(tmp_path, check):
+    cards = [
+        Recommendation(
+            id=rule, key=f"{rule}:x", severity="advice", title=f"Title of {rule}", why="why", action="action",
+            fixes=[{"key": None, "agent": None, "explainer": [], "command": None, "command_warning": None,
+                    "prompt": f"Prompt of {rule}", "title": None}],
+        )
+        for rule in check.rule_ids
+    ]
+    model = _full_model()
+    model.recommendations = cards
+    open_result = qa.run(check.id, _ctx(tmp_path, model=model))
+    ignored = qa.run(check.id, _ctx(tmp_path, model=model, skip_keys=frozenset(c.key for c in cards)))
+    for card in cards:
+        assert not any(fix.get("prompt") == f"Prompt of {card.id}" for fix in ignored["fixes"]), card.id
+        assert card.title not in {tip["title"] for tip in ignored["tips"]}, card.id
+        assert card.title not in ignored["summary"], card.id
+    assert len(ignored["fixes"]) <= len(open_result["fixes"])
+
+
+def test_the_tools_check_counts_what_the_card_counts_for_an_agent_with_a_deny_line(tmp_path):
+    """The agent's lines come as the snapshot stores them (``agents[name]``),
+    not from ``effective_agents``."""
+    from test_spawn_parts import _diet_acc, _recs, _report, _snapshot, _tools_rec
+
+    report = _report(_diet_acc("searcher"))
+    line = ["Read", "Grep", "Bash", "Skill", "WebFetch", "NotebookEdit"]
+
+    def counted(denied):
+        agents = {"searcher": {"source": "user", "tools": line, **({"disallowedTools": denied} if denied else {})}}
+        report.recommendations = _recs(report, snapshot=_snapshot(agents), units=UNITS)
+        card = _tools_rec(report.recommendations, "searcher")
+        result = qa.run("tools", _ctx(tmp_path, model=report, agents=agents))
+        (row,) = [r for r in result["table"]["rows"] if r[0] == "searcher"]
+        return card, row[4]
+
+    open_card, open_cell = counted(None)
+    denied_card, denied_cell = counted(["WebFetch"])
+    assert open_cell.startswith("3 (") and denied_cell.startswith("2 (")
+    assert "WebFetch" in open_card.action.split("Rarely used")[1] and "WebFetch" not in denied_card.action.split("Rarely used")[1]
+
+
+# -- the CLAUDE.md check offers the agent cards' fixes when no file shows a count --
+
+
+def _claude_md_card(agent="reviewer", rec_id="spawn-claude-md"):
+    return Recommendation(
+        id=rec_id, key=f"{rec_id}:{agent}", severity="advice", title=f"{agent} is sent CLAUDE.md files it may not need",
+        agent_type=agent, saving_usd=2.0,
+        changes=[SettingChange(target="agent", key="omitClaudeMd", agent=agent, value=True)],
+    )
+
+
+def test_the_claude_md_check_offers_the_agent_cards_fixes_when_no_file_was_seen(tmp_path):
+    model = NS(sections=[], context_files={}, recommendations=[_claude_md_card("reviewer"), _claude_md_card("tester")])
+    ctx = _ctx(tmp_path, model=model)
+    (ctx.config_dir.parent / "CLAUDE.md").write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act"
+    assert [(f["key"], f["agent"]) for f in result["fixes"]] == [("omitClaudeMd", "reviewer"), ("omitClaudeMd", "tester")]
+    assert "None of your CLAUDE.md files was seen in a session over the last 14 days" in result["summary"]
+    assert "how often each is sent isn't known" in result["summary"]
+    assert result["table"]["rows"]
+    # Nothing to offer: still no data, and an ignored card offers nothing.
+    model.recommendations = []
+    assert qa.run("claude-md", ctx)["status"] == "no_data"
+    model.recommendations = [_claude_md_card("reviewer")]
+    ignored = _ctx(tmp_path, model=model, skip_keys=frozenset({"spawn-claude-md:reviewer"}))
+    assert qa.run("claude-md", ignored)["status"] == "no_data"
+
+
+def test_the_claude_md_check_offers_the_agent_cards_fixes_when_no_file_was_found(tmp_path):
+    model = NS(sections=[], context_files={}, recommendations=[_claude_md_card(rec_id="spawn-shared-claude-md")])
+    ctx = _ctx(tmp_path, model=model)
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most.")
+    model.recommendations = []
+    assert qa.run("claude-md", ctx)["status"] == "no_data"
+    assert qa.run("claude-md", ctx)["summary"] == "No CLAUDE.md files found."
+
+
+def test_the_claude_md_check_still_leads_with_the_file_that_costs_most_once_one_was_seen(tmp_path):
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[_claude_md_card()]))
+    path = ctx.config_dir.parent / "CLAUDE.md"
+    path.write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    from claudeglass import claude_md_review, parse
+
+    salt = parse.load_or_create_salt(ctx.config_dir)
+    row = {"hash": parse.path_hash(str(path), salt), "type": "instructions", "sends": 4, "reach": {"main": 4},
+           "cost_by_reach": {"main": 1.5}, "cost_usd": 1.5, "tokens": 8, "last_seen": "2026-10-01", "weekly": {}}
+    ctx.model.context_files = {"files": [row], "transcripts": {"main": 4}}
+    assert [f.usage is not None for f in claude_md_review.build_review(ctx.config_dir, ctx.model.context_files).files] == [True]
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and "costs most" in result["summary"]
+
+
+def test_the_compaction_check_drops_a_candidate_an_ignored_card_already_suggested(tmp_path):
+    model = NS(sections=[NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+        {"window": 300000, "compactions_per_session": 2.0, "cost": 75.0, "delta_pct": -25.0},
+        {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
+    ])])], context_files={}, recommendations=[Recommendation(
+        id="compaction-window", key="compaction-window:top-level", severity="advice", title="Summarise earlier",
+        changes=[SettingChange(target="settings", key="autoCompactWindow", agent=None, value=300000)],
+    )])
+    shown = qa.run("compaction", _ctx(tmp_path, model=model))
+    assert shown["status"] == "act" and shown["fixes"]
+    result = qa.run("compaction", _ctx(tmp_path, model=model, skip_keys=frozenset({"compaction-window:top-level"})))
+    assert result["status"] == "ok" and result["fixes"] == []
+    # Not "your summary point is within a few percent of the cheapest": the table has one 25% cheaper.
+    assert result["summary"] == IGNORED_ONLY
+
+
+# -- the CLAUDE.md check reads where the report read -----------------------------------------------
+
+
+def _docker_context(tmp_path, cards, *, give_roots=True):
+    """docs/deploy.md's layout: Claude's folder and its projects under data/claude, this tool's own
+    folder at data/claudeglass. One project file is readable and was sent 40 times."""
+    from claudeglass import parse
+
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True)
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("# Rules\n\n" + "Be brief and careful.\n" * 200, encoding="utf-8")
+    slug = claude_root / "projects" / "C--work-demo"
+    slug.mkdir(parents=True)
+    (slug / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project), "sessionId": "s1"}) + "\n",
+                                   encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    row = {"hash": parse.path_hash(str(project / "CLAUDE.md"), salt), "type": "instructions", "sends": 40,
+           "reach": {"main": 40}, "cost_by_reach": {"main": 3.0}, "cost_usd": 3.0, "tokens": 1100,
+           "last_seen": "2026-11-01", "weekly": {}}
+    model = NS(sections=[], context_files={"files": [row], "transcripts": {"main": 40}}, recommendations=cards)
+    extra = {"claude_root": claude_root, "projects_roots": (claude_root / "projects",)} if give_roots else {}
+    return qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                      effective={}, effective_agents={}, **extra)
+
+
+def test_the_claude_md_check_finds_the_files_in_the_layout_the_report_read(tmp_path):
+    result = qa.run("claude-md", _docker_context(tmp_path, [_claude_md_card()]))
+    assert result["status"] == "act"
+    assert "costs most" in result["summary"], result["summary"]
+
+
+def test_the_claude_md_check_derives_the_folders_from_the_config_folder_when_none_are_given(tmp_path):
+    ctx = _docker_context(tmp_path, [_claude_md_card()], give_roots=False)
+    assert ctx.claude_root is None and ctx.projects_roots is None
+    result = qa.run("claude-md", ctx)
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read"), result["summary"]
+
+
+def test_the_claude_md_check_says_when_it_could_read_no_file_and_offers_the_open_cards_fixes(tmp_path):
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[_claude_md_card()]))
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"] == (
+        "ClaudeGlass found no CLAUDE.md file it could read, so it can't show which one costs most. "
+        "The fixes below come from what your agents were sent."
+    )
+
+
+def test_the_claude_md_check_offers_no_fix_from_a_card_that_is_only_information_or_already_fixed(tmp_path):
+    import dataclasses
+
+    info = dataclasses.replace(_claude_md_card(), severity="info")
+    fixed = dataclasses.replace(_claude_md_card("tester"), variant="fixed")
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[info, fixed]))
+    result = qa.run("claude-md", ctx)
+    assert result["status"] == "no_data" and result["fixes"] == []
+    assert result["summary"] == "No CLAUDE.md files found."
+    (ctx.config_dir.parent / "CLAUDE.md").write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    unseen = qa.run("claude-md", ctx)
+    assert unseen["status"] == "no_data" and unseen["fixes"] == []
+    assert "None of your CLAUDE.md files was seen in a session over the last 14 days" in unseen["summary"]
+
+
+# -- a goal check whose only changes were on ignored cards says so -------------------------------------
+
+
+def _cache_card():
+    """One card holding every cache-lifetime change the cache check would draft for ``_full_model``."""
+    return Recommendation(
+        id="ttl-switch", key="ttl-switch", severity="advice", title="Longer cache",
+        changes=[
+            SettingChange(target="settings", key="promptCacheTtl", agent=None, value="1h"),
+            SettingChange(target="settings", key="subagentPromptCacheTtl", agent=None, value="5m"),
+            SettingChange(target="agent", key="experimental.cacheTtl", agent="Explore", value="5m"),
+            SettingChange(target="agent", key="experimental.cacheTtl", agent="Plan", value="5m"),
+        ],
+    )
+
+
+def test_the_cache_check_says_the_ignored_card_held_its_only_change_not_that_the_lifetimes_are_cheapest(tmp_path):
+    model = _full_model()
+    model.recommendations = [_cache_card()]
+    assert qa.run("cache", _ctx(tmp_path, model=model))["status"] == "act"
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == IGNORED_ONLY
+
+
+def test_a_goal_check_with_no_change_and_no_ignored_card_keeps_its_all_clear_sentence(tmp_path):
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    assert qa.run("effort", _ctx(tmp_path, model=model))["summary"] == "No agent spends more than 20% of its output thinking."
+    model.sections[0].tables[0].rows[0][-3] = None
+    model.sections[0].tables[0].rows[1][-3] = None
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok" and result["summary"].startswith("Every agent is already on the cheapest model")
+
+
+def test_the_effort_check_counts_the_rows_over_the_bar_in_its_table_not_its_fixes(tmp_path):
+    """Two rows are over the bar and a third is under it, and three fixes are on offer."""
+    model = _full_model()
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    template = list(table.rows[0])
+    table.rows[0][keys.index("thinking_share")] = 40.0
+    for name, share in (("reviewer", 40.0), ("tester", 5.0)):
+        row = list(template)
+        row[keys.index("agent_type")], row[keys.index("thinking_share")] = name, share
+        table.rows.append(row)
+    over = sum(1 for row in table.rows if row[keys.index("thinking_share")] > 20)
+    assert over == 2 and len(table.rows) == 3
+    model.recommendations = [_effort_card(), Recommendation(
+        id="effort-mismatch", key="effort-mismatch:tester", severity="advice", title="High effort on easy work",
+        agent_type="tester",
+        changes=[SettingChange(target="agent", key="effort", agent="tester", value="low", current="high")],
+    )]
+    result = qa.run("effort", _ctx(tmp_path, model=model))
+    assert len(result["fixes"]) > over
+    assert result["summary"].startswith("2 of your agents or sessions spent more than 20% of their output thinking."), result["summary"]
+
+def _mounted_context(tmp_path, cards):
+    """docs/deploy.md's container, as the service sees it: the host's ~/.claude is mounted at data/claude
+    and the config folder is data/claudeglass. The transcripts name the host's paths, which do not exist
+    here, so no project folder is known and the mounted CLAUDE.md is not at any path the report names."""
+    from claudeglass import parse
+
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    claude_root.mkdir(parents=True, exist_ok=True)
+    (claude_root / "CLAUDE.md").write_text("# Mine\n\n" + "Always be careful and brief.\n" * 400, encoding="utf-8")
+    slug = claude_root / "projects" / "C--work-demo"
+    slug.mkdir(parents=True, exist_ok=True)
+    host = tmp_path / "host" / ".claude" / "CLAUDE.md"
+    (slug / "s1.jsonl").write_text(
+        json.dumps({"type": "user", "cwd": str(tmp_path / "host" / "work"), "sessionId": "s1"}) + "\n", encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    row = {"hash": parse.path_hash(str(host), salt), "type": "instructions", "sends": 40, "reach": {"main": 40},
+           "cost_by_reach": {"main": 3.0}, "cost_usd": 3.0, "tokens": 1100, "last_seen": "2026-11-01", "weekly": {}}
+    model = NS(sections=[], context_files={"files": [row], "transcripts": {"main": 40}}, recommendations=cards)
+    return qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                      effective={}, effective_agents={}, projects_roots=(claude_root / "projects",))
+
+
+def test_the_claude_md_check_does_not_read_the_projects_roots_parent_as_yours(tmp_path):
+    """The mounted file is found at a path no transcript names, so the check must neither list it nor say
+    that it was never sent."""
+    result = qa.run("claude-md", _mounted_context(tmp_path, []))
+    assert result["status"] == "no_data" and result["summary"] == "No CLAUDE.md files found."
+    assert not result.get("table")
+    result = qa.run("claude-md", _mounted_context(tmp_path, [_claude_md_card()]))
+    assert result["status"] == "act" and len(result["fixes"]) == 1
+    assert result["summary"].startswith("ClaudeGlass found no CLAUDE.md file it could read")
+    assert "was seen in a session" not in result["summary"]
+
+
+def test_the_skills_check_finds_descriptions_under_the_projects_root_but_not_your_skills_beside_it(tmp_path):
+    """The listings of the sessions are under the projects roots; your skills are in the Claude folder."""
+    claude_root = tmp_path / "data" / "claude"
+    config_dir = tmp_path / "data" / "claudeglass"
+    config_dir.mkdir(parents=True)
+    (claude_root / "skills" / "grill-me").mkdir(parents=True)
+    (claude_root / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    slug = claude_root / "projects" / "C--repo"
+    slug.mkdir(parents=True)
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    (slug / "s1.jsonl").write_text(json.dumps(listing) + "\n", encoding="utf-8")
+    row = {"name": "grill-me", "listing_tokens": 40, "listed": {"main": 60}, "listing_cost_usd": 4.0, "invoked": 0,
+           "invoked_by": {}, "resent_tokens": 0, "resent_cost_usd": 0.0, "attributed_turns": 0,
+           "attributed_cost_usd": 0.0, "last_seen": "2026-09-18T12:00:00Z"}
+    model = NS(sections=[], context_files={"skills": [row]}, recommendations=[])
+
+    def table_rows(**extra):
+        ctx = qa.Context(model=model, units=UNITS, period="over the last 14 days", config_dir=config_dir,
+                         effective={}, effective_agents={}, **extra)
+        return qa.run("skills", ctx).get("table", {}).get("rows", [])
+
+    assert table_rows()[0][2] == ""
+    (found,) = table_rows(projects_roots=(claude_root / "projects",))
+    assert found[0] == "grill-me" and found[2] == "Interview the user about a plan."
+    assert found[1] == "Built into Claude Code"
+    # Given the Claude folder, the skill is yours.
+    (found,) = table_rows(claude_root=claude_root, projects_roots=(claude_root / "projects",))
+    assert "Built" not in found[1]
+
+def test_models_check_does_not_say_nothing_else_would_save_when_an_ignored_card_held_a_change(tmp_path):
+    """An advice-level agent-model card is open and the ignored card held the main session's change:
+    the table still shows that saving, so "no change would save a useful amount" would be false."""
+    model = _full_model()
+    model.sections[0].tables[0].rows[1][-3] = None  # Explore has no cheaper alternative
+    flagged = _agent_model_rec("agent-model-inherited", "advice", _INHERITED,
+                               prompt="From now on, set the model on every agent you start.")
+    model.recommendations = [_main_sonnet_card(), flagged]
+    open_result = qa.run("models", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 model change would have cost less")
+    result = qa.run("models", _ctx(tmp_path, model=model, skip_keys=frozenset({"model-tier-main"})))
+    assert result["status"] == "act"
+    assert result["summary"] == f"{_INHERITED}. The only other change this check would suggest is on a card you ignored."
+    # With no change to ignore, the sentence about the rest is as it was.
+    model.sections[0].tables[0].rows[0][-3] = None
+    model.recommendations = [flagged]
+    assert qa.run("models", _ctx(tmp_path, model=model))["summary"] == (
+        f"{_INHERITED}. Apart from that, no change to an agent file or setting would save a useful amount."
+    )
+
+def test_the_project_files_check_names_files_from_the_projects_roots_it_is_given(tmp_path, pf_names):
+    """The sessions' folders are found under the projects root, which need not be beside the config folder."""
+    ctx, project, salt = _pf_setup(tmp_path)
+    apart = tmp_path / "mount" / "projects"
+    apart.parent.mkdir()
+    (ctx.config_dir.parent / "projects").rename(apart)
+    data = _pf_data(_pf_read(_pf_hash(project / "docs" / "context.md", salt)))
+    lost = _pf_run(ctx, data)
+    assert not lost["summary"].startswith("docs/context.md")
+    ctx.projects_roots = (apart,)
+    found = _pf_run(ctx, data)
+    assert found["status"] == "act" and found["summary"].startswith("docs/context.md is now about 9k tokens")
+
+
+def _ttl_rows(model, rows):
+    """``_full_model``'s cache-lifetime table with these ``(agent, observed, all 5m, all 1h)`` rows."""
+    (table,) = [t for s in model.sections if s.key == "ttl" for t in s.tables if t.name == "ttl_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    table.rows[:] = [[{"agent_type": a, "cost_observed": o, "cost_all_5m": m5, "cost_all_1h": h1}[k] for k in keys]
+                     for a, o, m5, h1 in rows]
+
+
+def _ttl_card(*changes):
+    return Recommendation(id="ttl-switch", key="ttl-switch", severity="advice", title="Longer cache",
+                          changes=list(changes))
+
+
+def test_the_cache_check_counts_an_ignored_settings_candidate_as_removed(tmp_path):
+    """Only the main session would save (a settings candidate); no agent would. Its card is ignored."""
+    model = _full_model()
+    _ttl_rows(model, [("top-level", 50.0, 55.0, 45.0), ("Explore", 5.0, 5.0, 6.0), ("Plan", 3.0, 3.0, 3.5)])
+    model.recommendations = [_ttl_card(SettingChange(target="settings", key="promptCacheTtl", agent=None, value="1h"))]
+    open_result = qa.run("cache", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 cache lifetime change would")
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["summary"] == IGNORED_ONLY
+
+
+def test_the_cache_check_counts_an_ignored_per_agent_candidate_as_removed(tmp_path):
+    """Only Explore would save; the agents together and the main session would not. Its card is ignored."""
+    model = _full_model()
+    _ttl_rows(model, [("top-level", 50.0, 50.0, 55.0), ("Explore", 10.0, 5.0, 12.0), ("Plan", 10.0, 15.0, 10.0)])
+    model.recommendations = [_ttl_card(
+        SettingChange(target="agent", key="experimental.cacheTtl", agent="Explore", value="5m"))]
+    open_result = qa.run("cache", _ctx(tmp_path, model=model))
+    assert open_result["status"] == "act" and open_result["summary"].startswith("1 cache lifetime change would")
+    result = qa.run("cache", _ctx(tmp_path, model=model, skip_keys=frozenset({"ttl-switch"})))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["summary"] == IGNORED_ONLY
+    # With nothing ignored and nothing to change, the lifetimes are said to be within a few percent.
+    _ttl_rows(model, [("top-level", 50.0, 50.0, 55.0), ("Explore", 10.0, 10.0, 12.0)])
+    model.recommendations = []
+    assert qa.run("cache", _ctx(tmp_path, model=model))["summary"] == (
+        "Your cache lifetimes are within a few percent of the cheapest replayed.")
+
+
+def test_the_effort_check_counts_its_changes_when_no_row_is_over_the_bar(tmp_path):
+    """No agent is over the bar, so the sentence cannot say how many are; it says how many changes there are."""
+    model = _full_model()
+    _thinking_rows(model, 5.0)
+    other = _effort_card()
+    other.key, other.agent_type = "effort-mismatch:tester", "tester"
+    other.changes = [SettingChange(target="agent", key="effort", agent="tester", value="medium", current="high")]
+    model.recommendations = [_effort_card()]
+    prefix = " Thinking is billed as output; a lower effort thinks less"
+    summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
+    assert summary.startswith("1 effort change would think less." + prefix), summary
+    model.recommendations = [_effort_card(), other]
+    summary = qa.run("effort", _ctx(tmp_path, model=model))["summary"]
+    assert summary.startswith("2 effort changes would think less." + prefix), summary
+
+
+def test_a_checks_fix_from_a_card_names_the_card():
+    from types import SimpleNamespace
+
+    prompt = {"key": None, "prompt": "Do this.", "command": None, "explainer": []}
+    rec = SimpleNamespace(title="A card", key="spawn-tools-list:x", fixes=[prompt])
+    [fix] = qa._rec_fixes([rec])
+    assert fix["card"] == "spawn-tools-list:x" and fix["title"] == "A card"
+    # The fix the card holds is copied, not changed.
+    assert "card" not in prompt
+
+
+def test_models_check_reads_the_main_setting_the_saving_reads(tmp_path):
+    """In a view of one project the main fix's current value, and where it
+    goes, are the lever's reading (ReportMeta.main_model_setting), not the
+    view's snapshot."""
+    def main_fixes(reading, now):
+        model = _full_model()
+        model.meta = NS(main_model_setting=reading)
+        result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": now}))
+        return [fix for fix in result["fixes"] if fix["title"].startswith("Main session")]
+
+    (fix,) = main_fixes({"value": "opus", "scope": "project-local"}, "sonnet")
+    assert fix["command"].startswith("claudeglass apply --set model=sonnet --scope project-local")
+    assert ["Now and after", "Now: opus. After: sonnet."] in fix["explainer"]
+    (fix,) = main_fixes({"value": "opus", "scope": "user"}, "sonnet")
+    assert "--scope project-local" not in fix["command"]
+    assert main_fixes({"value": "sonnet", "scope": "user"}, "opus") == []
+    assert main_fixes({}, "sonnet") == []
+
+
+@pytest.mark.parametrize(
+    "observed", ["us.anthropic.claude-opus-5-5-v1:0", "claude-opus-5-5@20260101", "claude-opus-5-5[1m]"],
+)
+def test_the_effort_checks_command_names_the_canonical_id_and_apply_reads_it(tmp_path, observed):
+    import shlex
+
+    from claudeglass import cli
+
+    model = _main_on(_full_model(), observed)
+    model.recommendations = [_main_effort_card()]
+    [fix] = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    words = shlex.split(fix["command"])
+    item = words[words.index("--set") + 1]
+    profile, error = cli._one_off_profile([item], None)
+    assert error is None and profile.settings == {"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+
+
+def test_a_plugin_agent_that_did_worse_is_a_tip_with_no_command(tmp_path):
+    worse = {**_WORSE, "agent_type": "superpowers:explorer"}
+    result = qa.run("quality", _ctx(tmp_path, model=_quality_model([{**_AGENT, "unfinished_pct": 3.0}], [worse])))
+    assert not result["fixes"]
+    [tip] = result["tips"]
+    assert tip["text"].endswith(" It comes from the superpowers plugin, so there is no agent file of yours to change.")
+
+
+def test_a_plugin_agent_retried_on_a_larger_model_names_its_plugin_not_an_agent_file(tmp_path):
+    retried = {**_RETRIED, "agent_type": "superpowers:explorer"}
+    result = qa.run("quality", _ctx(tmp_path, model=_quality_model([{**_AGENT, "unfinished_pct": 3.0}], retried=[retried])))
+    assert not result["fixes"]
+    [tip] = result["tips"]
+    assert "Its agent file" not in tip["text"]
+    assert tip["text"].endswith(
+        " It comes from the superpowers plugin, so there is no agent file of yours to change. "
+        "Don't pick haiku for this agent's work."
+    )
+
+
+# -- N2: once the main session's effort is set, the check says so --------------
+
+
+def test_the_effort_check_says_the_level_is_already_set_once_effort_medium_is_saved(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    effective = {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective=effective,
+                                   effective_provenance={"effortLevel": "user", "modelSettings": "user"}))
+    assert [f for f in result["fixes"] if f.get("agent") is None] == []
+    assert qa._EFFORT_ALREADY_SET.format(level="medium", model="claude-opus-5-5") in result["summary"]
+    assert "No agent spends more than" not in result["summary"]
+
+
+def test_a_user_level_medium_does_not_count_as_set_on_opus_5_5(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "medium"},
+                                   effective_provenance={"effortLevel": "user"}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    assert "already" not in result["summary"]
+
+
+def test_the_effort_check_never_says_the_level_is_set_while_the_variable_decides(tmp_path):
+    """CLAUDE_CODE_EFFORT_LEVEL beats every setting, so "already medium" would say a setting decides when the
+    variable does, even when no effort card (which fires on light work only) is there to say so."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    effective = {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+    provenance = {"effortLevel": "user", "modelSettings": "user"}
+    plain = qa.run("effort", _ctx(tmp_path, model=model, effective=effective, effective_provenance=provenance))
+    assert "is already medium" in plain["summary"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective=effective, effective_provenance=provenance,
+                                   effort_level_env_set=True))
+    assert "is already medium" not in result["summary"]
+
+
+# -- the effort check while CLAUDE_CODE_EFFORT_LEVEL decides ---------------------
+
+_LEFT_TO_ENV = (
+    "The main session spends {share} of its output thinking, but CLAUDE_CODE_EFFORT_LEVEL sets its effort, "
+    "so there is no setting to change. Set the variable to medium where you set it, or remove it."
+)
+
+
+def _with_reviewer_over_the_bar(model):
+    """``_thinking_rows``'s main session at 40%, and a ``reviewer`` row at 40% too."""
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    row = list(table.rows[0])
+    row[keys.index("agent_type")] = "reviewer"
+    table.rows.append(row)
+    return model
+
+
+def _effort_level_fixes(result) -> list:
+    return [f for f in result["fixes"] if "effortLevel" in (f["command"] or "") + (f["prompt"] or "")]
+
+
+def test_the_effort_check_offers_no_setting_while_the_variable_decides_and_no_card_exists(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    assert not [r for r in model.recommendations if r.id == "effort-mismatch"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True))
+    assert result["status"] == "ok"
+    assert _effort_level_fixes(result) == [] and result["fixes"] == []
+    assert result["summary"] == _LEFT_TO_ENV.format(share="40%")
+
+
+def test_the_effort_check_keeps_another_agents_fix_and_adds_the_sentence_while_the_variable_decides(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    _with_reviewer_over_the_bar(model)
+    ctx = dict(model=model, effective_agents={"reviewer": {}})
+    plain = qa.run("effort", _ctx(tmp_path, **ctx))
+    assert [f["title"] for f in plain["fixes"] if f.get("agent") is not None] == ["reviewer: effort medium"]
+    result = qa.run("effort", _ctx(tmp_path, effort_level_env_set=True, **ctx))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["reviewer: effort medium"]
+    assert result["summary"].endswith(" " + _LEFT_TO_ENV.format(share="40%"))
+
+
+def test_an_open_env_effort_card_keeps_its_fix_and_the_check_adds_no_sentence(tmp_path):
+    """Guard (passes before and after): the card already carries the variable's advice."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(variant="env")]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True))
+    assert [f for f in result["fixes"] if f.get("card") == "effort-mismatch"]
+    assert "CLAUDE_CODE_EFFORT_LEVEL sets its effort" not in result["summary"]
+
+
+def test_the_effort_check_is_what_it_was_with_the_variable_unset(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert result["summary"] == (
+        "1 of your agents or sessions spent more than 20% of their output thinking. Thinking is billed as output; "
+        "a lower effort thinks less, but how much less isn't measured, so check {{page:changes}} after a few sessions."
+    )
+    assert [f["title"] for f in result["fixes"]] == ["Main session: effort medium on claude-opus-5-5"]
+
+
+# -- N5: the variable, not the setting, picks the main session's model ---------
+
+
+def test_the_models_check_names_the_variable_when_the_setting_already_says_sonnet(tmp_path):
+    from claudeglass import advice
+
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(), effective={"model": "sonnet"},
+                                   effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["summary"] == qa._MAIN_MODEL_LEFT_TO_ENV.format(model="sonnet")
+    assert len(_env_tip(result)) == 1
+    main = next(row for row in result["table"]["rows"] if row[0] == "Main session")
+    assert main[3] == "ANTHROPIC_MODEL"
+    # Without the variable the settings set it, and nothing is said of one.
+    plain = qa.run("models", _ctx(tmp_path, model=_env_model(), effective={"model": "sonnet"}, effective_agents={"Explore": {}}))
+    assert next(row for row in plain["table"]["rows"] if row[0] == "Main session")[3] == "settings"
+    assert _env_tip(plain) == [] and advice.MODEL_ENV_WINS not in plain["summary"]
+
+
+def test_in_a_view_of_several_projects_a_project_files_medium_is_not_called_already_set(tmp_path):
+    # R2-3: one project's snapshot says nothing about the other projects in the view.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    kw = dict(effective={"effortLevel": "medium"}, effective_provenance={"effortLevel": "project_shared"})
+    assert "is already medium" in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]
+    model.meta = NS(projects=("alpha", "beta"))
+    assert "is already medium" not in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]
+
+
+def _expected_flat_effort_fix(scope, current="high"):
+    """What ``fixes.build_fix`` gives a main-session ``effortLevel`` change at ``scope``."""
+    from claudeglass.fixes import build_fix
+
+    change = SettingChange(target="settings", key="effortLevel", agent=None, value="medium", current=current, scope=scope)
+    rec = Recommendation(id="quick-action", title="t", scope="user", why="w", changes=[change])
+    return build_fix(rec, change)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_shared", "repo"), ("project_local", "project-local")])
+def test_the_effort_checks_flat_level_fix_goes_to_the_project_file_that_sets_it(tmp_path, layer, scope):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "high"},
+                                   effective_provenance={"effortLevel": layer}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    expected = _expected_flat_effort_fix(scope)
+    assert fix["key"] == "effortLevel"
+    assert fix["command"] == expected["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+    assert "~/.claude/settings.json" not in fix["prompt"] and "--scope user" not in fix["command"]
+
+
+def test_in_a_view_of_several_projects_the_flat_level_fix_goes_to_no_projects_file(tmp_path):
+    # A model id with no canonical form gets the flat level even in a view of several
+    # projects; the snapshot is one project's, so its file is not where the fix goes.
+    model = _main_on(_full_model(), "my-gateway-model")
+    _thinking_rows(model, 40.0)
+    kw = {"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "project_shared"}}
+    model.meta = NS(projects=("alpha", "beta"))
+    result = qa.run("effort", _ctx(tmp_path, model=model, **kw))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    expected = _expected_flat_effort_fix("")
+    assert fix["key"] == "effortLevel"
+    assert fix["command"] == expected["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+
+
+# -- R3-VIEW-RULE: a check's fix goes to the file that decides, read only in a view of one project ---
+
+
+def _window_model(projects=("alpha",), main=None):
+    sections = [NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+        {"window": 200000, "compactions_per_session": 2.0, "cost": 70.0, "delta_pct": -30.0},
+        {"window": 300000, "compactions_per_session": 1.5, "cost": 90.0, "delta_pct": -10.0},
+        {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
+    ])])]
+    if main:
+        sections.append(NS(key="model_swap", tables=[_table("model_swap_by_agent_type", [
+            {"agent_type": "top-level", "observed_model": main}])]))
+    return NS(sections=sections, context_files={}, recommendations=[], meta=NS(projects=tuple(projects)))
+
+
+def _window_fix(tmp_path, effective, provenance, projects=("alpha",), main=None):
+    result = qa.run("compaction", _ctx(tmp_path, model=_window_model(projects, main), effective=effective,
+                                       effective_provenance=provenance))
+    [fix] = result["fixes"]
+    return fix
+
+
+@pytest.mark.parametrize("layer, scope, file", [
+    ("project_shared", "repo", ".claude/settings.json"),
+    ("project_local", "project-local", ".claude/settings.local.json"),
+])
+def test_the_compaction_checks_fix_goes_to_the_project_file_that_sets_the_window(tmp_path, layer, scope, file):
+    """R3-3, the reviewer's input: the project file's window outranks your user file."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": layer})
+    assert f"--scope {scope}" in fix["command"]
+    assert fix["prompt"].splitlines()[0].endswith(f"In {file}, set autoCompactWindow to 200000.")
+
+
+def test_the_compaction_checks_fix_under_a_project_window_says_nothing_of_your_own_window(tmp_path):
+    """R3-2's case on the check: the project file's flat window beats your user file's own window."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}},
+                      {"autoCompactWindow": "project_shared", "modelSettings": "user"})
+    assert "--scope repo" in fix["command"] and "own auto-compact window" not in fix["prompt"]
+
+
+def test_in_a_view_of_several_projects_the_compaction_checks_fix_goes_to_your_user_file(tmp_path):
+    """Guard: one project's file is not where a fix for every project goes."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": "project_shared"}, ("alpha", "beta"))
+    assert "--scope user" in fix["command"]
+
+
+def test_the_compaction_check_under_a_managed_window_asks_your_administrator(tmp_path):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": "managed"})
+    assert fix["command"] is None
+    assert "administrator" in fix["prompt"]
+
+
+def test_the_effort_checks_fix_goes_to_a_project_files_own_entry_for_the_model(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model,
+                                   effective={"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+                                   effective_provenance={"modelSettings": "project_shared"}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    assert fix["command"] == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope repo --project-dir . --dry-run"
+    )
+
+
+def test_the_compaction_checks_fix_says_a_models_own_window_wins_as_the_card_does(tmp_path):
+    """Within one file a model's own window beats the flat one: the card's note, on the check's fix."""
+    from claudeglass.advice import _OWN_WINDOW_STEP
+
+    fix = _window_fix(tmp_path, {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}, {"modelSettings": "user"})
+    assert f"claude-opus-5-5 has its own auto-compact window, which wins for it. {_OWN_WINDOW_STEP}" in fix["prompt"]
+
+
+# -- R4-1: the effort check while managed settings decide the main session's effort ----------------
+
+_LEFT_TO_MANAGED = (
+    "The main session spends {share} of its output thinking, but your organisation's managed settings set its "
+    "effort, so only your administrator can change it."
+)
+_MANAGED_HIGH = dict(effective={"effortLevel": "high"}, effective_provenance={"effortLevel": "managed"})
+
+
+def test_the_effort_check_says_your_administrator_sets_it_under_a_managed_level_and_no_card(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    assert not [r for r in model.recommendations if r.id == "effort-mismatch"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, **_MANAGED_HIGH))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == _LEFT_TO_MANAGED.format(share="40%")
+    assert "No agent spends more than" not in result["summary"]
+
+
+def test_the_effort_check_keeps_another_agents_fix_and_adds_the_managed_sentence(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    _with_reviewer_over_the_bar(model)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective_agents={"reviewer": {}}, **_MANAGED_HIGH))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["reviewer: effort medium"]
+    assert [f for f in result["fixes"] if f.get("agent") is None] == []
+    assert result["summary"].endswith(" " + _LEFT_TO_MANAGED.format(share="40%"))
+
+
+def test_an_open_managed_effort_card_keeps_its_fix_and_the_check_adds_no_managed_sentence(tmp_path):
+    """Guard (passes before and after): the card already carries the administrator request as its fix."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(changes=[
+        SettingChange(target="settings", key="effortLevel", value="medium", current="high", scope="managed")
+    ])]
+    result = qa.run("effort", _ctx(tmp_path, model=model, **_MANAGED_HIGH))
+    assert [f for f in result["fixes"] if f.get("card") == "effort-mismatch"]
+    assert "managed settings set its effort" not in result["summary"]
+
+
+def test_the_variables_sentence_shows_not_the_managed_one_while_the_variable_is_set_too(tmp_path):
+    """Guard (passes before and after): the two sentences never both show."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True, **_MANAGED_HIGH))
+    assert result["summary"] == _LEFT_TO_ENV.format(share="40%")
+
+
+def test_a_managed_medium_is_already_set_and_the_check_adds_no_managed_sentence(tmp_path):
+    """Guard (passes before and after): a managed level that is already low or medium says so as it does today."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "medium"},
+                                   effective_provenance={"effortLevel": "managed"}))
+    assert qa._EFFORT_ALREADY_SET.format(level="medium", model="claude-opus-5-5") in result["summary"]
+    assert "managed settings set its effort" not in result["summary"]
+
+
+# -- R4-2: a project or managed file's own window for the main model gets the change there -------------
+
+_OWN_500K = {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+
+
+def _expected_own_window_fix(scope):
+    """What ``fixes.build_fix`` gives the main model's own window entry changed to 200,000 at ``scope``."""
+    from claudeglass.fixes import build_fix
+
+    change = SettingChange(target="settings", key="modelSettings", value={"claude-opus-5-5": {"autoCompactWindow": 200000}},
+                           current=_OWN_500K, scope=scope)
+    rec = Recommendation(id="quick-action", title="x", scope="user", changes=[change])
+    return build_fix(rec, change)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_local", "project-local"), ("project_shared", "repo")])
+def test_the_compaction_checks_fix_changes_a_project_files_own_window_entry_for_the_main_model(tmp_path, layer, scope):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": layer}, main="claude-opus-5-5")
+    expected = _expected_own_window_fix(scope)
+    assert fix["key"] == "modelSettings"
+    assert fix["command"] == expected["command"] and f"--scope {scope}" in fix["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+    assert "~/.claude/settings.json" not in fix["prompt"] and "/autocompact" not in fix["prompt"]
+
+
+def test_the_compaction_check_asks_your_administrator_to_change_a_managed_own_window_entry(tmp_path):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": "managed"}, main="claude-opus-5-5")
+    expected = _expected_own_window_fix("managed")
+    assert fix["command"] is None and expected["command"] is None
+    # The request is the same up to the reason each gives for it.
+    head = expected["prompt"].split("saying why:")[0]
+    assert head and fix["prompt"].startswith(head)
+    assert "administrator" in fix["prompt"]
+
+
+def test_an_own_window_in_your_user_file_keeps_the_checks_flat_change_and_its_note(tmp_path):
+    """Guard (W4): /autocompact is how that entry is changed."""
+    fix = _window_fix(tmp_path, {"modelSettings": _OWN_500K}, {"modelSettings": "user"}, main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope user" in fix["command"]
+    assert "claude-opus-5-5 has its own auto-compact window, which wins for it." in fix["prompt"]
+
+
+def test_a_flat_window_in_a_higher_file_than_the_own_entry_keeps_the_checks_flat_change(tmp_path):
+    """Guard: the local file's flat window decides over the shared file's own entry."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "project_local", "modelSettings": "project_shared"}, main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope project-local" in fix["command"]
+
+
+def test_in_a_view_of_several_projects_the_check_does_not_read_a_projects_own_window(tmp_path):
+    """Guard: the view rule took the project's block out, so the flat change goes to your user file."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": "project_local"}, ("alpha", "beta"),
+                      main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope user" in fix["command"]
+
+
+# -- R5-2: an ignored main effort card is why the check has nothing, whatever would have drafted the change --
+
+
+@pytest.mark.parametrize("variable_set", [False, True])
+def test_an_ignored_main_effort_card_under_a_managed_level_is_why_the_check_has_nothing(tmp_path, variable_set):
+    """Under a managed level the thinking goal drafts no main-session change to remove, so the check used to
+    fall back to "No agent spends more than 20%" beside a table that shows 40%."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(changes=[
+        SettingChange(target="settings", key="effortLevel", value="medium", current="high", scope="managed")
+    ])]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"}), effort_level_env_set=variable_set,
+               **_MANAGED_HIGH)
+    result = qa.run("effort", ctx)
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == qa._IGNORED_ONLY
+
+
+def test_an_ignored_main_effort_card_with_the_main_session_under_the_bar_changes_nothing(tmp_path):
+    """Guard: under the threshold the check's own sentence is true, card or no card."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 10.0)
+    model.recommendations = [_main_effort_card()]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"}), **_MANAGED_HIGH))
+    assert result["summary"].startswith("No agent spends more than")

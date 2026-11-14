@@ -95,19 +95,22 @@ class _Command:
     words: list[tuple[str, bool]] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     fed: bool = False
+    #: Whether it starts after ``||``: an alternative to the command before.
+    fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SimpleCommand:
     """One simple command as ``shell_reads`` reads it: the program (lower
     case, no directory or ``.exe``), its arguments as plain words,
-    whether its standard output goes to a file, and whether a heredoc or
-    here-string feeds it."""
+    whether its standard output goes to a file, whether a heredoc or
+    here-string feeds it, and whether it follows ``||`` (a fallback)."""
 
     program: str
     args: tuple[str, ...]
     redirected: bool
     fed: bool
+    fallback: bool = False
 
 
 def write_targets(command: str, *, powershell: bool, cwd: str | None) -> list[str]:
@@ -169,7 +172,7 @@ def simple_commands(command: str, *, powershell: bool) -> list[list[SimpleComman
         simple = []
         for cmd in pipeline:
             program, args = _program(cmd.words, powershell)
-            simple.append(SimpleCommand(program, tuple(text for text, _quoted in args), bool(cmd.writes), cmd.fed))
+            simple.append(SimpleCommand(program, tuple(text for text, _quoted in args), bool(cmd.writes), cmd.fed, cmd.fallback))
         result.append(simple)
     return result
 
@@ -203,8 +206,13 @@ def _pipelines(command: str, powershell: bool) -> list[list[_Command]]:
             expect = None
             if text == "|":
                 pipelines[-1].append(_Command())
+            elif len(pipelines[-1]) == 1 and not (cmd.words or cmd.writes or cmd.fed):
+                # Nothing has come since the last separator (``||`` then a
+                # newline or ``(``): the pipeline it opened is still the one
+                # waiting, so it keeps its fallback flag.
+                cmd.fallback = cmd.fallback or text == "||"
             else:
-                pipelines.append([_Command()])
+                pipelines.append([_Command(fallback=text == "||")])
     return [p for p in pipelines if any(c.words or c.writes or c.fed for c in p)]
 
 
@@ -218,6 +226,7 @@ def _tokens(command: str, powershell: bool):
     in_word = False
     quoted = False
     heredocs: list[tuple[str, bool]] = []
+    scan = [_SCAN_STEPS_PER_CHAR * n + _SCAN_STEPS_MIN]
 
     def flush():
         nonlocal word, in_word, quoted
@@ -273,6 +282,11 @@ def _tokens(command: str, powershell: bool):
                     j += 2
                 elif ch == '"':
                     break
+                elif not powershell and ch in "$`" and (end := _substitution_end(command, j, scan)) >= 0:
+                    # A substitution is read to its own end, so the quotes
+                    # inside it are its text and not this word's.
+                    word.append(command[j:end])
+                    j = end
                 else:
                     word.append(ch)
                     j += 1
@@ -372,6 +386,122 @@ def _tokens(command: str, powershell: bool):
 def _rest_of_line_blank(command: str, start: int) -> bool:
     end = command.find("\n", start)
     return end >= 0 and not command[start:end].strip()
+
+
+#: A substitution nested deeper than this is read the old way (its quotes
+#: end the word), so a command nested thousands deep cannot overflow the
+#: stack and cost the whole transcript.
+_MAX_SUBSTITUTION_DEPTH = 32
+#: The characters of a command the substitution scans may look at in all,
+#: so one that is opened and never closed is not scanned again from every
+#: opener after it. Reading each substitution once takes about one step a
+#: character; past the budget the rest is read the old way.
+_SCAN_STEPS_PER_CHAR = 4
+_SCAN_STEPS_MIN = 1000
+
+
+def _substitution_end(command: str, i: int, scan: list[int], depth: int = 0) -> int:
+    """The index just past the substitution that starts at ``i`` (``$(``
+    or a backtick), or -1 when it is not one, never closes, nests deeper
+    than :data:`_MAX_SUBSTITUTION_DEPTH` or runs the command's budget out
+    (``scan[0]``, the steps left). Bash parses what is inside afresh: its
+    quotes pair with each other, its heredoc bodies are text, and parens
+    nest, whatever the double quote around it is doing."""
+    n = len(command)
+    if depth >= _MAX_SUBSTITUTION_DEPTH:
+        return -1
+    if command.startswith("$(", i):
+        i += 2
+    elif command.startswith("`", i):
+        return _backtick_end(command, i + 1, scan)
+    else:
+        return -1
+    parens = 1
+    heredocs: list[tuple[str, bool]] = []
+    while i < n:
+        scan[0] -= 1
+        if scan[0] < 0:
+            return -1
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            end = command.find("'", i + 1)
+            if end < 0:
+                return -1
+            scan[0] -= end - i
+            i = end + 1
+        elif c == '"':
+            i = _double_quote_end(command, i + 1, scan, depth + 1)
+            if i < 0:
+                return -1
+        elif c == "`":
+            i = _backtick_end(command, i + 1, scan)
+            if i < 0:
+                return -1
+        elif c == "(":
+            parens += 1
+            i += 1
+        elif c == ")":
+            parens -= 1
+            i += 1
+            if not parens:
+                return i
+        elif c == "\n":
+            i += 1
+            if heredocs:
+                skipped = _skip_heredoc_bodies(command, i, heredocs)
+                scan[0] -= skipped - i
+                i = skipped
+                heredocs = []
+        elif command.startswith("<<<", i):
+            i += 3
+        elif command.startswith("<<", i):
+            strip_tabs = command.startswith("<<-", i)
+            delimiter, i = _read_heredoc_delimiter(command, i + (3 if strip_tabs else 2))
+            if delimiter:
+                heredocs.append((delimiter, strip_tabs))
+        else:
+            i += 1
+    return -1
+
+
+def _double_quote_end(command: str, i: int, scan: list[int], depth: int) -> int:
+    """The index just past the ``"`` that closes the double-quoted text
+    starting at ``i``, or -1 when it never closes or runs the budget out.
+    A substitution inside it that cannot be read is plain text."""
+    n = len(command)
+    while i < n:
+        scan[0] -= 1
+        if scan[0] < 0:
+            return -1
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == '"':
+            return i + 1
+        elif c in "$`" and (end := _substitution_end(command, i, scan, depth)) >= 0:
+            i = end
+        else:
+            i += 1
+    return -1
+
+
+def _backtick_end(command: str, i: int, scan: list[int]) -> int:
+    """The index just past the backtick that closes the one before ``i``,
+    or -1 when it never closes or runs the budget out."""
+    n = len(command)
+    while i < n:
+        scan[0] -= 1
+        if scan[0] < 0:
+            return -1
+        if command[i] == "\\":
+            i += 2
+        elif command[i] == "`":
+            return i + 1
+        else:
+            i += 1
+    return -1
 
 
 def _read_heredoc_delimiter(command: str, i: int) -> tuple[str, int]:

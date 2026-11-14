@@ -28,7 +28,56 @@ COMMANDS = [
     ("git -C /w --no-pager diff --stat", False, 1),
     ("git show HEAD~1", False, 1),
     ("grep a x; grep b y", False, 2),
+    ("cat a 2>/dev/null || cat b", False, 1),
+    ("cat a || cat b || cat c", False, 1),
+    ("cat a && cat b", False, 2),
+    ("test -f a || cat b", False, 1),
+    # A fallback that starts on the next line, or inside a subshell, is still a fallback
+    ("cat a 2>/dev/null ||\n  cat b", False, 1),
+    ("cat a || (cat b)", False, 1),
+    ("(cat a) || (cat b)", False, 1),
+    ("cat a ||\n(cat b)", False, 1),
+    ("Get-Content a ||\n  Get-Content b", True, 1),
+    # A second read after ;, && or a newline is a second read, even after a fallback line
+    ("cat a ||\n  cat b; cat c", False, 2),
+    ("cat a ||\n  cat b && cat c", False, 2),
+    ("cat a ||\n  cat b\ncat c", False, 2),
+    ("cat a;\ncat b", False, 2),
+    ("cat a\ncat b", False, 2),
+    ("cat a && (cat b)", False, 2),
+    ("(cat a); (cat b)", False, 2),
     ("for f in a b; do cat $f; done", False, 1),
+    # A search made by git, by xargs over the files git lists, or by PowerShell over a folder tree
+    ("git grep -n foo", False, 1),
+    ("git -C /w --no-pager grep -n foo -- src", False, 1),
+    ("git grep -n foo | head -5", False, 1),
+    ("cd /w && git grep foo", False, 1),
+    ("git ls-files | xargs grep -n foo", False, 1),
+    ("git ls-files '*.py' | xargs grep -n foo", False, 1),
+    ("git ls-files -z | xargs -0 grep -l foo", False, 1),
+    ("git ls-files | xargs -n 1 -P 4 rg foo", False, 1),
+    ("git ls-files | xargs -I{} grep foo {}", False, 1),
+    ("git ls-files | grep foo", False, 0),
+    ("git ls-files | xargs wc -l", False, 0),
+    ("git ls-files | xargs rm", False, 0),
+    ("git ls-files", False, 0),
+    ("ls | xargs grep foo", False, 0),
+    ("echo a | xargs grep foo", False, 0),
+    ("git ls-files | xargs grep foo > hits.txt", False, 0),
+    ("git config grep.lineNumber true", False, 0),
+    ("Get-ChildItem -Recurse -Filter *.py | Select-String foo", True, 1),
+    ("Get-ChildItem -Path src -Recurse | Select-String -Pattern foo", True, 1),
+    ("gci -r *.py | sls foo", True, 1),
+    ("ls -Recurse | Select-String foo", True, 1),
+    ("dir -Recurse -Include *.ts | Select-String foo | Select-Object -First 5", True, 1),
+    ("Set-Location C:/dev; Get-ChildItem -Recurse | Select-String foo", True, 1),
+    ("Get-ChildItem -Recurse | Select-String foo > hits.txt", True, 0),
+    ("Get-ChildItem -Recurse -Filter *.py", True, 0),
+    ("Get-ChildItem -Recurse | Sort-Object Length", True, 0),
+    ("Get-ChildItem src | Select-String foo", True, 0),
+    ("Get-ChildItem -Recurse | Get-Content", True, 0),
+    ("ls -R | grep foo", False, 0),
+    ("ls -Recurse | Select-String foo", False, 0),
     ("Get-Content src/a.py -TotalCount 20", True, 1),
     ("Get-Content -Path src/a.py | Select-String foo", True, 1),
     ("Select-String -Path src/*.py -Pattern foo", True, 1),
@@ -51,6 +100,41 @@ COMMANDS = [
     ("type a.txt", False, 0),
     ("pytest -q", False, 0),
     ("git commit -m 'grep foo'", False, 0),
+    # A message in "$( ... )" is text, whatever it quotes or however many stray quotes it holds
+    ("git commit -m \"$(cat <<'EOF'\nShell reads: \"cat a 2>/dev/null || cat b\" counts once\nEOF\n)\"", False, 0),
+    ("git commit -m \"$(cat <<'EOF'\nDocs: say \"cd src; grep -n foo x.py\" in the guide\nEOF\n)\"", False, 0),
+    ("git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor layout\nFind the cards that overflow\nEOF\n)\"", False, 0),
+    ("gh pr create --title t --body \"$(cat <<'EOF'\nRun \"git log -1; git show HEAD\" to check\nEOF\n)\"", False, 0),
+    ("git commit -m \"$(cat <<EOF\nHead the list\ntail -n 5 x\nEOF\n)\"", False, 0),
+    # Each form below has a separator inside the quoted text, so only a reader that pairs the quotes of the
+    # substitution itself gets it right
+    ("git commit -m \"`cat <<'EOF'\nFind \"x; cat a\" it\nEOF\n`\"", False, 0),
+    ("git commit -m \"$(printf '%s' 'a 27\" b; cat c')\"; grep -n x y", False, 1),
+    ("git commit -m \"$(printf '%s' 'say \"x; cat a\" here')\"", False, 0),
+    ("for f in a b; do echo \"$f: $(grep -o '\"model\":\"[^\"]*\"' $f | sort)\"; done; grep -n x y", False, 1),
+    ("git commit -m \"$(echo \"$(echo \"a)b\") ; cat d\")\"", False, 0),
+    ("git commit -m \"$(echo \"x $(echo \"a)b\") ; cat d\")\"; grep -n y z", False, 1),
+    ("git commit -m \"$(echo \"`echo \"a)b\"` ; cat d\")\"", False, 0),
+    ("git commit -m \"$(echo $(date) \"x; cat a\")\"; grep -n y z", False, 1),
+    ("git commit -m \"$(echo $(date +%F) 'it''s' \"x; cat a\")\"", False, 0),
+    ("git commit -m \"$(echo \\) 'say \"x; cat a\"')\"", False, 0),
+    # A heredoc body inside the substitution is text
+    ("git commit -m \"$(cat <<'EOF'\nMove (a; cat b) and $(grep x y) out\nEOF\n)\"", False, 0),
+    # PowerShell is read as it always was: its "$( ... )" is not part 2's
+    ("git commit -m \"$(cat <<'EOF'\nsay \"x; Get-Content a\" y\nEOF\n)\"", True, 1),
+    ("Write-Output \"$(Write-Output 'a \"x; Get-Content a\" b')\"", True, 1),
+    ("Write-Output \"line $(Get-Content a.txt)\"", True, 0),
+    ("Write-Output \"say `\"x; Get-Content a`\" now\"", True, 0),
+    ("Write-Output \"`$(Get-Content a)\"; Get-Content b", True, 1),
+    # A real second read after the commit still counts, so does one inside an unquoted substitution
+    ("git commit -m \"$(cat <<'EOF'\nsay \"cat a\"\nEOF\n)\" && cat src/a.py", False, 1),
+    ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"; grep -n foo a.py\ncat b.py", False, 2),
+    ("git commit -m \"$(cat <<'EOF'\nUse a 27\" monitor\nEOF\n)\"\ngrep -n foo a.py", False, 1),
+    ("echo $(cat a.py)", False, 1),
+    ("x=$(grep -rn foo src/)", False, 1),
+    ("git log -1 && git commit -m \"$(cat <<'EOF'\nsay \"cat a\"\nEOF\n)\"", False, 1),
+    # An unterminated substitution is left as text, as before
+    ("echo \"$(cat a.py", False, 0),
     ("echo grep foo", False, 0),
     ("", False, 0),
 ]
@@ -125,6 +209,17 @@ def test_a_read_through_powershell_counts_like_one_through_bash(tmp_path):
     assert (turns[0].shell_read_count, turns[0].shell_read_chars) == (1, 25)
 
 
+def test_a_fallback_on_the_next_line_is_one_read_in_the_turn(tmp_path):
+    turns = _session(tmp_path, [_bash("cat a.txt 2>/dev/null ||\n  cat b.txt")], [("body", False, {})])
+    assert turns[0].shell_read_count == 1
+
+
+def test_a_commit_reply_that_quotes_a_read_in_its_message_reads_nothing(tmp_path):
+    message = "git commit -m \"$(cat <<'EOF'\nShell reads: \"cat a || cat b\" counts once\nEOF\n)\""
+    turns = _session(tmp_path, [_bash(message)], [("[main abc] Shell reads", False, {})])
+    assert (turns[0].shell_read_count, turns[0].shell_read_chars) == (0, 0)
+
+
 def test_a_search_that_found_nothing_still_counts_and_its_output_is_in_context(tmp_path):
     turns = _session(tmp_path, [_bash("grep -rn nope src/")], [("Exit code 1", True, {})])
     assert (turns[0].shell_read_count, turns[0].shell_read_chars) == (1, len("Exit code 1"))
@@ -170,3 +265,50 @@ def test_a_result_claude_code_saved_to_a_file_counts_as_the_preview_left_in_cont
     assert turns[0].read_target_chars == (len(persisted),)
     assert turns[0].shell_read_chars == len(persisted)
     assert len(persisted) < 214_000
+
+
+# -- odd input: a substitution nested very deep, or opened and never closed ---------------------------------
+
+
+@pytest.mark.parametrize("depth", [40, 500, 3000])
+def test_a_command_nested_very_deep_is_still_read(tmp_path, depth):
+    # The substitutions past the cap are read the old way, so the counts are the ones the quote-by-quote
+    # reading gives; what matters is that the transcript is not lost to a RecursionError.
+    nest = "echo " + '"$(echo ' * depth + "x" + ')"' * depth
+    turns = _session(tmp_path, [_bash(nest + "; cat a.py")], [("body", False, {})])
+    assert turns[0].shell_read_count == 1
+    assert shell_reads.read_count(nest, powershell=False) == 0
+    assert shell_writes.write_targets(nest + "; echo y > src/a.py", powershell=False, cwd="C:/r") == ["C:/r/src/a.py"]
+    unclosed = "echo " + '"$(echo ' * depth + "; cat a.py"
+    assert shell_reads.read_count(unclosed, powershell=False) == 1
+
+
+def _characters_looked_at(command: str) -> int:
+    """How many times the tokenizer indexes into ``command`` while counting its reads and finding its writes."""
+    seen = [0]
+
+    class Counted(str):
+        def __getitem__(self, key):
+            seen[0] += 1
+            return super().__getitem__(key)
+
+    shell_reads.read_count(Counted(command), powershell=False)
+    shell_writes.write_targets(Counted(command), powershell=False, cwd="C:/r")
+    shell_writes.changes_files(Counted(command), powershell=False)
+    assert seen[0] > 0
+    return seen[0]
+
+
+@pytest.mark.parametrize("command", [
+    'echo "' + "$( a " * 2000 + '"; cat x',
+    'echo "' + "` a " * 2000 + '"; cat x',
+    'echo "' + "$(' a " * 2000 + '"; cat x',
+    'echo "' + "$(cat <<EOF\n" * 1500 + '"; cat x',
+    'echo "' + "$(echo \"" * 1500 + "; cat x",
+    'echo "$(' + "abc " * 2500 + '"; cat x',
+    "git commit -m \"$(cat <<'EOF'\n" + "Fix the \"cat a || cat b\" case; see $(grep x y)\n" * 4000 + "EOF\n)\" && git log -1",
+], ids=["unclosed $(", "unclosed backtick", "unclosed $(' ", "unclosed heredocs", "unclosed nesting", "one unclosed $(", "long message"])
+def test_a_substitution_that_never_closes_is_not_scanned_again_and_again(command):
+    # Every look at a character is counted, so a scan that starts over at each opener shows as a count far
+    # past the command's length (it was 2,000 scans of a 10 KB command), whatever the speed of the machine.
+    assert _characters_looked_at(command) <= 12 * len(command)

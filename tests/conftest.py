@@ -9,7 +9,10 @@ a no-op.
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,36 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+#: The floor under every test's own isolation (the autouse fixture below):
+#: a throwaway home set before collection and kept for the whole run. A test
+#: that calls ``monkeypatch.undo()`` undoes that fixture's ``setenv`` calls
+#: too, and the environment it falls back to is this one, not the real
+#: ``~/.claude`` -- a test that did so mid-test once rewrote the developer's
+#: own settings.json with entries pointing into its temp folder. Set before
+#: test modules are imported, so a path worked out at import lands here too.
+_SESSION_ENV = pytest.MonkeyPatch()
+_SESSION_HOME_PREFIX = "claudeglass-test-home-"
+_session_home: Path | None = None
+
+
+def pytest_configure(config):
+    global _session_home
+    _session_home = Path(tempfile.mkdtemp(prefix=_SESSION_HOME_PREFIX))
+    _SESSION_ENV.setenv("CLAUDE_CONFIG_DIR", str(_session_home / ".claude"))
+    _SESSION_ENV.setenv("HOME", str(_session_home))
+    _SESSION_ENV.setenv("USERPROFILE", str(_session_home))
+    if os.name == "nt":
+        # Path.home() falls back to these when a test removes USERPROFILE.
+        drive, rest = os.path.splitdrive(str(_session_home))
+        _SESSION_ENV.setenv("HOMEDRIVE", drive)
+        _SESSION_ENV.setenv("HOMEPATH", rest)
+
+
+def pytest_unconfigure(config):
+    _SESSION_ENV.undo()
+    if _session_home is not None:
+        shutil.rmtree(_session_home, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

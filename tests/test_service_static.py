@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import backtest, capture_catalogue, capture_view, footprint, helptext, quick_actions, setup_status, skills_review
+from claudeglass import backtest, capture_catalogue, capture_view, fixes, footprint, helptext, quick_actions, setup_status, skills_review
 from claudeglass.config import CaptureConfig, Config
 from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing
@@ -545,9 +545,10 @@ def test_capture_group_opens_for_a_metric_that_needs_you() -> None:
     sat in a closed group."""
     metrics = _function_source(_app_js(), "renderCaptureMetrics")
     assert "group.open = section.metrics.some(" in metrics
-    assert "return row.needs_hook || row.needs_install || row.statusline_note;" in metrics
+    assert "return row.needs_hook || row.needs_install || row.statusline_note || row.silent_note;" in metrics
     # The note it opens for is the one each row shows.
     assert "if (row.statusline_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
+    assert "if (row.silent_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
 
 
 def test_a_metric_row_that_needs_a_hook_entry_names_the_command_unless_a_policy_blocks_it() -> None:
@@ -621,6 +622,29 @@ def test_profile_copy_names_a_section_not_a_direction() -> None:
     assert "It's under Your profiles and the built-in ones" in draft and "list above" not in draft
     assert '"Edit settings directly"' in _function_source(source, "renderProfiles")
     assert '"Your profiles and the built-in ones"' in _function_source(source, "renderProfiles")
+
+
+def test_profiles_list_and_drawer_follow_the_window_and_project() -> None:
+    """PF1 part 2: the list draws at once, with no window (it needs no report). The suggestion is
+    fetched after it, for the picked window and project, and adds the chip and the reason line; each
+    profile's drawer asks for the picked project; a row's "Set in" cell adds what wins over the change."""
+    source = _app_js()
+    profiles = _function_source(source, "renderProfiles")
+    assert 'loadInto(listContainer, "/api/profiles", ' in profiles and 'withWindow("/api/profiles")' not in profiles
+    assert 'withWindow("/api/profile-suggestion")' in profiles
+    detail = _function_source(source, "renderProfileDetail")
+    squeezed = re.sub(r"\s+", "", detail)
+    assert re.sub(
+        r"\s+", "", 'withWindow("/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value))'
+    ) in squeezed
+    listing = _function_source(source, "renderProfilesList")
+    assert "suggest" not in listing and "Suggested for you" not in listing
+    applied = _function_source(source, "applySuggestion")
+    assert '"Suggested for you: " + suggestion.suggested_reason' in applied
+    assert 'chip("Suggested for you"' in applied
+    assert "the profile your latest baseline matches best" not in source
+    table = _function_source(source, "renderDiffRowsTable")
+    assert 'row.overridden_by ? where + ". " + row.overridden_by : where' in table
 
 
 def test_kind_of_task_reads_by_its_plain_name() -> None:
@@ -711,10 +735,12 @@ def test_habits_playbook_caps_featured_cards_and_collapses_the_rest() -> None:
     assert "appendHabitCards" in body
 
 
-def test_the_empty_habits_state_names_every_habit_the_notes_still_warn_about() -> None:
-    """The coaching notes still warn about small requests (drip_feed), huge pastes (big_paste) and
-    checks on a background task (status_poll), so the empty state names all three."""
-    assert "small requests, huge pastes" in _static_text("page-habits.js")
+def test_the_empty_habits_state_does_not_list_the_hints_that_speak() -> None:
+    """Which hints speak changes by one line in the catalogue, so the empty state says only that coaching
+    notes flag some of these habits."""
+    page = _static_text("page-habits.js")
+    assert "Coaching notes flag some of these as they happen." in page
+    assert "small requests, huge pastes" not in page
 
 
 def test_habits_digest_money_cards_follow_the_billing_mode() -> None:
@@ -926,6 +952,45 @@ def test_a_profile_estimate_scales_by_its_normalised_tasks() -> None:
     app_js = _app_js()
     body = _function_source(app_js, "renderProfileEstimate")
     assert "p.tasks" in body and "p.for" not in body
+
+
+def test_saving_current_settings_names_the_project_agents_it_left_out() -> None:
+    """PF1 part 5: the status line after "Save my current settings as a profile" adds, when the save
+    left project agents out (their file is in one project, not the user's folder), their names."""
+    source = _app_js()
+    profiles = _function_source(source, "renderProfiles")
+    squeezed = re.sub(r"\s+", " ", profiles)
+    assert 'var projectAgents = body.data.skipped_project_agents || [];' in squeezed
+    assert (
+        '(projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "")'
+        in squeezed
+    )
+    # after the managed sentence, so the existing text reads as before
+    assert squeezed.index("your organisation's policy sets them") < squeezed.index("belong to one project")
+
+
+def test_a_per_model_row_names_its_model_and_says_when_its_value_is_not_recorded() -> None:
+    """PF1 part 3: a diff row for one model's setting says whose in its label, and its "Now" says
+    "not recorded" when the snapshot does not keep that value (an unset one would be a guess). The
+    card summary and the estimate name modelSettings as one settings key, "Per-model settings"; the
+    profile form leaves it to the profile it starts from instead of offering a text box for a table."""
+    source = _app_js()
+    table = _function_source(source, "renderDiffRowsTable")
+    assert 'if (row.model) label += " (" + row.model + ")";' in table
+    assert 'if (row.recorded === false) return "not recorded";' in table
+    assert '"Per-model settings"' in _function_source(source, "profileLeverLabels")
+    assert "profileLeverLabels(results[1])" in _function_source(source, "renderProfilesList")
+    assert "profileLeverLabels(results[1])" in _function_source(source, "renderProfileEstimate")
+    # a table of names reads as "model (key: value)", not "[object Object]"
+    assert 'key + " (" + _diffRowValue(inner) + ")"' in _function_source(source, "_diffRowValue")
+    # a value that is not recorded is never "the same" as the proposed one
+    assert "row.recorded === false" in _function_source(source, "diffRowSame")
+    editor = _function_source(source, "buildProfileEditor")
+    assert 'lever.kind !== "map[str,model]"' in editor
+    # what the form carries through is shown, read-only, in one line under the existing label
+    assert 'profileLeverLabels(schema).modelSettings + ": " + _diffRowValue(carriedModelSettings)' in editor
+    assert editor.count("showCarriedModelSettings()") == 3  # the function and its two calls
+    assert "doc.settings.modelSettings = carriedModelSettings" in editor
 
 
 @pytest.mark.parametrize("name", FIRST_PARTY_FILES)
@@ -1360,6 +1425,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
     canned["/api/config-diff"] = to_jsonable(config_section) if config_section is not None else {"tables": []}
 
     canned["/api/recommendations"] = [to_jsonable(rec) for rec in report.recommendations]
+    canned["/api/recommendations/prompt"] = fixes.project_prompt(report.recommendations)
     canned["/api/diagnostics"] = to_jsonable(helptext.diagnostics_table(report.diagnostics))
     canned["/api/profile-schema"] = {
         "settings": [{"key": key, "label": key, "kind": spec.kind} for key, spec in profile_schema.SETTINGS_ALLOWLIST.items()],
@@ -1379,6 +1445,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
         model=report, units=units, period=period, config_dir=config_dir, effective={}, effective_agents={}
     )
     canned["/api/quick-actions"] = {"period": period, "checks": quick_actions.run_all(ctx)}
+    canned["/api/profile-suggestion"] = {"suggested_profile_id": None, "suggested_reason": None}
     canned["/api/profile-goals"] = {"goals": goals.goals_list()}
     canned["/api/skills"] = skills_review.review(config_dir, report.context_files or {}, units, period, projects=[])
     canned["/api/claude-md"] = {"period": period, "transcripts": 0, "files": []}
@@ -2259,6 +2326,21 @@ def test_recommendations_are_fetched_once_per_window() -> None:
     assert "state.recommendationPromises = {}" in _function_source(app_js, "redrawEverything")
 
 
+def test_recommendations_offer_one_prompt_per_project() -> None:
+    """With a project picked, one Copy prompt above the inbox copies every
+    open fix, from the server's bundle (it alone knows which cards have
+    landed); with none picked it fetches nothing, and it has no Apply."""
+    body = _function_source(_app_js(), "renderRecommendations")
+    assert 'id: "recommendations-bundle"' in body
+    assert "if (state.project)" in body
+    assert 'withWindow("/api/recommendations/prompt")' in body
+    assert "bundleBlock(data, projectName(state.project))" in body
+    block = _function_source(_app_js(), "bundleBlock")
+    assert '"Copy prompt for every open fix in "' in block
+    line = _function_source(_app_js(), "bundleLine")
+    assert '" open fix"' in line and '" file"' in line and "data.several" in line and "data.other" in line
+
+
 def test_tables_say_which_actions_they_feed() -> None:
     """Every report table that a recommendation cites as evidence says so
     in its header ("Feeds N actions"), and each cited row carries a mark;
@@ -2727,15 +2809,16 @@ def test_the_project_picker_says_what_follows_it_and_what_covers_every_project()
     project. The baseline, the estimates and the hook and statusline rows
     still cover every project, each with its own chip or row group: the
     picker's note names both, never the old "Settings always cover every
-    project". Profiles reads the newest settings from any project, and the
-    note says so."""
+    project". Profiles follows the pick (its suggestion and its drawer), and the
+    note's list says so."""
     picker = _function_source(_app_js(), "initProjectPicker")
-    assert "Your changes, settings and CLAUDE.md files follow the pick too." in picker
+    assert "Your changes, settings, profiles and CLAUDE.md files follow the pick too." in picker
     assert (
         "The latest baseline, whether your estimates came true, and the hook and statusline checks always cover "
         "every project." in picker
     )
-    assert "Profiles uses your newest settings from any project." in picker
+    assert "Profiles follows the project you pick." not in picker
+    assert "Profiles uses your newest settings from any project." not in picker
     assert "Settings and Data quality always cover every project" not in picker
     # Each part named as covering every project says so where it shows.
     setup = _static_text("page-setup.js")
@@ -2862,7 +2945,7 @@ def test_an_estimate_is_logged_when_a_change_is_saved_or_its_command_copied() ->
     assert goal.index('toast("Profile saved.")') < goal.index("log: true")
     estimate = _function_source(source, "renderProfileEstimate")
     assert "if (logged || !request) return;" in estimate and "log: true" in estimate
-    assert "renderProfileDiff(data, box, logEstimate)" in _function_source(source, "renderProfileDetail")
+    assert "renderProfileDiff(data, box, estimator.log)" in _function_source(source, "renderProfileDetail")
     assert "{ onCopy: onCopy }" in _function_source(source, "renderProfileDiff")
     copy = _function_source(source, "codeBlockWithCopy")
     assert "if (ok && onCopy) onCopy();" in copy
@@ -2878,7 +2961,8 @@ def test_copy_button_only_claims_success_when_the_clipboard_write_succeeded() ->
     app_js = _app_js()
     copy_fn = _function_source(app_js, "copyToClipboard")
     assert "return navigator.clipboard.writeText(text).then(" in copy_fn
-    assert "return Promise.resolve(false)" in copy_fn
+    assert "return Promise.resolve(copyBySelection(text))" in copy_fn
+    assert 'document.execCommand("copy") === true' in _function_source(app_js, "copyBySelection")
 
     code_block = _function_source(app_js, "codeBlockWithCopy")
     assert "copyToClipboard(text || \"\").then(function (ok) {" in code_block
@@ -4066,6 +4150,12 @@ def test_capture_segment_no_longer_claims_a_subagent_is_asked_for_anything() -> 
     assert "subagent starts" not in capture_view.WARNING and "when a session or subagent" not in capture_view.WARNING
 
 
+def test_the_capture_page_gives_the_note_after_a_compaction_where_it_is_bigger() -> None:
+    rough = _function_source(_static_text("page-capture.js"), "roughLine")
+    assert "rough.compact_note > rough.session_note" in rough
+    assert '" when it compacts"' in rough
+
+
 def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one() -> None:
     capture_js = _static_text("page-capture.js")
     render = _function_source(capture_js, "renderCaptureData")
@@ -4076,6 +4166,50 @@ def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one()
     assert "overheadAmount(overhead.capture)" in line and "overheadAmount(overhead.coaching)" in line
     assert 'return billed(amount, "", "about ");' in _function_source(capture_js, "overheadAmount")
     assert "if (overhead.capture && overhead.coaching)" in line
+
+
+def test_capture_page_offers_when_it_ends() -> None:
+    """The choice of what happens at the end sits under the end's select, shows only when an end is set, and
+    posts ``after`` (``capture on --after`` is the same choice)."""
+    controls = _function_source(_static_text("page-capture.js"), "renderCaptureControls")
+    assert 'var afterId = "capture-after";' in controls
+    assert 'el("label", { for: afterId, text: "When it ends" })' in controls
+    assert 'text: "Stop capturing"' in controls and 'text: "Keep a light sample"' in controls
+    assert 'value: "stop"' in controls and 'value: "light"' in controls
+    assert "if (config.until) {" in controls
+    assert "postCapture({ after: value }, container," in controls
+    assert '"Saved: capture stops at the end."' in controls
+    assert '"Saved: a light sample goes on after the end."' in controls
+    assert (
+        "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in "
+        in controls
+    )
+    # The note says the share the hook runs, which the server works out from the chosen sample.
+    assert 'in 1 session in " + Math.round(100 / config.light_share) + "."' in controls
+    assert "in 1 session in 5." not in controls
+    assert (
+        "At the end, capture stops or keeps its light sample, and the banner says so. Your level stays set, "
+        "so picking a new end starts it again." in controls
+    )
+    assert (
+        "When you switch capture on, it ends by itself after \" + config.timebox_days + \" days. Once it's on, "
+        "you can pick another end here, or none, and whether a light sample goes on after it." in controls
+    )
+    # The old wording is gone.
+    assert "At the end, capture stops by itself" not in controls
+
+
+def test_the_capture_page_does_not_say_nothing_is_captured_during_a_light_sample() -> None:
+    """``config.expired`` stays true while a light sample runs; the sentence about an ended capture is for the
+    capture that stopped."""
+    render = _function_source(_static_text("page-capture.js"), "renderCaptureData")
+    assert "if (config.expired && !config.light) now.push(" in render
+    assert "Its end time has passed, so nothing is captured now. " in render
+
+
+def test_the_sidebar_status_names_a_light_sample_instead_of_an_ended_capture() -> None:
+    text = _function_source(_static_text("shell.js"), "captureStatusText")
+    assert text.index('if (block.light) return "Capture: light sample";') < text.index("if (block.expired)")
 
 
 def test_capture_overhead_line_is_worded_as_capture_status_words_it() -> None:
@@ -4105,6 +4239,28 @@ def test_capture_segment_ends_with_the_tuning_block_of_copyable_commands() -> No
     # The dashboard only offers the commands: nothing here runs or writes.
     for forbidden in ("postJson", "postCapture", "fetch(", 'el("button"', "download", "Blob"):
         assert forbidden not in tuning, forbidden
+
+
+def test_data_quality_links_to_the_figures_behind_the_advice() -> None:
+    """K1: some advice rests on figures no page shows; the tuning file holds them. Data quality says so in
+    one line and links to the Capture block that writes the file (scrolled to and pulsed as an evidence
+    link's table is)."""
+    data_js, links_js, capture_js = _static_text("page-data.js"), _static_text("links.js"), _static_text("page-capture.js")
+    quality = _function_source(data_js, "renderDataQuality")
+    assert 'tuningLink("Figures behind the advice")' in quality
+    assert (
+        '"Some advice rests on figures no page shows, such as cost per reply and what a summary saves. '
+        'The tuning file holds them. "'
+    ) in quality
+    assert 'el("p", { class: "notes", id: "data-figures" }, [' in quality
+    assert re.search(r'import \{[^}]*\btuningLink\b[^}]*\} from "\./links\.js";', data_js)
+    assert 'export var TUNING_BLOCK = "capture.tuning";' in links_js
+    assert 'pageLink("setup/capture", text, { t: TUNING_BLOCK })' in _function_source(links_js, "tuningLink")
+    assert 'var TUNING_NAME = "tuning";' in capture_js
+    assert 'block.setAttribute("data-table-name", TUNING_NAME)' in _function_source(capture_js, "renderCaptureTuning")
+    # The link's table part is the name the block carries.
+    table = re.search(r'export var TUNING_BLOCK = "[^."]+\.([^"]+)";', links_js).group(1)
+    assert f'var TUNING_NAME = "{table}";' in capture_js
 
 
 def test_grid_words_an_empty_status_line_table_for_desktop_sessions() -> None:
@@ -4330,3 +4486,190 @@ def test_the_more_detail_copy_keeps_to_the_dashboards_copy_rules() -> None:
         assert sentence.endswith("."), sentence
         title = helptext.TABLE_COPY[targets[key].split(".", 1)[1]].title
         assert label.lower() in title.lower() or title.lower() in label.lower(), (label, title)
+
+
+def test_the_project_bundle_line_counts_fixes_in_one_unit() -> None:
+    """The line sums the prompts under each file, not the cards, and the ones
+    with no file are named in the same unit."""
+    actions = _static_text("page-actions.js")
+    assert "data.cards +" not in actions
+    assert "n + f.fixes" in actions
+    assert "with no file to edit" in actions
+
+
+def test_capture_segment_shows_the_signed_out_count_and_the_pause_beside_the_judged_share() -> None:
+    """``capture status`` words these lines in ``cli._capture_usage_lines``; the page puts the server's words
+    in the same places."""
+    render = _function_source(_static_text("page-capture.js"), "renderCaptureData")
+    judged = 'of agent runs" + (measured.report_signed_out_text ? ", and " + measured.report_signed_out_text : "")'
+    assert judged in render
+    assert "if (measured.judge_paused_text)" in render and "measured.judge_paused_text" in render
+
+
+def test_every_copy_of_a_cards_prompt_records_the_card() -> None:
+    """A copy of a card's prompt is recorded against the card (api.js
+    ``markCards``), on every button that copies one: the card's own detail,
+    its per-agent table, the project bundle, the Overview's checklist, a
+    check's fix that came from a card, and the search palette."""
+    actions = _static_text("page-actions.js")
+    detail = _function_source(actions, "renderRecommendationDetail")
+    assert 'markCards("copied", [focus.key || focus.id])' in detail
+    assert "commandBlock(fixes[0], { heading: true, onCopy: copied })" in detail
+    assert "renderFix(fix, true, { onCopy: copied })" in detail
+    assert "copyPromptButton(row.fix.prompt, row.agent, null, null, null, row.key || focus.key)" in _function_source(
+        actions, "changesTable"
+    )
+    button = _function_source(actions, "copyPromptButton")
+    assert 'if (ok && card) markCards("copied", [card])' in button
+    assert button.index('markCards("copied"') < button.index("handling.after(ok)")
+    bundle = _function_source(actions, "bundleBlock")
+    assert 'markCards("bundle", data.keys || [])' in bundle
+    assert bundle.index("if (ok)") < bundle.index('markCards("bundle"') < bundle.index("else showBundlePrompt")
+    evidence = _function_source(actions, "renderCheckEvidence")
+    assert "fix.card" in evidence and 'markCards("copied", [fix.card])' in evidence
+
+    overview = _static_text("page-overview.js")
+    overview_button = _function_source(overview, "copyPromptButton")
+    assert 'if (ok && card) markCards("copied", [card])' in overview_button
+    assert overview_button.index('markCards("copied"') < overview_button.index("toast(")
+    assert "copyPromptButton(fix.prompt, groupTitle(lead), lead.members[0].key)" in _function_source(overview, "checklistRow")
+
+    entries = _function_source(_static_text("palette.js"), "recommendationEntries")
+    assert entries.index("if (ok) {") < entries.index('markCards("copied", [key])') < entries.index('toast("Prompt copied')
+
+    ui = _static_text("ui.js")
+    fix = _function_source(ui, "renderFix")
+    assert "{ heading: true, onCopy: opts && opts.onCopy }" in fix
+    assert "commandBlock(fix, opts)" in fix
+    # The list of fixes in a drawer is not a card's: it passes nothing.
+    assert "opts" not in _function_source(ui, "renderFixList")
+
+
+def test_cards_are_marked_shown_from_the_list_and_the_overview_only_while_visible() -> None:
+    actions = _static_text("page-actions.js")
+    overview = _static_text("page-overview.js")
+    # Called from these two pages and no other.
+    callers = sorted(
+        path.name for path in _js_modules() if path.name != "api.js" and "markCardsShown(" in path.read_text(encoding="utf-8")
+    )
+    assert callers == ["page-actions.js", "page-overview.js"]
+    inbox_list = _function_source(actions, "recommendationInbox")
+    assert "drawn: function (items)" in inbox_list and "markCardsShown(" in inbox_list
+    # An ignored card is on the Ignored list, which is not a to-do: it is not marked shown.
+    marking = "markCardsShown(memberKeys(items.filter(function (g) { return !g.ignored; })));"
+    assert marking in inbox_list and inbox_list.index("drawn: function (items)") < inbox_list.index(marking)
+    assert "if (spec.drawn) spec.drawn(shownItems)" in _function_source(actions, "inbox")
+    checklist = _function_source(overview, "renderChecklist")
+    assert "markCardsShown(" in checklist and "check.headline" in checklist
+    # A tab nobody is looking at shows nothing.
+    shown = _function_source(_static_text("api.js"), "markCardsShown")
+    assert 'document.visibilityState === "visible"' in shown
+    assert 'document.addEventListener("visibilitychange"' in shown
+
+
+def test_the_bundle_note_says_a_model_change_is_left_out_to_try_first() -> None:
+    """``bundleLine`` ends with a sentence when the bundle left out a model
+    change its card says to try first (``left_out.trial``)."""
+    from test_ui_figures_audit import _node
+
+    def line(data: dict) -> str:
+        return _node([("page-actions.js", "bundleLine")], f"bundleLine({json.dumps(data)}, 'P')")
+
+    assert line({"files": [], "several": 1, "other": 1, "left_out": {"trial": 1}}) == (
+        "2 open fixes for P: 1 that spans several files or sets a standing rule and 1 with no file to edit. "
+        "The model change is left out: try it from its own card first."
+    )
+    assert line({"files": [{"file": "a", "fixes": 2}], "several": 0, "other": 0, "left_out": {"trial": 2}}) == (
+        "2 open fixes for P: 1 file to edit. The 2 model changes are left out: try each from its own card first."
+    )
+    assert line({"files": [{"file": "a", "fixes": 1}], "several": 0, "other": 0, "left_out": {"trial": 0}}) == (
+        "1 open fix for P: 1 file to edit."
+    )
+
+
+def test_start_from_carries_the_role_and_fills_only_the_profiles_own_agents() -> None:
+    """F1: "Start from" copies a profile's own agents and carries its role as a role, so the copy
+    shows and applies like the original at every target."""
+    editor = re.sub(r"\s+", " ", _function_source(_app_js(), "buildProfileEditor"))
+    assert "p.own_agents" in editor and "p.agents" not in editor
+    assert "carriedRoles = p.roles && Object.keys(p.roles).length ? p.roles : null;" in editor
+    assert "if (carriedRoles) doc.roles = carriedRoles;" in editor
+    assert '"For the agent that writes code: "' in editor
+    assert (
+        '". It goes to each of your agents named like implementer, fixer or builder that can edit files."' in editor
+    )
+
+
+def test_the_estimate_is_drawn_from_the_changes_the_chosen_target_makes() -> None:
+    """F2: the estimate is built from the drawer's own diff rows, so it prices what the chosen target
+    changes (not a key your policy locks or one already set) and is redrawn with each diff."""
+    source = _app_js()
+    detail = re.sub(r"\s+", " ", _function_source(source, "renderProfileDetail"))
+    assert "estimator.show(data);" in detail
+    assert "renderProfileDiff(data, box, estimator.log);" in detail
+    estimate = _function_source(source, "renderProfileEstimate")
+    assert "p.agents" not in estimate and "p.settings" not in estimate
+    assert "profileChangeFromDiff(diff)" in estimate
+    assert "if (mine !== ticket) return;" in estimate
+    assert "if (logged || !request) return;" in estimate and "log: true" in estimate
+    assert (
+        'container.insertBefore(el("h3", { text: "Estimated effect" }), container.firstChild);' in estimate
+    )
+    change = re.sub(r"\s+", " ", _function_source(source, "profileChangeFromDiff"))
+    assert "if (row.managed || diffRowSame(row)) return;" in change
+    assert "change.settings.modelSettings[row.model]" in change
+
+
+def test_save_current_settings_says_how_many_agents_were_left_out_for_their_names():
+    from claudeglass.profiles.schema import AGENT_NAME_MAX, AGENT_NAME_USABLE
+
+    js = _app_js()
+    assert "body.data.skipped_name_agents" in js
+    # The page has its own copy of the sentence, in two sentences (the copy scan allows 25 words
+    # to one): this pins it against schema.AGENT_NAME_USABLE.
+    usable = AGENT_NAME_USABLE.replace(", starts with", ". It starts with").replace(", and is at most", " and is at most")
+    assert usable.count(". ") == 1 and f"at most {AGENT_NAME_MAX} characters." in usable
+    assert f'" Left out, because of its name: one agent. {usable} Rename it to include it."' in js
+    assert (f'" Left out, because of their names: " + nameAgents + " agents. {usable} Rename each to '
+            'include it."') in js
+
+
+def test_a_profile_card_with_a_problem_shows_it_and_offers_nothing_to_open():
+    source = _function_source(_app_js(), "renderProfilesList")
+    at = source.index("if (profile.problem) {")
+    branch = source[at:source.index("return;", at) + len("return;")]
+    assert 'el("p", { class: "notes", text: profile.problem })' in branch
+    assert "cards.appendChild(card);" in branch
+    assert at < source.index("Show what it changes") and at < source.index('fetchJson("/api/profiles/"')
+
+
+def test_start_from_leaves_out_a_profile_whose_file_fails_the_checks() -> None:
+    """SR-2: picking a profile with a `problem` would clear the form, get the 409 and say nothing, so the
+    select never offers one (its card already says why it can't be used)."""
+    from test_ui_figures_audit import _node
+
+    listed = [
+        {"id": "good", "name": "Good one", "problem": None},
+        {"id": "broken", "name": "Broken one", "problem": "The file has a key ClaudeGlass doesn't know."},
+        {"id": "plain", "name": "No problem field"},
+    ]
+    shown = _node([("page-setup.js", "startFromProfiles")], f"startFromProfiles({json.dumps(listed)})")
+    assert [p["id"] for p in shown] == ["good", "plain"]
+    editor = re.sub(r"\s+", " ", _function_source(_app_js(), "buildProfileEditor"))
+    assert "startFromProfiles(profiles).forEach(function (p) { startSelect.appendChild(" in editor
+    assert "profiles.forEach" not in editor
+
+
+def test_the_before_and_after_counts_say_one_session_and_one_run() -> None:
+    """Seen in the browser pass: "1 sessions before, 3 after"."""
+    from test_ui_figures_audit import _node
+
+    def counts(label, before, after):
+        measure = {"label": label, "before_n": before, "after_n": after}
+        return _node([("page-changes.js", "countsText")], f"countsText({json.dumps(measure)})")
+
+    assert counts("Cost per session", 1, 3) == "1 session before, 3 after"
+    assert counts("Cost per session", 3, 1) == "3 sessions before, 1 after"
+    assert counts("Cost per session", 0, 2) == "0 sessions before, 2 after"
+    assert counts("general-purpose: cost per spawn", 1, 18) == "1 run before, 18 after"
+    assert counts("general-purpose: cost per spawn", 13, 18) == "13 runs before, 18 after"

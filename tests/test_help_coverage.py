@@ -173,6 +173,7 @@ def test_not_yet_covered_list_only_shrinks(report):
 AGENT_MODEL_COLUMNS = [
     "case", "agent_type", "verdict", "runs", "roles", "model", "cost_usd", "cost_on_sonnet_usd", "saving_usd",
     "saving_pct", "write_turns", "workflow_runs", "first_seen", "last_seen", "later_compliant", "env_var_set",
+    "sessions_measured",
 ]
 
 
@@ -329,6 +330,48 @@ def test_the_data_quality_page_lists_models_with_no_price_in_plain_words():
     for text in (row[2], table.value_labels["pricing_unknown_models"]):
         assert not SNAKE_CASE.search(text), text
         _plain(text, "pricing_unknown_models")
+
+
+def test_the_data_quality_page_says_how_many_sessions_an_older_version_read():
+    """R10: a session whose transcript Claude Code deleted keeps the digest an
+    older version wrote, and the newer figures leave it out; the page says how many."""
+    from claudeglass.measured import older_sentence
+    from claudeglass.model import Diagnostics
+
+    none = helptext.diagnostics_table(Diagnostics())
+    assert "older_sessions" not in [row[0] for row in none.rows]
+    table = helptext.diagnostics_table(
+        Diagnostics(), unpriced={"claude-future-9-9": {"turns": 1, "tokens": 9}}, older=(73, 82)
+    )
+    row = table.rows[-1]
+    assert row == ["older_sessions", "73 of 82", older_sentence(73, 82)]
+    assert table.rows[-2][0] == "pricing_unknown_models"
+    assert table.rows[:-1] == helptext.diagnostics_table(Diagnostics(), unpriced={"claude-future-9-9": {"turns": 1, "tokens": 9}}).rows
+    label = table.value_labels["older_sessions"]
+    assert label == helptext.OLDER_SESSIONS_LABEL
+    for text in (row[2], label):
+        assert not SNAKE_CASE.search(text), text
+        _plain(text, "older_sessions")
+
+
+def test_the_coaching_tips_help_names_the_sessions_an_older_version_read_are_left_out():
+    """R10: what Claude passed on counts the sessions this version read, so the share is not of all notes."""
+    copy = helptext.TABLE_COPY["prompting_tips"]
+    assert "Sessions an older version read are left out of what Claude passed on." in copy.help.read
+    assert copy.columns["shown_pct"][1] == "The share of notes that ended with a tip, in sessions this version read."
+    # The same leave-out sentence the single-lookups table carries.
+    assert "left out" in helptext.TABLE_COPY["habits_probes"].help.read
+    for text in (copy.help.read, copy.columns["shown_pct"][1]):
+        _plain(text, "prompting_tips")
+
+
+def test_every_hint_with_a_tips_row_has_a_label():
+    from claudeglass import capture_catalogue
+
+    labels = helptext.TABLE_COPY["prompting_tips"].value_labels
+    for hint in (*capture_catalogue.TIP_HINT_TITLES, *capture_catalogue.CLAUDE_ONLY_HINTS):
+        assert hint in labels, hint
+        _plain(labels[hint], "prompting_tips")
 
 
 def test_usage_log_tables_have_help_and_measured_causes_sit_on_the_cache_tab(tmp_path):
@@ -563,19 +606,13 @@ def test_the_copy_the_failed_calls_check_and_the_work_habits_row_add_keeps_to_th
         _plain(text, where)
 
 
-def test_the_copy_the_agent_reports_check_and_the_batch_probes_card_keep_to_the_help_rules(tmp_path):
+def test_the_copy_the_agent_reports_check_keeps_to_the_help_rules(tmp_path):
     """The "Replies to agent reports" check: its question and why, its two
     tips, and what it says when it finds something, when it finds little,
-    when no report came back and when there is no data; and the card that
-    tells you to batch an agent's lookups: its title, why, action, saving
-    basis, the prompt to copy and the explainer."""
+    when no report came back and when there is no data."""
     from types import SimpleNamespace as NS
 
-    from claudeglass import advice, fixes
     from claudeglass import quick_actions as qa
-    from claudeglass.model import Recommendation
-    from claudeglass.units import Units
-    from test_advice import _batch_probes, _model_swap_report
     from test_quick_actions import _ctx, _report_turn_rows, _reports_model
 
     check = next(c for c in qa.CHECKS if c.id == "agent-reports")
@@ -593,20 +630,7 @@ def test_the_copy_the_agent_reports_check_and_the_batch_probes_card_keep_to_the_
     nothing = qa.run("agent-reports", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
     strings.append(("no data summary", nothing["summary"]))
 
-    for agent in ("Explore", "workflow-subagent"):
-        (card,) = advice.finish([_batch_probes(agent)], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
-        strings += [(f"{agent} card {key}", getattr(card, key)) for key in ("title", "why", "action", "estimated_saving", "saving_basis")]
-        rec = Recommendation(
-            id="agent-batch-probes", severity="advice", category="workflow", title=card.title, action=card.action,
-            agent_type=agent, lever=None,
-        )
-        (fix,) = fixes.build_fixes(rec)
-        strings += [(f"{agent} explainer {heading}", text) for heading, text in fix["explainer"]]
-        # The opening line every finding's prompt shares is not this card's copy.
-        opening = fixes._FINDING_OPEN.format(title=card.title) + " "
-        assert fix["prompt"].startswith(opening)
-        strings.append((f"{agent} fix prompt", fix["prompt"].removeprefix(opening).removesuffix(" " + fixes.PROMPT_RESTART)))
-    assert len(strings) >= 20
+    assert len(strings) >= 8
     for where, text in strings:
         _plain(text, where)
 

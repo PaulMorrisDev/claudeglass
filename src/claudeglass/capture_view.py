@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
-from . import habits, hook_health
+from . import habits, haiku_tags, hint_occasions, hook_health
 from . import ratings as ratings_mod
 from .config import CAPTURE_SAMPLES, CaptureConfig
 from .render.tables import format_cell
@@ -40,6 +40,7 @@ TAG_EXAMPLE = "[cg: task=bugfix brief=clear]"
 CONNECT_COMMAND = "claudeglass capture connect"
 STATUS_COMMAND = "claudeglass capture status"
 ON_COMMAND = "claudeglass capture on"
+OFF_COMMAND = "claudeglass capture off"
 FEEDBACK_COMMAND = "claudeglass capture feedback on"
 BRIEF_COMMAND = "claudeglass capture brief on"
 
@@ -141,12 +142,20 @@ COST_NOTES = {
 
 #: Said when ``coaching_notes`` is turned on, before the yes/no: what the
 #: notes are, when they come and what they cost.
-COACHING_NOTES_ON = (
-    "Coaching notes: when a hint applies, a hook adds a short note (about 50 to 140 tokens) to Claude's context, "
-    "after a tool result or when you send a message, and Claude acts on it or tells you in one line. "
-    "They run at any capture level, at most one of a kind every half hour in a session. "
-    "'claudeglass capture status' shows how many there were and what they cost."
-)
+def coaching_notes_on_text() -> str:
+    """:data:`COACHING_NOTES_ON`, built from the hints that speak: it names
+    tool results only while one of them can follow a tool result."""
+    after_tool = any(hint in catalogue.TOOL_RESULT_HINTS for hint in catalogue.live_coaching_hints())
+    return (
+        "Coaching notes: when a hint applies, a hook adds a short note to Claude's context, about 50 to 140 "
+        f"tokens. It comes when you send a message{' or after a tool result' if after_tool else ''}. "
+        "Claude acts on it or tells you in one line. "
+        "They run at any capture level, at most one of a kind every half hour in a session. "
+        "'claudeglass capture status' shows how many there were and what they cost."
+    )
+
+
+COACHING_NOTES_ON = coaching_notes_on_text()
 
 #: Said when the tagger changes (``capture tagger``): who writes the tags
 #: now, what that sends where, and what it costs.
@@ -187,15 +196,26 @@ def amount_text(units, usd: float, period: str = "", *, prefix: str = "") -> str
     return amount.phrase(prefix) if amount is not None else "nothing"
 
 
-def describe(capture: CaptureConfig) -> str:
-    """One line: the level and, when on, its date, end and sample."""
+def one_session_in(capture: CaptureConfig) -> str:
+    """How often a light sample runs, as the hook runs it: ``1 session in 5``
+    at 20% of sessions, ``1 session in 10`` at 10%."""
+    return f"1 session in {round(100 / capture.light_share)}"
+
+
+def describe(capture: CaptureConfig, now: datetime | None = None) -> str:
+    """One line: the level and, when on, its date, end and sample. Once the
+    end has passed and a light sample was chosen, the line is that sample."""
     if not capture.is_on:
         return "Off"
+    if capture.light(now):
+        return f"Light sample (since {capture.until[:10]}, {capture.light_share}% of sessions)"
     parts = [catalogue.LEVEL_TITLES.get(capture.level, capture.level)]
     if capture.enabled_at:
         parts.append(f"since {capture.enabled_at[:10]}")
     if capture.until:
         parts.append(f"until {capture.until[:16].replace('T', ' ')}")
+        if capture.after == "light":
+            parts.append("then a light sample")
     if capture.sample < 100:
         parts.append(f"{capture.sample}% of sessions")
     if capture.haiku_tags:
@@ -209,9 +229,12 @@ def config_block(capture: CaptureConfig, now: datetime | None = None) -> dict:
     return {
         "level": capture.level,
         "title": catalogue.LEVEL_TITLES.get(capture.level, capture.level),
-        "describe": describe(capture),
+        "describe": describe(capture, now),
         "on": capture.is_on,
         "expired": expired,
+        "after": capture.after,
+        "light": capture.light(now),
+        "light_share": capture.light_share,
         "effective": capture.is_on and not expired,
         "enabled_at": capture.enabled_at,
         "until": capture.until,
@@ -436,7 +459,8 @@ def _feedback_facts(metric_id: str, feedback: dict) -> tuple[dict | None, int | 
 
 
 def _metric_row(
-    metric, capture: CaptureConfig, active, past, units, use, signal_sessions, missing_events, feedback=None
+    metric, capture: CaptureConfig, active, past, units, use, signal_sessions, missing_events, feedback=None,
+    hooks_ok: bool | None = None,
 ) -> dict:
     kind = _kind(metric)
     if kind == "derived":
@@ -485,6 +509,13 @@ def _metric_row(
         else ""
     )
     needs_hook = bool(on and kind != "derived" and set(metric.hooks) & missing_events)
+    # A live hint that had moments and gave no tip, said only when the hook entries look in order: a missing
+    # entry is told by the chip above, the banner or 'capture status'.
+    occasions = (feedback or {}).get("occasions")
+    silent_note = None
+    if on and metric.id == "coaching_notes" and hooks_ok is True and occasions is not None:
+        found = hint_occasions.silent(occasions)
+        silent_note = hint_occasions.silent_sentence(found, occasions.silent_distinct(found))
     return {
         "id": metric.id,
         "kind": kind,
@@ -506,6 +537,7 @@ def _metric_row(
         "install_note": install[1].get(skill_now) if needs_install else None,
         "install_command": install[2] if needs_install else None,
         "statusline_note": statusline_text,
+        "silent_note": silent_note,
         "warning": warning,
         "cost_note": COST_NOTES.get(metric.id),
         "estimate": estimate,
@@ -548,9 +580,10 @@ def _worth(rows: list[dict], capture: CaptureConfig, use, units, now: datetime |
     return worth
 
 
-def _measured(use, units) -> dict | None:
+def _measured(use, units, signed_out: haiku_tags.SignedOut | None = None) -> dict | None:
     if use is None:
         return None
+    signed_out = signed_out or haiku_tags.SignedOut()
     return {
         "since": use.since,
         "sessions": use.sessions,
@@ -576,6 +609,12 @@ def _measured(use, units) -> dict | None:
         "tagged_reports": use.tagged_reports,
         "judged": use.judged,
         "report_coverage_pct": use.report_coverage,
+        # Beside the share judged, as ``capture status`` words it: the agent
+        # runs whose call found the claude command signed out, and, while the
+        # judge is paused for it, one sentence on what to do.
+        "report_signed_out": signed_out.agent_runs,
+        "report_signed_out_text": signed_out.runs_text,
+        "judge_paused_text": signed_out.note,
         "scopes": {
             scope: {"note_tokens": s.note_tokens, "tag_tokens": s.tag_tokens, **_money(units, s.cost)}
             for scope, s in sorted(use.scopes.items())
@@ -786,12 +825,16 @@ def _banner(
         return {"on": False, "headline": invite, "notes": notes, "feedback_note": feedback_note, "unrated": waiting}
 
     expired = config["expired"]
-    parts = [f"Metrics capture: {config['title']}"]
-    if expired:
+    light = config["light"]
+    parts = ["Metrics capture: light sample" if light else f"Metrics capture: {config['title']}"]
+    if light:
+        parts.append(f"since {capture.until[:10]}")
+        parts.append(one_session_in(capture))
+    elif expired:
         parts.append(f"ended {capture.until[:10]}")
     elif capture.enabled_at:
         parts.append(f"since {capture.enabled_at[:10]}")
-    if capture.sample < 100:
+    if capture.sample < 100 and not light:
         parts.append(f"{capture.sample}% of sessions")
     if measured is not None and (measured["sessions"] or measured["subagents"]):
         parts.append(f"{measured['tokens_text']} tokens")
@@ -812,6 +855,20 @@ def _banner(
         )
         else None
     )
+    if light:
+        notes.append(
+            f"The full capture ended on {capture.until[:10]}. Claude now tags the kind, difficulty and size of the "
+            f"work, and task changes, in {one_session_in(capture)}."
+        )
+        notes.append(f"'{OFF_COMMAND}' stops it. '{ON_COMMAND}' starts full capture again.")
+        if hooks.get("ok") is False:
+            notes.append(hooks["summary"])
+        if low_coverage is not None:
+            notes.append(low_coverage)
+        return {
+            "on": True, "headline": " · ".join(parts), "notes": notes, "feedback_note": feedback_note,
+            "unrated": waiting,
+        }
     if expired:
         notes.append(
             f"Its end time ({capture.until[:16].replace('T', ' ')}) has passed, so nothing is captured now. "
@@ -882,9 +939,11 @@ def view(
     weekly_cost: float | None = None,
     dependent_value: float | None = None,
     coaching_use=None,
+    occasions=None,
     unrated: dict | None = None,
     entrypoints: dict[str, dict] | None = None,
     overhead: dict | None = None,
+    signed_out: haiku_tags.SignedOut | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Everything the Capture tab and the banner show.
@@ -903,7 +962,9 @@ def view(
     ``ratings`` how many sessions you rated on the dashboard (each only
     while its toggle is on). ``coaching_use`` is
     ``capture.coaching_usage`` over the same days, while coaching notes
-    are on. ``statusline`` is whether Claude Code's
+    are on. ``occasions`` is ``hint_occasions.collect`` over the same days
+    (``None`` when not worked out): a live hint with moments and no tip makes
+    the coaching row's ``silent_note``. ``statusline`` is whether Claude Code's
     status line is this tool's (``None`` when not checked).
     ``weekly_cost`` is ``capture.weekly_cost(use, until=capture.until)`` and ``dependent_value``
     ``habits.capture_dependent_value`` over the same window: together
@@ -915,7 +976,9 @@ def view(
     ``Store.entrypoint_counts()``, which tells the status-line toggles
     whether any session ran where Claude Code runs a status line.
     ``overhead`` is :func:`build_overhead` over :func:`overhead_window`
-    (``None`` while no ClaudeGlass hook is installed).
+    (``None`` while no ClaudeGlass hook is installed). ``signed_out`` is
+    ``haiku_tags.signed_out`` since capture was turned on: what the tag
+    files show of the judge's login.
     """
     signal_sessions = signal_sessions or {}
     config = config_block(capture, now)
@@ -931,16 +994,17 @@ def view(
         "statusline": statusline,
         "entrypoints": entrypoints,
         "coaching_use": coaching_use,
+        "occasions": occasions,
     }
     rows = [
-        _metric_row(m, capture, active, past, units, use, signal_sessions, missing_events, feedback)
+        _metric_row(m, capture, active, past, units, use, signal_sessions, missing_events, feedback, hooks_data["ok"])
         for m in catalogue.METRICS
     ]
     sections = [
         {"id": section, "title": title, "metrics": [r for r in rows if r["section"] == section]}
         for section, title in catalogue.SECTIONS.items()
     ]
-    measured = _measured(use, units)
+    measured = _measured(use, units, signed_out)
     worth = _worth(rows, capture, use, units, now)
     history = (
         {"days": past.days, "sessions": past.sessions, "subagents": past.subagents, "cycles": past.cycles}
@@ -1052,6 +1116,7 @@ __all__ = [
     "BRIEF_SKILL_NOTES",
     "BRIEF_SKILL_STATES",
     "COACHING_NOTES_ON",
+    "coaching_notes_on_text",
     "ON_COMMAND",
     "OVERHEAD_DAYS",
     "SKILL_NOTES",

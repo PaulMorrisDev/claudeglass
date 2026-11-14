@@ -115,6 +115,44 @@ def test_an_agent_model_prices_only_the_runs_its_agent_file_decides():
     assert "workflow script" in none["basis"]
 
 
+def test_the_main_session_model_prices_only_the_sessions_it_counts():
+    """The main session's model setting prices the sessions the report counts:
+    not those already on Sonnet or smaller, nor those from before their
+    project moved there."""
+
+    def tables(*, file_row: bool = True, **counts):
+        swap = _table("model_swap_by_agent_type", [
+            {"agent_type": "top-level", "observed_model": "claude-opus-5", "observed_cost": 100.0,
+             "cost_claude-sonnet-5": 60.0, "spawns": 5, **counts},
+        ])
+        decided = _table("model_swap_agent_file_runs", [
+            {"agent_type": "top-level", "runs": 2, "observed_cost": 40.0, "cost_claude-sonnet-5": 25.0},
+        ] if file_row else [])
+        return NS(sections=[NS(key="model_swap", tables=[swap, decided])])
+
+    def price(model):
+        [row] = whatif.estimate({"model": "claude-sonnet-5"}, {}, model, UNITS, period=PERIOD)["rows"]
+        return row
+
+    row = price(tables(lever_runs=2, before_change_runs=3, settled_runs=0))
+    assert (row["saving_usd"], row["fidelity"]) == (15.0, "ceiling")
+    assert "at claude-sonnet-5, on 2 of its 5 sessions. A different model" in row["basis"]
+    # No session counted: nothing to price, and the reason says why.
+    row = price(tables(file_row=False, lever_runs=0, before_change_runs=3, settled_runs=0))
+    assert row["saving_usd"] is None and row["fidelity"] == "none"
+    assert row["basis"] == "Every main session in this window started before its project moved to Sonnet or smaller."
+    # Any other mix of reasons: nothing is left for a settings change to reach.
+    left = "No main session in this window is left for a settings change to reach."
+    for counts in ({"before_change_runs": 3, "settled_runs": 2}, {"picked_runs": 5}, {"own_model_runs": 5},
+                   {"settled_runs": 2, "picked_runs": 3}, {"before_change_runs": 2, "own_model_runs": 3}):
+        row = price(tables(file_row=False, lever_runs=0, **{"before_change_runs": 0, "settled_runs": 0, **counts}))
+        assert row["saving_usd"] is None and row["basis"] == left, counts
+    # Every session already on Sonnet or smaller: the whole row is priced.
+    row = price(tables(file_row=False, lever_runs=0, before_change_runs=0, settled_runs=5))
+    assert (row["saving_usd"], row["fidelity"]) == (40.0, "ceiling")
+    assert ", on " not in row["basis"]
+
+
 def _swap_model(columns: dict, model_ids: dict | None = None):
     """A report whose main session row carries only ``columns`` (and,
     with ``model_ids``, a ``meta.model_ids`` like a real report's)."""
@@ -127,7 +165,8 @@ def _swap_model(columns: dict, model_ids: dict | None = None):
 
 def test_an_alias_prices_at_the_column_the_rate_card_names():
     # "best" names no column itself; the rate card's alias table puts it
-    # on Fable 5.1, as it does "sonnet[1m]" on Sonnet 5.5.
+    # on whichever row it names (here a fixture's own table), as it does
+    # "sonnet[1m]" on Sonnet 5.5.
     columns = {"cost_claude-fable-5-1": 70.0, "cost_claude-sonnet-5-5": 30.0, "cost_claude-sonnet-5": 25.0}
     model = _swap_model(columns, {"best": "claude-fable-5-1", "sonnet[1m]": "claude-sonnet-5-5"})
     [best] = whatif.estimate({"model": "best"}, {}, model, UNITS, period=PERIOD)["rows"]
@@ -264,6 +303,25 @@ def test_fast_mode_off_reprices_fast_applied_turns_at_standard():
     assert row["effect_text"] == f"Saves 12.00 USD {PERIOD}"
 
 
+def test_whatif_does_not_estimate_model_settings():
+    # A nested value (model id -> its own settings) is one row that is not simulated, not an error.
+    value = {"claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300000}, "other": {"autoCompactWindow": "auto"}}
+    [row] = _estimate({"modelSettings": value})["rows"]
+    assert row["key"] == "modelSettings" and row["value"] == value
+    assert row["saving_usd"] is None and row["fidelity"] == "none"
+    assert row["basis"] == "This change isn't simulated."
+    # beside another setting it still gets its own row
+    rows = _estimate({"modelSettings": value, "fastMode": False})["rows"]
+    assert [r["key"] for r in rows] == ["modelSettings", "fastMode"]
+
+
+def test_a_per_model_effort_level_is_estimated_like_the_flat_one():
+    # The thinking goal's main-session change gives the same basis as effortLevel.
+    flat = _estimate({"effortLevel": "medium"})["rows"][0]
+    [row] = _estimate({"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})["rows"]
+    assert row["basis"] == flat["basis"] and row["fidelity"] == "none" and row["saving_usd"] is None
+
+
 def test_fast_mode_on_is_not_simulated():
     [row] = _estimate({"fastMode": True})["rows"]
     assert row["saving_usd"] is None and row["fidelity"] == "none"
@@ -275,6 +333,39 @@ def test_fast_mode_off_without_fast_applied_data_is_not_estimated():
     [row] = whatif.estimate({"fastMode": False}, {}, model, UNITS)["rows"]
     assert row["saving_usd"] is None and row["fidelity"] == "none"
     assert "No fast-priced replies in this window" in row["basis"]
+
+
+def test_each_priced_row_says_what_it_was_priced_on():
+    plan = NS(key="plan_handoff", tables=[_table("plan_handoff_summary", [
+        {"scope": "main sessions", "build_usd": 30.0, "build_usd_sonnet": 18.0},
+    ])])
+    model = _model()
+    model.sections.append(plan)
+
+    def priced_on(settings=None, agents=None):
+        return [r["priced_on"] for r in whatif.estimate(settings or {}, agents or {}, model, UNITS, period=PERIOD)["rows"]]
+
+    # The observed cost a model reprice is a share of.
+    assert priced_on({"model": "sonnet"}) == [100.0]
+    assert priced_on(agents={"Explore": {"model": "haiku"}}) == [10.0]
+    # opusplan: the build cost after approved plans.
+    assert priced_on({"model": "opusplan"}) == [30.0]
+    # A cache lifetime: the observed cost summed over the agents replayed.
+    assert priced_on({"promptCacheTtl": "1h"}) == [50.0]
+    assert priced_on({"subagentPromptCacheTtl": "1h"}) == [8.0]
+    assert priced_on(agents={"Explore": {"experimental.cacheTtl": "1h"}}) == [5.0]
+    # A compaction window: the cost of the window in force (here, none).
+    assert priced_on({"autoCompactWindow": 200000}) == [100.0]
+    # CLAUDE.md: the tokens it puts at each start.
+    assert priced_on(agents={"Explore": {"omitClaudeMd": True}}) == [5000.0]
+    # Everything else, and any row that could not be estimated, carries the key and leaves it None.
+    assert priced_on({"skillOverrides": {"dataviz": "off"}, "enabledPlugins": {"engineering@marketplace": False}}) == [None, None]
+    assert priced_on({"effortLevel": "medium", "fastMode": False, "cleanupPeriodDays": 7}) == [None, None, None]
+    assert priced_on({"model": "no-such-model", "autoCompactWindow": 123}) == [None, None]
+    assert priced_on(agents={"Nobody": {"model": "haiku"}, "Explore": {"omitClaudeMd": False}}) == [None, None]
+    # The sentence stays its own field.
+    [row] = whatif.estimate({"model": "sonnet"}, {}, model, UNITS, period=PERIOD)["rows"]
+    assert isinstance(row["basis"], str) and row["basis"]
 
 
 def test_total_counts_only_estimated_rows_and_notes_overlap():
@@ -324,3 +415,41 @@ def test_calibration_never_invents_a_saving_for_a_row_that_had_none():
     assert row["saving_usd"] is None
     assert row["fidelity"] == "none"
     assert row["uncalibrated_usd"] is None
+
+
+def test_only_sonnet_for_the_main_session_prices_the_sessions_it_counts():
+    def tables(*, file_row=True, **counts):
+        swap = _table("model_swap_by_agent_type", [
+            {"agent_type": "top-level", "observed_model": "claude-opus-5", "observed_cost": 100.0,
+             "cost_claude-sonnet-5": 60.0, "cost_claude-haiku-5-5": 20.0, "cost_claude-fable-5-1": 150.0,
+             "spawns": 5, **counts},
+        ])
+        decided = _table("model_swap_agent_file_runs", [
+            {"agent_type": "top-level", "runs": 2, "observed_cost": 40.0, "cost_claude-sonnet-5": 25.0,
+             "cost_claude-haiku-5-5": 15.0, "cost_claude-fable-5-1": 60.0},
+        ] if file_row else [])
+        return NS(sections=[NS(key="model_swap", tables=[swap, decided])])
+
+    def price(model, value):
+        [row] = whatif.estimate({"model": value}, {}, model, UNITS, period=PERIOD)["rows"]
+        return row
+
+    some = tables(lever_runs=2, before_change_runs=3, settled_runs=0)
+    assert price(some, "claude-sonnet-5")["saving_usd"] == 15.0
+    for value, saving in (("claude-haiku-5-5", 80.0), ("claude-fable-5-1", -50.0)):
+        row = price(some, value)
+        assert (row["saving_usd"], row["fidelity"]) == (saving, "ceiling"), value
+        assert row["basis"] == (
+            f"Worked out by repricing the main session's replies in this window at {value}. A different model "
+            "may need more or fewer replies for the same work, which this doesn't capture."
+        )
+    none = tables(file_row=False, lever_runs=0, before_change_runs=3, settled_runs=2)
+    assert price(none, "claude-sonnet-5")["saving_usd"] is None
+    assert price(none, "claude-haiku-5-5")["saving_usd"] == 80.0
+
+
+def test_a_sonnet_is_any_value_that_names_the_sonnet_family():
+    for value in ("sonnet", "sonnet[1m]", "claude-sonnet-5-5", "Sonnet"):
+        assert whatif._sonnet(value), value
+    for value in ("haiku", "claude-haiku-5-5", "opus", "fable[1m]", "opusplan", "default", None):
+        assert not whatif._sonnet(value), value

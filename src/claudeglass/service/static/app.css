@@ -1264,6 +1264,20 @@ tr:focus-visible {
   font-size: var(--text-sm);
 }
 
+/* The project's one prompt above the recommendations inbox. */
+.bundle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+/* The prompt shown when the browser refused to copy it: a code block with
+   no Copy button, so none of the room the button takes. */
+.bundle-prompt .code-block pre {
+  padding-right: var(--space-5);
+}
+
 /* -- tables ----------------------------------------------------------------- */
 
 /* Every table is a data grid (grid.js); its scroll box draws the frame. */

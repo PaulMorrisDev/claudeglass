@@ -377,6 +377,32 @@ def test_scan_predictions_ingests_every_record_under_config_dir(tmp_path: Path, 
     assert predictions[0]["predicted_usd"] == 1.5
 
 
+def test_a_logged_estimate_carries_what_it_was_priced_on_into_the_store(tmp_path: Path, store: Store):
+    from claudeglass import config as config_mod
+
+    options = _options(tmp_path)
+    config_mod.append_prediction_log(
+        options.config_dir, source="whatif", measure_key="model", agent=None,
+        predicted_usd=1.5, predicted_pct=None, fidelity="ceiling", priced_on=12.5,
+    )
+    # A line an earlier build wrote has no priced_on key; one with a value that is not a number reads as none.
+    log = options.config_dir / config_mod.PREDICTION_LOG_NAME
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(
+            '{"id": "old-line", "ts": "2026-09-20T09:00:00+00:00", "source": "whatif", "measure_key": "model", '
+            '"agent": null, "predicted_usd": 1.0, "predicted_pct": null, "fidelity": "ceiling"}\n'
+            '{"id": "odd-line", "ts": "2026-09-20T09:00:00+00:00", "source": "whatif", "measure_key": "model", '
+            '"agent": null, "predicted_usd": 1.0, "predicted_pct": null, "fidelity": "ceiling", "priced_on": "lots"}\n'
+        )
+
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.errors == 0
+    bases = {row["id"]: row["priced_on"] for row in store.predictions()}
+    assert sorted(bases.values(), key=lambda v: (v is None, v)) == [12.5, None, None]
+    assert bases["old-line"] is None and bases["odd-line"] is None
+
+
 def test_scan_predictions_is_a_no_op_on_an_unchanged_repeat_tick(tmp_path: Path, store: Store):
     from claudeglass import config as config_mod
 
@@ -2084,3 +2110,121 @@ def test_run_once_uses_an_explicit_retention_days_for_the_mod_sensor_files(tmp_p
     os.utime(old, (now - 60 * 86400, now - 60 * 86400))
     FileWatcher(store, options).run_once()
     assert not old.exists() and store.read_mod_events() == []
+
+
+def test_a_tick_prunes_card_marks_past_the_signal_retention(tmp_path: Path, store: Store):
+    # The dashboard's card marks are background telemetry like the mod's events:
+    # pruned at the 180-day default whatever retention_days says about sessions.
+    options = _options(tmp_path)
+    now = time.time()
+    card = {"key": "k", "rule_id": "r", "agent_type": None, "changes": [], "saving_usd": None}
+    when = lambda days: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - days * 86400))  # noqa: E731
+    store.mark_cards([{**card, "key": "old"}], mark="shown", project="*", folders=[], now=when(200))
+    store.mark_cards([{**card, "key": "today"}], mark="shown", project="*", folders=[], now=when(0))
+
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.errors == 0
+    assert [r["card_key"] for r in store.card_marks()] == ["today"]
+
+
+def test_a_deleted_profile_file_leaves_no_row(tmp_path, store):
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "keep.toml").write_text('id = "keep"\n', encoding="utf-8")
+    (folder / "gone.toml").write_text('id = "gone"\n', encoding="utf-8")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["gone", "keep"]
+    (folder / "gone.toml").unlink()
+    stats = watcher.run_once()
+    assert stats.errors == 0
+    assert [p["id"] for p in store.profiles()] == ["keep"]
+
+
+def test_deleting_the_whole_profiles_folder_leaves_no_row(tmp_path, store):
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "keep.toml").write_text('id = "keep"\n', encoding="utf-8")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["keep"]
+    (folder / "keep.toml").unlink()
+    folder.rmdir()
+    stats = watcher.run_once()
+    assert stats.errors == 0
+    assert store.profiles() == []
+
+
+def test_a_row_whose_file_is_elsewhere_is_kept(tmp_path, store):
+    """A fixture row (or a store moved between config folders) is never the watcher's to drop."""
+    options = _options(tmp_path)
+    (options.config_dir / "profiles").mkdir(parents=True, exist_ok=True)
+    store.upsert_profile(profile_id="p1", name="p1", toml_path=str(tmp_path / "elsewhere" / "p1.toml"))
+    FileWatcher(store, options).run_once()
+    assert [p["id"] for p in store.profiles()] == ["p1"]
+
+
+def test_a_row_stored_under_a_relative_config_folder_is_dropped_by_the_absolute_one(tmp_path, store, monkeypatch):
+    """The prune compares resolved folders: a row stored while the service ran with a relative --config-dir
+    is dropped once its file is deleted and the service runs with the absolute one. What is stored stays as
+    it was written."""
+    monkeypatch.chdir(tmp_path)
+    relative = Path("cfg")
+    folder = relative / "profiles"
+    folder.mkdir(parents=True)
+    (folder / "gone.toml").write_text('id = "gone"\n', encoding="utf-8")
+    FileWatcher(store, _options(tmp_path, config_dir=relative)).run_once()
+    assert [p["id"] for p in store.profiles()] == ["gone"]
+    assert not Path(store.profile_files()["gone"]).is_absolute()
+    (folder / "gone.toml").unlink()
+    stats = FileWatcher(store, _options(tmp_path, config_dir=(tmp_path / "cfg").resolve())).run_once()
+    assert stats.errors == 0
+    assert store.profiles() == []
+
+
+def test_a_row_stored_under_the_absolute_config_folder_is_dropped_by_the_relative_one(tmp_path, store, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    folder = tmp_path / "cfg" / "profiles"
+    folder.mkdir(parents=True)
+    (folder / "gone.toml").write_text('id = "gone"\n', encoding="utf-8")
+    FileWatcher(store, _options(tmp_path, config_dir=tmp_path / "cfg")).run_once()
+    assert [p["id"] for p in store.profiles()] == ["gone"]
+    (folder / "gone.toml").unlink()
+    stats = FileWatcher(store, _options(tmp_path, config_dir=Path("cfg"))).run_once()
+    assert stats.errors == 0
+    assert store.profiles() == []
+
+
+def test_a_row_whose_relative_path_resolves_to_another_folder_is_kept(tmp_path, store, monkeypatch):
+    """The same relative path means another file from another folder: that row is not this scan's to drop."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cfg" / "profiles").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    store.upsert_profile(profile_id="p1", name="p1", toml_path=str(Path("other") / "p1.toml"))
+    FileWatcher(store, _options(tmp_path, config_dir=Path("cfg"))).run_once()
+    assert [p["id"] for p in store.profiles()] == ["p1"]
+
+
+def test_a_linked_profile_file_whose_target_is_deleted_leaves_no_row(tmp_path, store):
+    """A dotfiles manager links the file in: the folder is compared, the link is not followed."""
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "dotfiles" / "linked.toml"
+    target.parent.mkdir()
+    target.write_text('id = "linked"\n', encoding="utf-8")
+    try:
+        (folder / "linked.toml").symlink_to(target)
+    except OSError:
+        pytest.skip("this machine does not let the test make a symbolic link")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["linked"]
+    target.unlink()
+    # The dangling link is no file: it is not read, so no scan counts an error for it.
+    stats = watcher.run_once()
+    assert store.profiles() == []
+    assert stats.errors == 0

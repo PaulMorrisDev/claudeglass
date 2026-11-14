@@ -468,7 +468,6 @@ _ALL_RULE_IDS = frozenset(
         "cache-read-dominance",
         "baseline-bloat",
         "agent-report-size",
-        "agent-batch-probes",
         "plan-rounds",
         "spawn-cost",
         "effort-mismatch",
@@ -731,7 +730,7 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                 name="sessions_by_purpose",
                 title="Sessions by purpose",
                 columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
-                rows=[["general-dev", 5]],
+                rows=[["docs-or-light-edit", 5]],
             )
         ],
     )
@@ -875,3 +874,31 @@ def test_every_rule_id_that_can_fire_with_no_setting_change_has_a_workflow_expla
 
     missing = _ALL_RULE_IDS - set(fixes._WORKFLOW_EXPLAINER)
     assert not missing, f"rule ids with no where/trade-off/undo explainer: {sorted(missing)}"
+
+
+def test_effort_mismatch_fallback_cites_each_pooled_row_by_its_own_cells():
+    """R11: the pooled share is in no row, so the fallback cites each
+    pooled row's own share and output tokens."""
+    from claudeglass.model import Column
+
+    model = _build_every_rule_fixture()
+    table = next(
+        t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_tokens"
+    )
+    table.columns = [
+        Column(key="effort", label="Effort"),
+        Column(key="turns", label="Turns"),
+        Column(key="output_tokens", label="Output tokens"),
+        Column(key="thinking_tokens", label="Thinking tokens"),
+        Column(key="thinking_share", label="Thinking share"),
+    ]
+    table.rows = [
+        ["high", 10, 2_000, 200, 10.0],
+        ["xhigh", 10, 6_000, 3_000, 50.0],
+        ["max", 10, 2_000, 1_400, 70.0],
+    ]
+    recs = recommend.recommend(model, config=Config(), archetype=None, snapshot=None)
+    rec = next(r for r in recs if r.id == "effort-mismatch")
+    assert len(rec.evidence) >= 6
+    model.recommendations = [rec]
+    _assert_recommendation_evidence_is_valid(model)

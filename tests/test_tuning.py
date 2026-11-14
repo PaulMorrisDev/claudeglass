@@ -122,7 +122,7 @@ def test_the_sample_document_is_valid_and_holds_every_block():
     assert set(doc) == set(spec.fields) == {*tuning._HEADER, *tuning._BLOCKS}
     assert [name for name in doc if name in tuning._BLOCKS] == list(tuning._BLOCKS)
     assert (doc["kind"], doc["format"]) == (tuning.KIND, tuning.FORMAT) == ("claudeglass-tuning", 1)
-    assert tuning.MAX_BYTES == 256 * 1024
+    assert tuning.MAX_BYTES == 320 * 1024
     # What a person is shown to check is what a machine reads back.
     assert tuning.loads(tuning.dumps(doc)) == doc
 
@@ -196,6 +196,7 @@ def test_the_sample_document_is_valid_and_holds_every_block():
         ("tags.grounding", {"task:chat": 1}, "tags.grounding: has a key that is not in the spec", ""),
         ("tags.settling", {"plan:following>made extra": 1}, "tags.settling: has a key", "extra"),
         ("tags.words", {"mood": {}}, "tags.words: has a key that is not in the spec", "mood"),
+        ("tags.words", {"lost": {"claude": {"yes": 1}}}, "tags.words: has a key that is not in the spec", "lost"),
         ("tags.words", {"task": {"someone": {"feature": 1}}}, "tags.words.task: has a key", "someone"),
         ("tags.words", {"task": {"claude": {"poetry": 1}}}, "tags.words.task.claude: has a key", "poetry"),
         ("tags.words", {"task": {"claude": [1]}}, "tags.words.task.claude: must be an object", ""),
@@ -399,15 +400,20 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
     def weeks(n: int) -> list[str]:
         return [f"{2020 + i // 52}-W{i % 52 + 1:02d}" for i in range(n)]
 
+    def widest(words) -> list[str]:
+        return sorted(words, key=lambda word: (-len(word), word))
+
+    # Every value as wide as the description lets it print: the largest count, a float with all
+    # 17 digits and a three-digit exponent (23 characters), the longest word and the longest keys.
     def fill(node):
         if isinstance(node, tuning.Count):
-            return 123456
+            return tuning._MAX_NUMBER
         if isinstance(node, tuning.Num):
-            return 123456.789012
+            return 1.2345678901234567e-100
         if isinstance(node, tuning.Const):
             return node.expected
         if isinstance(node, tuning.Word):
-            return sorted(node.words)[0]
+            return widest(node.words)[0]
         if isinstance(node, tuning.Pattern):
             return examples[node.regex]
         if isinstance(node, tuning.Obj):
@@ -416,17 +422,20 @@ def test_the_fullest_document_the_spec_allows_is_valid_and_fits_the_size_limit()
             return [fill(node.item)] * node.limit
         keys = node.keys
         names = (
-            sorted(keys.words)
+            widest(keys.words)[: node.limit]
             if isinstance(keys, tuning.Closed)
             else weeks(node.limit)
             if isinstance(keys, tuning.Weeks)
-            else changes()[: node.limit]
+            else widest(changes())[: node.limit]
         )
         return {key: fill(node.item) for key in names}
 
     doc = fill(tuning.spec())
     assert tuning.validate(doc) == []
-    assert len(tuning.dumps(doc).encode("utf-8")) < tuning.MAX_BYTES
+    size = len(tuning.dumps(doc).encode("utf-8"))
+    assert size < tuning.MAX_BYTES
+    # SECURITY.md and the comment on MAX_BYTES give this figure as about 306 KB.
+    assert 300 * 1024 < size < 312 * 1024, size
     # Every change grounding can make has a place.
     assert len(changes()) <= tuning._MAX_CHANGES
     assert all(tuning.Changes().accepts(change) for change in changes())
@@ -615,6 +624,16 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     text = tuning.summary_text(_sample())
     lines = text.splitlines()
     assert lines[0] == "Tuning figures made on 2026-09-19 for the last 30 days, by ClaudeGlass 0.14.0."
+    # The sample's coverage block: 9 read from transcripts and 3 from the store make all 12.
+    # A summary is read on any machine, so it says whose dashboard and where the transcripts were missing.
+    assert lines[1] == (
+        "3 of 12 sessions in this window were read from what the dashboard kept "
+        "on the machine that made this file. Their transcripts were not found there."
+    )
+    assert lines[2] == (
+        "1 of 12 sessions in this window was read by an older version and its transcripts are gone, "
+        "so the newer figures leave it out."
+    )
     assert "Pieces of work: 67." in lines
     assert "Of the 55 delivered pieces with a clear start, 10 needed changes after delivery." in lines
     assert "Hooks: SessionStart ran 54 times, median 140 ms; Stop ran 800 times, no time recorded." in lines
@@ -626,7 +645,61 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     assert "Capture cost $4.20 and coaching notes $0.35 at list prices." in lines
     for name in ("Tips:", "Plans:", "Tags:", "Rework:", "Agent answers:", "Hooks:", "Limits:"):
         assert any(line.startswith(name) for line in lines), name
-    assert len(lines) < 50
+    assert len(lines) < 75
+
+
+def test_a_file_without_a_coverage_block_as_every_older_one_is_still_passes_and_says_nothing_of_it():
+    doc = _sample()
+    del doc["coverage"]
+    assert tuning.validate(doc) == []
+    text = tuning.summary_text(doc)
+    assert text.splitlines()[1].startswith("Capture:")
+    # (The figures block says "an older version read their sessions" of its own summaries: that is not this.)
+    for words in ("These figures cover", "what the dashboard kept", "read by an older version"):
+        assert words not in text
+
+
+def test_a_coverage_block_fails_the_checks_like_any_block():
+    problems = tuning.validate(_put(_sample(), "coverage.read", -1))
+    assert any(problem.startswith("coverage.read: must be 0 or more") for problem in problems)
+    problems = tuning.validate(_put(_sample(), "coverage.extra", 1))
+    assert any("coverage: has a key" in problem for problem in problems)
+    doc = _sample()
+    del doc["coverage"]["stored"]
+    assert "coverage.stored: is missing" in tuning.validate(doc)
+    # The days Claude Code keeps transcripts are not in the block: a file that has them is refused.
+    problems = tuning.validate(_put(_sample(), "coverage.kept_days", 30))
+    assert any("coverage: has a key" in problem for problem in problems)
+    assert list(_sample()["coverage"]) == ["sessions", "read", "stored", "older"]
+
+
+def test_the_coverage_lines_say_it_for_the_machine_that_runs_them_or_for_a_file():
+    block = {"sessions": 82, "read": 9, "stored": 0, "older": 0}
+    assert tuning.coverage_lines(block) == [
+        "These figures cover 9 of 82 sessions in this window. "
+        "The transcripts of the other 73 were not found, and the dashboard still has those sessions."
+    ]
+    assert tuning.coverage_lines(block, of_file=True) == [
+        "These figures cover 9 of 82 sessions in this window. "
+        "The transcripts of the other 73 were not found on the machine that made this file."
+    ]
+    block = {"sessions": 82, "read": 9, "stored": 73, "older": 73}
+    assert tuning.coverage_lines(block) == [
+        "73 of 82 sessions in this window are read from what the dashboard kept, "
+        "because their transcripts were not found.",
+        "73 of 82 sessions in this window were read by an older version and their transcripts are gone, "
+        "so the newer figures leave them out.",
+    ]
+    assert tuning.coverage_lines(block, of_file=True)[0] == (
+        "73 of 82 sessions in this window were read from what the dashboard kept "
+        "on the machine that made this file. Their transcripts were not found there."
+    )
+    assert tuning.coverage_lines(None) == tuning.coverage_lines({}) == []
+    one = {"sessions": 2, "read": 1, "stored": 1, "older": 0}
+    assert tuning.coverage_lines(one, of_file=True) == [
+        "1 of 2 sessions in this window was read from what the dashboard kept "
+        "on the machine that made this file. Its transcript was not found there."
+    ]
 
 
 def test_the_summary_gives_the_tools_list_saving_by_agent_type_when_the_file_has_one():
@@ -668,7 +741,19 @@ def test_the_summary_counts_one_in_the_singular_and_the_rest_in_the_plural():
     assert "Words were put right 1 time by the hook and 0 times by the transcript." in text
     assert "Claude admitted 1 mistake: you caught 1 and it caught 0. 1 more reply read like" in text
     assert "Rework: 1 follow-up after delivery" in text
-    for line in text.splitlines():
+    # The figures lines agree at one: a token, a reply, a summary that was followed.
+    figures = doc["figures"]
+    figures["growth"] = {"by_reply": {"to_500": {"replies": 1, "tokens": 1}}, "by_session": {}, "shrinks": 0}
+    figures["summaries"].update(summaries=1, paid_back=1)
+    lines = tuning.summary_text(doc).splitlines()
+    assert "Context grew by 1 token a reply on average in the main session, over 1 reply." in lines
+    assert "1 of 1 summary was followed by that many replies." in lines
+    figures["growth"]["by_reply"]["to_500"].update(replies=2, tokens=3)
+    figures["summaries"].update(summaries=6, paid_back=5)
+    lines = tuning.summary_text(doc).splitlines()
+    assert "Context grew by 2 tokens a reply on average in the main session, over 2 replies." in lines
+    assert "5 of 6 summaries were followed by that many replies." in lines
+    for line in tuning.summary_text(doc).splitlines():
         _plain(line)
 
 
@@ -875,7 +960,7 @@ class World:
 #: Names that live only in the world's transcripts, tag files and folders: none may reach the document.
 PRIVATE = (
     "my-private-reviewer", "proj-alpha", "proj-beta", "src/app.py", "src/lib.py", "src/fetch.py", "login", "logout",
-    "msg_wake", "msg_a1", "msg_a2", "msg_l1", "claude-haiku-4-5", "claude-sonnet-5", "workflow-subagent-1", "wf_1",
+    "msg_wake", "msg_a1", "msg_a2", "msg_l1", "workflow-subagent-1", "wf_1",
     "timeouts", "retry logic", "agent-a1", "bg1",
 )  # fmt: skip
 
@@ -1090,7 +1175,7 @@ def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert tuning.validate(doc) == []
     assert list(doc) == [
         *tuning._HEADER,
-        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions"),
+        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions", "figures", "capture_checks"),
     ]
     assert doc["kind"] == "claudeglass-tuning" and doc["format"] == 1
     assert doc["tool_version"] == re.match(r"\d+(?:\.\d+)+", __version__).group(0)
@@ -1098,6 +1183,32 @@ def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert doc["generated_on"] == "2026-09-19" and doc["window_days"] == 30
     assert tuning.loads(tuning.dumps(doc)) == doc
     assert 2_000 < len(tuning.dumps(doc).encode("utf-8")) < 40_000
+
+
+def test_build_writes_the_coverage_block_first_only_when_given_one(world):
+    from claudeglass import covered, measured
+
+    assert "coverage" not in _build(world)
+    doc = _build(world, coverage=covered.Coverage(sessions=8, read=6, stored=2))
+    assert list(doc)[6] == "coverage"
+    assert doc["coverage"] == {"sessions": 8, "read": 6, "stored": 2, "older": 0}
+    assert tuning.validate(doc) == []
+    assert tuning.summary_text(doc).splitlines()[1] == covered.stored_sentence(2, 8, of_file=True)
+    doc = _build(world, coverage=covered.Coverage(8, 6, 0))
+    assert tuning.summary_text(doc).splitlines()[1] == covered.gone_sentence(6, 8, of_file=True)
+    # A session an older parser wrote is counted once, for the newer figures to leave out.
+    corpus = copy.deepcopy(world.corpus)
+    corpus.sessions[0].top.parser_version = measured.BEFORE_STAMP
+    doc = _build(world, corpus=corpus, coverage=covered.Coverage(8, 8, 0))
+    assert doc["coverage"]["older"] == 1
+
+
+def test_a_required_block_whose_builder_gives_none_fails_the_build(monkeypatch):
+    original = tuning._BLOCKS["pieces"]
+    monkeypatch.setitem(tuning._BLOCKS, "pieces", (original[0], lambda ctx: None, True))
+    with pytest.raises(tuning.TuningError) as raised:
+        tuning.build(NS(sessions=[]), Config(), None, config_dir=None, days=7, today=TODAY, claude_root=None)
+    assert "pieces: is missing" in raised.value.problems
 
 
 def test_the_built_document_holds_nothing_that_names_anything(doc, world):
@@ -1430,6 +1541,23 @@ def test_the_tools_list_saving_is_summed_by_built_in_type_with_every_other_type_
     # Amounts under closed words only: no agent's name reaches it.
     assert "private" not in json.dumps(saved)
     assert tuning.validate(_put(_sample(), "agents.startup_diet_usd", saved)) == []
+
+
+def test_the_tools_list_saving_reads_the_tools_line_as_the_card_does():
+    from test_spawn_parts import _CUT_LINE, _orchestrator
+
+    stats = _diet_stats(_orchestrator())
+    bare = tuning._startup_diet_usd(stats)
+    assert bare["custom"] > 0
+    # A line the hook cut off is not known, so the amount is that of no line.
+    assert tuning._startup_diet_usd(stats, {"orchestrator": _CUT_LINE}) == bare
+    # Task is Agent under its old name: the line prices the same either way.
+    line = "{}, Read, Grep, Skill, NotebookEdit, WebFetch"
+    task = tuning._startup_diet_usd(stats, {"orchestrator": line.format("Task")})
+    assert task == tuning._startup_diet_usd(stats, {"orchestrator": line.format("Agent")})
+    # A line that already leaves a rarely used tool out is worth less.
+    partial = tuning._startup_diet_usd(stats, {"orchestrator": "Task, Read, Grep, Skill, NotebookEdit"})
+    assert 0 < partial["custom"] < bare["custom"]
 
 
 def test_the_tools_list_saving_follows_the_cards_own_rule_for_when_a_list_is_worth_giving():
@@ -1779,6 +1907,26 @@ def test_the_project_files_block_holds_closed_words_and_shares_and_no_name(tmp_p
     assert claude_md_review.EXT_CLASSES  # the vocabulary the block draws from
 
 
+def test_the_project_files_block_looks_in_the_projects_roots_the_export_read(tmp_path):
+    """The config folder is not beside the projects (docs/deploy.md's container): the folder a session ran
+    in is found under the projects root the export read, so its file has an extension class."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "notes.md").write_text("Notes.\n", encoding="utf-8")
+    root = tmp_path / "data" / "projects"
+    (root / "repo").mkdir(parents=True)
+    (root / "repo" / "s.jsonl").write_text(json.dumps({"cwd": str(repo)}) + "\n", encoding="utf-8")
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    salt = parse.load_or_create_salt(config_dir)
+    md = parse.path_hash(str(repo / "docs" / "notes.md"), salt)
+    data = _files_data([_file_row(md, 9000, {"main": 4}, {"2026-09-07": 9000}, cost=3.0)])
+    (lost,) = tuning._project_files(NS(context_files=data, config_dir=config_dir))["files"]
+    assert lost["ext"] == "unknown"
+    (found,) = tuning._project_files(NS(context_files=data, config_dir=config_dir, projects_roots=[root]))["files"]
+    assert found["ext"] == "md"
+
+
 def test_the_project_files_block_keeps_the_dearest_files_and_counts_them_all():
     rows = [_file_row(f"{i:016x}", 1000 + i, {"main": 5}, cost=float(i)) for i in range(1, 61)]
     block = tuning._project_files(NS(context_files=_files_data(rows), config_dir=None))
@@ -1848,6 +1996,27 @@ def test_the_summary_counts_the_project_files_by_size_and_reach():
 
 def _launching_agent(launch: str, run: str, **kw) -> habits.AgentFact:
     return habits.AgentFact("s1", kw.pop("agent_type", "Explore"), "2026-W38", kw.pop("cost", 0.5), launch=launch, run=run, **kw)
+
+
+def test_the_tuning_export_counts_probes_from_measured_agents_only(tmp_path):
+    # An agent a digest from an older parser read has no single-lookup figures
+    # (None): it is out of the count and out of the base alike.
+    older = dict(calls=50, probe_calls=None, probe_shell_calls=None, probe_runs=None, probe_batch_cost=None)
+    block = _agents_block(
+        tmp_path,
+        agents=[
+            _launching_agent("background", "r1", calls=20, probe_calls=8, probe_shell_calls=3, probe_runs=2),
+            _launching_agent("background", "r2", calls=10, probe_calls=1, probe_shell_calls=1),
+            _launching_agent("background", "r3", **older),
+        ],
+    )
+    assert block["probes"] == {"calls": 30, "single": 9, "by_shell": 4, "runs": 2}
+    # The replies of the group still count every agent; its single lookups only the measured ones.
+    assert block["launches"]["background"]["replies"] == 80
+    assert block["launches"]["background"]["single"] == 9
+    # With every agent older there is nothing to report, not a block of zeros.
+    block = _agents_block(tmp_path, agents=[_launching_agent("background", "r3", **older)])
+    assert "probes" not in block
 
 
 def test_the_agents_block_counts_the_runs_by_how_they_started(tmp_path):
@@ -2065,12 +2234,15 @@ def test_the_compactions_block_is_counts_alone_without_a_rate_card(tmp_path):
 def test_the_built_document_has_a_compactions_block_and_the_model_choice_and_nothing_that_names_anything(tmp_path):
     w = _mini_world(tmp_path)
     doc = tuning.build(w.corpus, w.config, w.pricing, config_dir=w.config_dir, days=DAYS, today=TODAY, claude_root=w.claude_root)
-    assert list(doc)[-1] == "compactions" and doc["compactions"]["summaries"] == 3
+    assert list(doc)[-2:] == ["figures", "capture_checks"] and doc["compactions"]["summaries"] == 3
     assert len(doc["agents"]["model_choice"]) == 4 and doc["agents"]["launches"]["foreground"]["agents"] == 3
     assert_privacy_deep(doc)
     text = tuning.dumps(doc)
-    for name in ("my-private-reviewer", "proj-mini", "claude-opus-4-1", "mystery-trigger", "agent-fi", "s1", str(w.root)):
+    for name in ("my-private-reviewer", "proj-mini", "mystery-trigger", "agent-fi", "s1", str(w.root)):
         assert name not in text, name
+    # The agents' model id is named only as a key of figures.models, where it is the packaged card's own id.
+    assert "claude-opus-4-1" in doc["figures"]["models"]
+    assert set(re.findall(r"claude-opus-4-1[\w.-]*", text)) <= set(doc["figures"]["models"])
     assert tuning.validate(json.loads(text)) == []
 
 
@@ -2238,3 +2410,38 @@ def test_the_fullest_phase_8_blocks_still_fit_the_size_limit():
     assert tuning.validate(doc) == []
     assert len(tuning.dumps(doc).encode("utf-8")) < tuning.MAX_BYTES
     assert "not_recorded" in tuning.MODEL_CHOSEN
+
+
+def test_the_tools_list_saving_leaves_out_what_the_agents_line_no_longer_lists():
+    from test_spawn_parts import _diet_acc
+
+    stats = _diet_stats(_diet_acc("reviewer"))
+    full = tuning._startup_diet_usd(stats)
+    # The file lists Read, Grep and Bash: nothing rarely used is still sent.
+    assert tuning._startup_diet_usd(stats, {"reviewer": ["Read", "Grep", "Bash"]}) == {}
+    # An unknown line, or another agent's, leaves it as it was.
+    assert tuning._startup_diet_usd(stats, {"other": ["Read"]}) == full
+
+
+def test_the_agents_block_prices_the_tools_list_without_the_tools_the_agents_file_withholds(tmp_path):
+    """The block reads each agent file's ``disallowedTools`` line as well as its ``tools`` line:
+    a tool the file withholds is never sent, so a tools list saves nothing on it."""
+    from test_spawn_parts import _diet_acc
+
+    def block(denied):
+        ctx = tuning._Ctx(NS(sessions=[]), Config(tz="UTC"), None, tmp_path, 30, TODAY, None)
+        ctx.habits = habits.Habits()
+        ctx.startup = _diet_stats(_diet_acc("reviewer"))
+        ctx.agent_tools = {}
+        ctx.agent_denied = denied
+        return tuning._agents(ctx)
+
+    open_block = block({})
+    assert open_block["startup_diet_usd"]["custom"] > 0
+    # Skill, NotebookEdit and WebFetch are the three rarely used tools it is offered: all withheld, none to save.
+    assert "startup_diet_usd" not in block({"reviewer": "Skill, NotebookEdit, WebFetch"})
+    # One of them withheld leaves less to save than none.
+    partial = block({"reviewer": "WebFetch"})["startup_diet_usd"]["custom"]
+    assert 0 < partial < open_block["startup_diet_usd"]["custom"]
+    # Another agent's line changes nothing.
+    assert block({"other": "WebFetch"}) == open_block

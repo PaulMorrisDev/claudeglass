@@ -595,6 +595,16 @@ def test_compare_with_parser_empty_when_every_key_is_read():
     assert unread == []
 
 
+def test_compare_with_parser_reads_the_content_of_a_queue_operation_line():
+    result = probe.ProbeResult()
+    probe.probe_line(
+        {"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-09-18T12:00:00.000Z", "content": "<task-notification/>"},
+        result,
+    )
+    unread = probe.compare_with_parser(result)
+    assert "queue-operation.content" not in unread
+
+
 def test_compare_with_parser_falls_back_to_base_keys_for_an_ignored_type():
     result = probe.ProbeResult()
     probe.probe_line({"type": "bridge-session", "someField": 1}, result)

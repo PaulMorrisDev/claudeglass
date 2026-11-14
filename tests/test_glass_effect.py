@@ -66,9 +66,12 @@ def _world(specs):
         sid = spec.pop("id")
         cost[sid] = spec.pop("cost", 1.0)
         tips, shown = spec.pop("tips", 0), spec.pop("shown", 0)
+        older = spec.pop("older", False)
         glass = spec.pop("glass", False)
         bundles.append(NS(session_id=sid, top=_transcript(sid, **spec)))
-        sessions.append(prompting.SessionPrompting(session_id=sid, start=None, tips=Counter({"drip_feed": tips})))
+        sessions.append(
+            prompting.SessionPrompting(session_id=sid, start=None, tips=Counter({"drip_feed": tips}), tips_measured=not older)
+        )
         if glass:
             events.append(_event(sid, "present", surface="desktop" if spec.get("desktop") else "terminal"))
         events += [_event(sid, "note", kind="cold_return", surface="hint", outcome="none")] * shown
@@ -252,6 +255,21 @@ def test_desktop_tip_delivery_adds_the_mods_tips_to_the_ones_claude_passed_on():
     assert (row["with_glass"], row["without_glass"]) == (4.0, 1.0)
     assert (row["with_sessions"], row["without_sessions"]) == (10, 12)
     assert row["difference"] == "about 300% higher" and row["verdict"] == "Measurable"
+
+
+def test_tips_shown_per_desktop_session_leaves_out_an_older_session():
+    # A session whose digest an older parser wrote has no tips figure, not zero: it is in neither mean.
+    kept = _group("g", 10, glass=True, desktop=True, tips=1, shown=3) + _group("n", 12, glass=False, desktop=True, tips=1)
+    older = [{"id": "o", "desktop": True, "glass": True, "tips": 0, "shown": 3, "older": True},
+             {"id": "p", "desktop": True, "glass": False, "tips": 0, "older": True}]
+    sessions, corpus, cost, events = _world(kept + older)
+    by_id = {f.session_id: f for f in glass_effect.facts_of(sessions, corpus, cost, TH, events)}
+    assert by_id["o"].tips is None and by_id["p"].tips is None and by_id["g0"].tips == 4
+    facts = list(by_id.values())
+    clean = [f for f in facts if f.session_id not in ("o", "p")]
+    mixed, without = glass_effect.compare("tips_desktop", facts), glass_effect.compare("tips_desktop", clean)
+    assert (mixed.with_value, mixed.without_value) == (without.with_value, without.without_value) == (4.0, 1.0)
+    assert (mixed.with_sessions, mixed.without_sessions) == (10, 12)
 
 
 def test_the_output_is_deterministic_and_does_not_depend_on_the_order_of_sessions():

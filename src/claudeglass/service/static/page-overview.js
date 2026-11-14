@@ -10,7 +10,7 @@
 
 import { clear, el, goTo, state, WINDOW_OPTIONS } from "./core.js";
 import { fraction, money, moneyParts, moneyText, projectName, shortTs, thousands, windowWhen } from "./format.js";
-import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, prefetchActions, withWindow } from "./api.js";
+import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, markCards, markCardsShown, prefetchActions, withWindow } from "./api.js";
 import {
   button,
   copyToClipboard,
@@ -220,6 +220,14 @@ var AGENT_MODEL_RULES = {
   "agent-decide-apply": true,
 };
 
+// The card each of the other levers is the finding of. Ignoring that
+// card takes its lever out of the headline (ignoredSavings).
+var LEVER_CARD = {
+  compaction_sim: "compaction-window",
+  carry: "tool-output-carry",
+  waste: "wasted-turns",
+};
+
 // The main session's agent type, as model_swap_by_agent_type and a
 // recommendation's agent_type name it.
 var MAIN_AGENT = "top-level";
@@ -240,18 +248,50 @@ function usdOf(value) {
 // only when the lever has no saving for it. A workflow agent's runs are
 // no lever's and span every type a script named, so their saving comes
 // from all the spend.
-function agentModelItems(group, agents) {
+// A row an ignored card took out (skipAgents) prices nothing any more, so
+// that type's inherited saving joins, at most as large as the row it
+// replaces: ignoring a card never raises the headline.
+function agentModelItems(group, agents, skipAgents) {
   if (group.id !== "agent-model-inherited" || group.severity !== "advice") return [];
+  var skipped = skipAgents || {};
   var priced = {};
+  var ceiling = {};
   agents.forEach(function (row) {
-    if (usdOf(row.saving_usd)) priced[row.agent_type] = true;
+    var usd = usdOf(row.saving_usd);
+    if (!usd) return;
+    if (skipped[row.agent_type]) ceiling[row.agent_type] = usd;
+    else priced[row.agent_type] = true;
   });
   var items = [];
   group.members.forEach(function (rec) {
     var usd = usdOf(rec.saving_usd);
-    if (usd && !priced[rec.agent_type]) items.push({ usd: usd, agent: rec.agent_type === WORKFLOW_AGENT ? null : rec.agent_type });
+    if (!usd || priced[rec.agent_type]) return;
+    if (ceiling[rec.agent_type] !== undefined) usd = Math.min(usd, ceiling[rec.agent_type]);
+    items.push({ usd: usd, agent: rec.agent_type === WORKFLOW_AGENT ? null : rec.agent_type });
   });
   return items;
+}
+
+// What the cards you ignored take out of the headline: the model lever's
+// row for the main session (model-tier-main) and for each agent type a
+// model-tier card changes, and the lever a card is the finding of
+// (LEVER_CARD). ``groups`` are groupRecommendations(recs, { ignored: true }).
+function ignoredSavings(groups) {
+  var skip = { levers: {}, agents: {} };
+  groups.forEach(function (group) {
+    if (group.id === "model-tier-main") skip.agents[MAIN_AGENT] = true;
+    if (group.id === "model-tier") {
+      group.members.forEach(function (rec) {
+        (rec.changes || []).forEach(function (change) {
+          skip.agents[change.agent] = true;
+        });
+      });
+    }
+    Object.keys(LEVER_CARD).forEach(function (key) {
+      if (LEVER_CARD[key] === group.id) skip.levers[key] = true;
+    });
+  });
+  return skip;
 }
 
 // What doing every way to save would come to: the four Savings levers,
@@ -262,24 +302,29 @@ function agentModelItems(group, agents) {
 // two multiply. A saving for one agent type comes from that type's spend
 // (the model lever per type; the summary lever from the main session);
 // any other from all of it. Each lever is a ceiling, so the whole is too,
-// and never more than the spend.
-function availableSaving(levers, groups, tables) {
+// and never more than the spend. What a card you ignored is the finding of
+// is left out (ignoredSavings).
+function availableSaving(levers, groups, tables, ignored) {
   var agents = tableObjects((tables || {}).model_swap_by_agent_type);
+  var skip = ignoredSavings(ignored || []);
   var items = [];
   levers.forEach(function (lever) {
-    if (!(lever.usd > 0)) return;
+    if (!(lever.usd > 0) || skip.levers[lever.key]) return;
     if (lever.key === "model_swap" && agents.length) {
       agents.forEach(function (row) {
-        if (usdOf(row.saving_usd)) items.push({ usd: usdOf(row.saving_usd), agent: row.agent_type });
+        if (usdOf(row.saving_usd) && !skip.agents[row.agent_type]) {
+          items.push({ usd: usdOf(row.saving_usd), agent: row.agent_type });
+        }
       });
     } else {
       items.push({ usd: lever.usd, agent: lever.key === "compaction_sim" ? MAIN_AGENT : null });
     }
   });
   groups.forEach(function (group) {
+    if (group.severity !== "action" && group.severity !== "advice") return;
     if (LEVER_RULES[group.id]) return;
     if (AGENT_MODEL_RULES[group.id]) {
-      agentModelItems(group, agents).forEach(function (item) {
+      agentModelItems(group, agents, skip.agents).forEach(function (item) {
         items.push(item);
       });
       return;
@@ -424,11 +469,13 @@ function addSpendTrend(spendTile, rows) {
 
 // about: the action it copies for. The button shows "Copy prompt" and is
 // named "Copy prompt for <action>", as codeBlockWithCopy names its
-// buttons, so several of them read as several different things.
-function copyPromptButton(prompt, about) {
+// buttons, so several of them read as several different things. card: the
+// key of the recommendation whose prompt it is, recorded when the copy worked.
+function copyPromptButton(prompt, about, card) {
   var node = button("Copy prompt", { variant: "quiet", icon: "prompt", class: "action-copy", label: "Copy prompt" + (about ? " for " + about : "") });
   node.addEventListener("click", function () {
     copyToClipboard(prompt).then(function (ok) {
+      if (ok && card) markCards("copied", [card]);
       toast(ok ? "Prompt copied. Paste it into Claude Code." : "Couldn't copy. Open the action and copy the prompt from there.", {
         tone: ok ? "success" : "warning",
       });
@@ -564,7 +611,7 @@ function checklistRow(row) {
   }
   var action = el("div", { class: "check-row-action" });
   var fix = lead && lead.members.length === 1 ? (lead.members[0].fixes || [])[0] : null;
-  if (fix && fix.prompt) action.appendChild(copyPromptButton(fix.prompt, groupTitle(lead)));
+  if (fix && fix.prompt) action.appendChild(copyPromptButton(fix.prompt, groupTitle(lead), lead.members[0].key));
   if (check && check.item && (row.state === "look" || row.state === "fix")) {
     action.appendChild(habitLink(check.item, check.item === REWORK_ITEM ? "See the rework" : "See the habit"));
   }
@@ -622,6 +669,16 @@ function renderChecklist(container, head, rows) {
   } else {
     container.appendChild(el("ul", { class: "check-rows" }, problems.map(checklistRow)));
   }
+  // The cards whose titles the problem rows lead with are the ones this page
+  // showed (a row with a check's own headline shows no card's title).
+  var led = [];
+  problems.forEach(function (row) {
+    if ((row.check && row.check.headline) || !row.groups[0]) return;
+    row.groups[0].members.forEach(function (rec) {
+      led.push(rec.key || rec.id);
+    });
+  });
+  markCardsShown(led);
   if (by.fine.length) container.appendChild(quietRows(by.fine, countWord(by.fine.length, "check found nothing to fix", "checks found nothing to fix")));
   if (by.unknown.length) container.appendChild(quietRows(by.unknown, countWord(by.unknown.length, "check had too little data to answer", "checks had too little data to answer")));
 }
@@ -930,7 +987,7 @@ export function renderOverview(panel) {
       phrase: phrase,
     };
     facts.previousCost = facts.previousSummary ? facts.previousSummary.total_cost || 0 : null;
-    facts.saving = availableSaving(levers, groups, reportTables);
+    facts.saving = availableSaving(levers, groups, reportTables, groupRecommendations(recs, { ignored: true }));
     var tiles = renderTiles(tilesHost, facts, meta, dailyRows);
     addSpendTrend(tiles.spend, dailyRows);
     countTiles(tiles.counts);

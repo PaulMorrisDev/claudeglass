@@ -24,6 +24,7 @@ from claudeglass.cache import (
     encode_result,
     result_from_jsonable,
 )
+from claudeglass.measured import BEFORE_STAMP
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 
@@ -52,6 +53,26 @@ def _write_transcript(tmp_path: Path, name: str = "session-1") -> Path:
 def _meta_for(path: Path, mtime_ns: int = _OLD_NS) -> TranscriptMeta:
     size = path.stat().st_size
     return TranscriptMeta(path=str(path), kind="top-level", session_id=path.stem, mtime_ns=mtime_ns, size_bytes=size)
+
+
+# -- which parser wrote a digest ------------------------------------------
+
+
+def test_a_fresh_parse_carries_the_parser_version_through_the_cache(tmp_path):
+    path = _write_transcript(tmp_path)
+    meta = _meta_for(path)
+    result = parse_transcript(path, meta)
+    assert result.parser_version == PARSER_VERSION
+    cache = DigestCache(tmp_path / "config")
+    cache.put(path, meta, result)
+    assert cache.get(path, meta).parser_version == PARSER_VERSION
+
+
+def test_a_digest_written_before_the_stamp_reads_as_before_it(tmp_path):
+    # Not None (a result built in memory) and not the current version: a digest whose transcript is gone can't be asked again.
+    data = encode_result(parse_transcript(*(lambda p: (p, _meta_for(p)))(_write_transcript(tmp_path))))
+    del data["parser_version"]
+    assert result_from_jsonable(json.loads(json.dumps(data))).parser_version == BEFORE_STAMP
 
 
 # -- basic put/get hit --------------------------------------------------
@@ -182,7 +203,9 @@ def test_fingerprint_is_pinned():
     to remember to bump this by hand), not to silently ship it.
     """
     # Re-pinned for the ``report_reread`` and ``split_run`` tip titles (parser 43 already starts a new cache generation).
-    assert FINGERPRINT == "1b51edd3cea4b3c2a19d137e9d9a76024e6c9050d133fe108fd40278df393080"
+    # Re-pinned for the ``lost`` key (the summary question; the parser version does not move, the fingerprint
+    # alone starts a new set of cache entries).
+    assert FINGERPRINT == "cf3100d9a9d78cda6dc0c5f7ea3f092a1d4929a4e4f50f6d45379578c1bb9fc3"
 
 
 def test_the_parser_version_has_a_note_saying_what_its_bump_changed():

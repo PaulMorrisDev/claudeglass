@@ -581,9 +581,43 @@ phase, label, description or path:
   uses, but counted with or without the salt). Repeats are kept, so a
   file written twice counts twice. A target is temp when, normalised like
   the path hashes (``..`` resolved, case and slashes folded, ``/c/`` read
-  as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
-  back for a command that was blocked or denied. A count only, never a
-  path.
+  as ``c:``), it sits under the reading process's own temp folder
+  (``tempfile.gettempdir()``) or at the root of a path of a system temp
+  shape (``parse._TEMP_SHAPE_RE``): a Windows user's ``AppData/Local/Temp``,
+  ``Windows/Temp`` or ``Windows/SystemTemp`` (also as ``/mnt/c/...`` or
+  ``/cygdrive/c/...``), macOS ``/var/folders/<xx>/<id>/t`` and
+  ``/private/tmp``, ``/tmp`` and ``/var/tmp``; a folder only named ``temp``
+  or ``tmp`` inside a project is not. Taken back for a command that was
+  blocked or denied. A count only, never a path.
+- ``Turn.shell_code_write_count: int | None = None`` -- the part of
+  ``shell_write_count`` aimed at code: not a document (a
+  ``capture_catalogue.DOC_SUFFIXES`` file, a ``.log``, ``.csv``, ``.tsv``
+  or ``.jsonl`` file wherever it is, a ``.json``, ``.html`` or ``.htm``
+  file under ``plans/``, ``reports/`` or ``docs/``, a report or ledger
+  ``.json``) and not under ``scratchpad/``. Those folders are the ones
+  below the deepest folder the target shares with the transcript's first
+  ``cwd`` (inside it, the folders below it: a repository kept under a
+  folder named ``docs`` has no ``docs`` folder of its own; outside it, a
+  worktree agent's write into the main checkout's ``docs/`` is still a
+  document). The known miss: a project under a ``docs``-named folder that
+  shares no parent with the working folder reads as a document. With no
+  absolute ``cwd`` the folder the target sits in decides alone. Taken back
+  like ``shell_write_count``. Only
+  the ``agent-decide-apply`` verdict reads it. ``None`` in a digest an
+  older parser wrote: not measured, which is not 0. Nothing can measure
+  it once the transcript is gone, so the verdict leaves that run out.
+  The rule for every field a parser version adds: a default of ``None``
+  where the key is missing, and a reader that leaves the run out of that
+  figure (a field a version redefines needs the digest's
+  ``TranscriptResult.parser_version`` as well). ``measured.FIELD_VERSIONS``
+  names each such field and the version its meaning dates from.
+- ``Turn.edit_code_count: int | None = None`` -- how many of this turn's edit-tool
+  calls (Edit, Write, MultiEdit, NotebookEdit) were aimed at code: outside
+  the temp dir and not a document, by the same test as
+  ``shell_code_write_count``. Counted whether or not the path is under a
+  ``.claude`` folder (a worktree there holds code). Taken back for a call
+  that failed or was denied. The ``agent-decide-apply`` verdict reads it
+  with ``shell_code_write_count``.
 
 The same bump puts ``Turn.edit_kind`` on that temp test: an
 Edit/Write/MultiEdit/NotebookEdit target in any of those forms is
@@ -734,6 +768,8 @@ memory and dropped:
   tip and says, near "ClaudeGlass" and outside the tip's quote block, that
   it misfired, was a false positive or doesn't apply
   (``capture_catalogue.MISFIRE_PATTERN``).
+- ``Turn.coach_disowned: bool = False`` -- the same words, with or without
+  a tip in the reply: how Claude disowns a note that asks for no tip.
 - ``Turn.read_target_chars: tuple[int, ...] = ()`` -- the size of each
   ``Read`` result, in the order of ``read_target_hashes``; 0 for a read
   that failed. A result Claude Code saved to a file and answered with a
@@ -742,7 +778,8 @@ memory and dropped:
 - ``Turn.shell_read_count: int = 0`` and ``shell_read_chars: int = 0`` --
   the commands of the turn's shell calls that read files and the size of
   their results (``shell_reads``: grep, rg, ``sed -n``, cat, head, tail,
-  find, git log/show/diff, Get-Content, Select-String; not a heredoc
+  find, git log/show/diff/grep, ``git ls-files | xargs grep``, Get-Content,
+  Select-String, ``Get-ChildItem -Recurse | Select-String``; not a heredoc
   write, ``sed -i``, ls, wc or git status). A call that was blocked or
   denied is taken back, like ``shell_write_count``.
 - ``Turn.tests_run: str = ""`` -- ``full`` when a shell call ran a whole
@@ -919,6 +956,20 @@ found the parser was missing, all numbers and closed words:
   there is one (``detail["tools_source"] == "request"``): the snapshot's
   entries run about 1.6 times the definitions actually sent.
 
+Coaching-occasions addition (``PARSER_VERSION`` 52). Whether the status-check
+hint (``status_poll``) could have fired, for the tuning export and the Capture
+page (``hint_occasions``). A yes/no only:
+
+- ``Turn.background_waiting: bool = False`` -- when the message that opens
+  this turn was typed, a tool result before it had said that work went to
+  the background (the capture hook's ``BACKGROUND_LAUNCH_PATTERN``, read in
+  the result's first ``BACKGROUND_SCAN_CHARS`` characters and dropped), and no
+  task notification for that call had arrived since. A notification that names
+  no call ends every wait, and a subagent's own lines are not the session's
+  work. It is the hook's ``_background_pending`` kept as a flag and never as
+  text: the typed line's ``Event.detail["waiting"]`` is ``True`` and carries
+  it, and the key is left out otherwise.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -1086,6 +1137,10 @@ class CaptureTag:
     fit: str | None = None
     rules: str | None = None
     prior: str | None = None
+    #: Whether the summary just made left out something the work needed
+    #: (``yes|no``): asked once, in the reply after a summary, and read only
+    #: from the first reply after one (``capture_checks.summary_answers``).
+    lost: str | None = None
     detour: str | None = None
     check: str | None = None
     out: str | None = None
@@ -1318,6 +1373,10 @@ class Turn:
     #: this turn's Bash/PowerShell commands named outside the temp dir (a
     #: file written twice counts twice). A count only, never a path.
     shell_write_count: int = 0
+    #: ``None`` in a digest from before ``PARSER_VERSION`` 47: not measured,
+    #: never 0 (the key is missing there, so the default shows).
+    shell_code_write_count: int | None = None
+    edit_code_count: int | None = None
     #: Quality-signals addition (see module docstring): the preceding
     #: human message looks like a correction. Flag only.
     human_correction: bool = False
@@ -1407,6 +1466,10 @@ class Turn:
     #: whether it showed a ClaudeGlass tip.
     reply_asked: bool = False
     coach_tip: bool = False
+    #: The hints whose own tip words (``capture_catalogue.TIP_FRAGMENTS``)
+    #: any text block of that reply, or the plan it submitted, holds, in
+    #: the order met and each once.
+    coach_tips: tuple[str, ...] = ()
     #: Parser-signals addition (see module docstring): how the preceding
     #: message you typed reads, and the messages you typed while Claude
     #: was working since the previous reply.
@@ -1421,6 +1484,10 @@ class Turn:
     #: only asked something, and whether it asked for a change.
     human_question: bool = False
     human_change: bool = False
+    #: Coaching-occasions addition (``PARSER_VERSION`` 52, see module
+    #: docstring): background work was out when the message that opened
+    #: this turn was typed.
+    background_waiting: bool = False
     #: A line you didn't type (a ``META`` event of subkind ``not_typed``)
     #: came between the previous reply and this one.
     preceding_not_typed: bool = False
@@ -1443,6 +1510,10 @@ class Turn:
     admit_candidate: bool = False
     admit_caught: str = ""
     tip_disowned: bool = False
+    #: The reply calls a ClaudeGlass note a misfire, whether or not it
+    #: carries a tip (:attr:`tip_disowned` needs one): how Claude disowns
+    #: a note that asks for none (``quiet_output``).
+    coach_disowned: bool = False
     read_target_chars: tuple[int, ...] = ()
     shell_read_count: int = 0
     shell_read_chars: int = 0
@@ -1687,6 +1758,16 @@ class TranscriptResult:
     #: MCP-servers addition: MCP server -> the last connection problem
     #: reported for it: "pending", "needs sign-in" or "failed to connect".
     mcp_connection_status: dict = field(default_factory=dict)
+    #: The ``PARSER_VERSION`` that wrote this digest (from 50). ``0``
+    #: (``measured.BEFORE_STAMP``) in a digest from before the stamp, set by
+    #: ``cache.result_from_jsonable`` where the key is missing; ``None`` in a
+    #: result built in memory and not by the parser, which reads as current.
+    #: The store's ``transcripts.parser_version`` column does not say, since
+    #: a rate-card change sets it to 0 on every row, including a current one
+    #: whose transcript is gone. Only a reader that leaves out what a newer
+    #: parser added or redefined needs this (a field a version only adds is
+    #: ``None`` where its key is missing).
+    parser_version: int | None = None
 
 
 @dataclass(slots=True)
@@ -1951,6 +2032,12 @@ class Recommendation:
     #: The saving as a number (USD at list price), used only to order
     #: recommendations of the same severity; ``None`` when not estimated.
     saving_usd: float | None = None
+    #: What the saving was priced on, as one number: for a start-context card the tokens it
+    #: says leave each start, for a price card the observed cost (USD at list price) its
+    #: saving is a share of. ``None`` when the card names no such figure. Unlike
+    #: ``saving_basis``, a sentence, it is read by ``outcomes`` to price the same figure on
+    #: the sessions after the fix.
+    priced_on: float | None = None
     why: str = ""
     #: Picks a variant of this id's workflow prompt/explainer in
     #: ``fixes._WORKFLOW_PROMPTS``/``fixes._WORKFLOW_EXPLAINER`` (looked
@@ -2045,6 +2132,26 @@ class ReportMeta:
     #: per model family, and the ``default_family``). Two floats per
     #: family and nothing else; the mod's settings file keeps it.
     calibration: dict = field(default_factory=dict)
+    #: Of ``sessions`` (those with a top-level transcript in this window), how
+    #: many hold a digest an older parser wrote whose figures the newer ones
+    #: leave out (``measured.older_sessions``). 0 when every transcript was read
+    #: by this version.
+    older_sessions: int = 0
+    sessions: int = 0
+    #: Set by the CLI's report only (``cli._store_coverage``): how many
+    #: sessions of this window the figures leave out, because the dashboard's
+    #: store holds them and their transcripts were not found. 0 when none is
+    #: missing, with no store, and always on the dashboard, which reads the
+    #: store.
+    sessions_left_out: int = 0
+    #: R11: in a view of one project, the main session's ``model`` setting
+    #: its model card, the Models check's fix and the models goal would
+    #: change, read as the main-model lever reads it, as ``{"value": ...,
+    #: "scope": ...}`` (``scope`` a ``fixes.py`` scope: where the change
+    #: goes). Empty in a view of several projects, where the view's own
+    #: setting (your user settings) holds, and with no snapshot. Read it
+    #: with ``model_swap.main_setting``.
+    main_model_setting: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)

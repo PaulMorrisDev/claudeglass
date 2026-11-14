@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 
+from . import measured
 from .capture_catalogue import TASK_LABELS
 from .capture_catalogue import THEMES as CAPTURE_THEMES
 from .habits import ITEMS as HABIT_ITEMS
@@ -200,6 +201,7 @@ PLACEMENT: dict[str, str] = {
     "habits_prompt_flags": "advanced",
     "habits_skills": "advanced",
     "habits_tool_output": "advanced",
+    "habits_summary_losses": "advanced",
     "rework_headline": "keep",
     "rework_causes": "keep",
     "rework_admitted": "keep",
@@ -803,6 +805,12 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "",
                 "The average number of replies a spawn made after its first. A saving counts each of them.",
             ),
+            "task_prompt_top_share": (
+                "",
+                "The share of the task prompt tokens that came from the one workflow run, or session outside "
+                "workflows, that wrote the most.",
+            ),
+            "task_prompt_top_run": ("", "The workflow run or session behind that share."),
             "largest_tools": (
                 "",
                 "The three biggest tools or MCP servers in this agent type's tool definitions, on the model "
@@ -832,6 +840,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "mcp_used_spawns": ("", "Spawns that called at least one MCP tool."),
             "claude_md_tokens": ("", "Average size of CLAUDE.md and memory per spawn, in tokens."),
             "read_only_spawns": ("", "Spawns given CLAUDE.md that only searched or read files."),
+            "edit_spawns": ("", "Spawns that changed files (Edit, Write, MultiEdit or NotebookEdit)."),
         },
         lead_columns=[
             "agent_type", "spawns", "skills_listing_tokens", "skills_used_spawns", "mcp_used_spawns",
@@ -980,24 +989,32 @@ TABLE_COPY: dict[str, TableCopy] = {
     "prompting_tips": TableCopy(
         title="Coaching tips shown",
         help=Help(
-            shows="For each coaching hint that asks for a tip, how many tips were shown. Some were passed on by "
+            shows="For each coaching hint, how many notes it added and how many tips were shown. Some were passed on by "
             "Claude in its reply. Others were shown by ClaudeGlass itself inside Claude Code. It also shows how often "
-            "Claude called a tip a misfire. Your own answers about each tip sit beside them. They come from "
+            "Claude called a tip a misfire. "
+            "A note meant for Claude alone asks for no tip, so its row counts notes and misfires. "
+            "Your own answers about each tip sit beside them. They come from "
             "/cg-feedback, a session rating, or the rating buttons on a card.",
             read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
             "when your message calls for it, so fewer of those show and that's no miss. A tip you called wrong, "
-            "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session.",
+            "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session. "
+            "Sessions an older version read are left out of what Claude passed on.",
             act="",
         ),
         columns={
             "hint": ("Hint", "The coaching hint."),
             "notes": ("Notes", "How many times the hint's note was added."),
-            "shown": ("Passed on by Claude", "How many of those replies ended with a ClaudeGlass tip."),
-            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip."),
+            "shown": (
+                "Passed on by Claude",
+                "How many of those replies held that note's own tip. If the note came alone with its message, a "
+                "reply with only the \"ClaudeGlass tip:\" label counts too.",
+            ),
+            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip, in sessions this version read."),
             "relay": (
                 "Passed on, of notes",
                 "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "
-                "whether your message called for it. Empty where ClaudeGlass showed the tip itself.",
+                "whether your message called for it. Empty where ClaudeGlass showed the tip itself. "
+                "No tip asked means the note was for Claude alone.",
             ),
             "glass": (
                 "Shown by Glass",
@@ -1023,6 +1040,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cold_return": "Back after a break",
             "report_reread": "Background agents in a long session",
             "split_run": "Agent runs that ended too big",
+            "quiet_output": "Reading a saved output whole",
         },
     ),
     "prompting_glass": TableCopy(
@@ -1403,9 +1421,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "one message holding them all would cost one. Replies are counted by message, so calls already sent "
             "together count once. The last column prices only those re-reads, because a batched message still "
             "writes the tool results. It is an upper bound. It takes the lookups to be independent, and "
-            "some aren't, such as a read that needs the name a search found first.",
-            act="Ask for independent lookups in one message. Add \"Batch independent Read/Grep/Glob calls into a "
-            "single message\" to the agent definitions or workflow prompts at the top of the list.",
+            "some aren't, such as a read that needs the name a search found first. Replies an older version read "
+            "are left out.",
+            act="This is a measurement, not a recommendation. A shell command that chains several reads is already "
+            "a batch, so it is not counted as a single lookup.",
         ),
         columns={
             "agent_type": ("Where", "The main session, or the subagent type."),
@@ -1418,7 +1437,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Of them by shell command",
                 "Those that ran as a shell command, such as cat, grep or ls, not as a Read, Grep or Glob call.",
             ),
-            "runs": ("Runs of two or more", "Stretches of two or more single read-only calls in a row."),
+            "runs": (
+                "Runs of two or more",
+                "Stretches of two or more lookup replies in a row. A shell command that chains several reads "
+                "counts in a stretch, though not as a single call.",
+            ),
             "batch_cost": (
                 "Re-reads a batch would spare",
                 "What the replies after the first of each run paid to read the cache. One message holding the "
@@ -1566,6 +1589,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "redo_pct": ("Redone", "Messages whose work was redone, fixed or corrected next."),
             "met_pct": ("Met the goal", "From your feedback."),
             "saving": ("Lower effort would save, about", "Half the thinking on easy work at high effort or above."),
+            "newest_tag": (
+                "Newest tag",
+                "The date of Claude's newest tag in this row, when it is a week or more older than your newest message.",
+            ),
         },
         value_labels={
             f"{level}:{effort}": f"{level.capitalize()} work, {effort_label}"
@@ -1579,6 +1606,8 @@ TABLE_COPY: dict[str, TableCopy] = {
                 ("default", "default effort"),
             )
         },
+        # The date of the newest tag is for the row's detail, not the grid: the grid stays as it was.
+        lead_columns=["setup", "cycles", "avg_cost", "thinking_pct", "redo_pct", "met_pct", "saving"],
     ),
     "habits_setups": TableCopy(
         title="Best setup for each kind of task",
@@ -1841,6 +1870,26 @@ TABLE_COPY: dict[str, TableCopy] = {
             "outputs": ("Big outputs", "Replies that got 8,000 tokens or more back from it."),
             "tokens": ("Tokens", "Their size together."),
             "cost": ("Carrying them cost", "What keeping them in context cost."),
+        },
+    ),
+    "habits_summary_losses": TableCopy(
+        title="What summaries left out",
+        help=Help(
+            shows="Whether Claude said a conversation summary left out something the work needed, and how often the "
+            "transcript backs that up.",
+            read="Backed up means the work read or edited a file it had touched before the summary, or you "
+            "corrected it. This table appears only when the yes answers are backed up clearly more often than the "
+            "no answers.",
+            act="",
+        ),
+        columns={
+            "answer": ("Claude's answer", "Yes means Claude said the summary left out something the work needed."),
+            "answers": ("Answers", "Summaries Claude gave this answer to."),
+            "evidence_pct": (
+                "With a file read again or a correction",
+                "Answers where the work read or edited a file it touched before the summary, or you corrected it.",
+            ),
+            "share_pct": ("Share of answers", "Out of all the yes and no answers."),
         },
     ),
     "capture_usage": TableCopy(
@@ -4694,13 +4743,17 @@ TABLE_COPY: dict[str, TableCopy] = {
             "repriced at every known model, and the saving one tier down.",
             read="Only real cost is measured. The saving is the most you could save at today's usage, and it "
             "appears only when a cheaper tier exists. A subagent's saving counts only the runs its agent file "
-            "decides.",
+            "decides. The main session's leaves out sessions already on Sonnet or smaller, and those from before "
+            "their project moved there.",
             act="A saving above 10% and above $1.00 at list price, on at least 5 runs or 200 replies, becomes "
             "a recommendation.",
         ),
         columns={
             "agent_type": ("", "The main session or the subagent type."),
-            "spawns": ("Runs", "Main session: how many sessions. Subagents: how many times that type started."),
+            "spawns": (
+                "Runs",
+                "Main session: how many sessions had a priced reply. Subagents: how many times that type started.",
+            ),
             "priced_turns": ("Replies", "Model replies counted, including any with an unknown model."),
             "unpriced_turns": (
                 "Replies with an unknown model",
@@ -4721,8 +4774,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "lever": ("Where to change it", "The file and field that set this agent type's model."),
             "lever_runs": (
                 "Runs it decides",
-                "Main session: every session. Subagents: runs started without a model of their own, which follow "
-                "the agent file.",
+                "Main session: its sessions not already on Sonnet or smaller, and not from before their project "
+                "moved there. Subagents: runs started without a model of their own, which follow the agent file.",
             ),
             "lever_priced_turns": ("Replies on those runs", "Model replies on the runs that setting decides."),
             "lever_model": ("Model on those runs", "The model most of those replies used."),
@@ -4734,6 +4787,26 @@ TABLE_COPY: dict[str, TableCopy] = {
             "spawn_model_runs": (
                 "Model named at start",
                 "Runs given a model when they started. That model wins over the agent file.",
+            ),
+            "before_change_runs": (
+                "From before a move to Sonnet",
+                "Main session: sessions that started before their project's model moved to Sonnet or smaller. The "
+                "saving leaves them out.",
+            ),
+            "settled_runs": (
+                "Already on Sonnet",
+                "Main session: sessions that ran on Sonnet or smaller. The main session is never moved below "
+                "Sonnet, so the saving leaves them out.",
+            ),
+            "picked_runs": (
+                "Picked against the setting",
+                "Main session: sessions that ran on a larger model though their project's setting said Sonnet or "
+                "smaller. A settings change can't reach them, so the saving leaves them out.",
+            ),
+            "own_model_runs": (
+                "In a project with its own model",
+                "Main session: sessions of projects that set their own model, in a view of several projects. A "
+                "change to your user settings can't reach them, so the saving leaves them out.",
             ),
         },
         value_labels={
@@ -4771,21 +4844,25 @@ TABLE_COPY: dict[str, TableCopy] = {
         lead_columns=["saving_usd", "saving_pct", "observed_cost_usd", "agent_types"],
     ),
     "model_swap_agent_file_runs": TableCopy(
-        title="Runs each agent file's model decides, on other models",
+        title="Runs each model setting decides, on other models",
         help=Help(
-            shows="Per subagent type, only its runs started without a model of their own, repriced at every "
-            "known model.",
-            read="These are the runs a model line in the agent file would change. A what-if for that line "
-            "prices these runs.",
+            shows="For the main session, the sessions it counts. Per subagent type, its runs started without a "
+            "model of their own. Each is repriced at every known model.",
+            read="These are the runs a model setting would change. A what-if for that setting prices these runs. "
+            "For the main session, only a what-if for Sonnet does.",
             act="",
         ),
         columns={
-            "agent_type": ("", "The subagent type."),
-            "runs": ("Runs", "Runs started without a model of their own."),
+            "agent_type": ("", "The main session or the subagent type."),
+            "runs": (
+                "Runs",
+                "Main session: the sessions it counts. Subagents: runs started without a model of their own.",
+            ),
             "priced_turns": ("Replies", "Model replies on those runs."),
             "observed_model": ("Model used", "The model most of those replies used."),
             "observed_cost": ("Real cost", "Measured cost of those runs, at list price."),
         },
+        value_labels={"top-level": "Main session"},
     ),
     "model_swap_agent_models": TableCopy(
         title="Agents that ran on a larger model than their work needed",
@@ -4809,7 +4886,7 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Finding",
                 "No model set means the agent ran on your main session's model. Asked for a larger model means "
                 "the call named Opus or Fable. Decided and changed code means a review or judging agent also "
-                "edited files on a larger model.",
+                "changed code on a larger model. Writing its report, a plan or a log doesn't count.",
             ),
             "runs": ("Agents", "How many agents this row counts, one per run."),
             "roles": (
@@ -4830,7 +4907,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "saving_pct": ("Saving %", "That saving as a share of cost."),
             "write_turns": (
                 "Edit replies",
-                "Replies in which an agent edited a file or wrote one from the shell, across these agents.",
+                "Replies in which an agent edited a file or wrote one from the shell, across these agents. "
+                "On a decided-and-changed-code row, only the replies that changed code.",
             ),
             "workflow_runs": (
                 "Workflow runs",
@@ -4840,12 +4918,17 @@ TABLE_COPY: dict[str, TableCopy] = {
             "last_seen": ("Last", "The date of the most recent of these agents."),
             "later_compliant": (
                 "Later on Sonnet",
-                "Agents of the same kind that wrote code on Sonnet or a smaller model after the last one flagged here.",
+                "Later agents that wrote code on Sonnet or a smaller model after the last one flagged here. Blank when not measured.",
             ),
             "env_var_set": (
                 "Env var set",
                 "Whether CLAUDE_CODE_SUBAGENT_MODEL is set now: if it is, agents that name no model run on the one "
                 "it names.",
+            ),
+            "sessions_measured": (
+                "Sessions measured",
+                "On a decided-and-changed-code row: the sessions whose replies were read by this version, when under "
+                "half of the window.",
             ),
         },
         # The row key ("workflow-subagent:inherited") is labelled by the
@@ -5063,7 +5146,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             act="A hook that failed in many sessions isn't guarding anything. Check its command first.",
         ),
         columns={
-            "hook": ("Hook", "The hook's script, or the start of its command."),
+            "hook": (
+                "Hook",
+                "The hook's script, or the start of its command. A hook Claude Code recorded without its command "
+                "is named by its event, as in SubagentStop command hook.",
+            ),
             "events": ("Runs on", "The hook events it ran on, as named in settings.json."),
             "failed": ("Failed runs", "Runs that ended in an error."),
             "cause": ("Why it failed", "The most common reason, read from the error. Relative path: the script path is relative."),
@@ -5651,8 +5738,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "skills_listing_est": ("Skills list (est.)", "The list of skills Claude Code sent, estimated from its length."),
             "memory_files_est": (
                 "CLAUDE.md and rules (est.)",
-                "Your CLAUDE.md files and project rules, estimated from file size, and the auto memory "
-                "(MEMORY.md) the first replies carried. Blank without a settings snapshot.",
+                "Your CLAUDE.md files and project rules that load at the start, estimated from file size, and the "
+                "auto memory (MEMORY.md) the first replies carried. Rules with a paths: list and CLAUDE.md files "
+                "in subfolders load only when needed, so they are left out. A snapshot from before this version "
+                "counts every rule until a new session starts. Blank without a settings snapshot.",
             ),
             "custom_agents_est": (
                 "Your own agents (est.)",
@@ -5681,7 +5770,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "controllable_est": (
                 "What you can change (est.)",
-                "The skills list, CLAUDE.md and rules, and the MCP tools of servers you can turn off, together. "
+                "The skills list, the CLAUDE.md files and project rules that load at the start, and the MCP tools of servers you can turn off, together. "
                 "The part of the first call a setting can shrink. Servers built into the desktop app are left out.",
             ),
             "system_prompt_est": (
@@ -5874,12 +5963,18 @@ UNPRICED_MODELS_LABEL = (
 )
 
 
+#: The Data quality row for sessions whose digest an older parser wrote
+#: (``measured.older_sessions``), also not a ``Diagnostics`` field.
+OLDER_SESSIONS_LABEL = "Sessions read by an older version"
+
+
 def diagnostics_table(
     diagnostics: Diagnostics,
     hook=None,
     statusline=None,
     parser_notes: dict | None = None,
     unpriced: dict | None = None,
+    older: tuple[int, int] | None = None,
 ) -> Table:
     """The parse-quality counters as a plain-English table (the Data
     quality page, ``GET /api/diagnostics``). Rows keep the raw field name
@@ -5894,7 +5989,11 @@ def diagnostics_table(
     no price for to its ``turns`` and ``tokens`` (the report's
     ``pricing_unknown_models`` table); when it is not empty one more row
     lists them, since those replies cost $0 in every figure and nothing
-    else on this page says so.
+    else on this page says so. ``older`` is ``(n, m)`` from
+    ``measured.older_sessions`` (the report's ``meta.older_sessions`` and
+    ``meta.sessions``); when ``n`` is not 0 a last row says how many of the
+    window's sessions an older version read, since the newer figures leave
+    those out.
 
     With a hook or statusline row, ``row_groups`` splits the table in two:
     those rows describe your setup and every session in every project
@@ -5933,6 +6032,8 @@ def diagnostics_table(
             for model_id, counts in sorted(unpriced.items())
         )
         rows.append(["pricing_unknown_models", value, UNPRICED_MODELS_LABEL[1]])
+    if older and older[0]:
+        rows.append(["older_sessions", f"{older[0]:,} of {older[1]:,}", measured.older_sentence(*older)])
     return Table(
         name="data_quality",
         title="What could be read",
@@ -5951,7 +6052,8 @@ def diagnostics_table(
         value_labels={"snapshot_hook": "Config snapshot hook", "statusline": "Statusline (usage limits)"}
         | {key: label for key, (label, _) in DIAGNOSTIC_LABELS.items()}
         | {key: label for key, (label, _) in _PARSER_NOTE_LABELS.items()}
-        | {"pricing_unknown_models": UNPRICED_MODELS_LABEL[0]},
+        | {"pricing_unknown_models": UNPRICED_MODELS_LABEL[0]}
+        | {"older_sessions": OLDER_SESSIONS_LABEL},
     )
 
 

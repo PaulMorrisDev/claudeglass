@@ -11,13 +11,13 @@ workflow runs" row plus its per-run agent_count/phases columns \
 (workflows.workflows_detail) are what this corpus's own workflow \
 activity looks like; each phase in a scripted run tends to be a short, \
 tightly-scoped agent invocation rather than a long open-ended \
-conversation, so implementer agents in a workflow are capped at a \
-tighter maxTurns (40, below implementation-heavy's 60) and kept on the \
-same short-gap 5m "experimental.cacheTtl"/subagentPromptCacheTtl \
-pairing as implementation-heavy for the same reason (ttl.ttl_by_agent_type's \
+conversation, so the agent that writes code in a workflow is capped at \
+a tighter maxTurns (40, below implementation-heavy's 60), and \
+subagentPromptCacheTtl is kept at the same short-gap 5m as \
+implementation-heavy for the same reason (ttl.ttl_by_agent_type's \
 per-agent-type lever). No effortLevel override: a scripted workflow's \
 own phases already fix what each step does, so the effort-mismatch \
-rule's docs/general-dev concern (agents.topology_effort_tokens's \
+rule's docs and light-edit concern (agents.topology_effort_tokens's \
 thinking_share column) does not apply the same way here.
 
 PROF-11/F11: also the starting point for "ops" work Claude reported \
@@ -30,6 +30,5 @@ spans several purposes, so no catalogue profile is a clean 1:1 match.
 [settings]
 subagentPromptCacheTtl = "5m"
 
-[agents.claude-implementer]
+[roles.writer]
 maxTurns = 40
-"experimental.cacheTtl" = "5m"

@@ -51,6 +51,10 @@ def test_model_tier_unknown_family_returns_minus_one():
     assert model_tier(None, None) == -1
 
 
+def test_mythos_ranks_with_fable():
+    assert model_tier("claude-mythos-5-2") == model_tier("claude-mythos-5-1") == model_tier("claude-fable-5-2") == 3
+
+
 # -- detect_archetype ------------------------------------------------------
 
 

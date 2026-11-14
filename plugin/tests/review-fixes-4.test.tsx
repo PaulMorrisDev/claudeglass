@@ -202,7 +202,7 @@ function statusRig(on: On): { statuses: (string | undefined)[] } {
 const PLAN = { plan: 'p'.repeat(4000), isAgent: false, filePath: '/work/plan.md' }
 const LIMIT_LINE = /^5-hour limit runs out in about \d+ min at this pace$/
 
-test('D5: the urgent line comes back after the plan tip is cleared at a reply end with no measure of its own', async ($, on) => {
+test('D5: the plan approval puts nothing on the status line, so the urgent line stays through it', async ($, on) => {
   const world = prepare(on)
   const rig = statusRig(on)
   on('prompt.submit', (_$, e) => e as never)
@@ -217,13 +217,11 @@ test('D5: the urgent line comes back after the plan tip is cleared at a reply en
   const urgent = rig.statuses[rig.statuses.length - 1]
 
   await $.tool.call({ tool: 'ExitPlanMode', tool_use_id: 'plan' } as never)
-  expect(String(rig.statuses[rig.statuses.length - 1])).toMatch(/^This plan was approved/)
+  expect(rig.statuses[rig.statuses.length - 1]).toBe(urgent)
 
-  // The next reply ends with no figure from Claude Code in between: the tip is cleared and the urgent line is on again.
   await $.turn.start({ text: 'build it', turnId: 'build' })
   await mainStep($, world, 'build', 0, PRICED)
   await complete($, world, 'build')
-  expect(rig.statuses[rig.statuses.length - 1]).toMatch(LIMIT_LINE)
   expect(rig.statuses[rig.statuses.length - 1]).toBe(urgent)
   expect(faults(world)).toEqual([])
 })

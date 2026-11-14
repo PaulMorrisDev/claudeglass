@@ -508,3 +508,172 @@ def old_agent_note_text(ids, agent_type: str = "") -> str:
         "End your final report with one line, [result: done|partial|blocked key=word ...], using only these words:"
     )
 
+
+
+def reminder_led_prompt(typed: str = "") -> str:
+    """A message as the UserPromptSubmit hook sees it when Claude Code
+    puts a ``<system-reminder>`` block in front of what the user typed
+    (``typed``; nothing for a message that is only the reminder)."""
+    return "<system-reminder>\nThe user opened the session from a side panel.\n</system-reminder>\n" + typed
+
+
+# -- R10: digests an older parser wrote, whose transcripts are gone ------------
+
+#: The turn keys parsers 47 to 52 added: a 0.16.0 (parser 45) digest holds none.
+OLDER_TURN_KEYS = ("shell_code_write_count", "edit_code_count", "coach_tips", "coach_disowned", "background_waiting")
+
+
+def to_older_digest(data: dict, *, reads_before_46: dict[int, int] | None = None) -> dict:
+    """A 0.16.0 (parser 45) digest of the same transcript: no stamp, none of
+    the keys parsers 47-50 added, and ``shell_read_count`` per turn index
+    from ``reads_before_46`` (the older reading of a ``||`` fallback)."""
+    older = json.loads(json.dumps(data))
+    older.pop("parser_version", None)
+    for turn in older["turns"]:
+        for key in OLDER_TURN_KEYS:
+            turn.pop(key, None)
+        if reads_before_46 and turn["turn_index"] in reads_before_46:
+            turn["shell_read_count"] = reads_before_46[turn["turn_index"]]
+    return older
+
+
+def fallback_read_session(session_id: str, when) -> list[dict]:
+    """A session: a human message, a reply with one Bash
+    ``cat a.txt 2>/dev/null || cat b.txt`` (one read today; two before parser
+    46), its tool result and a reply "done". ``when`` is a datetime."""
+    from datetime import timedelta
+
+    def stamp(seconds: int) -> str:
+        return (when + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    common = {"sessionId": session_id, "cwd": "C:/work/proj"}
+    return [
+        user_str_line("look at the config", timestamp=stamp(0), **common),
+        turn_line(
+            content=[tool_use_block("Bash", f"tu_{session_id}", {"command": "cat a.txt 2>/dev/null || cat b.txt"})],
+            timestamp=stamp(1),
+            **common,
+        ),
+        user_block_line([tool_result_block(f"tu_{session_id}", "contents")], timestamp=stamp(2), **common),
+        turn_line(content=[{"type": "text", "text": "done"}], timestamp=stamp(3), **common),
+    ]
+
+
+def store_with_older_sessions(tmp_path: Path, sessions: dict[str, list[dict]], older: set[str]):
+    """A Store (on disk under tmp_path, never service.db) after one
+    FileWatcher tick over ``sessions`` (session id -> JSONL lines), with
+    each id in ``older`` rewritten through :func:`to_older_digest` and its
+    transcript deleted, then a second tick (so ``missing_since`` is set).
+    Returns ``(store, options)``."""
+    import os
+    import time
+
+    from claudeglass.service.contracts import ServeOptions
+    from claudeglass.service.store import Store, decode_digest_blob, encode_digest_blob
+    from claudeglass.service.watcher import FileWatcher
+
+    folder = tmp_path / "projects" / "proj-a"
+    folder.mkdir(parents=True)
+    settled = time.time() - 3600  # past the live-file window, so the watcher reads each file
+    for session_id, lines in sessions.items():
+        path = folder / f"{session_id}.jsonl"
+        write_jsonl(path, lines)
+        os.utime(path, (settled, settled))
+    options = ServeOptions(projects_root=tmp_path / "projects", config_dir=tmp_path / "config")
+    store = Store(tmp_path / "service.db")
+    store.open()
+    FileWatcher(store, options).run_once()
+    conn = store._connection()
+    for session_id in sorted(older):
+        row = conn.execute("SELECT id, digest_blob FROM transcripts WHERE session_id = ?", (session_id,)).fetchone()
+        data = json.loads(decode_digest_blob(row["digest_blob"]))
+        digest = to_older_digest(data, reads_before_46={t["turn_index"]: 2 for t in data["turns"] if t["shell_read_count"] == 1})
+        conn.execute(
+            "UPDATE transcripts SET digest_blob = ?, parser_version = 45 WHERE id = ?",
+            (encode_digest_blob(json.dumps(digest)), row["id"]),
+        )
+        (folder / f"{session_id}.jsonl").unlink()
+    conn.commit()
+    FileWatcher(store, options).run_once()
+    return store, options
+
+
+def store_with_gone_sessions(
+    root: Path, projects: dict[str, dict[str, list[dict]]], gone: set[str], *, older: set[str] = frozenset()
+):
+    """A world the CLI reads: ``<root>/projects/<folder>`` holds each
+    folder's sessions (session id -> JSONL lines), ``<root>/claude`` is an
+    empty Claude root, and ``<root>/cg/service.db`` is the store one
+    FileWatcher tick made of them (``--config-dir <root>/cg``, never the real
+    one). Then each id in ``older`` (a subset of ``gone``) has its digest
+    rewritten through :func:`to_older_digest`, each id in ``gone`` has its
+    transcript deleted, and a second tick marks them missing. The store is
+    closed. Returns ``(projects_root, config_dir, claude_root)``."""
+    import os
+    import time
+
+    from claudeglass.service.contracts import ServeOptions
+    from claudeglass.service.store import Store, decode_digest_blob, encode_digest_blob
+    from claudeglass.service.watcher import FileWatcher
+
+    projects_root = root / "projects"
+    config_dir = root / "cg"
+    claude_root = root / "claude"
+    config_dir.mkdir(parents=True)
+    claude_root.mkdir()
+    settled = time.time() - 3600  # past the live-file window, so the watcher reads each file
+    paths: dict[str, Path] = {}
+    for folder_name, sessions in projects.items():
+        folder = projects_root / folder_name
+        folder.mkdir(parents=True)
+        for session_id, lines in sessions.items():
+            path = folder / f"{session_id}.jsonl"
+            write_jsonl(path, lines)
+            os.utime(path, (settled, settled))
+            paths[session_id] = path
+    options = ServeOptions(projects_root=projects_root, config_dir=config_dir)
+    store = Store(config_dir / "service.db", config_dir=config_dir)
+    store.open()
+    FileWatcher(store, options).run_once()
+    conn = store._connection()
+    for session_id in sorted(older):
+        row = conn.execute("SELECT id, digest_blob FROM transcripts WHERE session_id = ?", (session_id,)).fetchone()
+        data = json.loads(decode_digest_blob(row["digest_blob"]))
+        digest = to_older_digest(data, reads_before_46={t["turn_index"]: 2 for t in data["turns"] if t["shell_read_count"] == 1})
+        conn.execute(
+            "UPDATE transcripts SET digest_blob = ?, parser_version = 45 WHERE id = ?",
+            (encode_digest_blob(json.dumps(digest)), row["id"]),
+        )
+    for session_id in sorted(gone):
+        paths[session_id].unlink()
+    conn.commit()
+    FileWatcher(store, options).run_once()
+    store.close()
+    return projects_root, config_dir, claude_root
+
+
+def recommendation_rule_ids() -> set[str]:
+    """Every rule id the service can send: each literal ``id="..."`` a
+    ``Recommendation(...)`` call passes in the package, and every key of a
+    module's ``RULES`` dict (one that builds its cards through a shared
+    helper passes the id on as a variable). ``quick_actions.py`` builds one
+    only to render a fix, never to send, so its placeholder id is left out.
+    The same scan as ``test_service_static._recommendation_ids``."""
+    import ast
+
+    ids: set[str] = set()
+    for path in (Path(__file__).resolve().parents[1] / "src" / "claudeglass").rglob("*.py"):
+        if path.name == "quick_actions.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Recommendation":
+                for kw in node.keywords:
+                    if kw.arg == "id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        ids.add(kw.value.value)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Dict):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(getattr(target, "id", None) == "RULES" for target in targets):
+                    ids.update(
+                        key.value for key in node.value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    )
+    return ids

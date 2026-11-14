@@ -18,10 +18,13 @@ The model, per hook label:
 - **Stopped failing.** A hook fixed mid-window keeps its old failures
   until they age out, so each failing hook is judged on what came after
   its last failure, in the projects it failed in: the calls to the tools
-  it failed on (a tool hook's clean runs leave no record), or its own
-  recorded runs (other events record their clean runs). At the rate it
-  used to fail, if at least ``quiet_failures`` more failures should have
-  followed and none did, it has stopped failing.
+  it failed on (a tool hook's clean runs leave no record), the sessions
+  that start and the summaries (a ``SessionStart`` hook's), the replies
+  that end an agent's run, in the agent types it failed in (a
+  ``SubagentStop`` hook's), or its own recorded runs (other events record
+  their clean runs). At the rate it used to fail, if at least
+  ``quiet_failures`` more failures should have followed and none did, it
+  has stopped failing.
 - **Runs seen working.** Successful runs Claude Code recorded, plus calls
   and stops the hook blocked. A tool hook that ran cleanly and let the
   call through leaves no record, so this undercounts those.
@@ -53,7 +56,7 @@ from typing import Callable
 from .capture_catalogue import HOOK_SCRIPT
 from .carry import boundary_turn_indices, carry_end_index, carry_rate_prefix
 from .model import Column, EventKind, Recommendation, ReportModel, Section, Table, TranscriptResult
-from .parse import BUILT_IN_TOOLS, tool_server
+from .parse import BUILT_IN_TOOLS, hook_run_label, tool_server, unnamed_hook
 from .pricing import Pricing, price_turn
 
 #: Characters per token, the approximation used throughout this report
@@ -169,6 +172,9 @@ class HookRow:
     failed_tools: set[str] = field(default_factory=set)
     #: The hook events of the failures that name no tool.
     failed_events: set[str] = field(default_factory=set)
+    #: The agent types its failures that name no tool fell in (``""`` for an
+    #: agent with no type); see :func:`_since`.
+    failed_agent_types: set[str] = field(default_factory=set)
     #: What it could have failed on in its projects, up to its last
     #: failure and after it (see :func:`_since`).
     chances_before: int = 0
@@ -259,8 +265,8 @@ def _events(tr: TranscriptResult, stats: HookStats, project: str) -> None:
     for event in tr.events:
         if event.kind != EventKind.HOOK_OUTPUT or event.subkind not in _RUN_SUBKINDS:
             continue
-        label = event.detail.get("script")
-        if not isinstance(label, str) or not label:
+        label = hook_run_label(event.detail)
+        if not label:
             continue
         row = stats.row(label)
         bucket = event.detail.get("hookName")
@@ -290,6 +296,8 @@ def _events(tr: TranscriptResult, stats: HookStats, project: str) -> None:
                 row.failed_tools.add(tool)
             else:
                 row.failed_events.add(bucket if isinstance(bucket, str) else "other")
+                if tr.meta.kind != "top-level":
+                    row.failed_agent_types.add(tr.meta.agent_type or "")
         elif event.subkind == "hook_blocking_error":
             row.stop_blocks += 1
             row.worked += 1
@@ -351,7 +359,10 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
     on. Neither does a SessionStart hook's, so its chances are the
     sessions that start and the summaries (each starts the session
     again; the summary a continued session inherits started the session it
-    came from, not this one). Any other hook's are its own recorded runs."""
+    came from, not this one). Nor does a SubagentStop hook's, which runs each
+    time an agent's run ends and is written into the agent's own transcript,
+    so its chances are the replies that end a run, in the agent types it
+    failed in. Any other hook's are its own recorded runs."""
     rows = [
         h for h in stats.hooks.values()
         if h.failed and h.last_failed_ts and project in h.failed_projects
@@ -394,13 +405,28 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
                     row.chances_since += 1
                 else:
                     row.chances_before += 1
-    by_label = {h.label: h for h in rows if h.tool_less and h.failed_events != {"SessionStart"}}
+    stops = [h for h in rows if h.tool_less and h.failed_events == {"SubagentStop"}]
+    if stops and tr.meta.kind != "top-level":
+        for row in stops:
+            if row.failed_agent_types and (tr.meta.agent_type or "") not in row.failed_agent_types:
+                continue
+            for turn in tr.turns:
+                if not turn.ts or turn.stop_reason in (None, "tool_use") or turn.is_synthetic:
+                    continue
+                if turn.ts > row.last_failed_ts:
+                    row.chances_since += 1
+                else:
+                    row.chances_before += 1
+    by_label = {
+        h.label: h for h in rows
+        if h.tool_less and h.failed_events not in ({"SessionStart"}, {"SubagentStop"})
+    }
     if not by_label:
         return
     for event in tr.events:
         if event.kind != EventKind.HOOK_OUTPUT or event.subkind not in _RUN_SUBKINDS or not event.ts:
             continue
-        row = by_label.get(event.detail.get("script"))
+        row = by_label.get(hook_run_label(event.detail))
         if row is None:
             continue
         if event.ts > row.last_failed_ts:
@@ -570,6 +596,21 @@ def _names(labels: list[str]) -> str:
     return f"{labels[0]}, {labels[1]} and {len(labels) - 2} more"
 
 
+def unnamed_note(label: str) -> str:
+    """The sentence that ends a card's action when the hook it is about
+    was recorded without its command (``parse.unnamed_hook``), else
+    ``""``. It starts with a space."""
+    unnamed = unnamed_hook(label)
+    if unnamed is None:
+        return ""
+    event = unnamed[0]
+    where = f"the hooks that run on {event}" if event else "the hooks"
+    return (
+        f" Claude Code recorded this hook without its command, so look at {where} "
+        "in your settings files and plugins."
+    )
+
+
 def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recommendation]:
     """``hook-failures``: hooks with at least ``min_failures`` failed runs
     that haven't stopped failing. One card for all of them; the action
@@ -590,7 +631,7 @@ def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recomme
         title = f"{len(failing)} of your hooks failed {failed:,} times: {_names(labels)}"
     sessions = int(_num(top.get("failed_sessions")))
     why = (
-        f"A hook that fails doesn't do its job. {labels[0]} failed in {sessions:,} sessions"
+        f"A hook that fails doesn't do its job. {labels[0]} failed in {sessions:,} session{'' if sessions == 1 else 's'}"
         + (f", most recently at {top['last_failed']}" if top.get("last_failed") else "")
         + (f": {cause}." if cause else ".")
     )
@@ -616,6 +657,7 @@ def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recomme
         action = "Make the hook faster, or raise its timeout in the hook's settings."
     else:
         action = "Run the hook's command yourself to see the error, then fix the script."
+    action += unnamed_note(labels[0])
     if len(failing) > 1:
         action += " Check the other hooks listed in the same way."
     evidence = [
@@ -650,6 +692,14 @@ def _rule_hook_block_resent(report: ReportModel, th: HookThresholds) -> list[Rec
         label = str(r["hook"])
         block_usd = _num(r.get("block_usd"))
         saving = block_usd * min(1.0, resent / blocks)
+        left = blocks - resent
+        not_resent = (
+            f" {left:,} blocked {'call was' if left == 1 else 'calls were'} not sent again; letting calls "
+            f"through with additionalContext would let {'that one' if left == 1 else 'those'} run too, and "
+            f"the saving shown does not subtract {'it' if left == 1 else 'them'}."
+            if left > 0
+            else ""
+        )
         out.append(
             Recommendation(
                 id="hook-block-resent",
@@ -659,12 +709,14 @@ def _rule_hook_block_resent(report: ReportModel, th: HookThresholds) -> list[Rec
                 title=f"Hook {label} blocks calls that Claude then sends again unchanged",
                 why=(
                     f"It blocked {blocks:,} calls, and Claude sent {resent:,} ({100.0 * resent / blocks:.0f}%) of them "
-                    "again just as they were. Each of those blocks cost a reply that changed nothing."
+                    "again just as they were. Each of those blocks cost a reply before the same call went through."
+                    + not_resent
                 ),
                 action=(
                     "If Claude only needs to know something before the call runs, let the call through and pass the "
                     "message as additionalContext in the hook's JSON output. To change the call instead, return "
                     "updatedInput. Either way, no reply is spent sending it again."
+                    + unnamed_note(label)
                 ),
                 lever=None,
                 saving_usd=saving if saving > 0 else None,
@@ -705,6 +757,7 @@ def _rule_hook_context_carry(report: ReportModel, th: HookThresholds) -> list[Re
                 action=(
                     "Make the hook's message shorter, or have it add context only when something needs Claude's "
                     "attention. If the hook comes from a plugin, turn it off for projects that don't need it."
+                    + unnamed_note(label)
                 ),
                 lever=None,
                 saving_usd=carry_usd,

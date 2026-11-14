@@ -306,7 +306,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import capture_tags
+from . import PARSER_VERSION, capture_tags
 from . import events as events_mod
 from . import jsonl
 from . import known_savers
@@ -314,7 +314,18 @@ from . import prompt_shape
 from . import shell_reads
 from . import shell_writes
 from . import testrun
-from .capture_catalogue import DOC_SUFFIXES, ERROR_BLOCKED_PATTERN, REPORT_THRESHOLDS, TIP_TEXT_MARKER
+from .capture_catalogue import (
+    BACKGROUND_LAUNCH_PATTERN,
+    BACKGROUND_SCAN_CHARS,
+    DOC_SUFFIXES,
+    ERROR_BLOCKED_PATTERN,
+    REPORT_THRESHOLDS,
+    TASK_NOTIFICATION_CALL_PATTERN,
+    TASK_NOTIFICATION_PREFIX,
+    TIP_TEXT_MARKER,
+    tips_in,
+)
+from .hooks import capture_hook
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -332,11 +343,12 @@ from .model import (
 #: Tool names whose first ``input.command`` becomes a turn's ``cmd_prefix``.
 _SHELL_TOOL_NAMES = ("Bash", "PowerShell")
 
-#: tool name -> the input key holding the path to check against the
-#: system temp dir for ``edit_kind`` ("scratch" vs "real"). The test is
-#: ``_is_temp_target``, the one a shell write target gets, so a
-#: backslashed, forward-slash, mixed-case or Git Bash form of the temp
-#: dir all match.
+#: tool name -> the input key holding the path to check against the temp
+#: folders for ``edit_kind`` ("scratch" vs "real"). The test is
+#: ``_is_temp_target``, the one a shell write target gets: the reading
+#: process's own temp folder and the system temp shapes
+#: (``_TEMP_SHAPE_RE``), in a backslashed, forward-slash, mixed-case or
+#: Git Bash form.
 _EDIT_TOOL_PATH_KEYS = {
     "Edit": "file_path",
     "Write": "file_path",
@@ -654,9 +666,112 @@ def path_hash(path_value: str, salt: bytes) -> str:
 def _temp_prefixes() -> tuple[str, ...]:
     """The normalised directory prefixes (see :func:`_normalize_path_for_hash`,
     so the lower-case, forward-slash and Git Bash ``/c/`` forms all match)
-    that count as temp for a shell write target or an edit tool's target:
-    the system temp dir, and the ``/tmp/`` Git Bash and Linux use."""
+    that count as temp wherever the transcript is read: the reading
+    process's own temp dir, and the ``/tmp/`` Git Bash and Linux use. The
+    other temp dirs are found by the shape of the path
+    (:data:`_TEMP_SHAPE_RE`), because the dir the process asks for
+    depends on who reads: a service, an export or a second machine has
+    another, and the same transcript would count differently."""
     return (_normalize_path_for_hash(tempfile.gettempdir()).rstrip("/") + "/", "/tmp/")
+
+
+#: Where each system keeps its temp files, by the shape of a normalised
+#: path, anchored at its root: Windows
+#: ``<drive>/users/<user>/appdata/local/temp/`` (any one folder for the
+#: user, so an 8.3 short name such as ``paulm~1`` matches),
+#: ``<drive>/windows/temp/`` and ``<drive>/windows/systemtemp/``, each also
+#: with a long-path prefix (``//?/c:/...``) and as WSL and Cygwin name the
+#: drive (``/mnt/c/...``, ``/cygdrive/c/...``); macOS
+#: ``/var/folders/<xx>/<id>/t/``, with or without ``/private``,
+#: ``/private/tmp/`` and ``/private/var/tmp/``; ``/tmp/`` and ``/var/tmp/``.
+#: A folder only named ``temp`` or ``tmp`` inside a project, or a path that
+#: reaches one of these below a project folder, matches none of them.
+_TEMP_SHAPE_RE = re.compile(
+    r"^(?:(?:(?://\?/)?[a-z]:|/(?:mnt|cygdrive)/[a-z])"
+    r"/(?:users/[^/]+/appdata/local/temp|windows/(?:system)?temp)"
+    r"|(?:/private)?/var/folders/[^/]+/[^/]+/t"
+    r"|/private/(?:var/)?tmp"
+    r"|/var/tmp"
+    r"|/tmp)/"
+)
+
+
+def _is_under_temp(normal: str, prefixes: tuple[str, ...]) -> bool:
+    """Whether a normalised path is in a temp dir: under one of ``prefixes``
+    (:func:`_temp_prefixes`) or of a shape in :data:`_TEMP_SHAPE_RE`."""
+    return normal.startswith(prefixes) or _TEMP_SHAPE_RE.match(normal) is not None
+
+
+#: Folders whose files are reports, plans and notes rather than code, and
+#: the folder an agent session keeps its scratch files in.
+_DOC_FOLDERS = frozenset({"plans", "reports", "docs"})
+_SCRATCH_FOLDERS = frozenset({"scratchpad"})
+#: Under one of those folders, only a file with one of these endings is a
+#: document: ``app/reports/views.py`` and ``docs/conf.py`` are code, and so
+#: are ``package.json`` and ``web/index.html`` anywhere else.
+_DOC_FOLDER_SUFFIXES = (".json", ".html", ".htm")
+#: Endings of a log, a table of results and a record-per-line ledger: a
+#: document wherever the file sits, because an agent that keeps a record of
+#: its work appends to one in the project or the folder it runs in.
+_DOC_SUFFIXES_ANYWHERE = (".log", ".csv", ".tsv", ".jsonl")
+#: A ``.json`` file with one of these in its name is a report or ledger,
+#: not code.
+_LEDGER_NAME_RE = re.compile(r"report|ledger|audit|finding|review|verdict|result", re.IGNORECASE)
+#: A normalised path that starts at a root: ``/...`` or ``c:/...``.
+_ABSOLUTE_RE = re.compile(r"^(?:/|[a-z]:/)")
+
+
+def _folders_below(normal: str, cwd: str | None) -> set[str]:
+    """The folder names that can make ``normal`` (a normalised target) a
+    document or scratch file: the folders below the deepest folder it
+    shares with the working folder ``cwd``. Inside the working folder that
+    is the folders below it, since the path the project itself sits at says
+    nothing about what its files are (a repository in ``~/docs/shop``).
+    Outside it, a file in another checkout of the same project (a worktree
+    agent writing the main checkout's ``docs/api/spec.json``) is still
+    judged by the folders below the project's own root, and one with
+    nothing in common counts every folder it sits under. The case this
+    gets wrong, and is allowed to: a project under a ``docs``-named folder
+    that shares no parent with the working folder reads as a document, a
+    missed card and not a false alarm. A relative target is below the
+    working folder by being relative: all its folders count. An absolute
+    target with no absolute working folder to measure from is judged by
+    the folder it sits in alone."""
+    folders = normal.rpartition("/")[0]
+    if not _ABSOLUTE_RE.match(normal):
+        return set(folders.split("/"))
+    root = _normalize_path_for_hash(cwd) if isinstance(cwd, str) and cwd else ""
+    if not _ABSOLUTE_RE.match(root):
+        return {folders.rpartition("/")[2]}
+    # The folders both paths start with, taken by name so that a UNC path's
+    # leading "//" and a drive on one side only need no special case.
+    mine, shared = folders.split("/"), 0
+    for ours, theirs in zip(mine, root.split("/")):
+        if ours != theirs:
+            break
+        shared += 1
+    return set(mine[shared:])
+
+
+def _is_code_write_target(target: str, prefixes: tuple[str, ...], cwd: str | None = None) -> bool:
+    """Whether a shell write target is code: not temp or scratchpad, and not
+    a document (a ``DOC_SUFFIXES`` file, a log, table or ``.jsonl`` ledger,
+    a ``.json``, ``.html`` or ``.htm`` file under ``plans/``, ``reports/``
+    or ``docs/``, or a report or ledger in ``.json``). ``cwd`` is the
+    transcript's first working folder: the folders that count are those
+    below the deepest one the target shares with it (:func:`_folders_below`).
+    ``Turn.shell_code_write_count`` and ``Turn.edit_code_count`` count only
+    these."""
+    normal = _normalize_path_for_hash(target)
+    if _is_under_temp(normal, prefixes):
+        return False
+    name = normal.rpartition("/")[2]
+    parts = _folders_below(normal, cwd)
+    if parts & _SCRATCH_FOLDERS or (parts & _DOC_FOLDERS and name.endswith(_DOC_FOLDER_SUFFIXES)):
+        return False
+    if name.endswith(DOC_SUFFIXES) or name.endswith(_DOC_SUFFIXES_ANYWHERE):
+        return False
+    return not (name.endswith(".json") and _LEDGER_NAME_RE.search(name))
 
 
 def _is_temp_target(target: str, prefixes: tuple[str, ...]) -> bool:
@@ -664,7 +779,7 @@ def _is_temp_target(target: str, prefixes: tuple[str, ...]) -> bool:
     an edit to your work, so ``Turn.shell_write_count`` leaves a shell
     write to one out, and ``Turn.edit_kind`` calls an edit tool's write to
     one "scratch"."""
-    return _normalize_path_for_hash(target).startswith(prefixes)
+    return _is_under_temp(_normalize_path_for_hash(target), prefixes)
 
 
 def detect_provider(model_id: str | None) -> str | None:
@@ -910,6 +1025,14 @@ class _PendingTurn:
     #: back like ``edit_hashes_by_tool_use``.
     shell_write_count: int = 0
     shell_writes_by_tool_use: dict[str, int] = field(default_factory=dict)
+    #: The part of ``shell_write_count`` aimed at code (see model.py's
+    #: ``Turn.shell_code_write_count``), with the part each tool_use added.
+    shell_code_write_count: int = 0
+    shell_code_writes_by_tool_use: dict[str, int] = field(default_factory=dict)
+    #: The edit-tool calls aimed at code (see model.py's
+    #: ``Turn.edit_code_count``), with the part each tool_use added.
+    edit_code_count: int = 0
+    edit_code_by_tool_use: dict[str, int] = field(default_factory=dict)
     #: Live-coaching addition (see model.py's ``Turn.config_edit_count``/
     #: ``Turn.agent_edit_files``): the edit calls and shell write targets
     #: inside a ``.claude`` folder (with the part each tool_use added, so a
@@ -935,9 +1058,12 @@ class _PendingTurn:
     #: last text block, parsed for tags when the turn is finalised and
     #: then dropped (see model.py's ``Turn.result_marker``/``Turn.cap``).
     last_text_tail: str | None = None
-    #: Prompting-habits addition: the reply's last text block holds a
+    #: Prompting-habits addition: a text block of the reply holds a
     #: ClaudeGlass tip (``Turn.coach_tip``).
     last_text_tip: bool = False
+    #: The hints whose own tip words any block of it holds, in the order
+    #: met (``Turn.coach_tips``).
+    last_text_tips: tuple[str, ...] = ()
     #: Parser-signals addition (see model.py's ``Turn.reply_asked``/
     #: ``admit_candidate``/``admit_caught``/``tip_disowned``): what the
     #: reply's text blocks said, as yes/no only. The reply's last text
@@ -1242,16 +1368,26 @@ def _plan_stats(plan: str) -> PlanStats:
     return PlanStats(steps=steps, files=events_mod.path_count(plan), chars=len(plan))
 
 
+def _with_tips(seen: tuple[str, ...], found: tuple[str, ...]) -> tuple[str, ...]:
+    """``seen`` with the hints of ``found`` it lacks added after it: every
+    block of one reply keeps its tips, in the order met and each once."""
+    return seen + tuple(hint for hint in found if hint not in seen)
+
+
 def _merge_content_blocks(
     pending: _PendingTurn,
     content,
     tool_use_names: dict[str, str],
     cwd: str | None = None,
     blocked_calls: dict[int, str] | None = None,
+    root_cwd: str | None = None,
 ) -> None:
     """Fold one line's tool_use blocks into ``pending``. ``cwd`` is the
-    line's own working directory, used only to resolve a shell command's
-    relative write targets before they are hashed. ``blocked_calls`` maps
+    line's own working directory, used to resolve a shell command's
+    relative write targets before they are hashed. ``root_cwd`` is the
+    transcript's first working directory: the folders below it decide
+    whether a write is to code (:func:`_is_code_write_target`), so a ``cd``
+    into ``reports`` does not turn its files into code. ``blocked_calls`` maps
     the key of each call a hook blocked earlier in the transcript to that
     hook's label: a call here with the same key is an unchanged re-send."""
     if not isinstance(content, list):
@@ -1263,7 +1399,10 @@ def _merge_content_blocks(
             # was quoted, not reported.
             text = block["text"]
             pending.last_text_tail = text[-_TAG_TAIL_CHARS:]
-            pending.last_text_tip = _TIP_TEXT in text
+            # The tip label is kept from any block: a reply's tip does not
+            # have to be in its last one (``tips_in`` reads every block too).
+            pending.last_text_tip = pending.last_text_tip or _TIP_TEXT in text
+            pending.last_text_tips = _with_tips(pending.last_text_tips, tips_in(text))
             pending.last_text_reminder = capture_tags.carries_reminder(text)
             # Parser-signals addition: what the block says, kept as yes/no.
             pending.last_text_asked = prompt_shape.ends_on_question(text)
@@ -1305,6 +1444,12 @@ def _merge_content_blocks(
                     pending.edit_scratch_found = True
                 else:
                     pending.edit_real_found = True
+                    # Counted before the .claude split, as the shell side
+                    # counts it: a worktree under .claude holds code.
+                    if _is_code_write_target(path_value, temp_prefixes, root_cwd):
+                        pending.edit_code_count += 1
+                        if isinstance(tool_use_id, str) and tool_use_id:
+                            pending.edit_code_by_tool_use[tool_use_id] = 1
                 if prompt_shape.is_config_path(path_value):
                     pending.config_edit_count += 1
                     if isinstance(tool_use_id, str) and tool_use_id:
@@ -1386,7 +1531,7 @@ def _merge_content_blocks(
                     pending.test_scopes_by_tool_use[
                         tool_use_id if isinstance(tool_use_id, str) and tool_use_id else f"#{len(pending.tool_use_ids)}"
                     ] = scope
-                outside_temp = config_targets = 0
+                outside_temp = config_targets = code_targets = 0
                 for target in shell_writes.write_targets(
                     command, powershell=name == "PowerShell", cwd=cwd if isinstance(cwd, str) else None
                 ):
@@ -1396,6 +1541,8 @@ def _merge_content_blocks(
                     # keeps no path.
                     if not _is_temp_target(target, temp_prefixes):
                         outside_temp += 1
+                        if _is_code_write_target(target, temp_prefixes, root_cwd):
+                            code_targets += 1
                         if prompt_shape.is_config_path(target):
                             config_targets += 1
                 if outside_temp:
@@ -1403,6 +1550,12 @@ def _merge_content_blocks(
                     if isinstance(tool_use_id, str) and tool_use_id:
                         pending.shell_writes_by_tool_use[tool_use_id] = (
                             pending.shell_writes_by_tool_use.get(tool_use_id, 0) + outside_temp
+                        )
+                if code_targets:
+                    pending.shell_code_write_count += code_targets
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.shell_code_writes_by_tool_use[tool_use_id] = (
+                            pending.shell_code_writes_by_tool_use.get(tool_use_id, 0) + code_targets
                         )
                 if config_targets:
                     pending.config_edit_count += config_targets
@@ -1444,6 +1597,7 @@ def _merge_content_blocks(
                     # The tip a ``plan_fresh_early`` note asked to end the
                     # plan with: the plan is the reply that shows it.
                     pending.last_text_tip = pending.tip_carried = True
+                    pending.last_text_tips = _with_tips(pending.last_text_tips, tips_in(plan))
         elif name == "AskUserQuestion" and isinstance(tool_use_id, str) and tool_use_id:
             if capture_tags.asks_for_feedback(tool_input):
                 pending.feedback_asks.append(tool_use_id)
@@ -1452,7 +1606,10 @@ def _merge_content_blocks(
 
 
 def _new_pending(
-    d: dict, tool_use_names: dict[str, str], blocked_calls: dict[int, str] | None = None
+    d: dict,
+    tool_use_names: dict[str, str],
+    blocked_calls: dict[int, str] | None = None,
+    root_cwd: str | None = None,
 ) -> _PendingTurn:
     message = d.get("message")
     message = message if isinstance(message, dict) else {}
@@ -1496,7 +1653,9 @@ def _new_pending(
         _apply_usage(pending, usage)
     _apply_cache_miss(pending, message)
 
-    _merge_content_blocks(pending, message.get("content"), tool_use_names, d.get("cwd"), blocked_calls)
+    _merge_content_blocks(
+        pending, message.get("content"), tool_use_names, d.get("cwd"), blocked_calls, root_cwd
+    )
     _merge_stop_reason(pending, message)
     return pending
 
@@ -1649,7 +1808,11 @@ def _merge_stop_reason(pending: _PendingTurn, message) -> None:
 
 
 def _merge_into_pending(
-    pending: _PendingTurn, d: dict, tool_use_names: dict[str, str], blocked_calls: dict[int, str] | None = None
+    pending: _PendingTurn,
+    d: dict,
+    tool_use_names: dict[str, str],
+    blocked_calls: dict[int, str] | None = None,
+    root_cwd: str | None = None,
 ) -> None:
     if not pending.is_synthetic:
         message = d.get("message")
@@ -1670,7 +1833,7 @@ def _merge_into_pending(
         _apply_usage(pending, usage)
     _apply_cache_miss(pending, message)
     content = message.get("content") if isinstance(message, dict) else None
-    _merge_content_blocks(pending, content, tool_use_names, d.get("cwd"), blocked_calls)
+    _merge_content_blocks(pending, content, tool_use_names, d.get("cwd"), blocked_calls, root_cwd)
     _merge_stop_reason(pending, message)
 
 
@@ -1737,8 +1900,15 @@ _ERROR_COMMAND_WRONG_RE = re.compile(
 
 
 #: A hook's block, as Claude Code words it: ``PreToolUse:Read hook error:
-#: [<command>]: <message>``. Group 1 is the hook's command.
-_HOOK_BLOCK_RE = re.compile(r"^\w+:[\w.-]+ hook error: \[(.+?)\]: ")
+#: [<command>]: <message>``. Group 1 is the hook's event, group 2 its command.
+_HOOK_BLOCK_RE = re.compile(r"^(\w+):[\w.-]+ hook error: \[(.+?)\]: ")
+#: The name Claude Code shows for a hook it records without its command:
+#: the hook's type and the word ``hook`` (``command hook``, ``http hook``),
+#: with `` 2`` added when an event runs several. The types are Claude
+#: Code's own, so a command such as ``make hook`` is still a command.
+_HOOK_DISPLAY_NAME_RE = re.compile(
+    r"(?:command|prompt|agent|http|mcp_tool|script|callback|function) hook(?: [0-9]{1,3})?"
+)
 #: A hook script's file name inside its command: the label a hook is
 #: shown by. The character class stops at path separators, so a
 #: directory never comes with it.
@@ -1748,7 +1918,8 @@ _HOOK_SCRIPT_RE = re.compile(
 )
 #: A hook that failed because its script or program wasn't there.
 _HOOK_NOT_FOUND_RE = re.compile(
-    r"does not exist|No such file|can't open file|cannot find|is not recognized as|command not found",
+    r"does not exist|No such file|can't open file|cannot find|is not recognized as|command not found"
+    r"|hook script appears to be missing",
     re.IGNORECASE,
 )
 _HOOK_TIMEOUT_RE = re.compile(r"timed? ?out", re.IGNORECASE)
@@ -1759,17 +1930,52 @@ _HOOK_UNEXPANDED_RE = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*%")
 _HOOK_PLAIN_STDOUT_CONTEXT_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
 
 
-def _hook_label(command) -> str | None:
+def _hook_label(command, event: str = "other") -> str | None:
     """The label a hook is shown by: its script's file name when the
     command names one, else the command's first 40 characters with paths
-    redacted (the ``cmd_prefix`` rule). ``None`` for no command."""
+    redacted (the ``cmd_prefix`` rule). ``None`` for no command. When the
+    "command" is Claude Code's own name for the hook (``command hook 2``),
+    the label is that name behind the hook's ``event``
+    (``SubagentStop command hook 2``), so hooks on different events don't
+    share one; an ``event`` that isn't a known one leaves the name alone."""
     if not isinstance(command, str) or not command.strip():
         return None
+    name = command.strip()
+    if len(name) <= _CMD_PREFIX_MAX_CHARS and _HOOK_DISPLAY_NAME_RE.fullmatch(name):
+        return f"{event} {name}" if event in events_mod._HOOK_EVENT_NAMES else name
     capped = _cap_command_for_redaction(command)
     script = _HOOK_SCRIPT_RE.search(capped)
     if script is not None:
         return script.group(1)
     return _redact_paths(_escape_newlines(capped))[:_CMD_PREFIX_MAX_CHARS].strip() or None
+
+
+def unnamed_hook(label) -> tuple[str, str] | None:
+    """``(event, display name)`` for the label of a hook Claude Code
+    recorded without its command (``("SubagentStop", "command hook 2")``,
+    the event ``""`` when the label has none), else ``None``."""
+    if not isinstance(label, str):
+        return None
+    event, _, name = label.partition(" ")
+    if event in events_mod._HOOK_EVENT_NAMES and _HOOK_DISPLAY_NAME_RE.fullmatch(name):
+        return event, name
+    return ("", label) if _HOOK_DISPLAY_NAME_RE.fullmatch(label) else None
+
+
+def hook_run_label(detail) -> str | None:
+    """The label of a hook run, from its event's ``detail``: its ``script``,
+    or ``None`` when it has none. A session whose transcript is gone keeps
+    the label it was read with before parser 53, the bare display name
+    (``command hook``); where the run's event is a known one, that name is
+    read behind it (``SubagentStop command hook``), so a hook's older and
+    newer runs are one hook. Any other label is returned as it is."""
+    label = detail.get("script") if isinstance(detail, dict) else None
+    if not isinstance(label, str):
+        return None
+    event = detail.get("hookName")
+    if isinstance(event, str) and event in events_mod._HOOK_EVENT_NAMES and unnamed_hook(label) == ("", label):
+        return f"{event} {label}"
+    return label
 
 
 def _hook_script_is_relative(command: str) -> bool:
@@ -1851,7 +2057,7 @@ def _annotate_hook_event(event: Event, attachment, context_queue: dict[tuple[str
     if command is None and isinstance(blocking, dict):
         # A Stop hook's block keeps its command inside ``blockingError``.
         command = blocking.get("command")
-    label = _hook_label(command)
+    label = _hook_label(command, key[1])
     if label is None:
         return
     event.detail["script"] = label
@@ -1882,7 +2088,7 @@ def _hook_block_label(content) -> str | None:
     if not isinstance(content, str):
         return None
     match = _HOOK_BLOCK_RE.match(content.strip()[:_ERROR_TEXT_CHARS])
-    return _hook_label(match.group(1)) if match else None
+    return _hook_label(match.group(2), match.group(1)) if match else None
 
 
 def _block_source(content) -> tuple[str, str]:
@@ -2099,12 +2305,16 @@ def _accumulate_tool_results(
                 shell_writes_made = current.shell_writes_by_tool_use.pop(tool_use_id, 0)
                 if shell_writes_made and kind in _SHELL_NOT_RUN_KINDS:
                     current.shell_write_count -= shell_writes_made
+                code_writes_made = current.shell_code_writes_by_tool_use.pop(tool_use_id, 0)
+                if code_writes_made and kind in _SHELL_NOT_RUN_KINDS:
+                    current.shell_code_write_count -= code_writes_made
                 # And the part of either inside a ``.claude`` folder, on the
                 # same terms as the hashes above.
                 config_made = current.config_edits_by_tool_use.pop(tool_use_id, 0)
                 if config_made and (name not in _SHELL_TOOL_NAMES or kind in _SHELL_NOT_RUN_KINDS):
                     current.config_edit_count -= config_made
                 # And the edit calls and file-changing commands, the same way.
+                current.edit_code_count -= current.edit_code_by_tool_use.pop(tool_use_id, 0)
                 calls_made, docs_made = current.edit_calls_by_tool_use.pop(tool_use_id, (0, 0))
                 current.edit_call_count -= calls_made
                 current.edit_doc_count -= docs_made
@@ -2263,6 +2473,64 @@ class _PlanWatch:
             self.mode = mode
 
 
+#: What a tool result says when its work went to the background, and how a
+#: task's finishing message names the call that started it: the capture
+#: hook's own patterns (``capture_catalogue``), compiled once.
+_BACKGROUND_LAUNCH_RE = re.compile(BACKGROUND_LAUNCH_PATTERN)
+_TASK_NOTIFICATION_CALL_RE = re.compile(TASK_NOTIFICATION_CALL_PATTERN)
+
+
+@dataclass(slots=True)
+class _BackgroundWatch:
+    """Which background work is still out, in memory only: the calls whose
+    tool result said the work went to the background, with no task
+    notification for the call since, each with where in the file its result
+    line began. ``capture_hook._background_pending`` line by line, with the
+    hook's own helpers; a message you typed while :meth:`waiting` has
+    ``Turn.background_waiting``.
+
+    The hook reads only the last ``capture_hook._COACH_PROMPT_TAIL_BYTES`` of
+    the file, so a launch that never got a notification (a dev server) stops
+    being seen once more than that lies between its line and the end of the
+    message: :meth:`waiting` drops it then. The distance is the file's bytes
+    as ``jsonl.LineStats`` counts them (exact for ASCII white space and valid
+    UTF-8), copied and replayed lines the parser skips included, as the hook
+    reads them too."""
+
+    pending: dict[str, int] = field(default_factory=dict)
+
+    def waiting(self, end: int) -> bool:
+        """Whether a launch is still within the hook's tail of a message
+        whose line ends ``end`` bytes into the file. A launch beyond it never
+        comes back, so it is forgotten."""
+        floor = end - capture_hook._COACH_PROMPT_TAIL_BYTES
+        if self.pending and any(start < floor for start in self.pending.values()):
+            self.pending = {call: start for call, start in self.pending.items() if start >= floor}
+        return bool(self.pending)
+
+    def see(self, d: dict, start: int = 0) -> None:
+        """One line of the transcript, in order, which began ``start`` bytes
+        into the file. A subagent's own line is not the session's work. A
+        notification ends the wait for the calls it names, or every wait when
+        it names none."""
+        if d.get("isSidechain"):
+            return
+        text = capture_hook._notification_text(d, TASK_NOTIFICATION_PREFIX)
+        if text is not None:
+            called = set(_TASK_NOTIFICATION_CALL_RE.findall(text))
+            self.pending = {call: at for call, at in self.pending.items() if call not in called} if called else {}
+            return
+        if d.get("type") != "user":
+            return
+        for block in capture_hook._blocks(d):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_result"
+                and _BACKGROUND_LAUNCH_RE.search(capture_hook._result_head(block, BACKGROUND_SCAN_CHARS))
+            ):
+                self.pending[str(block.get("tool_use_id") or "")] = start
+
+
 def _denial_before(events: list[Event]) -> str | None:
     """The bucket of the denial an interrupt follows, among the events
     since the last reply: a call you turned down first, then a dialog you
@@ -2396,6 +2664,7 @@ def _finalize_turn(
     human_acks: list[bool] = []
     # Parser-signals addition (see model.py's module docstring).
     human_adjust = human_remind = human_change = preceding_not_typed = False
+    background_waiting = False
     human_gos: list[bool] = []
     human_statuses: list[bool] = []
     human_handoffs: list[bool] = []
@@ -2462,6 +2731,7 @@ def _finalize_turn(
         human_adjust = human_adjust or bool(pending_event.detail.get("adjust"))
         human_remind = human_remind or bool(pending_event.detail.get("remind"))
         human_change = human_change or bool(pending_event.detail.get("change"))
+        background_waiting = background_waiting or bool(pending_event.detail.get("waiting"))
         human_gos.append(bool(pending_event.detail.get("go")))
         human_statuses.append(bool(pending_event.detail.get("status")))
         human_handoffs.append(bool(pending_event.detail.get("plan_handoff")))
@@ -2543,6 +2813,8 @@ def _finalize_turn(
         tool_errors_by_kind=dict(pending.tool_errors_by_kind),
         edit_target_hashes=tuple(pending.edit_target_hashes),
         shell_write_count=pending.shell_write_count,
+        shell_code_write_count=pending.shell_code_write_count,
+        edit_code_count=pending.edit_code_count,
         config_edit_count=pending.config_edit_count,
         agent_edit_files=pending.agent_edit_files,
         edit_call_count=pending.edit_call_count,
@@ -2590,6 +2862,7 @@ def _finalize_turn(
         human_plan_handoff=any(human_handoffs),
         human_question=bool(human_questions) and all(human_questions),
         human_change=human_change,
+        background_waiting=background_waiting,
         preceding_not_typed=preceding_not_typed,
         human_remind=human_remind,
         queued_prompts=queued_prompts,
@@ -2603,9 +2876,11 @@ def _finalize_turn(
         preceding_denials=preceding_denials,
         reply_asked=pending.last_text_asked and not pending.is_synthetic,
         coach_tip=pending.last_text_tip,
+        coach_tips=pending.last_text_tips,
         admit_candidate=pending.admit_found,
         admit_caught=("user" if pending.after_challenge else "self") if pending.admit_found else "",
         tip_disowned=pending.tip_carried and pending.tip_disown_found,
+        coach_disowned=pending.tip_disown_found,
         read_target_chars=tuple(pending.read_target_chars),
         shell_read_count=pending.shell_read_count,
         shell_read_chars=pending.shell_read_chars,
@@ -2892,6 +3167,9 @@ def _compaction_turn(replies: list[Turn], event: Event, summary_chars: int | Non
         speed=previous.speed,
         estimated="compaction",
         compaction_precomputed=precomputed,
+        # Made by this parser, so measured: a summary writes no code.
+        shell_code_write_count=0,
+        edit_code_count=0,
     )
 
 
@@ -3100,9 +3378,13 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: the summary that follows it is inherited too.
     inherited_boundary = False
 
+    #: The first working directory any line names: where the session began,
+    #: whatever a later ``cd`` makes of a line's own ``cwd``.
+    first_cwd: str | None = None
     current: _PendingTurn | None = None
     current_key: str | None = None
     plan_watch = _PlanWatch()
+    background = _BackgroundWatch()
     previous_turn: Turn | None = None
     previous_non_synthetic_ts: datetime | None = None
     priced_turn_count = 0
@@ -3126,6 +3408,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             seen_uuids.add(uuid_val)
 
         line_type = d.get("type")
+        # Coaching-occasions addition: a typed line never changes what is
+        # pending, so every line is seen before it is classified.
+        background.see(d, line_stats.line_start)
 
         line_ts = d.get("timestamp")
         plan_watch.at = line_ts if isinstance(line_ts, str) else ""
@@ -3134,6 +3419,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             if line_at is not None and (latest_at is None or line_at > latest_at):
                 latest_at, latest_ts = line_at, line_ts
 
+        if first_cwd is None:
+            cwd_raw = d.get("cwd")
+            if isinstance(cwd_raw, str) and cwd_raw:
+                first_cwd = cwd_raw
         if first_entrypoint is None:
             entrypoint_raw = d.get("entrypoint")
             if isinstance(entrypoint_raw, str) and entrypoint_raw:
@@ -3152,7 +3441,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                 recent_messages[-1]["answered"] = True
             key = _turn_key(d)
             if current is not None and key == current_key:
-                _merge_into_pending(current, d, tool_use_names, blocked_calls)
+                _merge_into_pending(current, d, tool_use_names, blocked_calls, first_cwd)
                 plan_watch.see_call(current)
                 continue
             if key in finalized_keys:
@@ -3181,7 +3470,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             attachments_for_current = attachments_since_current
             events_since_current = []
             attachments_since_current = []
-            current = _new_pending(d, tool_use_names, blocked_calls)
+            current = _new_pending(d, tool_use_names, blocked_calls, first_cwd)
             current.after_challenge = last_human_challenge
             plan_watch.see_call(current)
             (
@@ -3328,6 +3617,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                 event.detail["after"] = after
         elif event.kind in (EventKind.HUMAN_TEXT, EventKind.QUEUE_OPERATION) and event.detail.get("go"):
             plan_watch.approve()
+        if event.kind == EventKind.HUMAN_TEXT and background.waiting(line_stats.bytes_read):
+            # Coaching-occasions addition (see model.py's module docstring):
+            # a flag only, never the result text it was worked out from.
+            event.detail["waiting"] = True
         events.append(event)
         events_since_current.append(event)
         if notes.plan_feedback is not None:
@@ -3497,6 +3790,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         upfront_tool_chars=upfront_tools,
         upfront_request_tools=upfront_requested,
         mcp_connection_status=dict(mcp_servers.status),
+        parser_version=PARSER_VERSION,
     )
 
 
@@ -3576,7 +3870,7 @@ READ_KEYS: dict[str, frozenset[str]] = {
         }
     ),
     "attachment": _BASE_READ_KEYS | frozenset({"timestamp", "message", "attachment", "rendered"}),
-    "queue-operation": _BASE_READ_KEYS | frozenset({"timestamp", "message", "operation"}),
+    "queue-operation": _BASE_READ_KEYS | frozenset({"timestamp", "message", "operation", "content"}),
     "agent-setting": _BASE_READ_KEYS | frozenset({"agentSetting"}),
     "mode": _BASE_READ_KEYS | frozenset({"mode"}),
     "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage", "startTime"}),

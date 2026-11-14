@@ -15,7 +15,7 @@
 
 import { clear, el, goTo, pickProject, state, WINDOW_OPTIONS } from "./core.js";
 import { icon } from "./icons.js";
-import { fetchJson, loadProjects, loadQuickActions, loadRecommendations, loadReport, scopeKey, withWindow } from "./api.js";
+import { fetchJson, loadProjects, loadQuickActions, loadRecommendations, loadReport, markCards, scopeKey, withWindow } from "./api.js";
 import { COST_CARDS, findPage, GLOSSARY, goToHabit, plainText, REWORK_ITEM, termSlug, VIEW_KEYS, viewFor, viewForSection, viewLabel } from "./links.js";
 import { evidenceView, openEvidence } from "./evidence.js";
 import { button, copyToClipboard, SEVERITY_LABELS, statusLabel, toast } from "./ui.js";
@@ -182,6 +182,7 @@ function recommendationEntries(recs) {
         function () {
           copyToClipboard(prompt).then(function (ok) {
             if (ok) {
+              markCards("copied", [key]);
               toast("Prompt copied to the clipboard.");
               return;
             }

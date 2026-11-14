@@ -7,7 +7,7 @@
  */
 
 import { clear, el, goTo, onParams, renderedViews, state } from "./core.js";
-import { fetchJson, findSection, groupedTitle, loadInto, loadQuickActions, loadRecommendations, loadReport, postJson, withWindow } from "./api.js";
+import { fetchJson, findSection, groupedTitle, loadInto, loadQuickActions, loadRecommendations, loadReport, markCards, markCardsShown, postJson, withWindow } from "./api.js";
 import {
   AGENT_LABELS,
   basisChip,
@@ -84,7 +84,6 @@ export var RULE_AREA = {
   "spawn-task-prompt": "agents",
   "subagent-volume": "agents",
   "agent-report-size": "agents",
-  "agent-batch-probes": "agents",
   "run-split": "agents",
   "discovery-share": "habits",
   "limit-pressure": "habits",
@@ -159,7 +158,6 @@ var RULE_MECHANISM = {
   "spawn-tools-list": "startup",
   "spawn-task-prompt": "startup",
   "agent-report-size": "report",
-  "agent-batch-probes": "carried",
   "plan-rounds": "carried",
 };
 
@@ -259,6 +257,17 @@ export function groupRecommendations(recs, opts) {
     });
 }
 
+// The key of every card in these groups.
+function memberKeys(groups) {
+  var keys = [];
+  groups.forEach(function (group) {
+    group.members.forEach(function (rec) {
+      keys.push(rec.key || rec.id);
+    });
+  });
+  return keys;
+}
+
 export function groupTitle(group) {
   return groupedTitle(group.id, group.members.length, group.members[0].title);
 }
@@ -340,7 +349,8 @@ function filterRow(label, options, current, choose) {
 // (item, filters) -> bool, filters {name: value}, drawFilters(host,
 // filters, redraw), itemContent(item) -> nodes, renderDetail(item, pane,
 // memberKey), empty (text, or filters -> text, when a filter leaves
-// nothing), resetFilters(item) (show the item a link names).
+// nothing), resetFilters(item) (show the item a link names), drawn(items)
+// (after each draw, with the items the list now shows).
 function inbox(container, spec) {
   var root = el("div", { class: "inbox" });
   var listPane = el("div", { class: "inbox-list-pane" });
@@ -384,6 +394,7 @@ function inbox(container, spec) {
       });
       list.appendChild(el("li", null, [link]));
     });
+    if (spec.drawn) spec.drawn(shownItems);
   }
 
   // opts: address (say it in the address), focus (move focus to the
@@ -450,8 +461,10 @@ export function renderRecommendations(panel) {
   clear(panel);
   viewIntro(panel, "actions/recommendations");
   var noticeContainer = el("div", { id: "recommendations-notice" });
+  var bundleContainer = el("div", { id: "recommendations-bundle" });
   var container = el("div", { id: "recommendations-list" });
   panel.appendChild(noticeContainer);
+  panel.appendChild(bundleContainer);
   panel.appendChild(container);
   container.appendChild(loadingNode("Loading recommendations", "rows"));
 
@@ -472,6 +485,16 @@ export function renderRecommendations(panel) {
       );
     }
   });
+
+  // With a project picked, one prompt for all its open fixes (built on the
+  // server: it knows which cards are ignored or already fixed).
+  if (state.project) {
+    fetchJson(withWindow("/api/recommendations/prompt")).then(function (result) {
+      var data = result.body && result.body.ok === true ? result.body.data : null;
+      if (!data || !data.prompt || !container.isConnected) return;
+      bundleContainer.appendChild(bundleBlock(data, projectName(state.project)));
+    });
+  }
 
   // The key asked for before the list arrives is kept until it does.
   var wanted = state.params.id || null;
@@ -538,6 +561,11 @@ function recommendationInbox(container, allGroups, ctx) {
     label: "Recommendations",
     items: allGroups,
     filters: recFilters,
+    // The cards whose titles the list now draws were shown (an ignored one is
+    // on the Ignored list, which is not a to-do).
+    drawn: function (items) {
+      markCardsShown(memberKeys(items.filter(function (g) { return !g.ignored; })));
+    },
     empty: function (filters) {
       var shown = allGroups.filter(function (g) {
         return !!g.ignored === (filters.show === "ignored");
@@ -684,15 +712,92 @@ function shortSaving(text) {
   return String(text).replace(/\s+(over|across) the (period|spawns) in this report\.?$/, "");
 }
 
-function copyPromptButton(prompt, agent) {
-  return button("Copy", {
+// The toast when the bundle's copy is refused: the prompt is on the page.
+var BUNDLE_COPY_REFUSED = "Couldn't copy. The prompt is selected below: copy it from there.";
+
+// The note beside the bundle's Copy prompt. The first number is every open
+// fix; the rest say which of them are the fixes in M files (data.files), the
+// ones that span several files or set a standing rule (data.several) and the
+// ones with no file to edit (data.other). Each counts fixes, as the prompt
+// states them. A model change the card says to try first is left out
+// (left_out.trial), and the note says so.
+function bundleLine(data, name) {
+  var files = data.files.length;
+  var several = data.several || 0;
+  var other = data.other || 0;
+  var total =
+    data.files.reduce(function (n, f) {
+      return n + f.fixes;
+    }, 0) +
+    several +
+    other;
+  var head = total + (total === 1 ? " open fix" : " open fixes") + " for " + name;
+  var trial = (data.left_out && data.left_out.trial) || 0;
+  var tail = !trial
+    ? ""
+    : trial === 1
+      ? " The model change is left out: try it from its own card first."
+      : " The " + trial + " model changes are left out: try each from its own card first.";
+  if (!files && !several) return head + ", with no file to edit." + tail;
+  var text = head + ":";
+  if (files) text += " " + files + (files === 1 ? " file" : " files") + " to edit";
+  if (several) {
+    text += (files ? ", plus " : " ") + several + (several === 1 ? " that spans several files or sets a standing rule" : " that span several files or set a standing rule");
+  }
+  if (other) text += " and " + other + " with no file to edit";
+  return text + "." + tail;
+}
+
+// The bundle's row (its note and Copy prompt) and, under it, the room for
+// the prompt itself: shown only when the browser refused every way of
+// copying it, and cleared when a later press works.
+function bundleBlock(data, name) {
+  var shown = el("div", { class: "bundle-prompt" });
+  var row = el("div", { class: "bundle-row" }, [
+    el("p", { class: "notes", text: bundleLine(data, name) }),
+    copyPromptButton(data.prompt, null, "Copy prompt", "Copy prompt for every open fix in " + name, {
+      refused: BUNDLE_COPY_REFUSED,
+      after: function (ok) {
+        if (ok) {
+          clear(shown);
+          markCards("bundle", data.keys || []);
+        } else showBundlePrompt(shown, data.prompt, name);
+      },
+    }),
+  ]);
+  return el("div", null, [row, shown]);
+}
+
+// The prompt in the page's code-block style, named, focused and selected,
+// so a press of Ctrl+C or Cmd+C copies it.
+function showBundlePrompt(slot, prompt, name) {
+  clear(slot);
+  var pre = el("pre", { text: prompt, tabIndex: -1, role: "group", "aria-label": "Prompt for every open fix in " + name });
+  slot.appendChild(el("div", { class: "code-block" }, [pre]));
+  pre.focus();
+  var range = document.createRange();
+  range.selectNodeContents(pre);
+  var selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+// handling, when given, is for a prompt that is not in the detail pane:
+// refused is the toast's sentence when the copy fails, and after(ok) runs
+// once the result is known. card, when given, is the key of the
+// recommendation whose prompt this is: a copy that worked is recorded.
+function copyPromptButton(prompt, agent, text, label, handling, card) {
+  return button(text || "Copy", {
     variant: "quiet",
     icon: "prompt",
     class: "action-copy",
-    label: "Copy prompt for " + agentName(agent),
+    label: label || "Copy prompt for " + agentName(agent),
     action: function () {
       copyToClipboard(prompt).then(function (ok) {
-        toast(ok ? "Prompt copied. Paste it into Claude Code." : "Couldn't copy. Open the change below and copy it from there.", { tone: ok ? "success" : "warning" });
+        if (ok && card) markCards("copied", [card]);
+        if (handling) handling.after(ok);
+        var refused = handling ? handling.refused : "Couldn't copy. Open the change below and copy it from there.";
+        toast(ok ? "Prompt copied. Paste it into Claude Code." : refused, { tone: ok ? "success" : "warning" });
       });
     },
   });
@@ -743,7 +848,7 @@ function changesTable(group, focus, focusMember) {
         label: "Prompt",
         nowrap: true,
         render: function (row) {
-          return row.fix && row.fix.prompt ? copyPromptButton(row.fix.prompt, row.agent) : "—";
+          return row.fix && row.fix.prompt ? copyPromptButton(row.fix.prompt, row.agent, null, null, null, row.key || focus.key) : "—";
         },
       },
     ],
@@ -856,10 +961,14 @@ function renderRecommendationDetail(pane, group, memberKey, focusMember, ctx) {
     todo.push(el("p", { text: "Setting to change: " + focus.lever + " (" + (SCOPE_LABELS[focus.scope] || focus.scope) + ")" }));
   }
   if (focus.scope !== "managed") {
-    if (fixes.length === 1) todo.push(commandBlock(fixes[0], { heading: true }));
+    // A copy that worked is recorded against this card.
+    var copied = function () {
+      markCards("copied", [focus.key || focus.id]);
+    };
+    if (fixes.length === 1) todo.push(commandBlock(fixes[0], { heading: true, onCopy: copied }));
     else
       fixes.forEach(function (fix, i) {
-        var block = renderFix(fix, true);
+        var block = renderFix(fix, true, { onCopy: copied });
         if (i === 0) block.open = true;
         todo.push(block);
       });
@@ -1177,7 +1286,14 @@ function renderCheckEvidence(data, container, seen) {
       }),
     ];
     data.fixes.forEach(function (fix, i) {
-      var block = renderFix(fix, data.fixes.length > 1);
+      // A fix that came from a card records a copy against it.
+      var block = renderFix(fix, data.fixes.length > 1, {
+        onCopy: fix.card
+          ? function () {
+              markCards("copied", [fix.card]);
+            }
+          : null,
+      });
       if (i === 0 && data.fixes.length > 1) block.open = true;
       fixes.push(block);
     });

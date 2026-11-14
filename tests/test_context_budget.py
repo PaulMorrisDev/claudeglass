@@ -384,6 +384,31 @@ def test_baseline_table_uses_snapshot_for_memory_agents_mcp(tmp_path):
     assert_privacy(section)
 
 
+def test_memory_files_leave_out_scoped_rules_and_nested_claude_md(tmp_path):
+    """paths:-scoped rules and nested CLAUDE.md files load only when Claude
+    reads a matching file, so the at-start figure counts the unscoped rule
+    bytes and no nested bytes."""
+    layers = {
+        "claude_md": {"project_root_bytes": 4000, "user_bytes": 0, "project_local_bytes": 0, "nested_bytes": 50_000},
+        "rules": {"count": 10, "bytes": 54_000, "unscoped_bytes": 800},
+    }
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1"))
+    _, col, rows = _baseline_rows(stats, snapshots=[_snapshot("proj-a", content_layers=layers)])
+    assert rows["proj-a"][col["memory_files_est"]] == pytest.approx((4000 + 800) / 4)
+
+
+def test_memory_files_of_an_old_snapshot_count_all_rule_bytes(tmp_path):
+    layers = {
+        "claude_md": {"project_root_bytes": 4000, "user_bytes": 0, "project_local_bytes": 0, "nested_bytes": 0},
+        "rules": {"count": 2, "bytes": 800},
+    }
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _build_session(tmp_path, "s1", session_id="s1"))
+    _, col, rows = _baseline_rows(stats, snapshots=[_snapshot("proj-a", content_layers=layers)])
+    assert rows["proj-a"][col["memory_files_est"]] == pytest.approx((4000 + 800) / 4)
+
+
 def test_memory_files_adds_the_auto_memory_the_first_call_carried(tmp_path):
     """MEMORY.md is loaded in every session and is part of Claude Code's
     Memory files category; the snapshot's CLAUDE.md and rules figures leave
@@ -1452,7 +1477,7 @@ def test_the_diet_row_keeps_the_tools_called_in_a_tenth_of_the_spawns_and_sizes_
 
 
 def test_a_tool_called_in_under_a_tenth_of_the_spawns_moves_from_the_list_to_the_rarely_used(tmp_path):
-    stats = _spawn_many(tmp_path, 20, used=lambda n: "Bash" if n == 0 else "Read")
+    stats = _spawn_many(tmp_path, 20, used=lambda n: "Grep" if n == 0 else "Read")
     row = _diet_row(stats)
     assert row["keep_tools"] == "Read"
     assert row["rare_tools"] == "Bash, Grep, mcp__figma__*"
@@ -1504,6 +1529,22 @@ def test_the_diet_counts_the_tool_prefix_at_the_write_price_only_for_the_spawns_
     # Priced as if every spawn wrote it, the saving would be larger.
     every = 4 * row["dropped_definitions"] * (write + later * read) / 1_000_000
     assert row["saving_usd"] < every
+
+
+def test_the_write_price_follows_the_first_calls_own_cache_lifetime_split(tmp_path):
+    # Sonnet 5 lists 2.5 for a 5-minute write and 4.0 for a 1-hour write.
+    def write_price(cc_5m, cc_1h):
+        lines = _sub_lines(written=cc_5m + cc_1h)
+        usage = next(line for line in lines if line.get("message", {}).get("id") == "sub_1")["message"]["usage"]
+        usage["cache_creation"] = {"ephemeral_5m_input_tokens": cc_5m, "ephemeral_1h_input_tokens": cc_1h}
+        stats = context_budget.ContextBudgetStats()
+        stats.add_subagent(_sub(tmp_path, f"agent-{cc_5m}-{cc_1h}", lines), pricing=PRICING)
+        return _diet_row(stats)["write_price"]
+
+    assert write_price(0, 3_000) == pytest.approx(4.0)
+    assert write_price(1_000, 3_000) == pytest.approx((1_000 * 2.5 + 3_000 * 4.0) / 4_000)
+    # No split, or no write at all: the 5-minute price.
+    assert write_price(0, 0) == pytest.approx(2.5)
 
 
 def test_the_startup_breakdown_carries_the_read_price_and_the_calls_after_the_first(tmp_path):

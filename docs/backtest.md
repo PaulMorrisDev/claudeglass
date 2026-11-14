@@ -33,7 +33,11 @@ Each row is one settings key, on one occasion: `measure_key` (the raw
 settings key, e.g. `"model"`, `"subagentPromptCacheTtl"`), an optional
 `agent` (an agent-scoped change), and the *uncalibrated* `predicted_usd`
 — never a calibrated figure, so calibrating an already-calibrated
-number can never compound (see "Calibration" below).
+number can never compound (see "Calibration" below). A row also holds
+`priced_on`: the number the estimate is a share of, such as the observed cost it
+repriced or the tokens per start it takes out, or nothing (`null`) when the
+estimate names none. It is kept so that the check can price the same
+figure on the sessions after the change ("An estimate that says what it was priced on", below).
 
 ## The method, in five steps
 
@@ -93,7 +97,48 @@ number can never compound (see "Calibration" below).
    totals' *ratio*, not their exact dollar difference, as what the
    verdict below is built from.
 5. **Verdict**, one of a closed set: `as_estimated`, `smaller`,
-   `larger`, `opposite`, `too_little_data`.
+   `larger`, `opposite`, `too_little_data`, `not_measured`.
+
+### An estimate that says what it was priced on
+
+A row with a `priced_on` is not judged by steps 2 to 4. They compare an
+estimate for the whole report window with the cost per session or per
+spawn of an after-window of another length, and a short after-window reads
+"smaller" however good the estimate was. `outcomes.read_fix` reads such a
+row instead (see [exports](exports.md#reading-the-outcomes-block)): the
+sessions in the 14 days before the change and the 30 days after it,
+in each project the change applies to, cut by other changes to the same
+setting.
+
+- **A model, fast mode, cache lifetime or raised compaction window** is
+  measured by pricing the same replies both ways. The estimate is its saving as a
+  share of the cost it repriced, applied to what the replies after the change would
+  have cost without it. A model change is read only on the runs it decided: an
+  agent's runs its agent file decides, and main sessions that ran on the model
+  the change sets.
+- **An agent's tools, disallowed tools, CLAUDE.md, skills or MCP servers**
+  is measured on the context at the start of each agent run, on the one model
+  family both sides share, carried over every reply of the runs after the
+  change. The estimate is the tokens it said it takes out of each start,
+  carried the same way. The main session's CLAUDE.md, plugins, skills or MCP
+  servers are measured the same way, on the context at the start of each
+  main session. A start-context fix is measured only when its estimate takes out at least 45% of the start: where nothing changed, starts moved by up to 22% on their own.
+- **Any other setting** has no honest measure (cost per session moves with the
+  kind of work by more than an estimate's size), so the row is closed
+  out as `not_measured` ("Can't be checked from your sessions."), the same day
+  it is matched. Waiting does not change that.
+- **Fewer than 5 runs after the change** (5 on each side for the start-context
+  measure) waits, then closes out as `too_little_data` once the 30 days the
+  reading looks at after the change have run out. A later change in the project
+  does not close it sooner, since the reading cuts its own sides.
+
+Otherwise the reading's own measured and estimated amounts go through the
+same verdict test as below (there is no percentage). For these rows
+`measured_usd` is the share of the estimate that came true on the work after the
+change, on the estimate's own scale: the reading's measured amount over its
+estimated one, times the row's `predicted_usd`. The rows a back-test judges this way are the ones logged after
+the change that began recording `priced_on`; an older row is judged by
+steps 2 to 4, unchanged.
 
 ## Verdicts
 
@@ -103,7 +148,8 @@ number can never compound (see "Calibration" below).
 | `smaller` | The measured effect is under half the predicted one, or the before/after difference wasn't statistically significant. |
 | `larger` | The measured effect is more than double the predicted one. |
 | `opposite` | The measured direction is statistically significant and the opposite sign from the prediction (a predicted saving that cost more instead, or vice versa). |
-| `too_little_data` | Too few sessions on one side to tell, and the window has since closed (a later change point bounds it), so no more sessions can ever arrive to help. |
+| `too_little_data` | Too few sessions on one side to tell, and the window has since closed, so no more sessions can ever arrive to help: a later change point bounds it, or for an estimate that says what it was priced on, 30 days have passed since the change. |
+| `not_measured` | Nothing in your sessions can check this estimate: the setting has no honest measure, the estimate is too small a share of the start, or nothing prices the change exactly. It is closed at once when the setting or the estimate decides it, otherwise 30 days after the change. It has no measured amount and teaches calibration nothing. |
 
 A predicted amount under $0.01 (either way) is treated as "predicted no
 real effect": any measurable effect at all is `larger`; no significant
@@ -122,6 +168,8 @@ change point already bounds the after-window (so no more sessions can
 ever arrive for it). Otherwise the prediction is left unjudged and
 retried on a future call, so a change you just made isn't prematurely
 locked into a permanent negative verdict while data is still coming in.
+An estimate that says what it was priced on is not closed by a later change: it waits out
+the 30 days its reading looks at after the change.
 For a change to every project, only a later change to every project
 closes the window: a change made in one project bounds that project's
 after-window alone, and another project, or one not seen yet, can still
@@ -155,12 +203,17 @@ starts at the newest change in any project.
 
 Once at least `backtest.MIN_JUDGED_FOR_CALIBRATION` (3) of your own
 past predictions for the same `(agent, measure_key)` have been judged
-— excluding `too_little_data` ones, which have no measured amount —
+— excluding `too_little_data` and `not_measured` ones, which have no measured amount —
 `backtest.calibration_multipliers` averages their `measured_usd /
 predicted_usd` ratios into one multiplier per key. `whatif.estimate`
 applies a matching multiplier to that row's `saving_usd`, and its
 `fidelity` becomes `"calibrated"`. The prior is implicitly 1.0: a key
 with fewer than 3 judged points is estimated exactly as before.
+Only predictions that say what they were priced on count: an older row's ratio carries the
+bias of how it was measured (a window of another length), not the estimate's. For a
+counted row the ratio is the one the table shows: the share of the estimate that came
+true on the work after the change, on the estimate's own scale, so the length of the
+after-window does not bias it.
 
 The pre-calibration value and fidelity survive in every row as
 `uncalibrated_usd`/`uncalibrated_fidelity` (`null` when calibration

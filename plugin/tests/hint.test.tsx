@@ -20,20 +20,18 @@ test('the hint says nothing while the cache is warm', async ($, on) => {
   expect(faults(world)).toEqual([])
 })
 
-test('once the cache has expired the terminal gets a tail and the desktop keeps the engine hint after the mod\'s', async ($, on) => {
+test('once the cache has expired the hint line says nothing about it: that hint is off', async ($, on) => {
   const world = prepare(on)
   await $.session.start(START)
   await reply($, world, FIRST)
   await world.clock.advance(400 * 1000)
 
   const terminal = await hint($, world, 'terminal')
-  expect(String(terminal.tail)).toMatch(/^Idle \d+ min, so the cache expired \(est\.\): this send costs about \$\d/)
-  expect(String(terminal.tail)).toMatch(/\/clear first costs about \$\d/)
+  expect(terminal.tail).toBeUndefined()
   expect(terminal.hint).toBe('Enter to send')
 
   const desktop = await hint($, world, 'desktop')
-  expect(String(desktop.hint)).toMatch(/^Idle \d+ min, so the cache expired/)
-  expect(String(desktop.hint)).toMatch(/ · Enter to send$/)
+  expect(desktop.hint).toBe('Enter to send')
   expect(desktop.tail).toBeUndefined()
   expect(faults(world)).toEqual([])
 })

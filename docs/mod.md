@@ -142,7 +142,6 @@ applies:
 | Small changes in a row | Your third small change request in a row, each its own message. Listing the rest in one message costs less. |
 | Large paste | The draft is about 10,000 tokens or more. If it's a log, paste only the part that matters. |
 | Background work | Work is still running in the background and you are about to ask how it's going. Asking re-reads the whole session. |
-| Cache expired | You have been idle past the cache lifetime, and the context is 100,000 tokens or more. It says what this send costs, and what `/clear` first would cost. |
 | New topic | The draft is a new request that shares no words with the session, and the session carries 20,000 tokens or more beyond its startup. It says what each later reply would save after `/clear`. A message that carries on ("commit this", "now run the tests") isn't a new topic. |
 | No file named | You ask for a change in a session that carries under 20,000 tokens and has touched no file, and name none. |
 | Read everything | You ask Claude to read the whole codebase. Asking for one folder or file, such as "read all of src/api", doesn't count. |
@@ -150,18 +149,20 @@ applies:
 With `/glass detail` on, a warm send says what it costs ("Sending costs
 about $0.07") when nothing else needs saying.
 
-The first four are the coaching hints the capture hook used to give after
+The first three are the coaching hints the capture hook used to give after
 you sent the message, when the cost was already paid. They use the same
 thresholds, wording, rest rules and `muted` and `once` lists as the hook
 ([Coaching notes](coaching.md#when-the-claudeglass-mod-is-running)). The last
 three are the draft checks, which only the mod makes. All of them need
 **coaching notes** turned on, in a project the coaching setting covers
-(`claudeglass capture enable coaching_notes`).
+(`claudeglass capture enable coaching_notes`). Coaching hints that are off
+until they pass the replay don't show here. `claudeglass capture status`
+names them.
 
 A hint rests after it shows: 30 minutes, doubling each time it returns, up
-to 3 times. It comes back early only if what is at stake grows by half. A
-cache-expired hint rests 12 hours. While it applies, the hint stays on
-screen without asking the rest rule again.
+to 3 times. It comes back early only if what is at stake grows by half.
+While it applies, the hint stays on screen without asking the rest rule
+again.
 
 The mod looks at your draft's length and shape. It keeps the words of a draft
 in memory only, to compare them with the session's, and never writes them
@@ -190,10 +191,10 @@ before Claude summarises. It is cleared when neither holds, when the session
 ends and on `/clear`. While the limit forecast is on the line it is looked at
 again every minute, so the minutes follow the clock even when you are idle.
 
-When you approve a plan after a lot of planning, the status line says a
-fresh session would save tokens on every reply. That tip has the line while
-it shows, and nothing here overwrites it. It goes at the next reply or
-summary. Leaving plan mode counts as approving.
+When it is on, the tip that a fresh session would save tokens shows on the
+status line as you approve a plan. A coaching hint that is off until it
+passes the replay shows nowhere, and `claudeglass capture status` names
+those.
 
 ## The Checkpoint pane
 
@@ -518,8 +519,7 @@ none of them changes what you do at the moment of a summary:
 - Spend and the 5-hour limit on the band.
 - The notes at the end of a reply, and the cache-rebuild line.
 
-The capture hook gives the tips for agent reports and split runs, and the
-rating reminder, itself again ([With and without the mod](#with-and-without-the-mod)).
+The capture hook gives the rating reminder itself again ([With and without the mod](#with-and-without-the-mod)).
 
 ## What it reads and writes
 
@@ -529,7 +529,7 @@ or `claudeglass` under `CLAUDE_CONFIG_DIR`.
 | File | Who writes it | What it holds |
 |---|---|---|
 | `mod/settings.json` | ClaudeGlass: `update --finish`, then the dashboard's service after a report, and again at once when you rate a session or change the capture settings | Your billing mode, rate card, cache lifetime and characters per token. Also the coaching thresholds, your `muted` and `once` lists, whether coaching is on, "your usual", and where the dashboard answers. The mod only reads it. |
-| `mod/present/<session id>.json` | The mod | A heartbeat: the session id, the last time seen and the time of the session's last request. It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
+| `mod/present/<session id>.json` | The mod | A heartbeat: the session id, the last time seen, the time of the session's last request and `shows`, what the mod has seen drawn (`"hint"` once the hint line has been rendered). It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
 | `mod/sensor/<session id>.json` | The mod | What the mod showed and what you did next, as closed words and counts. |
 
 ### The sensor
@@ -582,16 +582,13 @@ wording and rest rules:
 
 | Hint | Without the mod | With the mod |
 |---|---|---|
-| Cache expired | After you send, when the cost is paid | The hint line, before you send |
 | Background work | After you send | The hint line |
 | Small changes in a row | After you send | The hint line |
 | Large paste | After you send | The hint line, where you judge whether it is a log |
-| Fresh start after a plan | After you approve a plan | The status line |
 
-Some hints stay with the hook, because they steer Claude or feed a skill, or
-because the mod no longer shows them. They are the fresh start tip in plan
-mode, the quiet output tip, the plan check, the facts line, the capture note,
-the tips for agent reports and split runs, and the rating reminder.
+The hints that stay with the hook are the plan check, the facts line, the
+capture note and the rating reminder. Some coaching hints stay off until
+they pass the replay, and `claudeglass capture status` names them.
 
 A hint the hook leaves out is not marked as shown. If the mod closes, goes
 stale or can't be read, the hint returns at once. Nothing changes without

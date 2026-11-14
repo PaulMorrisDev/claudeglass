@@ -25,7 +25,9 @@ command, its output or a full path.
 
 - **The hook's label.** The file name of the script its command runs
   (`session-digest.ps1`), or the command's first 40 characters with any
-  path hidden when it names no script. Context Claude Code adds itself is
+  path hidden when it names no script. A hook Claude Code records without
+  its command is labelled by its event and Claude Code's own name for it
+  (`SubagentStop command hook`). Context Claude Code adds itself is
   labelled `built-in`.
 - **Why a failed run failed.** Exit code 127 or a "not found" message is
   *script not found*; a timeout is *timed out*; anything else is
@@ -63,8 +65,10 @@ subagents alike):
   subagent counts in its session's project). A tool hook's clean runs
   leave no record, so its chances to fail are the calls to the tools it
   failed on (any MCP tool counts as one); a `SessionStart` hook's are
-  the sessions that start and the summaries; any other hook's are its
-  own recorded runs. If, at the rate it failed up to then, at least
+  the sessions that start and the summaries; a `SubagentStop` hook's are
+  the agent runs that ended, in the agent types it failed in, because
+  Claude Code records no clean run of it; any other hook's are its own
+  recorded runs. If, at the rate it failed up to then, at least
   `hooks_quiet_failures` (default 5) more failures should have followed
   and none did, it has stopped failing: the table says so and the
   failing-hooks card leaves it out.
@@ -96,32 +100,31 @@ imports and none of a script it is started on, so the code sits in a
 module to skip compiling it on every call. Uninstalling removes all
 three, and the compiled copy, with the data folder.
 
-Claude Code waits for a hook each time it runs one. This one is
-registered on UserPromptSubmit and on PostToolUse for `Read`,
-`WebFetch`, `WebSearch` and an approved plan, and never for the
-shell or MCP tools: they were about two thirds of the calls, and a size
-note after them was wrong too often to pay for the wait. `Grep` and
-`Glob` are left out as well. Claude Code keeps a `Grep` result whole only
-up to about 20,000 characters (about 5,000 tokens), and in 30 days of
-sessions no `Glob` result passed 18,200, so neither could reach the size a
-note applies to, yet `Grep` was the call the hook most often made Claude
-wait on. With coaching
-notes on, it is also registered for the `Agent` and `Workflow` tools, so
-it can tell you what each report from background work will cost to
-answer when you start it in a long session. It reads no size from their
-results and never says a large result is large. It is also registered
-for SubagentStop, where it prints nothing: it only notes that an agent
-run ended too big for one task, so the main session's next hook can say
-so. How long a call takes depends on the machine, and Python's own start
-is part of it. Setup > Capture and `claudeglass capture status` show the
-measured figure from your own sessions, which Claude Code times (about 124
-milliseconds a run on the author's Windows machine). The hook returns
-before anything else when a result is under the size a note could apply to. A `settings.json` written before
-the shell and MCP tools, or `Grep` and `Glob`, were dropped keeps
-starting it after them until `claudeglass update --finish` or
-`capture connect` rewrites the entry; it returns at once. The wait and
-the size measure are on the
-[coaching notes page](coaching.md#what-it-costs).
+Claude Code waits for a hook each time it runs one. This one is registered
+on UserPromptSubmit and on PostToolUse for `Read`, `WebFetch`, `WebSearch`
+and an approved plan, and never for the shell or MCP tools: they were
+about two thirds of the calls, and a size note after them was wrong too
+often to pay for the wait. `Grep` and `Glob` are left out as well. Claude
+Code keeps a `Grep` result whole only up to about 20,000 characters (about
+5,000 tokens), and in 30 days of sessions no `Glob` result passed 18,200,
+so neither could reach the size a note applies to, yet `Grep` was the call
+the hook most often made Claude wait on. With coaching notes on, it is
+also registered for the `Agent` and `Workflow` tools, so it can keep the
+newest reply's time and, when `split_run` is on, say that an agent run was
+too big for one task. It reads no size from their results and never says a
+large result is large. While `split_run` is on, it is also registered for
+SubagentStop, where it prints nothing: it notes that an agent run ended
+too big for one task, so the main session's next hook can say so. How long
+a call takes depends on the machine, and Python's own start is part of it.
+Setup > Capture and `claudeglass capture status` show the measured figure
+from your own sessions, which Claude Code times (about 124 milliseconds a
+run on the author's Windows machine). The hook returns before anything
+else when a result is under the size a note could apply to. A
+`settings.json` written before the shell and MCP tools, or `Grep` and
+`Glob`, were dropped keeps starting it after them until `claudeglass
+update --finish` or `capture connect` rewrites the entry; it returns at
+once. The wait and the size measure are on the [coaching notes
+page](coaching.md#what-it-costs).
 
 ### With the ClaudeGlass mod
 
@@ -129,7 +132,12 @@ The ClaudeGlass mod, a separate plugin that runs inside Claude Code, shows
 some of the hints itself, in its own panes, so they cost no context. It
 tells the hook which sessions it is running in with one small file per
 session, `mod/present/<session id>.json` in ClaudeGlass's data folder:
-`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>, "active": <seconds since 1970>}`.
+`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>, "active": <seconds since 1970>, "shows": ["hint"]}`.
+`shows` lists what the mod has seen drawn, and starts empty: `"hint"` appears once the
+hint line under the prompt has been rendered (the desktop app never renders it). The hook
+hands the mod `cold_return`, `status_poll`, `drip_feed` and `big_paste` only when `shows` lists
+`"hint"`, and `plan_fresh` only when it lists `"status"` (the status line); a file without the key,
+from an older mod, keeps the earlier rule.
 `active` is when the session last sent a request (0 before its first); the mod uses it to
 tell another session that is working from one that is only open, and the hook ignores it.
 The mod refreshes it every minute on a timer while the session is open, so
@@ -142,20 +150,17 @@ The hook reads the session's own file on a call that could draw a note
 session counts as having the mod when the file's `session_id` is its own
 name, its schema is 1 and `seen` is within the last 10 minutes; a session
 id that isn't letters, digits and `-` never counts. Then the hook leaves
-out the hints the mod shows, and doesn't note that it did: `cold_return`,
-`status_poll`, `drip_feed`, `big_paste` and `plan_fresh`. It doesn't work
+out the hints the mod shows (when `shows` allows it), and doesn't note that it did: `cold_return`,
+`status_poll`, `drip_feed`, `big_paste` and `plan_fresh`, less any that are off for everyone. It doesn't work
 them out either, so
 a call with the mod present is a little quicker (about 39 milliseconds
 against 43 on the author's machine, with a hint due). A hint the hook
 leaves out is not marked as shown, so it is there again as soon as the mod
 isn't: it was closed, the file went stale, or it is missing, unreadable or
-of another schema. The hook also reads the
-mod's sensor file for the session (`mod/sensor/<session id>.json`): a tip to
-start fresh that the mod showed within the cooldown rests `plan_fresh_early`,
-as one the hook showed itself would.
+of another schema.
 
-The hook keeps what steers Claude or feeds a skill: `plan_fresh_early`,
-`quiet_output`, the plan check, the facts line and the capture note.
+The hook keeps what steers Claude or feeds a skill: the plan check, the facts
+line and the capture note.
 
 The mod writes the other way too. Once a turn, it rewrites
 `mod/sensor/<session id>.json` with what it showed in that session: the
@@ -194,7 +199,9 @@ None of them changes a setting. Each gives a prompt to hand Claude.
   `hooks_resend_share_pct` (default 50%) of them again unchanged. It
   suggests letting the call through with `additionalContext`, or
   changing it with `updatedInput`. The saving is the share of the block
-  cost those re-sent calls took.
+  cost those re-sent calls took (the re-sent replies, not a net figure).
+  When some blocks were not sent again, the card says how many, and that
+  the saving does not subtract them.
 - **`hook-context-carry`** (severity `advice`) when a hook added context
   at least `hooks_min_contexts` (default 20) times, costing at least
   `hooks_min_context_usd` (default $1.00 at list price) to keep. It

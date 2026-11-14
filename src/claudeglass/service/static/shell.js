@@ -145,6 +145,7 @@ function captureStatusText(block) {
   if (!block) return "";
   if (!block.on) return "Capture: off";
   var title = block.title || block.level;
+  if (block.light) return "Capture: light sample";
   if (block.expired) return "Capture: " + title + ", ended";
   if (block.hooks_ok === false) return "Capture: " + title + ", hooks not connected";
   return "Capture: " + title;

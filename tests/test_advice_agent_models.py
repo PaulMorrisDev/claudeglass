@@ -296,6 +296,14 @@ def test_a_card_is_a_workflow_card_by_the_runs_a_script_started_and_not_by_its_a
     assert inherited.why.startswith("4 implementers and 1 fixer in 3 workflow runs started with no model")
 
 
+def test_the_fixed_asked_card_says_it_looks_fixed_and_does_not_point_at_claude_md():
+    card = _finish(_rec("agent-model-asked", agents=2, roles="fix 2", severity="info", variant="fixed", later=4))
+    assert "Since then, 4 later calls of this agent type named Sonnet or a smaller model, so this looks fixed." in card.why
+    assert "out of habit" not in card.why
+    assert "CLAUDE.md" not in card.action
+    assert card.estimated_saving
+
+
 def test_the_asked_card_reads_in_the_singular():
     card = _finish(_rec("agent-model-asked", agents=1, roles="fix 1", severity="info"))
     assert card.title == "1 workflow agent that wrote code was started on Opus 5.5"
@@ -375,8 +383,6 @@ def _every_card() -> list[Recommendation]:
         for agent_type, runs in (("workflow-subagent", 12), ("a-long-agent-type-name", 0)):
             for rule_id in ("agent-model-inherited", "agent-model-asked"):
                 for variant, severity, later in (("", "advice", 0), ("fixed", "info", 14)):
-                    if rule_id == "agent-model-asked" and variant:
-                        continue
                     cards.append(
                         _rec(
                             rule_id, agent_type=agent_type, variant=variant, severity=severity, later=later,
@@ -428,3 +434,35 @@ def test_the_cards_stay_through_finish_and_sort_advice_first():
     assert [r.id for r in out] == ["agent-model-inherited", "agent-model-asked", "agent-decide-apply"]
     assert [r.severity for r in out] == ["advice", "info", "info"]
     assert all(r.changes == [] and r.title and r.why and r.action for r in out)
+
+
+# -- built-in agent types -----------------------------------------------------------
+
+_BUILT_IN_GENERAL = (
+    " Or create ~/.claude/agents/general-purpose.md (it replaces the built-in general-purpose) and set model: sonnet in it."
+)
+
+
+def _built_in_keeping_start(agent: str) -> str:
+    return (
+        f" Or create ~/.claude/agents/{agent}.md (it replaces the built-in {agent}) and set model: sonnet in it. "
+        f"The built-in {agent} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to keep "
+        f"that. Leave it out if you want {agent} to follow your CLAUDE.md rules: each start then carries those "
+        "files too."
+    )
+
+
+def test_the_model_cards_for_a_built_in_agent_say_a_same_named_file_replaces_it():
+    # The asked card's call names the model, which beats a file's model: line,
+    # so the file is no lever there.
+    asked = _finish(_rec("agent-model-asked", agent_type="Explore", severity="info", workflow_runs=0))
+    assert "replaces the built-in" not in asked.action
+    # Explore and Plan start without CLAUDE.md files, and a file that replaces them keeps that only if it says so.
+    for agent in ("Explore", "Plan"):
+        assert _finish(_rec(agent_type=agent, workflow_runs=0)).action.endswith(_built_in_keeping_start(agent))
+    assert _finish(_rec(agent_type="general-purpose", workflow_runs=0)).action.endswith(_BUILT_IN_GENERAL)
+    assert "omitClaudeMd" not in _finish(_rec(agent_type="general-purpose", workflow_runs=0)).action
+    # Not for a custom agent, a workflow, or a card that looks fixed.
+    assert "replaces" not in _finish(_rec(agent_type="claude-implementer", workflow_runs=0)).action
+    assert "replaces" not in _finish(_rec(workflow_runs=2)).action
+    assert "replaces" not in _finish(_rec("agent-model-asked", agent_type="Explore", severity="info", variant="fixed", later=4)).action

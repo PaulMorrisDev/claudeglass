@@ -867,9 +867,13 @@ look, and the calls before the first edit) is shown beside it and never
 pushes a suggestion. The `spawn-claude-md` rule adds
 `habits_agents`' reported `rules_used`/`rules_unused` counts on top of
 its structural evidence (whether every measured spawn only searched or
-read files): it holds back suggesting `omitClaudeMd: true` once most of
-an agent's reported runs said they did use the rules, and otherwise
-cites how many said they didn't.
+read files): it holds back suggesting `omitClaudeMd: true` once at least as many of
+an agent's reported runs said they did use the rules as said they
+didn't (a tie holds it back), and otherwise cites how many said they
+didn't. An agent that edits files (its tools list names Edit, Write,
+MultiEdit or NotebookEdit; with no tools line, its spawns called one) with no run saying
+it didn't use them gets the card at `info`, telling you to move the
+rules it needs into its agent file first.
 
 The full table reference — every column of every `habits` and `capture`
 table — is in
@@ -911,12 +915,15 @@ for all three, so it can't be used. A workflow's agents, and every agent of
 a resumed workflow, are one run.
 
 **Single lookups.** A reply is a single lookup when it made one read-only
-call (a Read, a Grep, a Glob or a shell command that reads files) and
-nothing else. Every reply re-reads the whole context, so lookups sent one
-by one cost one re-read each, where one message holding them all would cost
-one. The saving counts the cache reads of the replies after the first of each
-stretch. A batched message still writes the tool results. It is an upper
-bound, since some lookups need the answer to the one before.
+call (a Read, a Grep, a Glob or a shell command that reads files once) and
+nothing else. One shell command that chains several reads is already a
+batch: it is not a single lookup, but it doesn't end a stretch, and its
+re-read counts in the saving. Every reply re-reads the whole context, so
+lookups sent one by one cost one re-read each, where one message holding
+them all would cost one. The saving counts the cache reads of the replies
+after the first of each stretch. A batched message still writes the tool
+results. It is an upper bound, since some lookups need the answer to the
+one before.
 
 **Starting context times replies.** What an agent starts with is read again
 on every reply. The product is an upper bound on what the starting context

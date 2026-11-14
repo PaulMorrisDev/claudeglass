@@ -9,9 +9,9 @@ operator planning directly, at most two agents spawned -- \
 workstyle.detect_archetype's single-model condition) rather than \
 handing implementation off (that combination is "implementation-heavy" \
 below, for the plan-high-implement-low archetype). \
-agents.topology_effort_tokens's "high" row (thinking_share column) is \
+agents.topology_effort_tokens's high, xhigh and max rows (thinking_share column) are \
 exactly what recommend.py's effort-mismatch rule reads to flag \
-*mis*-applied high effort on docs/general-dev work -- this profile is \
+*mis*-applied high effort on docs and light-edit work -- this profile is \
 the deliberate opposite case: a planning session is exactly the purpose \
 where a high thinking-token share is doing real work, so effortLevel is \
 raised to "high" rather than lowered. promptCacheTtl is pinned to 1h: a \

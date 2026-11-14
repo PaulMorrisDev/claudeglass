@@ -564,6 +564,17 @@ redundant read in `topology_redundant_reads`), is still more
 than 5% of observed cost (`1 - switch_pct`) and more than $1.00
 (`switch_usd`). The action says the figure is modelled, not observed.
 See [`docs/compaction-sim.md`](compaction-sim.md#the-report-section).
+Its change goes to the file that sets the window (a project's local file
+too), never a project's in a view of several projects, and it says a
+model's own window wins only when that window is in the same file or a
+higher one. The Overview compaction check's fix goes to the same file
+with the same note; under a managed window it asks your administrator.
+When a project or managed file's own window for the main session's model
+decides (`goals.main_own_window`), both change that entry there instead.
+The note's last sentence says how to change a model's own window in the
+file that holds it: /autocompact for your user file, an edit of the entry
+for a project file, your administrator for managed settings. A managed
+flat window carries no note unless the own window is managed too.
 Once the sweep has priced the main sessions, `compaction-churn` is
 dropped and `long-context-share` keeps only its workflow advice, whether
 or not `compaction-window` fires: the replay is the one answer on the
@@ -670,11 +681,15 @@ changes a figure.
   counts, such as "implement 4, fix 1"; "other" when no word fits),
   `model`, `cost_usd`, `cost_on_sonnet_usd`, `saving_usd`, `saving_pct`
   (these last three empty for `decide-apply`), `write_turns` (replies
-  that wrote code), `workflow_runs`, `first_seen`, `last_seen`,
-  `later_compliant` (later writers of the same kind on Sonnet or
-  smaller) and `env_var_set` (`yes` or `no`:
+  that wrote files; `decide-apply` counts only writes to code, not to reports, plans or ledgers), `workflow_runs`, `first_seen`, `last_seen`,
+  `later_compliant` (later writers on Sonnet or
+  smaller: the same kind for `inherited`, the same Agent-tool type
+  whose call named the model for `asked`; empty when not measured) and `env_var_set` (`yes` or `no`:
   `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's
-  environment variable names). It holds agent types, role words,
+  environment variable names). A last column, `sessions_measured` (`9 of 82`),
+  is there only when some, but fewer than half, of the window's sessions were
+  read by this version and a `decide-apply` row stands: that row's cell says how many
+  were, and the card cites it. It holds agent types, role words,
   counts, models, amounts and dates, and nothing else.
 
 `recommend.recommend()` runs the `model-tier` rule
@@ -717,6 +732,8 @@ replies wrote code.
   saved where you choose (this session, a project's CLAUDE.md or
   `~/.claude/CLAUDE.md`); no setting changes.
 - `agent-model-asked` (info) — the same, but the call named the model.
+  It takes `variant` `fixed` once `later_compliant_for_info` later
+  calls of the same Agent-tool type named Sonnet or smaller.
 - `agent-decide-apply` (info) — an agent whose word decides that also
   wrote code in at least `decide_apply_min_edit_turns` (default 3)
   replies. It has no saving: the fix is two agents, one to decide and
@@ -852,7 +869,8 @@ the agents/skills/workflows it spawns" with numbers only:
   type.
 - `topology_report_proxy` — a per-subagent report-size proxy by agent
   type, for transcripts where the parent-side tool_result isn't directly
-  available.
+  available. Workflow agents are left out (their report goes to the
+  workflow script, not the main session).
 - `topology_skills_rollup` — a skill's own direct cost plus every agent
   (and workflow) it spawned, recursively via `parentAgentId`: invocations,
   direct cost, spawned cost, mean spawns per invocation, mean report
@@ -998,7 +1016,9 @@ doesn't add it on top.
 
 Full write-up: [`docs/hooks.md`](hooks.md). Every transcript in the
 window, main sessions and subagents alike. A hook is named by its
-script's file name, never by its command or path.
+script's file name, never by its command or path. A hook Claude Code
+records without its command is named by its event and Claude Code's own
+name for it (`SubagentStop command hook`).
 
 - `hooks_summary` — one row (`your hooks`): hooks seen, hooks that
   failed, failed runs, time waited on failed runs, calls blocked, calls
@@ -1279,12 +1299,17 @@ columns of a table still divide by that table's own messages.
   another agent. A workflow's agents are counted
   here (their agent type is whatever the run named them, `workflow-subagent`
   when it named none) and read "again" against the message that started
-  the workflow.
+  the workflow. The two single-look shares leave out a run, or a main-session
+  message, whose digest a parser from before 46 wrote and whose transcript is
+  gone: it counted a `||` fallback as two reads. Numerator and replies both come
+  from the runs that were measured; the other columns keep every run.
 - `habits_effort_fit` — per reported level and effort (`easy:high`):
   messages, per message, thinking share of output, redone, met the
   goal, and for easy work at high effort or above, what lower effort
   would save (half the thinking, or a quarter of the output without
-  thinking).
+  thinking). The last column, the newest tag, holds the date of the row's
+  newest message when that is a week or more before your newest message,
+  and is empty otherwise.
 - `habits_setups` — per kind of task Claude reported, all levels
   together and then by how hard it said the work was (`all`, `easy`,
   `normal`, `hard`): each model family and effort the main session ran
@@ -1381,10 +1406,19 @@ columns of a table still divide by that table's own messages.
   row, and `batch_cost`: the cache reads of the replies after the first of
   each run, at list price. A batched message still writes the tool results
   and names the calls, so those are left out. That is an upper bound, since
-  it takes the lookups of a run to be independent. Rows with no single lookups are left out,
-  costliest first. It feeds `research_split`, `explore_research` and
-  `name_files`, "lookups before the first edit", and the
-  `agent-batch-probes` card. The Overview's **More detail** links to it.
+  it takes the lookups of a run to be independent. A shell command that
+  chains several reads (`grep a x; grep b y`) is already a batch: it is not
+  a single lookup, though it neither ends a run nor goes unpriced inside
+  one, and a `||` fallback (`cat a || cat b`) counts as one read. A digest a
+  parser from before 46 wrote, whose transcript is gone, counted that fallback
+  as two: its replies are left out of every column, `calls` included, so the
+  columns share one base. Rows with no single lookups are left out, costliest
+  first. It feeds `research_split`,
+  `explore_research` and `name_files`, "lookups before the first edit", and
+  is a measurement only: the `agent-batch-probes` card it once fed was
+  dropped because it did not predict batching misses (replayed against a
+  control group, it was right less often than wrong). The Overview's
+  **More detail** links to it.
 - `habits_agent_runs` — what agent runs did, by how they were started
   (`background`, `foreground`, `workflow`; a row is left out with no
   replies). Runs are counted per run (a workflow's agents are all one run,
@@ -1664,13 +1698,15 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   tokens of earlier work were in context.
 - `prompting_tips` — only once there are coaching notes: one row per hint
   whose note asks Claude to pass a tip on, hints told to pass it on every
-  time first, with `notes`, `shown` (replies to that message that ended
-  with a ClaudeGlass tip: those Claude passed on), `shown_pct`, `relay`
+  time first, with `notes`, `shown` (replies to that message that hold
+  that note's own tip words, `Turn.coach_tips`: those Claude passed on), `shown_pct`, `relay`
   (`relayed N of M` for a hint
   whose note orders the tip every time, so a tip left out was missed;
   `judged relevant N of M` for
   `big_paste`, where Claude decides whether the message calls for it and
-  a tip left out is no miss; empty for a hint the hook wrote no note for),
+  a tip left out is no miss; `no tip asked` for `quiet_output`, a note to
+  Claude alone, counted by its notes and by Claude calling it a misfire,
+  `Turn.coach_disowned`; empty for a hint the hook wrote no note for),
   `glass` (tips the ClaudeGlass mod showed itself, counted from its sensor
   files, `mod_events`), `where` (the places it showed them, with counts),
   `total` (`shown` plus `glass`: the tips shown by both), `misfires` (notes whose replies called
@@ -1680,7 +1716,13 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   said it was useful (empty with neither). Two wrong answers or misfires
   raise or mute a hint, and two `known` answers, more than `useful`,
   show it once a session (`coaching.tip_rules`, written to
-  `coaching.json` by the daily run).
+  `coaching.json` by the daily run). `shown` and its share count the
+  sessions this version read: a digest an older parser wrote, whose
+  transcript is gone, holds the tip fields in an older meaning, so its
+  session is left out of `shown`, `shown_pct`, the `relay` text and the
+  `quiet_output` misfires, while `notes` still counts every session.
+  Misfires of a hint that asks for a tip come from `Turn.tip_disowned`,
+  which no version changed, and still count.
 
   `prompting_glass` — only once the mod's sensor files hold a session of
   the report: a single row with `sessions` (your sessions with a message of
@@ -1783,11 +1825,16 @@ or made a scratch (temp-dir) edit; **OTHER** otherwise. A turn that both
 edits *and* runs a test/build command in the same turn lands in
 IMPLEMENTATION, since DISCOVERY/IMPLEMENTATION are checked first — noted
 here since a turn usually does one or the other, not both. A scratch
-edit is one to a file in the system temp dir or `/tmp/`, whether its
-path is written with backslashes, forward slashes or Git Bash's `/c/`,
-and in any case. Parses before `PARSER_VERSION` 36 matched only the
-temp dir's own spelling, so a forward-slash path on Windows counted as
-a real edit.
+edit is one to a file in a temp folder, whether its path is written with
+backslashes, forward slashes or Git Bash's `/c/`, and in any case. A temp
+folder is told by the shape of the path from its root: the Windows user
+and system Temp folders (also in long-path, WSL and Cygwin form), macOS's
+`/var/folders/.../T/` and `/private/tmp/`, and `/tmp/` and `/var/tmp/`.
+The reading machine's own temp folder counts too, so a service, an export
+or another machine counts the same edits. A folder named `temp` inside a
+project is not one. Parses before `PARSER_VERSION` 51 knew only the
+reading machine's temp folder, and parses before 36 matched only its own
+spelling, so a forward-slash path on Windows counted as a real edit.
 
 - `phases_summary` — turns, new tokens, cache-read tokens, output
   tokens, cost and cost share per phase.
@@ -2036,8 +2083,9 @@ one.
   snapshot was recorded), `not_recorded` (the rest; a spawn with no
   snapshot leaves its tool definitions here, since Claude Code writes the
   snapshot after the first call), `measured_pct`,
-  `write_price` (the first turn's model's 5-minute cache-write list
-  price per million tokens, used to price each part), and
+  `write_price` (the first turn's model's cache-write list price per
+  million tokens, weighted by that call's own 5-minute and 1-hour write
+  split, or the 5-minute price when it has none; used to price each part), and
   `claude_md_managed` (PROF-11/F13 — the share of `claude_md` that is
   Managed policy CLAUDE.md, which still loads regardless of
   `omitClaudeMd`; `goals._omit_claude_md`, `whatif._omit_claude_md` and
@@ -2048,11 +2096,13 @@ one.
   definitions and MCP servers the agent type was offered and called in
   fewer than a tenth of the spawns offered them: what a tools list on the
   agent would leave out. Tools Claude Code adds whatever the list says,
-  `StructuredOutput` and `SubagentHandback`, are not counted) and
+  `StructuredOutput`, `SubagentHandback` and `advisor`, are not counted) and
   `largest_tools` (the three largest tool definitions or MCP servers in the
   start on the measured model, each with its average size per spawn
   offered it, like `Bash 4.6k, figma 2.3k` (servers named as above); empty when no spawn
-  recorded its tools). The startup chart's "Tool definitions" tooltip
+  recorded its tools), `task_prompt_top_share` and `task_prompt_top_run` (the
+  share, 0 to 100, of the task prompt tokens that came from the largest single
+  workflow run, or session for spawns outside workflows, and its id). The startup chart's "Tool definitions" tooltip
   repeats it.
 - `agent_startup_tools` — per agent type, one row per tool (built-in) or
   MCP server it was offered and rarely used (called in fewer than a tenth
@@ -2062,7 +2112,11 @@ one.
   would take out of a start, on the model with the most spawns that
   recorded their tools. `keep_tools` are the tools and MCP servers (as `mcp__server__*`) called
   in at least a tenth of the spawns offered them, whether sent in full or
-  loaded when asked for. `rare_tools` are the rest. `dropped_definitions`,
+  loaded when asked for. `rare_tools` are the rest. For `workflow-subagent`,
+  Edit, Write, MultiEdit, NotebookEdit, Bash and PowerShell are never rare
+  once any of its spawns, on any model, called them: they go to
+  `keep_tools` and the amounts and saving are worked out without them.
+  `dropped_definitions`,
   `dropped_deferred` (the deferred tool names of the MCP servers left out),
   `dropped_skills` (the skills list, when Skill is left out) and
   `dropped_roster` (the agent list, when Agent is left out) are tokens per
@@ -2070,7 +2124,10 @@ one.
   which stay under a tools list and are not counted in the saving. Then the
   `later_calls`, `prefix_write_share` (the share of spawns that wrote the
   tool definitions), the two prices, `saving_usd` across the spawns
-  measured (list prices) and `window_days`. Whether the skills list and the
+  measured (list prices) and `window_days`. `rare_sizes` gives each
+  rarely used tool's definition, deferred names and instructions in tokens
+  per spawn (`tool=definition/deferred/instructions`), so a card can work
+  the amounts out again for the tools the agent's file still lists. `rule_kept_tools` names the tools that write files or run commands which a run of that agent called on any model, so `keep_tools` holds them; the card's why names apart only those still on the line it proposes, so a tool the agent's file no longer offers, or one its `disallowedTools` withholds, is never said to stay. Whether the skills list and the
   agent list really go with their tools is not in Claude Code's docs, so
   the `spawn-tools-list` card asks for a before and after check.
 - `agent_startup_servers` — per agent type (report only): one row per MCP
@@ -2094,7 +2151,8 @@ one.
 - `agent_startup_unused` — per agent type: spawns measured, the skills
   list size, spawns given it and spawns that called the Skill tool,
   spawns offered MCP tools and spawns that called one, the CLAUDE.md
-  size and spawns that only used search and read tools.
+  size, spawns that only used search and read tools and spawns that edited
+  files (called Edit, Write, MultiEdit or NotebookEdit).
 - `agent_startup_shared` — parts (CLAUDE.md by source, and the other
   parts) that at least half the agent types receive at about the same
   size, with where they come from and the total across spawns. A
@@ -2126,8 +2184,10 @@ when the corpus has no top-level transcripts at all.
   the first turn's own `human_prompt_chars`, over the calibrated
   characters per token), `skills_listing` (every `skill_listing`
   attachment's `size_chars` preceding the first turn), `memory_files` (the
-  joined schema-2 snapshot's `content_layers` CLAUDE.md family + rules
-  bytes, plus the median auto memory (`MEMORY.md`) the project's first
+  joined schema-2 snapshot's `content_layers` user and project CLAUDE.md
+  bytes + unscoped rules bytes (rules with a `paths:` key and nested
+  CLAUDE.md files load only on demand, so they are left out; a snapshot
+  without `unscoped_bytes` counts all rule bytes), plus the median auto memory (`MEMORY.md`) the project's first
   calls carried, which Claude Code loads in every session; `null` without
   a snapshot), `custom_agents` (labelled "Your own agents (est)": the
   snapshot's agent count out of the agent types the first calls' agent list
@@ -2518,6 +2578,7 @@ is guaranteed to cite a real, checkable number. Each `Recommendation`
 | `evidence` | one or more `(label, value, source_table, row_key)` tuples, each citing a real cell from a table already in the report — a test walks every recommendation this module produces and confirms the value it cites is genuine, not recomputed |
 | `why` | one plain sentence on why it matters |
 | `estimated_saving` / `saving_basis` | the saving phrased for your billing mode (`units.py`), and how it was worked out |
+| `saving_usd` / `priced_on` | the saving as a number, and the one number it was priced on (the tokens a start-context card says leave each start, or the observed cost a price card's saving is a share of); `None` when the card names no single figure. Shown in the JSON report and the dashboard's recommendations route, not in the Markdown, HTML or CSV reports |
 | `changes` | the concrete edits proposed: `SettingChange` (`target` `settings`/`agent`, `key`, `agent`, `value` or a `suggested` description when the value needs your judgement, `current`, `note`, `unconfirmed`, `new_agent_file`) |
 | `fixes` | per change, from `fixes.py`: a six-part `explainer`, an `apply --set ... --dry-run` `command` (when the value is known), a `command_warning` when the command alone isn't enough, and a `prompt` to give Claude |
 
@@ -2525,11 +2586,13 @@ The dashboard never changes your Claude Code settings. Each change comes
 with the prompt and, for a plain setting, the command. The command's
 `--dry-run` shows the diff first, and a real run prints how to undo it.
 
+A plugin's agent (`plugin:agent`) has no file of yours, so a card that would edit its file is information only, and the model card leaves it out.
+
 Rules implemented today, in the order they run. From `recommend.py`'s
 own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `notification-invalidation`, `batch-instructions`, `subagent-volume`,
 `compaction-churn`, `long-context-share`, `cache-read-dominance`,
-`baseline-bloat`, `agent-report-size`, `agent-batch-probes`, `plan-rounds`, `spawn-cost` (for agent types
+`baseline-bloat`, `agent-report-size`, `plan-rounds`, `spawn-cost` (for agent types
 without `agent_startup` data, and only when the mean first call is over
 40k tokens and at least 5k tokens of its tool definitions are rarely or
 never used; otherwise the per-part `spawn-tools-list`,
@@ -2554,28 +2617,48 @@ and managed-settings awareness (see
 `report --patch-set` renders the whole set as unified-diff-style text
 via `recommend.render_patch_set`, showing the before and after value for
 each lever. A managed-scope lever is marked
-`# managed by policy -- shown for reference only`.
+`# managed by policy -- shown for reference only`. A new Explore.md or Plan.md
+gets a comment line and an `omitClaudeMd: true` line, because Claude Code
+starts those two without CLAUDE.md files and only that line keeps it so.
+
+The `spawn-tools-list`, `spawn-unused-skills`, `spawn-unused-mcp`, `spawn-claude-md` and `agent-model-inherited` cards for a built-in agent type with no agent file (general-purpose, Explore, Plan, statusline-setup) say a file named like the agent replaces the built-in, so the change goes there, and name the file their fix writes: `~/.claude/agents/<agent>.md`, or `.claude/agents/<agent>.md` for a project fix. The `agent-model-asked` card does not: a model named in the call overrides an agent file's `model:` line. Claude Code starts Explore and Plan without CLAUDE.md files, so for those two the other cards and their prompts say so, say to set `omitClaudeMd: true` in the new file to keep that, and say you can leave it out if you want the agent to follow your CLAUDE.md rules, at the cost of carrying those files on every start.
 
 With metrics capture on, some rules read the `habits` section too. Each
 cites the cell it used:
 
 - `effort-mismatch` comes straight from `habits_effort_fit` when five or
   more messages Claude reported easy ran at high effort or above with
-  a thinking share over the threshold. Otherwise it falls back to the
-  corpus-wide approximation.
-- `spawn-claude-md` is held back when more of an agent type's runs said
-  they used CLAUDE.md than said they didn't, and cites the ones that
-  didn't.
-- `agent-batch-probes` is a card per agent type (not the main session)
-  from `habits_probes`, when the type made 100 replies or more, a
-  quarter or more of them a single read-only call, and half of
-  `batch_cost` is $1 or more (`agent_batch_probes_min_replies`,
-  `_share_pct`, `_min_saving_usd` and `_saving_factor`). `batch_cost` is the
-  re-reads only: the tool results are written once either way. The halving is
-  because some lookups of a run depend on one another. It cites the four
-  cells it used and offers one line to add to the agent's definition or
-  the workflow prompt that starts it: "Batch independent Read/Grep/Glob
-  calls into a single message".
+  a thinking share over the threshold. Otherwise it falls back to a
+  corpus-wide approximation: it fires only when docs-or-light-edit sessions
+  are more than half of all sessions (`effort_mismatch_light_share_pct`,
+  50, unvalidated) and the thinking share over the high, xhigh and max
+  rows together (weighted by output tokens) is over the threshold. It cites
+  each of those rows' own thinking share and output tokens, and the card says
+  "N of M (P%)" and the pooled percent. The card offers no settings change
+  in user settings or while `CLAUDE_CODE_EFFORT_LEVEL` is set: Opus 5.5 and
+  later ignore a user `effortLevel`, so it asks for `/effort medium`. In a
+  project, local or managed file it changes `effortLevel` there, or the
+  model's own entry when that file decides by it (the file
+  `goals.main_effort_reading` names, config-layers.md's view rule). Outside the
+  variable's case the card closes once the settings already give the main
+  session's model `low` or `medium` (`goals.main_effort_reading`): its own
+  `modelSettings` entry, matched by canonical id, unless a flat `effortLevel`
+  in a higher file wins; a flat level in a project, local or managed file;
+  a flat user level only on Opus 5, Fable 5.1, Fable 5 and earlier models.
+  A session on two models is read for its first one. In a view of several
+  projects a project file's level is not read: the snapshot is one
+  project's, so the card reads your user file's level, stays open without
+  one and offers the user path. The card is dropped, not shown as fixed, and Your changes
+  shows the saved setting as a settings change. The Overview effort check follows the card
+  (`quick_actions._main_effort_already_set`). While the variable is set and
+  no main-session effort card is open, the check offers no setting for the
+  main session and says the variable decides
+  (`quick_actions._main_effort_left_to_env`). Under a managed effort level
+  above medium and no effort card it says your administrator sets it
+  (`quick_actions._main_effort_left_to_managed`).
+- `spawn-claude-md` is held back when at least as many of an agent type's
+  runs said they used CLAUDE.md as said they didn't (a tie holds it back),
+  and cites the ones that didn't. With no runs that said, it still fires.
 - `plan-rounds` is one card, from `habits_plan_rounds`, when at least 5
   plans were approved, 30% or more of them were sent back first, 30% or
   more of the rounds read as a question, a critique or a doubt, and the
@@ -2598,13 +2681,36 @@ none writes a file.
   file; `general-purpose` is warned that a list limits every spawn that
   names no type. Workflow agents get a workflow-script variant: pass an
   `agentType` that names an agent file with the list. It says that
-  `StructuredOutput` and `SubagentHandback` are added whatever the list
-  says, and asks for one spawn before and one after on the same model.
-  It replaces the old `spawn-read-only-tools`.
+  `StructuredOutput`, `SubagentHandback` and `advisor` are added whatever
+  the list says (none is ever on the suggested line or in the rarely used
+  list), and asks for one spawn before and one after on the same model.
+  Edit, Write, MultiEdit, NotebookEdit, Bash and PowerShell stay on a
+  workflow line (and out of the rarely used list) once any workflow agent
+  called them, on any model; the saving is for the final list.
+  It replaces the old `spawn-read-only-tools`. When the agent's current
+  `tools:` line is known (a real list or comma string, with parentheses such
+  as `Agent(...)` kept whole), only the rarely used tools still on it are
+  left out, the amount is worked out again from each one's size, and the
+  card goes if that is under the 5,000-token bar. A tool to keep that the
+  line lacks is not added; the card says so. With no snapshot, no `tools:`
+  line, a built-in type, a workflow agent or a new agent file, every tool
+  counts as present and the card is as it was.
+- `spawn-claude-md` for a writer agent (its `tools:` line names Edit,
+  Write, MultiEdit or NotebookEdit; with no `tools:` line, its own spawns
+  called one. A known read-only line stays read-only after a stray edit) with no run saying it
+  didn't use CLAUDE.md is kept at `info`. Its why and fix start with
+  "move the rules it needs into its agent file first, then omitClaudeMd",
+  and say how many of its spawns edited files. Read-only agents are
+  unchanged. Its `saving_usd` is the figure in `estimated_saving`.
+- `spawn-task-prompt` is gated and priced on the mean task prompt. When one
+  workflow run (or session, outside workflows) holds half or more of the
+  task prompt tokens, the why names it ("one workflow run, wf_..." or "one
+  session, ...") and its share.
 - `spawn-unused-skills` offers the tools list first (leave Skill off it)
   and keeps `disallowedTools: Skill` as the narrow alternative. When the
   tools list card leaves Skill out, its saving is a part of that card's,
-  not on top of it.
+  not on top of it. It is skipped when the agent's known `tools:` line has no
+  `Skill`, since the skills list is already left out.
 - `spawn-unused-mcp` is one card per agent type, naming each MCP server
   that at most 2% of the spawns offered it called
   (`spawn_unused_mcp_use_share_pct`) and that costs at least 5 USD over 30
@@ -2616,12 +2722,16 @@ none writes a file.
   subagent docs give `disallowedTools` as the way to withhold a server's
   tools, whatever its kind; an `mcpServers` list only adds servers. A
   server whose name holds `__` is left off the card, since `mcp__<prefix>`
-  would also withhold the servers that share its start.
+  would also withhold the servers that share its start. With a known `tools:`
+  line, a server with no `mcp__<server>` entry on it (`mcp__X`, `mcp__X__*`
+  and `mcp__X__tool` all mean server X) is left off, since the agent never gets it.
 - A built-in agent type's `spawn-cost` card no longer says to shorten the
   task prompt: its start is Claude Code's own system prompt and tool
   definitions, which a tools list trims. `Explore`, `Plan` and
   `claude-code-guide`, which the tools list card leaves alone, get no
-  `spawn-cost` card unless an agent file of yours defines them. The
+  `spawn-cost` card unless an agent file of yours defines them. An agent
+  whose `tools:` line is already known gets no `spawn-cost` card either: its
+  rarely used tools were measured on spawns from before the line. The
   baseline card suggests shortening an agent's `description:` only when
   your own agents add 1,000 tokens or more to every session.
 - `spawn-claude-md`, `spawn-unused-skills` and `spawn-task-prompt` are

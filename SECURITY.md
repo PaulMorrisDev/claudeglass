@@ -33,7 +33,13 @@ artefacts — see [docs/deploy.md](docs/deploy.md).
   (`hooks/snapshot-config.py`): user and project `settings*.json` files
   (including `.claude/settings.local.json`), the platform's system-wide
   `managed-settings.json` (if present), agent frontmatter
-  (`.claude/agents/*.md`), MCP server names, and enabled plugin names.
+  (`.claude/agents/*.md`; an agent's `tools` and `disallowedTools` are kept as
+  a list of entries as written, each cut at 64 characters. An entry that
+  itself starts like a path or a URL is replaced by a marker, like every
+  other name; a path inside an entry such as `Bash(cat /home/u/x.txt)` is
+  kept as written up to the cut; an agent's name is cut at 128 characters,
+  the longest ClaudeGlass takes in, and every other name at 64), MCP server
+  names, and enabled plugin names.
 - Environment variable **names** matching `ANTHROPIC_*` / `CLAUDE_*` /
   `OTEL_*` (plus a short fixed list of irregularly-named levers) —
   never their values, with one exception: `MAX_THINKING_TOKENS`,
@@ -255,9 +261,14 @@ which replaces the username segment with the literal `<user>` before
 it ever reaches `/api/sessions`, `/api/session/<id>`,
 `/api/report.{json,md,html}`, or the rendered UI.
 
-Message text, tool-result content, file contents, full file paths and
-full shell commands are never written to a dataclass field, the on-disk
-cache, or any rendered output. This is enforced today by
+Message text, tool-result content and full shell commands are never
+written to a dataclass field, the on-disk cache, or any rendered output,
+and neither is a file's content or path, with these exceptions. Each
+parsed transcript's meta holds the transcript's own path and its project
+folder name (`TranscriptMeta.path` and `project_slug`), so the on-disk
+cache (`cache/`) keeps both; `tests/test_privacy.py` allows
+`TranscriptMeta.path` by name. And `apply`'s backups (`backups/`) are whole
+files, byte for byte. This is enforced today by
 `tests/test_privacy.py` (walks every field `parse_transcript` produces
 and asserts no `str` field exceeds 64 characters outside a small named
 allowlist, and that command-prefix fields never exceed 40) and
@@ -305,6 +316,10 @@ files, depending on `--scope`:
   configures — only the allowlisted frontmatter keys are patched in
   place; every surrounding character (comments, unrelated keys,
   formatting) is preserved verbatim.
+- An agent name is checked before any path is built. It holds only
+  letters, digits, single dots, underscores and hyphens, and starts with
+  a letter or digit. So `<name>.md` is always a file in that agents
+  folder, from a profile, the dashboard or `--agent`.
 - `<config-dir>/backups/<ts>/...` — a byte-for-byte pre-image of every
   file above, written *before* the new content, plus a `manifest.json`
   recording which backup corresponds to which target.
@@ -388,7 +403,9 @@ session, when each hint last showed, how many times and how long it
 rests, and those three numbers, keyed by the same salted session hash
 as the signals, and, for the agent runs that ended too big and have not
 been told yet, the count of each of two words; entries older than a day
-are dropped. A hint you said you already knew also
+are dropped. When the `claude` command that runs Claude Haiku isn't signed
+in, it also holds the time, an hour on, when the hook will ask it again
+(`judge`). A hint you said you already knew also
 carries a flag, `once`, that is true or absent. `coaching.json` holds
 hint ids from the fixed list in the catalogue, and numbers. Neither ever leaves `<config-dir>`. See
 [docs/coaching.md](docs/coaching.md).
@@ -692,6 +709,24 @@ ended without one; the call is Claude Code's, with your own login,
 and the hook imports no networking module (see "Claude Haiku as the
 tagger", "Claude Haiku as the fallback" and "Agent runs" above).
 
+**The Claude Code mod** ([docs/mod.md](docs/mod.md)) is a separate plugin
+that runs inside Claude Code and has no network code of its own. It has
+Claude Code call Claude Haiku only when you press it: `/glass tighten`
+sends your draft, and "Check with a model" sends the summary (up to
+12,000 characters) and the items it checks (`plugin/hooks/command.ts`,
+`plugin/hooks/pane.tsx`, `plugin/hooks/page-checkpoint.tsx`,
+`$.model.complete`). Every summary of the main session, including one you
+start with the mod's Summarise button, is given your keep list as
+instructions, and items you re-add go in a system-prompt section on each
+later request of the main session until a summary keeps them
+(`plugin/hooks/compaction.ts`, `plugin/hooks/readd.ts`). Once a session,
+after Claude's first reply, the mod asks Claude Code for the token count
+`/context` makes (`plugin/hooks/track.ts`); that is not a model reply.
+ClaudeGlass's own Python code is not involved in any of these.
+ClaudeGlass writes `<config-dir>/mod/settings.json` for the mod to read,
+and it holds your `[capture] projects` and `exclude_projects` patterns as
+you wrote them (`mod_settings.py`).
+
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:
 `_cmd_update` (`cli.py`) shells out to `pip install --upgrade
@@ -719,9 +754,9 @@ both loopback-only as just described. The package has zero runtime
 Python dependencies (`pyproject.toml`'s `dependencies = []`). The
 dashboard vendors d3 and two fonts, pinned by sha256 in
 `service/static/THIRD_PARTY.sha256`, and makes no remote requests.
-`rich` is an optional, opt-in extra for nicer terminal output, not a
-networking dependency. Pricing comes from a user-edited local `pricing.toml`,
-never a live lookup — there is no code path that could fetch it.
+The `rich` extra declared in `pyproject.toml` is not imported by any
+code, and is not a networking dependency. Pricing comes from a
+user-edited local `pricing.toml`, never a live lookup — there is no code path that could fetch it.
 
 For the CLI's analytics/report subcommands this is a structural
 guarantee: nothing to call out to, because they contain no networking
@@ -802,6 +837,9 @@ The dashboard never changes your Claude Code configuration. A
 recommendation or profile gives you a prompt to paste into Claude Code
 (which asks your permission before editing anything under `.claude`)
 and a `claudeglass apply ... --dry-run` command to run yourself.
+An agent's name appears in a prompt in quotes, and only when it passes the
+agent-name rule. A card about an agent whose name fails it offers no prompt
+or command.
 The service's few write routes touch only its own files: session tags
 (`mode`/`purpose`), your `/cg-feedback` rating (`POST
 /api/sessions/<id>/feedback` — the closed checkbox vocabulary of the
@@ -825,13 +863,21 @@ by its own row id, on one of this tool's own logged "what if?"
 predictions already in the store, so the "Did your estimates come
 true?" table on Setup › Settings can tell a prediction you've looked at
 from one still waiting on you — it names no session, setting or transcript
-content.
+content. `POST /api/recommendations/marks` records, in the same store, that a
+recommendation card was shown or copied (its key, the view it was shown in,
+the settings it names and when); it changes no setting and no file, and
+nothing returns what it stored.
 
 The service's on-disk SQLite store (`<config-dir>/service.db`) is
-always a derived cache rebuilt from the same transcripts the CLI
-already reads, never a second source of truth — `claudeglass
-serve --purge` deletes it safely at any time (it prints exactly which
-files it will delete and requires `--yes` before doing so).
+a derived cache rebuilt from the same transcripts the CLI already reads,
+apart from what you and the dashboard add to it: your tags and ratings, and
+what the dashboard kept of the recommendation cards it showed
+(`POST /api/recommendations/marks`: the card, the view it was shown in, the
+settings it named, and when it was first shown, copied and landed; it stays
+on this machine, no route returns it, and `serve --purge` deletes it with the
+rest). `claudeglass serve --purge` deletes the store safely at any time (it
+prints exactly which files it will delete and requires `--yes` before doing
+so).
 
 ## Digest cache
 
@@ -864,7 +910,18 @@ slug matches is excluded from discovery entirely — never scanned, never
 parsed, never appearing in a cache file — not merely hidden from
 output. A malformed regex stops `config.toml` from loading, with an
 error naming the pattern, so a typo can't quietly stop a project being
-excluded.
+excluded. This covers reading transcripts, and the capture and coaching
+hooks. The SessionStart hook (`snapshot-config.py`) does not read
+`config.toml`, so it still records that project's settings (redacted as
+for any project), the names of its agents, plugins and MCP servers, the
+names and sizes of its CLAUDE.md files, rules, commands and skills, its
+output style names, the size of its auto-memory, and the id, cost,
+duration, token counts and lines added and removed of its last session
+that `~/.claude.json` keeps for it, under an unsalted hash of its folder
+name. The mod's coaching hints follow
+`exclude_projects`, but its band, keep list and sensor still run in an
+excluded project, and the dashboard reads the sensor's counts by session
+(`service/watcher.py`, `plugin/hooks/settings.ts`).
 
 ```toml
 exclude_projects = ["^confidential-", "client-acme$"]
@@ -920,16 +977,22 @@ column-by-column detail: [`docs/exports.md`](docs/exports.md).
 figures that show how you work with Claude, to take to another machine, and
 `claudeglass tuning summary FILE` reads one back. Export works over the same
 in-memory corpus every other subcommand does, and `summary` reads one local
-file and nothing else. Export also reads your dashboard ratings and tip-card
-answers from `<config-dir>/service.db`, read-only, as `report` does; only
-their counts reach the file. Neither makes a network call. Export writes only
+file and nothing else. Export also reads `<config-dir>/service.db`, read-only:
+your dashboard ratings and tip-card answers, as `report` does, the digests
+of the window's sessions whose transcripts were not found, which it
+counts like the rest, and what the dashboard kept of the recommendation
+cards it showed (its `card_marks` table) and the estimates it logged for
+profile changes (its `predictions` table); only counts, amounts and fixed words reach
+the file. The figure a saving was priced on does not. Neither makes a network call. Export writes only
 to the terminal or the single file `--out` names. The properties below are the
 ones the code enforces, not promises about intent:
 
 - **Only counts, list-price amounts and words from fixed lists.** The
   document never holds a name, a path, a hash, a session id, a project name,
-  a skill name, a custom agent name (it counts as `custom`), a model id (it
-  is reduced to a family) or any text of yours or Claude's. Any new pattern
+  a skill name, a custom agent name (it counts as `custom`), a model id other
+  than those of ClaudeGlass's own rate card (a model is named by the id of the
+  packaged rate-card row ClaudeGlass prices it with, or `other` when no row
+  prices it) or any text of yours or Claude's. Any new pattern
   that reads a transcript's text runs in memory and the text is dropped.
 - **A closed description of what may appear.** `tuning.spec()` names every
   key. Every string must be one of the words it lists or match a tight
@@ -942,9 +1005,9 @@ ones the code enforces, not promises about intent:
   `Users\`, a Git Bash `/c/` path, an `@`, `://` or `www.`. At read, the scan
   also covers the file's own text, and a key repeated in one object is
   refused, so nothing can hide in a value the parser would drop.
-- **A size limit.** The document is 256 KB or less. The fullest one the
-  description allows is about 225 KB, so a valid document always fits, and
-  a real one is about 35 KB.
+- **A size limit.** The document is 320 KB or less. The fullest one the
+  description allows, with every number as wide as it can print, is about
+  306 KB, so a valid document always fits, and a real one is about 35 KB.
 - **Fail closed, at write and at read.** `tuning.build` validates what it
   built and `tuning.dumps` validates again before it returns text, so a
   document that fails produces no file and no JSON on stdout: `tuning

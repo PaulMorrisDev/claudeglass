@@ -381,6 +381,26 @@ def test_plan_apply_blocks_tracked_agent_file(tmp_path):
     assert parse_frontmatter((project / ".claude" / "agents" / "reviewer.md").read_text())["effort"] == "high"
 
 
+def test_a_role_writer_file_that_git_tracks_is_refused_without_allow_tracked(tmp_path):
+    """A role is never refused for a missing agent, but the writer file it
+    reaches is an agent file like any other: git-tracked, it is refused
+    without --allow-tracked (a project agent is usually committed)."""
+    from claudeglass.profiles import catalogue
+
+    home = tmp_path / "home"
+    project = tmp_path / "proj"
+    _init_git_repo_with_file(project, ".claude/agents/builder.md", _agent_text("builder", "Read, Edit"))
+    kwargs = dict(
+        scope="project-local", project_path=project, config_dir=home / ".claude" / "claudeglass", claude_root=home / ".claude"
+    )
+    plan = apply_mod.plan_apply(catalogue.get("implementation-heavy"), **kwargs)
+    assert len(plan.blocked) == 1 and "builder.md is tracked by git" in plan.blocked[0]
+    allowed = apply_mod.plan_apply(catalogue.get("implementation-heavy"), allow_tracked=True, **kwargs)
+    assert allowed.blocked == ()
+    apply_mod.execute(allowed, config_dir=kwargs["config_dir"])
+    assert parse_frontmatter((project / ".claude" / "agents" / "builder.md").read_text())["model"] == "sonnet"
+
+
 # --------------------------------------------------------------------
 # missing agent file refusal + --force
 # --------------------------------------------------------------------
@@ -401,6 +421,162 @@ def test_plan_apply_blocks_missing_agent_file(tmp_path):
     assert not (project / ".claude" / "agents" / "ghost.md").exists()
 
 
+def test_a_saved_current_profile_applies_at_user_scope(tmp_path, monkeypatch):
+    """"Save my current settings" saved a project agent too, and apply, which looks for an agent's
+    file in the user's folder at its default scope, then refused the whole saved profile."""
+    from test_service_api import _start_server
+
+    handle = _start_server(tmp_path, monkeypatch)
+    try:
+        handle.store.upsert_snapshot(
+            project_slug="proj-a",
+            project_root_path=r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-a",
+            ts="2026-09-19T12:00:00Z",
+            schema_version=2,
+            digest_json=json.dumps(
+                {
+                    "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+                    "managed_keys": [],
+                    "effective_agents": {
+                        "helper": {"source": "user", "model": "sonnet", "effort": "low", "max_turns": 40},
+                        "builder": {"source": "project", "model": "haiku"},
+                    },
+                }
+            ),
+        )
+        resp, payload = handle.post_json("/api/profiles/from-current", {})
+        assert resp.status == 201, payload
+        saved_path = handle.options.config_dir / "profiles" / "my-current-settings.toml"
+    finally:
+        handle.close()
+        handle.store.close()
+
+    from claudeglass.profiles.schema import load_profile
+
+    profile = load_profile(saved_path)
+    assert set(profile.agents) == {"helper"}
+    assert profile.settings["modelSettings"] == {"claude-opus-5-5": {"effortLevel": "medium"}}
+    claude_root = tmp_path / "home" / ".claude"
+    (claude_root / "agents").mkdir(parents=True)
+    (claude_root / "agents" / "helper.md").write_text("---\nname: helper\n---\nBody.\n", encoding="utf-8")
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass", claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    helper = next(a for a in plan.actions if a.kind == "agent_frontmatter")
+    assert b"maxTurns: 40" in helper.new_bytes and b"effort: low" in helper.new_bytes
+
+
+def test_a_saved_current_profile_is_not_refused_for_an_agent_kept_in_a_subfolder(tmp_path, monkeypatch):
+    """The config hook reads the agents folder recursively and names an agent by its frontmatter, so
+    "Save my current settings" saves an agent apply finds only elsewhere under the folder. The saved
+    profile must still apply: the settings and the other agents are written."""
+    from claudeglass.profiles.schema import load_profile
+    from test_service_api import _start_server
+
+    handle = _start_server(tmp_path, monkeypatch)
+    try:
+        handle.store.upsert_snapshot(
+            project_slug="proj-a",
+            project_root_path=r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-a",
+            ts="2026-09-19T12:00:00Z",
+            schema_version=2,
+            digest_json=json.dumps(
+                {
+                    "effective": {"effortLevel": "high"},
+                    "managed_keys": [],
+                    "effective_agents": {
+                        name: {"source": "user", "model": "sonnet", "max_turns": 30}
+                        for name in ("helper", "nested", "implementer")
+                    },
+                }
+            ),
+        )
+        assert handle.post_json("/api/profiles/from-current", {})[0].status == 201
+        saved_path = handle.options.config_dir / "profiles" / "my-current-settings.toml"
+    finally:
+        handle.close()
+        handle.store.close()
+
+    profile = load_profile(saved_path)
+    claude_root, config_dir, agents_dir = _role_world(tmp_path / "w", {"helper": _agent_text("helper", "Read")})
+    _put(agents_dir, "team/nested.md", _agent_text("nested", "Read"))
+    _put(agents_dir, "impl.md", _agent_text("implementer", "Read, Edit"))
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert plan.role_notes == (_LEFT_AS_THEY_ARE + "implementer and nested.",)
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))["effortLevel"] == "high"
+    assert "maxTurns: 30" in (agents_dir / "helper.md").read_text(encoding="utf-8")
+
+
+_LEFT_AS_THEY_ARE = "Left as they are, because the file is in a subfolder or not named after the agent: "
+
+
+def test_an_explicit_agent_whose_file_is_elsewhere_is_left_as_it_is_and_named_not_refused(tmp_path):
+    """Claude Code reads the agents folder recursively and names an agent by its frontmatter, so an
+    agent kept in a subfolder, or in a file not named after it, is the user's own. apply patches
+    <agents folder>/<name>.md only: it leaves those, says so, and applies the rest."""
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"helper": _agent_text("helper", "Read")})
+    _put(agents_dir, "team/nested.md", _agent_text("nested", "Read"))
+    _put(agents_dir, "impl.md", _agent_text("implementer", "Read, Edit"))
+    profile = _profile(
+        settings={"effortLevel": "low"},
+        agents={"helper": {"model": "sonnet"}, "implementer": {"model": "sonnet"}, "nested": {"model": "sonnet"}},
+    )
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert sorted(a.agent_name for a in plan.actions if a.kind == "agent_frontmatter") == ["helper"]
+    assert plan.role_notes == (_LEFT_AS_THEY_ARE + "implementer and nested.",)
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert json.loads((claude_root / "settings.json").read_text(encoding="utf-8")) == {"effortLevel": "low"}
+    assert "model: sonnet" in (agents_dir / "helper.md").read_text(encoding="utf-8")
+    assert (agents_dir / "impl.md").read_text(encoding="utf-8") == _agent_text("implementer", "Read, Edit")
+    # one name reads in the singular; --force creates no second file for an agent that exists
+    one = _profile(settings={}, agents={"nested": {"model": "sonnet"}})
+    plan = apply_mod.plan_apply(
+        one, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root, force=True
+    )
+    assert plan.blocked == () and plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: nested.",
+    )
+    assert not (agents_dir / "nested.md").exists()
+    # an agent found nowhere is refused as before, and a role's writers join the same note
+    ghost = _profile(settings={}, agents={"ghost": {"model": "sonnet"}, "nested": {"model": "sonnet"}})
+    plan = apply_mod.plan_apply(
+        ghost, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert len(plan.blocked) == 1 and "no agent file found for 'ghost'" in plan.blocked[0]
+    both = _profile(settings={}, agents={"nested": {"model": "sonnet"}}, roles={"writer": {"model": "sonnet"}})
+    plan = apply_mod.plan_apply(
+        both, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert plan.role_notes == (_LEFT_AS_THEY_ARE + "implementer and nested.",)
+
+
+def test_apply_of_discovery_scrape_without_an_explore_file_writes_the_settings(tmp_path):
+    """Explore is built into Claude Code, so nearly no user has an
+    Explore.md: a shipped profile must not name it, or the whole apply
+    (settings included) is refused."""
+    from claudeglass.profiles import catalogue
+
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"researcher": _agent_text("researcher", "Read")})
+    plan = apply_mod.plan_apply(
+        catalogue.get("discovery-scrape"), scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    apply_mod.execute(plan, config_dir=config_dir)
+    written = json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))
+    assert written == {"effortLevel": "low", "subagentPromptCacheTtl": "5m", "autoCompactWindow": 100000}
+    assert sorted(p.name for p in agents_dir.iterdir()) == ["researcher.md"]
+
+
 def test_force_creates_missing_agent_file_from_scratch(tmp_path):
     home = tmp_path / "home"
     claude_root = home / ".claude"
@@ -417,6 +593,315 @@ def test_force_creates_missing_agent_file_from_scratch(tmp_path):
     agent_path = project / ".claude" / "agents" / "ghost.md"
     assert agent_path.exists()
     assert parse_frontmatter(agent_path.read_text(encoding="utf-8"))["model"] == "opus"
+
+
+def _agent_text(name: str | None, tools: str, model: str = "opus") -> str:
+    head = f"name: {name}\n" if name else ""
+    return f"---\n{head}tools: {tools}\nmodel: {model}\n---\n\nBody.\n"
+
+
+def _role_world(tmp_path, agents: dict[str, str]):
+    """A user whose own agent files are ``agents`` (file stem -> text)."""
+    claude_root = tmp_path / "home" / ".claude"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    for stem, text in agents.items():
+        (agents_dir / f"{stem}.md").write_text(text, encoding="utf-8")
+    return claude_root, tmp_path / "home" / ".claude" / "claudeglass", agents_dir
+
+
+def _plan_role_profile(tmp_path, agents, profile=None, **kwargs):
+    from claudeglass.profiles import catalogue
+
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, agents)
+    plan = apply_mod.plan_apply(
+        profile or catalogue.get("implementation-heavy"),
+        scope=kwargs.pop("scope", "user"),
+        project_path=kwargs.pop("project_path", None),
+        config_dir=config_dir,
+        claude_root=claude_root,
+        **kwargs,
+    )
+    return plan, config_dir, claude_root, agents_dir
+
+
+def test_apply_of_a_role_profile_with_no_writer_writes_the_settings(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path,
+        {
+            "researcher": _agent_text("researcher", "Read, Grep"),
+            "reviewer": _agent_text("reviewer", "Read, Grep"),
+        },
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert plan.role_notes == (
+        "No agent in agents is named like implementer, fixer or builder and can edit files. "
+        "The changes for the agent that writes code are left out.",
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    written = json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))
+    assert written == {"effortLevel": "medium", "subagentPromptCacheTtl": "5m"}
+    assert "model: opus" in (agents_dir / "researcher.md").read_text(encoding="utf-8")
+
+
+def test_apply_of_a_role_profile_patches_the_users_writer(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path,
+        {
+            "implementer": _agent_text("implementer", "Read, Grep, Edit, Write, Bash"),
+            "researcher": _agent_text("researcher", "Read, Grep"),
+            "reviewer": _agent_text("reviewer", "Read, Grep"),
+        },
+    )
+    assert plan.blocked == ()
+    assert plan.role_notes == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["implementer"]
+    apply_mod.execute(plan, config_dir=config_dir)
+    fm = parse_frontmatter((agents_dir / "implementer.md").read_text(encoding="utf-8"))
+    assert (fm["model"], fm["effort"], fm["maxTurns"]) == ("sonnet", "medium", 60)
+    assert "experimental.cacheTtl" not in fm and "omitClaudeMd" not in fm
+    # a read-only agent is left alone
+    assert "effort" not in parse_frontmatter((agents_dir / "researcher.md").read_text(encoding="utf-8"))
+
+
+def test_apply_of_a_role_profile_says_when_several_agents_write_code(tmp_path):
+    plan, *_ = _plan_role_profile(
+        tmp_path,
+        {
+            "tester": _agent_text("tester", "Read, Edit"),
+            "implementer": _agent_text("implementer", "Read, Edit"),
+            "researcher": _agent_text("researcher", "Read"),
+        },
+    )
+    assert sorted(a.agent_name for a in plan.actions if a.kind == "agent_frontmatter") == ["implementer", "tester"]
+    assert plan.role_notes == (
+        "implementer and tester are both named like an agent that writes code, so each gets these changes.",
+    )
+    plan, *_ = _plan_role_profile(
+        tmp_path / "three",
+        {
+            "tester": _agent_text("tester", "Read, Edit"),
+            "implementer": _agent_text("implementer", "Read, Edit"),
+            "fixer": _agent_text("fixer", "Read, Edit"),
+        },
+    )
+    assert plan.role_notes == (
+        "fixer, implementer and tester are all named like an agent that writes code, so each gets these changes.",
+    )
+
+
+def test_apply_of_a_role_profile_leaves_out_a_writer_that_cannot_edit_a_misnamed_file_and_a_broken_one(tmp_path):
+    plan, *_ = _plan_role_profile(
+        tmp_path,
+        {
+            # named like a writer, but cannot edit
+            "implementer": _agent_text("implementer", "Read, Grep"),
+            # the file's frontmatter name is not its stem: apply could not patch it
+            "builder": _agent_text("something-else", "Read, Edit"),
+            # frontmatter this parser cannot read
+            "fixer": "---\nname: fixer\ntools: [Edit\n---\n",
+            "notes": "no frontmatter at all\n",
+        },
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert len(plan.role_notes) == 1 and plan.role_notes[0].startswith("No agent in agents is named like")
+
+
+def test_a_writer_named_file_with_no_frontmatter_is_not_an_agent(tmp_path):
+    """Claude Code does not load a markdown file with no frontmatter as an
+    agent and the snapshot hook skips it, so a role must not reach it: it
+    would make the whole apply fail on a file that is not an agent."""
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path,
+        {
+            "implementer": _agent_text("implementer", "Read, Edit"),
+            "writing-style": "Prefer short sentences.\n",
+            "testing": "# Notes on testing\n",
+        },
+    )
+    assert plan.blocked == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["implementer"]
+    assert plan.role_notes == ()
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert (agents_dir / "writing-style.md").read_text(encoding="utf-8") == "Prefer short sentences.\n"
+    assert "model: sonnet" in (agents_dir / "implementer.md").read_text(encoding="utf-8")
+
+
+def test_a_writer_file_that_starts_with_a_byte_order_mark_is_left_alone(tmp_path):
+    """The parser reads a file that opens with a byte-order mark as having
+    no frontmatter, so it is not found as a writer: the apply succeeds, the
+    file is not touched, and the no-writer note says so."""
+    text = "\ufeff" + _agent_text("implementer", "Read, Edit")
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {})
+    (agents_dir / "implementer.md").write_bytes(text.encode("utf-8"))
+    from claudeglass.profiles import catalogue
+
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"), scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root
+    )
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert len(plan.role_notes) == 1 and plan.role_notes[0].startswith("No agent in agents is named like")
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert (agents_dir / "implementer.md").read_bytes() == text.encode("utf-8")
+
+
+def _put(agents_dir, relative: str, text: str) -> None:
+    path = agents_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _plan_with_files(tmp_path, files: dict[str, str], **kwargs):
+    from claudeglass.profiles import catalogue
+
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {})
+    for relative, text in files.items():
+        _put(agents_dir, relative, text)
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="user",
+        project_path=None,
+        config_dir=config_dir,
+        claude_root=claude_root,
+        **kwargs,
+    )
+    return plan, config_dir, claude_root, agents_dir
+
+
+def test_writers_the_cli_cannot_patch_are_named_in_one_note_and_nothing_is_refused(tmp_path):
+    """Claude Code reads the agents folder recursively and names an agent by
+    its frontmatter, but apply patches ``<agents folder>/<name>.md`` only.
+    A writer kept in a subfolder, in a file not named after it, or with a
+    different capital letter is found, left as it is, and named: the
+    no-writer note would be false for it."""
+    files = {
+        "impl.md": _agent_text("implementer", "Read, Edit"),
+        "team/fixer.md": _agent_text("fixer", "Read, Edit"),
+        "Builder.md": _agent_text("builder", "Read, Edit"),
+    }
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(tmp_path, files)
+    assert plan.blocked == ()
+    assert [a.kind for a in plan.actions if a.kind != "active_profile"] == ["settings"]
+    assert plan.role_notes == (
+        "Left as they are, because the file is in a subfolder or not named after the agent: "
+        "builder, fixer and implementer.",
+    )
+    # with --force no file is created for any of them
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(tmp_path / "forced", files, force=True)
+    assert plan.blocked == ()
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert sorted(p.relative_to(agents_dir).as_posix() for p in agents_dir.rglob("*") if p.is_file()) == sorted(files)
+    for relative, text in files.items():
+        assert (agents_dir / relative).read_text(encoding="utf-8") == text
+
+
+def test_one_writer_the_cli_cannot_patch_is_named_with_the_singular_sentence(tmp_path):
+    plan, *_ = _plan_with_files(tmp_path, {"team/fixer.md": _agent_text("fixer", "Read, Edit")})
+    assert plan.blocked == ()
+    assert plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: fixer.",
+    )
+
+
+def test_a_writer_file_named_after_another_writer_name_is_not_patched_under_its_stem(tmp_path):
+    """The name against stem guard: ``impl.md`` says it is ``implementer``,
+    so the plan would look for ``implementer.md`` and refuse the whole apply
+    (or, with --force, create a new file) unless the guard keeps it out."""
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(
+        tmp_path,
+        {"impl.md": _agent_text("implementer", "Read, Edit"), "tester.md": _agent_text("tester", "Read, Edit")},
+        force=True,
+    )
+    assert plan.blocked == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["tester"]
+    assert plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: implementer.",
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert not (agents_dir / "implementer.md").exists()
+
+
+def test_a_subfolder_writer_beside_a_patchable_one_is_named_and_the_other_is_patched(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_with_files(
+        tmp_path,
+        {"implementer.md": _agent_text("implementer", "Read, Edit"), "team/fixer.md": _agent_text("fixer", "Read, Edit")},
+    )
+    assert plan.blocked == ()
+    assert [a.agent_name for a in plan.actions if a.kind == "agent_frontmatter"] == ["implementer"]
+    assert plan.role_notes == (
+        "Left as it is, because the file is in a subfolder or not named after the agent: fixer.",
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert "effort" not in parse_frontmatter((agents_dir / "team" / "fixer.md").read_text(encoding="utf-8"))
+
+
+def test_the_no_writer_note_is_printed_only_when_no_writer_exists_anywhere_in_the_folder(tmp_path):
+    plan, *_ = _plan_with_files(tmp_path / "none", {"team/helper.md": _agent_text("helper", "Read, Edit")})
+    assert [n.startswith("No agent in agents is named like") for n in plan.role_notes] == [True]
+    plan, *_ = _plan_with_files(tmp_path / "readonly", {"team/implementer.md": _agent_text("implementer", "Read")})
+    assert [n.startswith("No agent in agents is named like") for n in plan.role_notes] == [True]
+
+
+def test_apply_of_a_role_profile_reads_the_project_agents_at_a_project_scope(tmp_path):
+    from claudeglass.profiles import catalogue
+
+    project = tmp_path / "proj"
+    project_agents = project / ".claude" / "agents"
+    project_agents.mkdir(parents=True)
+    (project_agents / "builder.md").write_text(_agent_text("builder", "Read, Edit"), encoding="utf-8")
+    claude_root, config_dir, user_agents = _role_world(
+        tmp_path, {"implementer": _agent_text("implementer", "Read, Edit")}
+    )
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="project-local",
+        project_path=project,
+        config_dir=config_dir,
+        claude_root=claude_root,
+    )
+    assert [a.path for a in plan.actions if a.kind == "agent_frontmatter"] == [project_agents / "builder.md"]
+    no_writer = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="project-local",
+        project_path=tmp_path / "other",
+        config_dir=config_dir,
+        claude_root=claude_root,
+    )
+    assert no_writer.role_notes == (
+        f"No agent in {Path('.claude') / 'agents'} is named like implementer, fixer or builder and can edit files. "
+        "The changes for the agent that writes code are left out.",
+    )
+
+
+def test_an_explicit_agent_with_no_file_is_still_refused(tmp_path):
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"implementer": _agent_text("implementer", "Edit")})
+    profile = _profile(settings={}, agents={"ghost": {"model": "opus"}}, roles={"writer": {"effort": "low"}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    assert len(plan.blocked) == 1 and "no agent file found for 'ghost'" in plan.blocked[0]
+    assert not (agents_dir / "ghost.md").exists()
+
+
+def test_force_never_creates_a_file_for_a_role(tmp_path):
+    plan, config_dir, claude_root, agents_dir = _plan_role_profile(
+        tmp_path, {"researcher": _agent_text("researcher", "Read")}, force=True
+    )
+    assert plan.blocked == ()
+    apply_mod.execute(plan, config_dir=config_dir)
+    assert sorted(p.name for p in agents_dir.iterdir()) == ["researcher.md"]
+
+
+def test_explicit_agent_values_win_over_the_role_when_both_name_the_writer(tmp_path):
+    claude_root, config_dir, agents_dir = _role_world(tmp_path, {"implementer": _agent_text("implementer", "Edit")})
+    profile = _profile(
+        settings={}, agents={"implementer": {"model": "haiku"}}, roles={"writer": {"model": "sonnet", "effort": "low"}}
+    )
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    apply_mod.execute(plan, config_dir=config_dir)
+    fm = parse_frontmatter((agents_dir / "implementer.md").read_text(encoding="utf-8"))
+    assert (fm["model"], fm["effort"]) == ("haiku", "low")
 
 
 def test_force_does_not_affect_allow_tracked(tmp_path):
@@ -824,6 +1309,95 @@ def test_apply_result_paths_are_all_under_caller_supplied_roots(tmp_path):
     assert str(result.active_profile_path).startswith(str(config_dir))
 
 
+def _model_settings_world(tmp_path, settings: dict):
+    claude_root = tmp_path / "home" / ".claude"
+    claude_root.mkdir(parents=True)
+    settings_path = claude_root / "settings.json"
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return claude_root / "claudeglass", claude_root, settings_path
+
+
+def test_apply_merges_one_models_entry_without_losing_the_rest(tmp_path):
+    existing = {
+        "model": "opus",
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300_000, "maxEffortLevel": "xhigh"},
+            "claude-sonnet-4-6": {"effortLevel": "low"},
+        },
+    }
+    config_dir, claude_root, settings_path = _model_settings_world(tmp_path, existing)
+    profile = _profile(
+        settings={
+            "modelSettings": {
+                "claude-opus-5-5": {"effortLevel": "medium"},
+                "claude-haiku-4-5": {"autoCompactWindow": "auto"},
+            }
+        }
+    )
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    apply_mod.execute(plan, config_dir=config_dir)
+    written = json.loads(settings_path.read_text(encoding="utf-8"))
+    # the named model changes only the key the profile names; every other
+    # key of its entry (even one this tool has no name for), every other
+    # model and every other setting stay as they were
+    assert written["modelSettings"] == {
+        "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300_000, "maxEffortLevel": "xhigh"},
+        "claude-sonnet-4-6": {"effortLevel": "low"},
+        "claude-haiku-4-5": {"autoCompactWindow": "auto"},
+    }
+    assert written["model"] == "opus"
+    # a file with no modelSettings at all gets the profile's, as written
+    config_dir2, claude_root2, settings_path2 = _model_settings_world(tmp_path / "second", {"model": "opus"})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir2, claude_root=claude_root2)
+    apply_mod.execute(plan, config_dir=config_dir2)
+    assert json.loads(settings_path2.read_text(encoding="utf-8"))["modelSettings"] == profile.settings["modelSettings"]
+
+
+def test_write_launch_overlay_carries_model_settings(tmp_path):
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    path = apply_mod.write_launch_overlay(profile, config_dir=tmp_path / "cfg")
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}
+    }
+
+
+def test_apply_of_a_profile_with_no_model_settings_leaves_the_files_model_settings_byte_for_byte(tmp_path):
+    existing = {
+        "effortLevel": "low",
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300_000},
+            "claude-sonnet-4-6[1m]": {"autoCompactWindow": "auto"},
+        },
+    }
+    config_dir, claude_root, settings_path = _model_settings_world(tmp_path, existing)
+    old_text = settings_path.read_text(encoding="utf-8")
+    block_start = old_text.index('"modelSettings"')
+    plan = apply_mod.plan_apply(
+        _profile(settings={"effortLevel": "high"}),
+        scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root,
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+    new_text = settings_path.read_text(encoding="utf-8")
+    assert new_text[new_text.index('"modelSettings"'):] == old_text[block_start:]
+    assert json.loads(new_text)["effortLevel"] == "high"
+
+
+def test_revert_restores_a_file_whose_model_settings_an_apply_changed(tmp_path):
+    existing = {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300_000}}}
+    config_dir, claude_root, settings_path = _model_settings_world(tmp_path, existing)
+    original = settings_path.read_bytes()
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "low"}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root)
+    result = apply_mod.execute(plan, config_dir=config_dir)
+    assert settings_path.read_bytes() != original
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["modelSettings"]["claude-opus-5-5"] == {
+        "effortLevel": "low",
+        "autoCompactWindow": 300_000,
+    }
+    apply_mod.revert(result.ts, config_dir=config_dir)
+    assert settings_path.read_bytes() == original
+
+
 def test_map_settings_merge_by_name_and_revert_cleanly(tmp_path):
     # skillOverrides and enabledPlugins are objects keyed by name: a
     # profile naming one entry changes that entry and keeps the rest.
@@ -845,3 +1419,101 @@ def test_map_settings_merge_by_name_and_revert_cleanly(tmp_path):
     assert data["enabledPlugins"] == {"a@m": True, "b@m": False}
     apply_mod.revert(result.ts, config_dir=config_dir)
     assert settings_path.read_bytes() == original
+
+
+def test_plan_apply_refuses_an_agent_name_nothing_checked(tmp_path):
+    from claudeglass.profiles.schema import Profile
+
+    rule = (
+        "an agent name holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters"
+    )
+    root = tmp_path / "root"
+    (root / "agents").mkdir(parents=True)
+    with pytest.raises(apply_mod.ApplyError) as raised:
+        apply_mod.plan_apply(
+            Profile(id="x", agents={"../x": {"model": "sonnet"}}),
+            scope="user",
+            project_path=None,
+            config_dir=tmp_path / "cfg",
+            claude_root=root,
+        )
+    assert raised.value.reasons == [f"agent '../x': {rule}"]
+
+
+def test_apply_leaves_out_a_writer_file_with_an_unusable_name(tmp_path):
+    from claudeglass.profiles import catalogue
+
+    root = tmp_path / "root"
+    (root / "agents").mkdir(parents=True)
+    (root / "agents" / "fixer x.md").write_text("---\nname: fixer x\ntools: Read, Edit\n---\n", encoding="utf-8")
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="user",
+        project_path=None,
+        config_dir=tmp_path / "cfg",
+        claude_root=root,
+    )
+    assert not [a for a in plan.actions if a.kind == "agent_frontmatter"]
+    assert (
+        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
+        "A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters. Rename it to include it."
+    ) in plan.role_notes
+
+
+def test_a_per_model_effort_level_merges_and_is_explained_like_the_flat_one(tmp_path):
+    # The thinking goal's main-session change, applied over a file that already has modelSettings.
+    from claudeglass.fixes import SETTING_TEXT
+
+    claude_root = tmp_path / ".claude"
+    claude_root.mkdir()
+    (claude_root / "settings.json").write_text(json.dumps({"modelSettings": {
+        "claude-opus-5-5": {"autoCompactWindow": 500000}, "claude-fable-5-2": {"effortLevel": "high"}}}), encoding="utf-8")
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass", claude_root=claude_root,
+    )
+    action = next(a for a in plan.actions if a.kind == "settings")
+    assert json.loads(action.new_bytes)["modelSettings"] == {
+        "claude-opus-5-5": {"autoCompactWindow": 500000, "effortLevel": "medium"}, "claude-fable-5-2": {"effortLevel": "high"}}
+    lines = apply_mod.explain_plan(plan)
+    assert "Change: modelSettings.claude-opus-5-5.effortLevel" in lines
+    assert f"  What it controls: {SETTING_TEXT['modelSettings.effortLevel'][0]}" in lines
+    assert any(line.startswith("  Trade-off: Lower effort can miss things") for line in lines)
+
+
+def test_the_apply_preview_says_a_project_files_flat_effort_beats_a_models_own_level(tmp_path):
+    # N6: within a file a model's own level wins; across files the higher file's flat level does.
+    claude_root = tmp_path / ".claude"
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    snap = _snapshot(effective={"effortLevel": "high"}, effective_provenance={"effortLevel": "project_shared"})
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass",
+                                claude_root=claude_root, snapshot=snap)
+    assert plan.overridden == (
+        "modelSettings.claude-opus-5-5.effortLevel: effortLevel is set by this project's shared settings "
+        "(.claude/settings.json), which takes precedence",
+    )
+    same_file = apply_mod.plan_apply(profile, scope="repo", project_path=project, config_dir=claude_root / "claudeglass",
+                                     claude_root=claude_root, snapshot=snap)
+    assert same_file.overridden == ()
+
+
+def test_the_apply_preview_says_a_project_files_flat_window_beats_a_models_own_window(tmp_path):
+    # R2-4: within a file a model's own window wins; across files the higher file's flat window does.
+    claude_root = tmp_path / ".claude"
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    snap = _snapshot(effective={"autoCompactWindow": 400000}, effective_provenance={"autoCompactWindow": "project_shared"})
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass",
+                                claude_root=claude_root, snapshot=snap)
+    assert plan.overridden == (
+        "modelSettings.claude-opus-5-5.autoCompactWindow: autoCompactWindow is set by this project's shared settings "
+        "(.claude/settings.json), which takes precedence",
+    )
+    same_file = apply_mod.plan_apply(profile, scope="repo", project_path=project, config_dir=claude_root / "claudeglass",
+                                     claude_root=claude_root, snapshot=snap)
+    assert same_file.overridden == ()

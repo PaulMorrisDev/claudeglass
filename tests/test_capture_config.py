@@ -168,6 +168,107 @@ def test_a_tagger_or_toggle_change_does_not_revive_capture_that_ended(tmp_path):
         assert after.expired(LATER), change
 
 
+def test_after_defaults_to_stop_and_takes_light(tmp_path):
+    assert CaptureConfig().after == "stop"
+    assert load_config(config_dir=tmp_path).capture.after == "stop"
+    # A file written before the key: a missing key reads stop.
+    _write(tmp_path / "older", '[capture]\nlevel = "deep"\n')
+    assert load_config(config_dir=tmp_path / "older").capture.after == "stop"
+    on = set_capture(tmp_path, level="deep", now=NOW)
+    assert on.after == "stop"
+    chosen = set_capture(tmp_path, after="light", now=NOW)
+    assert chosen.after == "light" and (chosen.level, chosen.until) == (on.level, on.until)
+    assert load_config(config_dir=tmp_path).capture == chosen
+    assert 'after = "light"' in (tmp_path / "config.toml").read_text(encoding="utf-8")
+    # Logged like every change.
+    assert load_capture_log(tmp_path)[-1]["changed"] == {"after": {"from": "stop", "to": "light"}}
+    assert set_capture(tmp_path, after="stop", now=NOW).after == "stop"
+    assert 'after = "stop"' in (tmp_path / "config.toml").read_text(encoding="utf-8")
+    for bad in ("never", "", "Light", 1):
+        with pytest.raises(ConfigError, match="'capture.after'"):
+            set_capture(tmp_path, after=bad, now=NOW)
+    _write(tmp_path / "hand", '[capture]\nlevel = "deep"\nafter = "forever"\n')
+    with pytest.raises(ConfigError, match="'capture.after'"):
+        load_config(config_dir=tmp_path / "hand")
+
+
+def test_a_light_sample_runs_only_once_capture_has_ended_and_light_was_chosen(tmp_path):
+    ended = set_capture(tmp_path, level="deep", after="light", now=NOW)
+    assert not ended.light(NOW) and not ended.expired(NOW)
+    assert ended.light(LATER) and ended.expired(LATER)
+    stopped = set_capture(tmp_path, after="stop", now=NOW)
+    assert not stopped.light(LATER)
+    assert not set_capture(tmp_path, level="off", now=NOW).light(LATER)
+    # Capture with no end never reaches it, and choosing light after the end does not start a new span.
+    set_capture(tmp_path, level="deep", until="", now=NOW)
+    assert not set_capture(tmp_path, after="light", now=NOW).light(LATER)
+    set_capture(tmp_path, level="deep", until="2026-10-01T00:00:00+00:00", now=NOW)
+    late = set_capture(tmp_path, after="light", now=LATER)
+    assert late.light(LATER) and late.until == "2026-10-01T00:00:00+00:00"
+    assert set_capture(tmp_path, level="deep", now=LATER).light(LATER) is False  # `capture on` starts full capture again
+    assert (capture_catalogue.LIGHT_METRICS, capture_catalogue.LIGHT_SAMPLE) == (("task", "level", "size", "shift"), 20)
+
+
+#: The ``[capture]`` table of each state the hook entries are checked in: capture running, a light sample
+#: after the end, past the end with no sample, and capture off.
+STATE_TABLES = {
+    "full": 'level = "deep"\nuntil = "2099-01-01T00:00:00+00:00"\nafter = "light"',
+    "light": 'level = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"',
+    "ended": 'level = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "stop"',
+    "off": 'level = "off"',
+}
+DEEP_FEEDBACK = 'feedback = ["feedback_skill", "feedback_note", "feedback_reminder", "plan_check"]'
+#: (state, tagger) -> the events the hook does something on in that state, with Deep's feedback items on and
+#: coaching notes off (`` bg``: in the background), read from ``capture_hook._run``. The plan check and the
+#: rating reminder run on your messages in every state, so ``UserPromptSubmit`` is always there. Deep's note
+#: after a large result is never added while Haiku writes the tags, so it needs no ``PostToolUse``.
+HOOK_EVENTS = {
+    ("full", "claude"): {"SessionStart", "SubagentStop", "UserPromptSubmit", "PostToolUse", "SessionEnd",
+                         "Notification bg", "PermissionRequest bg", "Stop bg", "StopFailure bg"},
+    ("full", "haiku"): {"SubagentStop", "UserPromptSubmit", "SessionEnd", "Notification bg", "PermissionRequest bg",
+                        "Stop", "StopFailure bg"},
+    ("light", "claude"): {"SessionStart", "UserPromptSubmit", "Stop bg"},
+    ("light", "haiku"): {"UserPromptSubmit", "Stop"},
+    ("ended", "claude"): {"UserPromptSubmit"},
+    ("ended", "haiku"): {"UserPromptSubmit"},
+    ("off", "claude"): {"UserPromptSubmit"},
+    ("off", "haiku"): {"UserPromptSubmit"},
+}
+
+
+@pytest.mark.parametrize("state, tagger", sorted(HOOK_EVENTS))
+def test_the_hook_entries_are_for_what_the_hook_runs_in_every_state(tmp_path, state, tagger):
+    capture = _capture_with(tmp_path, f'{STATE_TABLES[state]}\n{DEEP_FEEDBACK}\ntagger = "{tagger}"')
+    events = {spec[1] + (" bg" if spec[3] else "") for spec in capture_catalogue.hook_specs(capture.hook_metrics())}
+    assert events == HOOK_EVENTS[state, tagger]
+    # The items on your messages are counted as running in every state, as the hook runs them.
+    assert {"feedback_skill", "plan_check", "feedback_reminder"} <= set(capture.running_metrics())
+
+
+@pytest.mark.parametrize("state", sorted(STATE_TABLES))
+def test_coaching_notes_keep_their_own_entries_in_every_state(tmp_path, state):
+    capture = _capture_with(tmp_path, f'{STATE_TABLES[state]}\nfeedback = []\ncoaching = ["coaching_notes"]')
+    specs = {spec[1:] for spec in capture_catalogue.hook_specs(capture.hook_metrics())}
+    assert ("UserPromptSubmit", "", False) in specs
+    assert ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False) in specs
+    assert any(event == "Stop" for event, _matcher, _bg in specs)
+    # Nothing runs at an agent's end for coaching notes while split_run is off, and no agent metric runs
+    # past the end.
+    if state != "full" and "split_run" in capture_catalogue.LIVE_OFF_HINTS:
+        assert all(event != "SubagentStop" for event, _matcher, _bg in specs)
+
+
+def test_what_runs_follows_the_clock_it_is_given(tmp_path):
+    capture = set_capture(tmp_path, level="deep", now=NOW)
+    assert capture.running_metrics(NOW) == capture.active_metrics()
+    assert capture.running_metrics(LATER) == tuple(i for i in capture_catalogue.FEEDBACK_IDS if i in capture.feedback)
+    light = set_capture(tmp_path, after="light", now=NOW)
+    assert light.running_metrics(LATER) == capture_catalogue.active_metrics(
+        capture_catalogue.CUSTOM_LEVEL, capture_catalogue.LIGHT_METRICS, light.feedback
+    )
+    assert light.hook_metrics(NOW) == light.active_metrics()
+
+
 def test_capture_still_running_keeps_its_span_when_the_level_is_named_again(tmp_path):
     first = set_capture(tmp_path, level="essentials", now=NOW)
     soon = NOW + timedelta(days=2)

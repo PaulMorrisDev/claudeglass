@@ -388,7 +388,8 @@ def test_finish_adds_the_background_stop_entry_and_the_plan_matcher_coaching_nee
     assert sorted(_capture_hooks(tmp_path)) == sorted([
         ("UserPromptSubmit", "", False),
         ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False),
-        ("SubagentStop", "", False),
+        # split_run's entry at an agent's end: only while that hint is on.
+        *([] if "split_run" in capture_catalogue.LIVE_OFF_HINTS else [("SubagentStop", "", False)]),
         ("Stop", "", True),
     ])
     assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in _capture_hooks(tmp_path))["PostToolUse"]
@@ -493,7 +494,7 @@ def test_finish_says_when_pip_cannot_remove_a_copy(tmp_path):
 def test_finish_refreshes_outdated_hook_files(tmp_path, monkeypatch):
     monkeypatch.setattr(hook_health, "refresh_hook_files", lambda config_dir: [Path("a"), Path("b")])
     _rc, out = _Finish(tmp_path).run()
-    assert "Refreshed 2 hook files this version changed." in out
+    assert "Updated 2 hook files." in out
 
 
 def test_finish_offers_the_snapshot_hook_repair(tmp_path, monkeypatch):

@@ -15,7 +15,9 @@ verdicts, each at its own severity (see :data:`RULES`):
   ceiling for information; never added to the ``inherited`` figure.
 - ``decide-apply`` -- an agent whose role is to decide (review, audit, ...)
   that also edited code on a larger model. Cost and edit counts only: its
-  fix is a split into two agents, not a swap, so there is no saving.
+  fix is a split into two agents, not a swap, so there is no saving. A
+  run whose digest an older parser wrote has no code-write counts
+  (``None``, not measured) and is left out.
 
 Whether the model was chosen is read, never inferred: a ``.meta.json`` of
 the newer shape (``TranscriptMeta.model_recorded``) leaves ``model`` out
@@ -23,8 +25,10 @@ exactly when the call set none, so an agent with no ``agent_model_alias``
 inherited. The agent's role is its canonical word
 (``TranscriptMeta.role_word``, see ``agent_roles``) and what it did is
 whether a reply edited a file or wrote to a path outside the temp dir
-(``Turn.edit_kind``/``Turn.shell_write_count``). A role word that writes
-code, and a write, is a writer; so is an agent with no word that edited
+(``Turn.edit_kind``/``Turn.shell_write_count``). ``decide-apply`` counts
+only the replies that wrote code (``Turn.edit_code_count``/
+``Turn.shell_code_write_count``), not a report, plan or ledger. A role word
+that writes code, and a write, is a writer; so is an agent with no word that edited
 code in several replies. Integrators and deciders are never writers.
 
 Three layers, mirroring ``model_swap.py``'s own shape:
@@ -57,7 +61,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Sequence
 
-from . import agent_roles, workstyle
+from . import agent_roles, measured, workstyle
 from .model import Column, Recommendation, ReportModel, Table, TranscriptResult, Turn
 from .model_swap import _ALL_ARCHETYPES, _NO_SUBAGENT_ARCHETYPES, _dominant_label
 from .pricing import Pricing, model_name, price_turn
@@ -178,15 +182,18 @@ class AgentModelGroup:
     #: which is never repriced, and unused when the rate card has no
     #: Sonnet alias).
     cost_on_sonnet: float = 0.0
-    #: Replies that edited a file or wrote to a path outside the temp dir.
+    #: Replies that edited a file or wrote to a path outside the temp dir; on a
+    #: ``decide-apply`` group, only the replies that wrote code.
     write_turns: int = 0
     workflow_run_ids: set[str] = field(default_factory=set)
     #: ``YYYY-MM-DD`` of each agent's first reply; "" until one is seen.
     first_seen: str = ""
     last_seen: str = ""
-    #: Writers of the same kind on Sonnet or smaller that started after the
-    #: latest agent in this group. Only ever set for ``inherited``.
-    later_compliant: int = 0
+    #: Later writers on Sonnet or smaller. ``inherited``: the same kind, any
+    #: type. ``asked``: the same Agent-tool type, whose own call named the
+    #: model. None when not measured (``decide-apply``, and a workflow's
+    #: ``asked``, since no script can be told apart).
+    later_compliant: int | None = None
 
 
 @dataclass(slots=True)
@@ -216,9 +223,14 @@ class _Run:
     verdict: str | None
     #: A writer on Sonnet or smaller, by a known tier (counts towards "this looks fixed").
     compliant: bool
+    #: The call that started the run named a model.
+    call_named: bool
     role: str
     model: str
     write_turns: int
+    #: The replies that wrote code, which decide-apply counts instead;
+    #: None when the digest has no such count (see model.py).
+    code_write_turns: int | None
     workflow_run_id: str | None
     first_ts: datetime | None
     date: str
@@ -295,6 +307,17 @@ def _analyse(
     tier = workstyle.model_tier(model) if model else -1
 
     write_turns = sum(1 for t in result.turns if t.edit_kind == "real" or t.shell_write_count > 0)
+    # A decider that only wrote its report or a ledger did not change code:
+    # decide-apply counts shell writes and edit-tool calls aimed at code.
+    # A digest an older parser wrote (``measured``) has no such counts, or has
+    # them in an older meaning; its transcript may be gone: that run is left
+    # out of decide-apply.
+    code_write_turns = (
+        None
+        if not measured.measures(result, *measured.CODE_WRITE_FIELDS)
+        or any(t.shell_code_write_count is None or t.edit_code_count is None for t in result.turns)
+        else sum(1 for t in result.turns if t.shell_code_write_count > 0 or t.edit_code_count > 0)
+    )
     role_class = agent_roles.role_class(meta.role_word)
     writer = (role_class == "writer" and write_turns >= 1) or (
         role_class is None and write_turns >= th.unknown_min_edit_turns
@@ -309,7 +332,11 @@ def _analyse(
             # no verdict here. model-tier prices such a run only when it is a
             # direct Agent-tool run; a workflow agent's is left alone.
             verdict = {"inherited": "inherited", "call": "asked"}.get(chosen_by)
-        elif role_class == "decider" and write_turns >= th.decide_apply_min_edit_turns:
+        elif (
+            role_class == "decider"
+            and code_write_turns is not None
+            and code_write_turns >= th.decide_apply_min_edit_turns
+        ):
             verdict = "decide-apply"
 
     return _Run(
@@ -317,9 +344,11 @@ def _analyse(
         kind="workflow" if is_workflow else "agent tool",
         verdict=verdict,
         compliant=writer and 0 <= tier <= _SONNET_OR_SMALLER,
+        call_named=bool(meta.agent_model_alias),
         role=meta.role_word or _UNKNOWN_ROLE,
         model=model,
         write_turns=write_turns,
+        code_write_turns=code_write_turns,
         workflow_run_id=meta.workflow_run_id,
         first_ts=_parse_ts(priced[0].ts),
         date=(priced[0].ts or "")[:10],
@@ -374,7 +403,9 @@ def compute_agent_models(
         group.runs += 1
         group.role_counts[run.role] = group.role_counts.get(run.role, 0) + 1
         group.model_counts[run.model] = group.model_counts.get(run.model, 0) + 1
-        group.write_turns += run.write_turns
+        # A decide-apply row shows the code-writing replies its verdict
+        # used, so the card's "edited code in N replies" is a real cell.
+        group.write_turns += run.code_write_turns if run.verdict == "decide-apply" else run.write_turns
         if run.workflow_run_id:
             group.workflow_run_ids.add(run.workflow_run_id)
         if run.date:
@@ -394,11 +425,22 @@ def compute_agent_models(
 
     for (group_key, verdict), group in stats.groups.items():
         latest = latest_flagged.get((group_key, verdict))
-        if verdict != "inherited" or latest is None:
-            continue
-        group.later_compliant = sum(
-            1 for run in compliant if run.kind == group.kind and run.first_ts is not None and run.first_ts > latest
-        )
+        if latest is None:
+            group.later_compliant = 0 if verdict == "inherited" else None
+        elif verdict == "inherited":
+            group.later_compliant = sum(
+                1 for run in compliant if run.kind == group.kind and run.first_ts is not None and run.first_ts > latest
+            )
+        elif verdict == "asked" and group.kind == "agent tool":
+            group.later_compliant = sum(
+                1
+                for run in compliant
+                if run.kind == group.kind
+                and run.group == group_key
+                and run.call_named
+                and run.first_ts is not None
+                and run.first_ts > latest
+            )
     return stats
 
 
@@ -421,11 +463,19 @@ _VERDICT_PHRASES = {
 }
 
 
-def build_table(stats: AgentModelStats) -> Table:
+def build_table(stats: AgentModelStats, older: tuple[int, int] = (0, 0)) -> Table:
     """Render a finished :class:`AgentModelStats` as
     ``model_swap_agent_models``: one row per group and verdict, verdicts in
     :data:`VERDICTS` order, then the biggest saving first. No ids, labels
     or paths.
+
+    ``older`` is ``(n, m)`` from ``measured.older_sessions``: of the ``m``
+    sessions of the window, ``n`` hold a digest an older parser wrote, whose
+    runs the decide-apply verdict left out. When fewer than half of the
+    sessions were measured (and some were) and a decide-apply row stands, that row gets a
+    ``sessions_measured`` cell, ``"9 of 82"``, in a column added for it (as
+    ``model_swap``'s per-model cost columns are, only where there is
+    something to show), and the card cites it.
 
     The first column, the row key every card's evidence cites, is
     ``"<group>:<verdict>"`` (``"workflow-subagent:inherited"``): an agent
@@ -444,6 +494,7 @@ def build_table(stats: AgentModelStats) -> Table:
         Column(key="cost_on_sonnet_usd", label="Cost on Sonnet", kind="money"),
         Column(key="saving_usd", label="Most you could save", kind="money"),
         Column(key="saving_pct", label="Ceiling saving (%)", kind="pct"),
+        # For a decide-apply row, the replies that wrote code (what the verdict counted).
         Column(key="write_turns", label="Edit turns", kind="int"),
         Column(key="workflow_runs", label="Workflow runs", kind="int"),
         Column(key="first_seen", label="First seen", kind="str"),
@@ -451,6 +502,13 @@ def build_table(stats: AgentModelStats) -> Table:
         Column(key="later_compliant", label="Later writers on Sonnet or smaller", kind="int"),
         Column(key="env_var_set", label="Model environment variable set", kind="str"),
     ]
+
+    n, m = older
+    coverage = f"{m - n:,} of {m:,}" if n and 0 < m - n and 2 * (m - n) < m else None
+    if coverage is not None and any(group.verdict == "decide-apply" for group in stats.groups.values()):
+        columns.append(Column(key="sessions_measured", label="Sessions measured", kind="str"))
+    else:
+        coverage = None
 
     def _saving(group: AgentModelGroup) -> float | None:
         if group.verdict == "decide-apply" or stats.sonnet_model is None:
@@ -487,6 +545,7 @@ def build_table(stats: AgentModelStats) -> Table:
                 group.last_seen,
                 group.later_compliant,
                 "yes" if stats.env_var_set else "no",
+                *([coverage if group.verdict == "decide-apply" else None] if coverage is not None else []),
             ]
         )
 
@@ -549,6 +608,7 @@ _EVIDENCE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Last seen", "last_seen"),
     ("Later compliant writers", "later_compliant"),
     (f"{ENV_VAR} set", "env_var_set"),
+    ("Sessions measured", "sessions_measured"),
 )
 
 #: Plain fallback wording per verdict: ``advice.py`` rewrites the title and
@@ -598,15 +658,17 @@ def _recommendations(
             continue
         agent_type = cell(row, "agent_type")
         later = cell(row, "later_compliant")
-        later = later if isinstance(later, int) and not isinstance(later, bool) else 0
+        later = later if isinstance(later, int) and not isinstance(later, bool) else None
 
         severity = "info"
         variant = ""
         if verdict == "inherited":
-            if later >= th.later_compliant_for_info:
+            if (later or 0) >= th.later_compliant_for_info:
                 variant = "fixed"
             else:
                 severity = "advice"
+        elif verdict == "asked" and later is not None and later >= th.later_compliant_for_info:
+            variant = "fixed"
 
         who = "Workflow agents" if agent_type == WORKFLOW_GROUP else f"{agent_type} agents"
         # The row's own key: the agent type alone repeats across verdicts.
@@ -628,6 +690,8 @@ def _recommendations(
                 evidence=[
                     _evidence(label, cell(row, column_key), _SOURCE_SECTION, TABLE_NAME, row_key)
                     for label, column_key in _EVIDENCE_COLUMNS
+                    if (column_key != "later_compliant" or later is not None)
+                    and (column_key != "sessions_measured" or cell(row, column_key) is not None)
                 ],
             )
         )
@@ -655,7 +719,9 @@ def _rule_agent_model_asked(
     snapshot: Snapshot | None = None,
 ) -> list[Recommendation]:
     """``agent-model-asked``: agents that wrote code on a larger model
-    because the call named it. Info only."""
+    because the call named it. Info only, with variant ``"fixed"`` once
+    ``th.later_compliant_for_info`` later calls of the same agent type named
+    Sonnet or smaller."""
     return _recommendations(report, th, archetype, "agent-model-asked", "asked")
 
 

@@ -255,6 +255,75 @@ def test_cmd_apply_user_scope_agent_patch_finds_claude_root_agents_file(tmp_path
     assert "model: sonnet" in (agents_dir / "reviewer.md").read_text(encoding="utf-8")
 
 
+def test_cmd_apply_prints_the_no_writer_note_and_exits_0_on_dry_run(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    for name in ("researcher", "reviewer"):
+        (agents_dir / f"{name}.md").write_text(f"---\nname: {name}\ntools: Read, Grep\n---\n\nBody.\n", encoding="utf-8")
+    note = (
+        "No agent in agents is named like implementer, fixer or builder and can edit files. "
+        "The changes for the agent that writes code are left out."
+    )
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--dry-run"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    assert "would be refused" not in captured.err
+    # the note follows the change explanations and comes before the diff
+    assert captured.out.index("Change: effortLevel") < captured.out.index(note) < captured.out.index("+++")
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    written = json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))
+    assert written["effortLevel"] == "medium"
+
+
+def test_cmd_apply_of_a_profile_naming_an_agent_kept_in_a_subfolder_leaves_it_and_exits_0(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    (claude_root / "agents" / "team").mkdir(parents=True)
+    (claude_root / "agents" / "team" / "nested.md").write_text(
+        "---\nname: nested\nmodel: opus\n---\n\nBody.\n", encoding="utf-8"
+    )
+    profile_path = tmp_path / "sample.toml"
+    _write_profile_toml(profile_path, settings={"effortLevel": "low"}, agents={"nested": {"model": "sonnet"}})
+    note = "Left as it is, because the file is in a subfolder or not named after the agent: nested."
+
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--dry-run"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines() and "would be refused" not in captured.err
+
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert note in captured.out.splitlines()
+    assert json.loads((claude_root / "settings.json").read_text(encoding="utf-8"))["effortLevel"] == "low"
+    assert "model: opus" in (claude_root / "agents" / "team" / "nested.md").read_text(encoding="utf-8")
+    assert not (claude_root / "agents" / "nested.md").exists()
+
+
+def test_cmd_apply_of_a_role_profile_patches_the_users_writer_and_prints_no_note(tmp_path, capsys):
+    claude_root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    config_dir = tmp_path / "claudeglass"
+    agents_dir = claude_root / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "implementer.md").write_text(
+        "---\nname: implementer\ntools: Read, Edit\nmodel: opus\n---\n\nBody.\n", encoding="utf-8"
+    )
+
+    exit_code = cli.main(["apply", "implementation-heavy", "--config-dir", str(config_dir), "--yes"])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert "named like" not in captured.out
+    assert "model: sonnet" in (agents_dir / "implementer.md").read_text(encoding="utf-8")
+
+
 def test_cmd_apply_claude_root_flag_overrides_default(tmp_path):
     explicit_root = tmp_path / "explicit-claude-root"
     config_dir = tmp_path / "claudeglass"
@@ -465,6 +534,28 @@ def test_backtest_lists_judged_and_pending_predictions(tmp_path, capsys):
     assert "model" in out and "as_estimated" in out
     assert "1 prediction still waiting on a match or more data." in out
     assert_privacy({"out": out})
+
+
+def test_backtest_lists_a_prediction_closed_as_not_measured_with_the_judged_ones(tmp_path, capsys):
+    from claudeglass.service.serve import STORE_FILENAME
+    from claudeglass.service.store import Store
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    store = Store(config_dir / STORE_FILENAME)
+    store.open()
+    store.upsert_prediction(
+        prediction_id="pred-closed", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="experimental.cacheTtl",
+        agent="gp", predicted_usd=1.0, predicted_pct=None, fidelity="ceiling", priced_on=12.0,
+    )
+    store.judge_prediction("pred-closed", change_ts="2026-09-21T09:00:00Z", verdict="not_measured", measured_usd=None, measured_pct=None)
+    store.close()
+
+    exit_code = cli.main(["backtest", "--config-dir", str(config_dir)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "not_measured" in out
+    assert "still waiting" not in out
 
 
 def test_no_argv_with_no_data_exits_1(capsys):
@@ -2266,6 +2357,72 @@ def test_cmd_apply_set_merges_a_skill_override_by_name(tmp_path, capsys):
                      "--claude-root", str(claude_root), "--dry-run"]) == 2
 
 
+def test_set_builds_a_per_model_entry(tmp_path, capsys):
+    profile, err = cli._one_off_profile(
+        [
+            "modelSettings.claude-opus-5-5.effortLevel=medium",
+            "modelSettings.claude-opus-5-5.autoCompactWindow=300000",
+            "modelSettings.claude-sonnet-4-6[1m].autoCompactWindow=auto",
+            "effortLevel=high",
+        ],
+        None,
+    )
+    assert err is None
+    # "auto" stays a string, digits become an int, two keys of one model share its entry, and the
+    # flat setting beside them is untouched
+    assert profile.settings == {
+        "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": 300000},
+            "claude-sonnet-4-6[1m]": {"autoCompactWindow": "auto"},
+        },
+        "effortLevel": "high",
+    }
+    # what the allowlist rejects is said the usual way
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.effortLevel=max"], None)
+    assert err == "settings.modelSettings.claude-opus-5-5.effortLevel: expected one of low, medium, high, xhigh"
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.autoCompactWindow=99999"], None)
+    assert "autoCompactWindow: expected 'auto' or an int between 100000 and 1000000" in err
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.nonsense=1"], None)
+    assert err == "settings.modelSettings.claude-opus-5-5.nonsense: unknown key"
+    # a name with no key after it, a bare modelSettings, a per-agent use
+    assert cli._one_off_profile(["modelSettings.claude-opus-5-5=medium"], None)[0] is None
+    assert cli._one_off_profile(["modelSettings=medium"], None)[0] is None
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-5-5.effortLevel=low"], "reviewer")
+    assert "unknown key" in err
+
+    # end to end, into a settings file that already holds that model's window and another model
+    claude_root = tmp_path / "claude"
+    config_dir = tmp_path / "tl"
+    claude_root.mkdir()
+    settings = claude_root / "settings.json"
+    settings.write_text(
+        json.dumps({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}, "other": {"effortLevel": "low"}}}),
+        encoding="utf-8",
+    )
+    command = [
+        "apply", "--set", "modelSettings.claude-opus-5-5.effortLevel=medium", "--set", "effortLevel=high",
+        "--config-dir", str(config_dir), "--claude-root", str(claude_root),
+    ]
+    assert cli.main([*command, "--dry-run"]) == 0
+    assert "Change: modelSettings" in capsys.readouterr().out
+    assert cli.main([*command, "--yes"]) == 0
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "modelSettings": {
+            "claude-opus-5-5": {"autoCompactWindow": 300000, "effortLevel": "medium"},
+            "other": {"effortLevel": "low"},
+        },
+        "effortLevel": "high",
+    }
+    assert cli.main(["apply", "--set", "modelSettings.claude-opus-5-5.effortLevel=max", "--config-dir",
+                     str(config_dir), "--claude-root", str(claude_root), "--dry-run"]) == 2
+
+
+def test_set_with_a_dot_in_the_model_id_reaches_the_schemas_message_about_the_id():
+    # the key is the last part, so a cloud-provider style id with a dot is read whole
+    _, err = cli._one_off_profile(["modelSettings.claude-opus-4.5.effortLevel=low"], None)
+    assert err == "settings.modelSettings: model id 'claude-opus-4.5' must be letters, digits, '-', '_' or brackets"
+
+
 def test_cmd_apply_set_env_writes_the_settings_env_block(tmp_path, capsys):
     # COV-07/COV-11: apply --set env.NAME=value writes into the target
     # settings file's own "env" object, exactly like any other --set key
@@ -2378,6 +2535,26 @@ def test_check_reads_the_settings_in_force_in_the_selected_project(tmp_path, cap
         assert cli.main(["check", "--projects-root", str(root), *selection, "--config-dir", str(config_dir)]) == 0
     capsys.readouterr()
     assert [effective.get("model") for effective in seen] == ["opus", "haiku", "haiku"]
+
+
+def test_check_hands_the_checks_the_tools_lines_of_the_snapshots_agents_map(tmp_path, capsys, monkeypatch):
+    """The Tools check reads a line where the cards do: the merged snapshot's
+    ``agents`` map (``effective_agents`` never holds one)."""
+    from claudeglass import quick_actions
+
+    root, config_dir = _alternating_snapshots(tmp_path)
+    newest = sorted((config_dir / "snapshots").glob("*.json"))[-1]
+    data = json.loads(newest.read_text(encoding="utf-8"))
+    data["agents"] = {"reviewer": {"source": "user", "tools": ["Read", "Grep"]}}
+    data["effective_agents"] = {"reviewer": {"source": "user", "model": "haiku"}}
+    newest.write_text(json.dumps(data), encoding="utf-8")
+    seen = []
+    real = quick_actions.Context
+    monkeypatch.setattr(quick_actions, "Context", lambda **kwargs: seen.append(kwargs["agents"]) or real(**kwargs))
+
+    assert cli.main(["check", "tools", "--projects-root", str(root), "--all-projects", "--config-dir", str(config_dir)]) == 0
+    capsys.readouterr()
+    assert seen == [{"reviewer": {"source": "user", "tools": ["Read", "Grep"]}}]
 
 
 def test_review_claude_md_follows_the_selected_project(tmp_path, capsys):
@@ -2493,3 +2670,131 @@ def test_cli_reports_read_what_the_mod_showed_without_writing(tmp_path):
     before = (tmp_path / "service.db").read_bytes()
     assert cli._dashboard_mod_events(tmp_path) == expected and expected[0]["outcome"] == "warned"
     assert (tmp_path / "service.db").read_bytes() == before
+
+
+def test_a_project_picked_for_review_or_check_is_found_in_the_projects_root_the_report_read(tmp_path):
+    """A config folder kept apart from the projects (docs/deploy.md's container): the project's own
+    folder is found under ``--projects-root``, and Claude's folder is the one ``--claude-root`` names."""
+    root = tmp_path / "data" / "claude" / "projects"
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    _write_project(root, "proj-a")
+    (root / "proj-a" / "folder.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project)}) + "\n", encoding="utf-8")
+    config = tmp_path / "data" / "claudeglass"
+    base = ["check", "--projects-root", str(root), "--config-dir", str(config), "--project", "proj-a"]
+    args = cli._make_parser().parse_args(base)
+    assert cli._report_only(args, ["proj-a"], config) == (project,)
+    assert cli._read_where(args, config) == (None, [root])
+    given = cli._make_parser().parse_args(base + ["--claude-root", str(tmp_path / "data" / "claude")])
+    assert cli._read_where(given, config) == (tmp_path / "data" / "claude", [root])
+
+def test_check_claude_md_in_the_container_layout_does_not_read_the_mounts_files_as_yours(tmp_path, capsys):
+    """docs/deploy.md's layout: the projects folder is in the mounted Claude home, the config folder is not.
+    Your files are read from --claude-root, else beside the config folder; never beside the projects."""
+    home = tmp_path / "data" / "claude"
+    user = home / "CLAUDE.md"
+    user.parent.mkdir(parents=True)
+    user.write_text("# Mine\n\nBe brief.\n", encoding="utf-8")
+    _write_project(home / "projects", "proj-a")
+    argv = ["check", "claude-md", "--projects-root", str(home / "projects"), "--all-projects",
+            "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "No CLAUDE.md files found." in out and str(user) not in out, out
+    assert cli.main(argv + ["--claude-root", str(home)]) == 0
+    assert str(user) in capsys.readouterr().out
+
+
+def test_review_skills_finds_descriptions_under_the_projects_root_and_your_skills_in_the_claude_folder(
+    tmp_path, capsys
+):
+    home = tmp_path / "data" / "claude"
+    (home / "skills" / "grill-me").mkdir(parents=True)
+    (home / "skills" / "grill-me" / "SKILL.md").write_text("---\nname: grill-me\n---\n", encoding="utf-8")
+    slug = _write_project(home / "projects", "proj-a")
+    listing = {"type": "attachment", "attachment": {
+        "type": "skill_listing", "content": "- grill-me: Interview the user about a plan.\n", "names": ["grill-me"]}}
+    with (slug / "session-1.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(listing) + "\n")
+    argv = ["review", "skills", "--projects-root", str(home / "projects"), "--all-projects",
+            "--config-dir", str(tmp_path / "data" / "claudeglass")]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "Interview the user about a plan." in out and "Built into Claude Code" in out, out
+    assert cli.main(argv + ["--claude-root", str(home)]) == 0
+    assert "Built into Claude Code" not in capsys.readouterr().out
+
+def test_review_claude_md_reads_the_projects_roots_it_was_given(tmp_path, capsys):
+    """The Claude folder is not above the projects root (a mount, or a WSL distro's): the project's own
+    folder and its auto memory are found under --projects-root."""
+    claude = tmp_path / "me" / ".claude"
+    claude.mkdir(parents=True)
+    root = tmp_path / "mount" / "projects"
+    project = tmp_path / "work" / "demo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("# Demo\n\nUse the demo style.\n", encoding="utf-8")
+    slug = _write_project(root, "proj-a")
+    (slug / "folder.jsonl").write_text(json.dumps({"type": "user", "cwd": str(project)}) + "\n", encoding="utf-8")
+    argv = ["review", "claude-md", "--projects-root", str(root), "--all-projects",
+            "--config-dir", str(tmp_path / "cg"), "--claude-root", str(claude)]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert str(project / "CLAUDE.md") in out, out
+
+
+def test_apply_agent_refuses_a_name_that_leaves_the_agents_folder(tmp_path, capsys):
+    rule = (
+        "an agent name holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters"
+    )
+    plugin = "this is a plugin's agent, and a profile can change only your own agent files"
+    root = tmp_path / "root"
+    (root / "skills" / "x").mkdir(parents=True)
+    skill = root / "skills" / "x" / "SKILL.md"
+    skill.write_text("---\nname: x\n---\nbody\n", encoding="utf-8")
+    for name in ("../skills/x/SKILL", "..\\skills\\x\\SKILL", "plugin:agent"):
+        code = cli.main(
+            [
+                "apply",
+                "--set",
+                "model=haiku",
+                "--agent",
+                name,
+                "--scope",
+                "user",
+                "--yes",
+                "--claude-root",
+                str(root),
+                "--config-dir",
+                str(tmp_path / "cfg"),
+            ]
+        )
+        err = capsys.readouterr().err
+        assert code == 2, name
+        expected = rule if ":" not in name else plugin
+        assert f"claudeglass apply: --agent {name!r}: {expected}" in err
+    assert skill.read_text(encoding="utf-8") == "---\nname: x\n---\nbody\n"
+
+
+# -- R3-VIEW-RULE: a user-scope preview with snapshots of several projects names no project's file --
+
+
+def test_cmd_apply_user_scope_names_no_projects_file_when_snapshots_span_projects(tmp_path, capsys):
+    config_dir = tmp_path / "tl"
+    snapshots_dir = config_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    for ts, folder, provenance in (("20260101T000000Z", "project-b", {}),
+                                   ("20260201T000000Z", "project-a", {"effortLevel": "project_shared"})):
+        (snapshots_dir / f"{ts}.json").write_text(json.dumps({
+            "ts": ts, "schema_version": 2,
+            "project_slug": snapshot_project_key(discovery.slug_for(str(tmp_path / folder))),
+            "effective": {"effortLevel": "high"} if provenance else {},
+            "effective_provenance": provenance,
+            "user_settings": {},
+        }), encoding="utf-8")
+    root = tmp_path / "claude"
+    root.mkdir()
+    exit_code = cli.main(["apply", "--set", "effortLevel=medium", "--scope", "user", "--config-dir", str(config_dir),
+                          "--claude-root", str(root), "--dry-run"])
+    assert exit_code == 0
+    assert "this project's shared settings" not in capsys.readouterr().out

@@ -15,6 +15,9 @@ import { capturePoll, showCaptureData } from "./shell.js";
 
 // -- Setup, Capture ---------------------------------------------------
 
+// The block links.js TUNING_BLOCK points at (evidence.js revealEvidence finds it by this name).
+var TUNING_NAME = "tuning";
+
 // The billing mode capture's amounts were phrased for (/api/capture's
 // billing.mode), set each time the page draws.
 var captureBilling = "";
@@ -153,7 +156,8 @@ function estimateLine(estimate) {
 
 function roughLine(rough) {
   var parts = [];
-  if (rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts, is cleared or compacts");
+  if (rough.compact_note > rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts or is cleared, and about " + rough.compact_note + " when it compacts");
+  else if (rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts, is cleared or compacts");
   if (rough.reply_tag) parts.push("about " + rough.reply_tag + " tokens of tag per reply");
   if (rough.message_note) parts.push("about " + rough.message_note + " tokens of note on a message of yours now and then, when a plan check or the /cg-feedback reminder is due");
   if (rough.reminder) parts.push("about " + rough.reminder + " tokens for the /cg-feedback reminder, at most once every 3 days");
@@ -193,7 +197,7 @@ function renderCaptureData(data, container) {
   // Where it stands now.
   var nowBlock = captureBlock(container, "Now");
   var now = [el("strong", { text: "Metrics capture: " + config.describe + ". " })];
-  if (config.expired) now.push(el("span", { text: "Its end time has passed, so nothing is captured now. " }));
+  if (config.expired && !config.light) now.push(el("span", { text: "Its end time has passed, so nothing is captured now. " }));
   if (config.projects_limited) now.push(el("span", { text: "Only some projects are captured ([capture] projects in config.toml). " }));
   nowBlock.appendChild(el("p", {}, now));
   var measured = data.measured;
@@ -208,8 +212,9 @@ function renderCaptureData(data, container) {
         var tagged = (config.tagger !== "haiku" && measured.filled_text)
           ? "Claude tagged " + measured.own_coverage_text + " of your messages, and Claude Haiku filled in " + measured.filled_text
           : tagger + " tagged " + measured.coverage_text + " of your messages";
-        lines.push(tagged + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
+        lines.push(tagged + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs" + (measured.report_signed_out_text ? ", and " + measured.report_signed_out_text : "") + "." : "."));
       }
+      if (measured.judge_paused_text) lines.push(measured.judge_paused_text);
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });
       })));
@@ -295,6 +300,7 @@ function renderCaptureTuning(data, container) {
   var tuning = data.tuning;
   if (!tuning) return;
   var block = captureBlock(container, tuning.title);
+  block.setAttribute("data-table-name", TUNING_NAME);
   block.appendChild(el("p", { class: "notes", text: tuning.text }));
   block.appendChild(el("p", { class: "notes", text: "From a terminal on this machine, write the file:" }));
   block.appendChild(codeBlockWithCopy(tuning.export_command, "Command", "writing the file"));
@@ -374,7 +380,7 @@ function renderCaptureControls(data, container) {
   var config = data.config || {};
   var block = captureBlock(container, "How much and for how long");
   if (!config.on) {
-    block.appendChild(el("p", { class: "notes", text: "When you switch capture on, it ends by itself after " + config.timebox_days + " days. Once it's on, you can pick another end here, or none." }));
+    block.appendChild(el("p", { class: "notes", text: "When you switch capture on, it ends by itself after " + config.timebox_days + " days. Once it's on, you can pick another end here, or none, and whether a light sample goes on after it." }));
     return;
   }
   var form = el("div", { class: "capture-controls" });
@@ -438,7 +444,23 @@ function renderCaptureControls(data, container) {
   form.appendChild(el("label", { for: endId, text: "Capture ends" }));
   form.appendChild(end);
   form.appendChild(el("p", { class: "notes", text: "A choice saves as soon as you pick it. The days count from when you pick, not from when capture started." }));
-  form.appendChild(el("p", { class: "notes", text: "At the end, capture stops by itself and the banner says so. Your level stays set, so picking a new end starts it again." }));
+  form.appendChild(el("p", { class: "notes", text: "At the end, capture stops or keeps its light sample, and the banner says so. Your level stays set, so picking a new end starts it again." }));
+
+  // What happens at the end only matters when there is an end.
+  if (config.until) {
+    var afterId = "capture-after";
+    var after = el("select", { id: afterId });
+    after.appendChild(el("option", { value: "stop", text: "Stop capturing" }));
+    after.appendChild(el("option", { value: "light", text: "Keep a light sample" }));
+    after.value = config.after === "light" ? "light" : "stop";
+    after.addEventListener("change", function () {
+      var value = after.value;
+      postCapture({ after: value }, container, value === "light" ? "Saved: a light sample goes on after the end." : "Saved: capture stops at the end.");
+    });
+    form.appendChild(el("label", { for: afterId, text: "When it ends" }));
+    form.appendChild(after);
+    form.appendChild(el("p", { class: "notes", text: "A light sample asks only for the kind, difficulty and size of the work, and task changes, in 1 session in " + Math.round(100 / config.light_share) + "." }));
+  }
   block.appendChild(form);
 }
 
@@ -455,7 +477,7 @@ function renderCaptureMetrics(data, container) {
     }).length;
     var group = el("details", { class: "disclosure capture-group" });
     group.open = section.metrics.some(function (row) {
-      return row.needs_hook || row.needs_install || row.statusline_note;
+      return row.needs_hook || row.needs_install || row.statusline_note || row.silent_note;
     });
     group.appendChild(el("summary", { text: section.title + " (" + on + " of " + section.metrics.length + " on)" }));
     var list = el("div", { class: "capture-metric-list" });
@@ -521,6 +543,7 @@ function renderMetricRow(row, data, container) {
     box.appendChild(codeBlockWithCopy(row.install_command, "Command"));
   }
   if (row.statusline_note) box.appendChild(el("p", { class: "notes" }, prose(row.statusline_note)));
+  if (row.silent_note) box.appendChild(el("p", { class: "notes" }, prose(row.silent_note)));
 
   toggle.addEventListener("change", function () {
     var turningOn = toggle.checked;

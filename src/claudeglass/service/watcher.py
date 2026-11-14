@@ -39,7 +39,8 @@ Each :meth:`FileWatcher.run_once` tick:
    ``usage-log.csv`` rows (SIG-5: ``log_usage.prune_usage_log``), and the
    ClaudeGlass mod's sensor files and the ``mod_events`` rows read from
    them (``mod_sensor.prune``, ``Store.prune_mod_events``), and its
-   heartbeat files after a day (``mod_sensor.prune_present``) -- at
+   heartbeat files after a day (``mod_sensor.prune_present``), and the
+   dashboard's card marks (``Store.prune_card_marks``) -- at
    ``options.retention_days`` when set, else
    ``config.SIGNAL_RETENTION_DEFAULT_DAYS`` (SEC-P8/G7: this telemetry
    must never grow forever just because nobody set a retention window,
@@ -739,6 +740,8 @@ class FileWatcher:
         # only reads the last ten minutes of one.
         mod_sensor_mod.prune_present(self.options.config_dir)
         self._time_store(stats, self.store.prune_mod_events, signal_retention)
+        # What the dashboard kept of the cards it showed goes at the same age.
+        self._time_store(stats, self.store.prune_card_marks, signal_retention)
         config_mod.prune_capture_log(self.options.config_dir, signal_retention)
         config_mod.prune_habit_log(self.options.config_dir, signal_retention)
 
@@ -1592,10 +1595,16 @@ class FileWatcher:
         other per-file step in this module already follows.
         """
         profiles_dir = Path(self.options.config_dir) / "profiles"
+        # Before the folder check: deleting the whole folder leaves no card.
+        self._forget_deleted_profiles(stats, profiles_dir)
         if not profiles_dir.is_dir():
             return
 
         for path in sorted(profiles_dir.glob("*.toml")):
+            if not path.is_file():
+                # A link whose target is gone, or a folder named like a profile:
+                # nothing to read, and no error a person could trace to a file.
+                continue
             try:
                 text = path.read_text(encoding="utf-8")
                 profile = profile_schema.load_profile(path)
@@ -1613,6 +1622,27 @@ class FileWatcher:
             except Exception as exc:
                 stats.errors += 1
                 stats.error_messages = stats.error_messages + (f"profile ingest error: {_error_summary(exc)}",)
+
+    def _forget_deleted_profiles(self, stats: WatcherStats, profiles_dir: Path) -> None:
+        """Drop the row of a profile whose file was deleted from this config
+        folder's ``profiles`` (the dashboard tells a person to fix or delete
+        a file that fails the checks), so it leaves no card. A row whose file
+        is elsewhere (a fixture, a store moved between config folders) is
+        kept: it is not this scan's to drop. Folders are compared resolved,
+        so a row stored under a relative config folder is still this
+        folder's under the absolute one (what is stored does not change).
+        Only the folder is resolved, never the file: a file linked in from
+        elsewhere (a dotfiles manager) is this folder's, and when its target
+        is deleted the link is no file any more."""
+        try:
+            folder = profiles_dir.resolve()
+            for profile_id, toml_path in self.store.profile_files().items():
+                path = Path(toml_path)
+                if path.parent.resolve() == folder and not path.is_file():
+                    self._time_store(stats, self.store.forget_profile, profile_id)
+        except Exception as exc:
+            stats.errors += 1
+            stats.error_messages = stats.error_messages + (f"profile ingest error: {_error_summary(exc)}",)
 
     def _scan_predictions(self, stats: WatcherStats) -> None:
         """Ingest every record in ``<config_dir>/prediction-log.jsonl``
@@ -1638,6 +1668,7 @@ class FileWatcher:
                 source = record.get("source")
                 measure_key = record.get("measure_key")
                 fidelity = record.get("fidelity")
+                priced_on = record.get("priced_on")
                 if not all(isinstance(value, str) and value for value in (prediction_id, ts, source, measure_key, fidelity)):
                     continue
                 self._time_store(
@@ -1651,6 +1682,7 @@ class FileWatcher:
                     predicted_usd=record.get("predicted_usd"),
                     predicted_pct=record.get("predicted_pct"),
                     fidelity=fidelity,
+                    priced_on=priced_on if isinstance(priced_on, (int, float)) and not isinstance(priced_on, bool) else None,
                 )
             except Exception as exc:
                 stats.errors += 1

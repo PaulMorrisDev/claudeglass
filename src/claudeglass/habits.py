@@ -65,11 +65,13 @@ from typing import TYPE_CHECKING
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
+from . import capture_checks
 from . import compaction as compaction_mod
 from . import classify
 from . import events as events_mod
 from . import known_savers
 from . import limits
+from . import measured
 from . import model_gate
 from . import pieces as pieces_mod
 from . import quality
@@ -77,7 +79,17 @@ from .capture_tags import with_older_why
 from .context_files import _parse_ts
 from .discovery import local_day, to_local
 from .handoff import MIN_FEEDBACK_ANSWERS, plan_carried, plan_groups, plan_shape, starting_context
-from .model import PROMPT_FLAGS, Column, EventKind, Feedback, Recommendation, Section, Table, Turn
+from .model import (
+    PROMPT_FLAGS,
+    Column,
+    EventKind,
+    Feedback,
+    Recommendation,
+    Section,
+    Table,
+    Turn,
+    scheduled_main_session,
+)
 from .pricing import Pricing, effective_rates, price_turn
 from .topology import LAUNCH_WORDS, _report_index, agent_key, launch_of, launches_by_tool_use
 
@@ -107,6 +119,30 @@ _HIGH_EFFORT = ("high", "xhigh", "max")
 #: confidence is capped when self-reports don't carry signal (see
 #: ``_self_report_calibration``).
 _LEVEL_ITEMS = frozenset({"effort_fit", "skip_plan_easy", "plan_hard"})
+#: Playbook items that rest on Claude's tags -> the tag keys each reads
+#: (:func:`_newest_tag` dates a card by them). ``better_briefs`` rests on
+#: Haiku's verdicts on agent runs instead (:data:`AGENT_TAG_KEYS`).
+ITEM_TAG_KEYS = {
+    "split_large": ("size",),
+    "paste_errors": ("task",),
+    "plan_hard": ("level",),
+    "skip_plan_easy": ("level",),
+    "effort_fit": ("level",),
+    "clear_between": ("shift", "prior"),
+    "brief_clearly": ("brief",),
+    "targeted_checks": ("check",),
+    "quiet_output": ("out",),
+    "skill_early": ("skill",),
+    "skill_unneeded": ("skill",),
+    "explore_research": ("found",),
+}
+#: The keys of an agent run's verdict, and the :class:`AgentFact` field
+#: that holds a key whose name differs from it.
+AGENT_TAG_KEYS = ("result", "agent_brief", "retry")
+_AGENT_FACT_FIELDS = {"agent_brief": "brief"}
+#: A card that rests on tags says how old the newest one is once your
+#: newest message is this many days later (:func:`_tag_age_line`).
+TAG_AGE_DAYS = 7
 #: Easy-at-high-effort messages before ``effort_fit`` fires -- the same
 #: number as ``recommend._EFFORT_MIN_MESSAGES`` (UX-3, "one shared effort
 #: threshold"): the habit item is ``COVERED_BY`` the ``effort-mismatch``
@@ -625,12 +661,14 @@ class CycleFact:
     #: them were a single read-only probe (:func:`_is_probe`), how many of
     #: those a shell command, how many runs of two or more such replies in
     #: a row came, and what the replies after the first of each run paid to
-    #: read the cache (:func:`_probe_counts`).
+    #: read the cache (:func:`_probe_counts`). The four probe figures are
+    #: ``None`` when the message's digest is from a parser before 46: its
+    #: shell reads are counted in an older meaning, so it is not measured.
     calls: int = 0
-    probe_calls: int = 0
-    probe_shell_calls: int = 0
-    probe_runs: int = 0
-    probe_batch_cost: float = 0.0
+    probe_calls: int | None = 0
+    probe_shell_calls: int | None = 0
+    probe_runs: int | None = 0
+    probe_batch_cost: float | None = 0.0
     #: How many of its replies came before the first one that changed your
     #: files (:func:`_calls_before_edit`); ``None`` when none did.
     calls_before_edit: int | None = None
@@ -729,6 +767,8 @@ class AgentFact:
     cost: float
     depth: int = 1
     model: str = ""
+    #: When the run began: the first priced turn of its transcript.
+    ts: datetime | None = None
     report_tokens: int = 0
     report_carry: float = 0.0
     capped: bool = False
@@ -739,15 +779,17 @@ class AgentFact:
     retry: str | None = None
     spawn: str | None = None
     #: The run's model calls (replies, one per message id), and how many of
-    #: them were a single read-only probe (:func:`_is_probe`).
+    #: them were a single read-only probe (:func:`_is_probe`). ``None`` for
+    #: the four probe figures when the run's digest is from a parser before
+    #: 46 (its shell reads are counted in an older meaning: not measured).
     calls: int = 0
-    probe_calls: int = 0
+    probe_calls: int | None = 0
     #: How many of those were a shell command, the runs of two or more in a
     #: row, and what the replies after the first of each run paid to read
     #: the cache (:func:`_probe_counts`).
-    probe_shell_calls: int = 0
-    probe_runs: int = 0
-    probe_batch_cost: float = 0.0
+    probe_shell_calls: int | None = 0
+    probe_runs: int | None = 0
+    probe_batch_cost: float | None = 0.0
     #: How many calls came before the first one that changed your files
     #: (:func:`_calls_before_edit`); ``None`` when the run changed none.
     calls_before_edit: int | None = None
@@ -992,6 +1034,10 @@ class Habits:
     plan_fixes: list[PlanFix] = field(default_factory=list)
     #: One per main session with a message of yours.
     shapes: list[SessionShape] = field(default_factory=list)
+    #: One per cycle that answers a summary (:class:`~claudeglass.capture_checks
+    #: .SummaryAnswer`), in the main sessions of the window: what
+    #: ``capture_checks.lost_check`` decides on.
+    summary_answers: list = field(default_factory=list)
     #: (session_id, day, project, start-up premium USD) of sessions that
     #: were one small ask; ``reported`` when a size tag said so.
     small_sessions: list = field(default_factory=list)
@@ -1139,6 +1185,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     out.saver_active = out.saver_calls > 0 and out.saver_calls >= known_savers.ADVICE_MIN_SHARE * out.tool_calls
     workflows = getattr(bundle, "workflows", ())
     cycles = capture_mod.prompt_cycles(top, bundle.subs, workflows)
+    if not scheduled_main_session(top):
+        out.summary_answers.extend(capture_checks.summary_answers(top, cycles))
     carry = _CarryCost(turns, rates)
     first_turn = turns[0]
     baseline = starting_context(turns)
@@ -1220,7 +1268,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     for cycle in work:
         facts.append(
             _cycle_fact(
-                bundle.session_id, cycle, carry, index_of, rates, baseline, rated, session_rating, denied, out.tz
+                bundle.session_id, cycle, carry, index_of, rates, baseline, rated, session_rating, denied, out.tz,
+                probes_measured=measured.measures(bundle.top, "shell_read_count"),
             )
         )
     captured = capture_mod.is_captured(top)
@@ -1594,7 +1643,8 @@ def _piece(fb: Feedback, cycles, rates: _Rates, source: str) -> Piece:
 
 
 def _cycle_fact(
-    session_id, cycle, carry: _CarryCost, index_of, rates: _Rates, baseline, rated, session_rating, denied, tz=None
+    session_id, cycle, carry: _CarryCost, index_of, rates: _Rates, baseline, rated, session_rating, denied, tz=None,
+    probes_measured: bool = True,
 ):
     first = cycle.turns[0]
     moment = _moment(first.ts)
@@ -1677,9 +1727,12 @@ def _cycle_fact(
     if fact.tag is not None and fact.tag.plan in ("made", "following", "deviated"):
         fact.planned = True
     fact.calls = len(cycle.turns)
-    fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost = _probe_counts(
-        cycle.turns, [carry.read_cost(i) for i in idx]
-    )
+    if probes_measured:
+        fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost = _probe_counts(
+            cycle.turns, [carry.read_cost(i) for i in idx]
+        )
+    else:
+        fact.probe_calls = fact.probe_shell_calls = fact.probe_runs = fact.probe_batch_cost = None
     fact.calls_before_edit = _calls_before_edit(cycle.turns)
     return fact
 
@@ -1748,6 +1801,7 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
             session_id=bundle.session_id,
             agent_type=sub.meta.agent_type or "general-purpose",
             week=_week(_moment(first.ts), out.tz),
+            ts=_moment(first.ts),
             cost=sum(sub_carry.costs),
             depth=max(1, sub.meta.spawn_depth or 1),
             model=_dominant(t.model for t in priced) or "",
@@ -1770,9 +1824,12 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
                 fact.brief = fact.brief or cap.brief
                 fact.missing = fact.missing or tuple(cap.missing)
         fact.calls = len(priced)
-        (fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost) = _probe_counts(
-            priced, [sub_carry.read_cost(k) for k in range(len(priced))]
-        )
+        if measured.measures(sub, "shell_read_count"):
+            (fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost) = _probe_counts(
+                priced, [sub_carry.read_cost(k) for k in range(len(priced))]
+            )
+        else:
+            fact.probe_calls = fact.probe_shell_calls = fact.probe_runs = fact.probe_batch_cost = None
         fact.calls_before_edit = _calls_before_edit(priced)
         fact.compactions, fact.auto_compactions = compaction_mod.compactions_in(sub)
         _place_in_run(fact, sub, launches, main_spawn)
@@ -1871,10 +1928,12 @@ def _share_reads(reads: dict) -> None:
 
 def _is_probe(turn) -> bool:
     """Whether a reply (one message id) only looked, once: its one tool call
-    was a Read, Grep or Glob, or a shell command that reads files
+    was a Read, Grep or Glob, or a shell command that reads files once
     (``shell_reads``: grep, sed -n, cat, find, git log) and writes or moves
     none. A reply with two calls, or with a call that did anything else,
-    is not. What a small model does as well as a large one."""
+    is not, and neither is one command that chains several reads: that is
+    already a batch (:func:`_is_batched_shell_read`). What a small model
+    does as well as a large one."""
     calls = turn.tool_calls_by_tool
     if sum(calls.values()) != 1:
         return False
@@ -1882,7 +1941,20 @@ def _is_probe(turn) -> bool:
         return True
     return (
         any(calls.get(tool) for tool in _SHELL_TOOLS)
-        and turn.shell_read_count > 0
+        and turn.shell_read_count == 1
+        and not (turn.shell_write_count or turn.shell_change_count)
+    )
+
+
+def _is_batched_shell_read(turn) -> bool:
+    """Whether a reply's one call was a read-only shell command that chains
+    several reads (a ``||`` fallback counts as one): a batch already, so
+    not a probe, though it still sits in a run of lookups."""
+    calls = turn.tool_calls_by_tool
+    return (
+        sum(calls.values()) == 1
+        and any(calls.get(tool) for tool in _SHELL_TOOLS)
+        and turn.shell_read_count >= 2
         and not (turn.shell_write_count or turn.shell_change_count)
     )
 
@@ -1899,7 +1971,8 @@ def _probe_counts(turns, read_costs) -> tuple[int, int, int, float]:
     :meth:`_CarryCost.read_cost`): how many replies were a single read-only
     probe, how many of those were a shell command, how many runs of two or
     more probes in a row came, and the cache reads of the replies after the
-    first of each run. Those are the re-reads one message holding the calls
+    first of each run. A command chaining several reads is no probe, but it
+    neither ends a run nor goes unpriced inside one. Those are the re-reads one message holding the calls
     side by side would not have needed, as far as the calls didn't depend on
     each other. Each reply's cache write and output stay out of it: a
     batched message still writes the tool results and still names the
@@ -1908,11 +1981,13 @@ def _probe_counts(turns, read_costs) -> tuple[int, int, int, float]:
     cost = 0.0
     run = 0
     for turn, usd in zip(turns, read_costs):
-        if not _is_probe(turn):
+        batched = _is_batched_shell_read(turn)
+        if not (batched or _is_probe(turn)):
             run = 0
             continue
-        probes += 1
-        shell += _is_shell_probe(turn)
+        if not batched:
+            probes += 1
+            shell += _is_shell_probe(turn)
         run += 1
         if run == 2:
             runs += 1
@@ -2050,6 +2125,12 @@ def _mean(values) -> float | None:
 
 def _pct(part: int, whole: int) -> float | None:
     return 100.0 * part / whole if whole else None
+
+
+def _probed(facts) -> list:
+    """The facts whose single lookups were measured (``probe_calls`` not
+    None: a digest an older parser wrote has them in an older meaning)."""
+    return [f for f in facts if f.probe_calls is not None]
 
 
 def _sources(reported: bool, inferred: bool, feedback: bool = False) -> tuple[str, ...]:
@@ -2416,8 +2497,9 @@ def _item_name_files(h: Habits) -> Item | None:
         f"Asks that named a file ran {reads_named:.1f} reads and searches on average; the {len(unnamed)} that "
         f"didn't ran {reads_unnamed:.1f}."
     )
-    lone_named = _pct(sum(c.probe_calls for c in named), sum(c.calls for c in named))
-    lone_unnamed = _pct(sum(c.probe_calls for c in unnamed), sum(c.calls for c in unnamed))
+    probed_named, probed_unnamed = _probed(named), _probed(unnamed)
+    lone_named = _pct(sum(c.probe_calls for c in probed_named), sum(c.calls for c in probed_named))
+    lone_unnamed = _pct(sum(c.probe_calls for c in probed_unnamed), sum(c.calls for c in probed_unnamed))
     if lone_named is not None and lone_unnamed is not None and lone_unnamed > lone_named:
         evidence += (
             f" {lone_unnamed:.0f}% of the replies to those that didn't made one lookup and nothing else, "
@@ -2473,9 +2555,10 @@ def _item_explore_research(h: Habits) -> Item | None:
     not_found = sum(1 for c in heavy if c.tag is not None and c.tag.found == "no")
     if not_found:
         parts.append(f"Claude said it didn't find what it looked for {not_found} times")
-    lone = sum(c.probe_calls for c in heavy)
+    probed = _probed(heavy)
+    lone = sum(c.probe_calls for c in probed)
     if lone:
-        parts.append(f"{lone} of their {sum(c.calls for c in heavy)} replies made one lookup and nothing else")
+        parts.append(f"{lone} of their {sum(c.calls for c in probed)} replies made one lookup and nothing else")
     return Item(
         "explore_research", saving, len(heavy), _sources(confirmed > 0, confirmed < saving), _clauses(parts),
         example=EXPLORE_RESEARCH_TOKENSAVE_EXAMPLE if tokensave else "",
@@ -2686,7 +2769,9 @@ def _item_targeted_checks(h: Habits) -> Item | None:
     # set ``classify_purpose`` uses) is evidence a message was checked
     # even without a ``[cg: check=...]`` tag, and stronger evidence than
     # one that contradicts it (said "none" but ran a test anyway).
-    reported_checked = [c for c in h.cycles if c.tag is not None and c.tag.check]
+    # A message that changed nothing was not asked for the word (and ``settle`` blanks it), so it is not
+    # counted: old data and new count alike.
+    reported_checked = [c for c in h.cycles if c.tag is not None and c.tag.check and c.changed]
     inferred_checked = [c for c in h.cycles if c.checked_by_tool]
     checked = list({id(c): c for c in (*reported_checked, *inferred_checked)}.values())
     if len(checked) < MIN_GROUP:
@@ -2901,6 +2986,60 @@ _BUILDERS = (
 )
 
 
+def _newest_tag(h: Habits, item: Item) -> datetime | None:
+    """When the newest tag behind ``item`` was written: the newest message
+    whose tag holds a word for a key the card reads (:data:`ITEM_TAG_KEYS`),
+    or for ``better_briefs`` the newest agent run with a verdict. ``check``
+    counts only on a message that changed something, the only kind asked for
+    it (an older digest holds the word on others, rewritten to ``none``).
+    ``None`` when there is none, or the card reads no tags."""
+    if item.key == "better_briefs":
+        fields = [_AGENT_FACT_FIELDS.get(key, key) for key in AGENT_TAG_KEYS]
+        return max((a.ts for a in h.agents if a.ts is not None and any(getattr(a, f) for f in fields)), default=None)
+    keys = ITEM_TAG_KEYS.get(item.key, ())
+    return max(
+        (
+            c.ts for c in h.cycles
+            if c.ts is not None and c.tag is not None and (c.changed or "check" not in keys)
+            and any(getattr(c.tag, k, None) for k in keys)
+        ),
+        default=None,
+    )
+
+
+def _newest_asked(h: Habits, item: Item) -> datetime | None:
+    """The newest moment the card's key was asked for: a message that
+    changed something for ``check``, one with a large Read or web result
+    for ``out``, an agent run for ``better_briefs``, any message for the
+    rest. A tag is as old as that moment says, not as the newest message of
+    any kind: a question changes nothing and gets no ``check``."""
+    if item.key == "better_briefs":
+        return max((a.ts for a in h.agents if a.ts is not None), default=None)
+    keys = ITEM_TAG_KEYS.get(item.key, ())
+    return max(
+        (
+            c.ts for c in h.cycles
+            if c.ts is not None and (c.changed or "check" not in keys)
+            and ("out" not in keys or any(tool in catalogue.BIG_OUTPUT_TOOLS for tool, *_ in c.big_outputs))
+        ),
+        default=None,
+    )
+
+
+def _tag_age_line(h: Habits, item: Item) -> str:
+    """For a card that rests on Claude's tags (``reported`` among its
+    sources): the date of its newest tag, once the newest message that would
+    have been asked for it (:func:`_newest_asked`) is :data:`TAG_AGE_DAYS`
+    days or more after it, as capture ends by itself. ``""`` otherwise,
+    including while capture asks and gets answers."""
+    if "reported" not in item.sources:
+        return ""
+    newest, asked = _newest_tag(h, item), _newest_asked(h, item)
+    if newest is None or asked is None or asked - newest < timedelta(days=TAG_AGE_DAYS):
+        return ""
+    return f"Claude's newest tag behind this is from {local_day(newest, h.tz)}. None of your messages since then has one."
+
+
 def playbook(h: Habits) -> list[Item]:
     """The habits worth trying, the largest weekly saving first; items
     without an estimate come after, most evidence first."""
@@ -2920,6 +3059,10 @@ def playbook(h: Habits) -> list[Item]:
         for item in items:
             if ITEMS[item.key][0] == "information" and item.key != "brief_clearly":
                 item.evidence += " " + _clauses(notes)
+    for item in items:
+        age = _tag_age_line(h, item)
+        if age:
+            item.evidence += " " + age
     items.sort(key=lambda i: (i.saving is None, -(i.saving or 0.0), -i.n))
     return items
 
@@ -3690,12 +3833,13 @@ def _agents_table(h: Habits) -> Table:
     levels = [c for c in h.cycles if c.tag is not None and c.tag.level]
     if levels:
         cost = sum(c.cost for c in h.cycles)
-        calls = sum(c.calls for c in h.cycles)
+        probed = _probed(h.cycles)
+        calls = sum(c.calls for c in probed)
         edited = [c.calls_before_edit for c in h.cycles if c.calls_before_edit is not None]
         rows.append([
             "top-level", len(h.cycles), cost, None, None, None, None, None,
-            _pct(sum(c.probe_calls for c in h.cycles), calls),
-            _pct(sum(c.probe_shell_calls for c in h.cycles), calls),
+            _pct(sum(c.probe_calls for c in probed), calls),
+            _pct(sum(c.probe_shell_calls for c in probed), calls),
             statistics.median(edited) if edited else None,
             None, None,
             _pct(sum(c.tag.level == "easy" for c in levels), len(levels)),
@@ -3711,6 +3855,7 @@ def _agents_table(h: Habits) -> Table:
         leveled = [a for a in runs if a.level]
         edited = [a.calls_before_edit for a in runs if a.calls_before_edit is not None]
         rules = Counter(a.rules for a in runs if a.rules)
+        probed = _probed(runs)
         rows.append([
             agent_type,
             len(runs),
@@ -3720,8 +3865,8 @@ def _agents_table(h: Habits) -> Table:
             _pct(sum(a.result == "done" for a in results), len(results)),
             sum(1 for a in runs if a.retry),
             sum(1 for a in runs if a.retry == "model"),
-            _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
-            _pct(sum(a.probe_shell_calls for a in runs), sum(a.calls for a in runs)),
+            _pct(sum(a.probe_calls for a in probed), sum(a.calls for a in probed)),
+            _pct(sum(a.probe_shell_calls for a in probed), sum(a.calls for a in probed)),
             statistics.median(edited) if edited else None,
             rules.get("used", 0),
             rules.get("unused", 0),
@@ -3805,16 +3950,18 @@ def _probes_table(h: Habits) -> Table:
     for a in h.agents:
         groups.setdefault(a.agent_type, []).append(a)
     rows = []
-    if h.cycles:
+    cycles = _probed(h.cycles)
+    if cycles:
         rows.append([
             "top-level",
-            sum(c.calls for c in h.cycles),
-            sum(c.probe_calls for c in h.cycles),
-            sum(c.probe_shell_calls for c in h.cycles),
-            sum(c.probe_runs for c in h.cycles),
-            sum(c.probe_batch_cost for c in h.cycles),
+            sum(c.calls for c in cycles),
+            sum(c.probe_calls for c in cycles),
+            sum(c.probe_shell_calls for c in cycles),
+            sum(c.probe_runs for c in cycles),
+            sum(c.probe_batch_cost for c in cycles),
         ])
-    for agent_type, runs in groups.items():
+    for agent_type, found in groups.items():
+        runs = _probed(found)
         rows.append([
             agent_type,
             sum(a.calls for a in runs),
@@ -3860,12 +4007,13 @@ def _run_receipts_table(h: Habits) -> Table:
     for word, agents in agent_run_groups(h).items():
         runs = {a.run or id(a) for a in agents}
         calls = sum(a.calls for a in agents)
+        probed = _probed(agents)
         rows.append([
             word,
             len(runs),
             len(agents),
             calls,
-            _pct(sum(a.probe_calls for a in agents), calls),
+            _pct(sum(a.probe_calls for a in probed), sum(a.calls for a in probed)),
             sum(a.start_tokens * a.calls for a in agents),
             sum(a.compactions for a in agents),
             sum(1 for a in agents if a.compactions),
@@ -4037,6 +4185,7 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
             results = [a for a in runs if a.result]
             leveled = [a for a in runs if a.level]
             edited = [a.calls_before_edit for a in runs if a.calls_before_edit is not None]
+            probed = _probed(runs)
             alt = None
             task_row = {
                 "runs": len(runs),
@@ -4051,8 +4200,8 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
                 len(runs),
                 _mean(a.cost for a in runs),
                 _pct(sum(a.result == "done" for a in results), len(results)),
-                _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
-                _pct(sum(a.probe_shell_calls for a in runs), sum(a.calls for a in runs)),
+                _pct(sum(a.probe_calls for a in probed), sum(a.calls for a in probed)),
+                _pct(sum(a.probe_shell_calls for a in probed), sum(a.calls for a in probed)),
                 statistics.median(edited) if edited else None,
                 alt[0] if alt else None,
                 alt[1] if alt else None,
@@ -4082,9 +4231,12 @@ def _effort_table(h: Habits) -> Table:
         if c.tag is not None and c.tag.level:
             groups.setdefault(f"{c.tag.level}:{c.effort or 'default'}", []).append(c)
     order = {w: n for n, w in enumerate(catalogue.TAG_VOCAB["level"])}
+    latest = max((c.ts for c in h.cycles if c.ts is not None), default=None)
     rows = []
     for key, cycles in sorted(groups.items(), key=lambda kv: (order.get(kv[0].split(":")[0], 9), kv[0])):
         rated = [c for c in cycles if c.outcome]
+        newest = max((c.ts for c in cycles if c.ts is not None), default=None)
+        stale = newest is not None and latest is not None and latest - newest >= timedelta(days=TAG_AGE_DAYS)
         output = sum(c.output_cost for c in cycles)
         rows.append([
             key,
@@ -4094,6 +4246,7 @@ def _effort_table(h: Habits) -> Table:
             _pct(sum(c.redone for c in cycles), len(cycles)),
             _pct(sum(c.outcome == "met" for c in rated), len(rated)),
             sum(_effort_waste(c) for c in cycles) if key.split(":")[0] == "easy" and key.split(":")[1] in _HIGH_EFFORT else None,
+            local_day(newest, h.tz) if stale else "",
         ])
     return Table(
         name="habits_effort_fit",
@@ -4106,6 +4259,7 @@ def _effort_table(h: Habits) -> Table:
             Column(key="redo_pct", label="Redone", kind="pct"),
             Column(key="met_pct", label="Met the goal", kind="pct"),
             Column(key="saving", label="Lower effort would save, about", kind="money"),
+            Column(key="newest_tag", label="Newest tag", kind="str"),
         ],
         rows=rows,
     )
@@ -4500,6 +4654,31 @@ def _tool_output_table(h: Habits) -> Table:
     )
 
 
+def _summary_table(h: Habits) -> Table | None:
+    """What Claude said summaries left out, with how often the transcript
+    backs each answer: only once ``capture_checks.lost_check`` has passed,
+    otherwise there is no table. The two window cards that move the
+    compact window cite its ``yes`` row (``recommend``)."""
+    check = capture_checks.lost_check(h.summary_answers)
+    if not check.passed:
+        return None
+    answered = check.yes + check.no
+    return Table(
+        name="habits_summary_losses",
+        title="What summaries left out",
+        columns=[
+            Column(key="answer", label="Claude's answer", kind="str"),
+            Column(key="answers", label="Answers", kind="int"),
+            Column(key="evidence_pct", label="With a file read again or a correction", kind="pct"),
+            Column(key="share_pct", label="Share of answers", kind="pct"),
+        ],
+        rows=[
+            ["yes", check.yes, _pct(check.yes_evidence, check.yes), _pct(check.yes, answered)],
+            ["no", check.no, _pct(check.no_evidence, check.no), _pct(check.no, answered)],
+        ],
+    )
+
+
 def build_section(
     corpus,
     pricing: Pricing | None,
@@ -4543,6 +4722,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             "No feedback yet: rate sessions on {{page:spend/sessions}} or run /cg-feedback to see cost per piece of "
             "work that met its goal."
         )
+    summary = _summary_table(h)
     return Section(
         key="habits",
         title="Work habits",
@@ -4564,6 +4744,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             _outcomes_table(h),
             _by_shape_table(h),
             _self_report_table(h),
+            *([summary] if summary is not None else []),
             _prompt_flags_table(h),
             _skills_table(h),
             _tool_output_table(h),

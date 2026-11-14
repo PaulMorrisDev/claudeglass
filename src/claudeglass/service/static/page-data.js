@@ -8,7 +8,7 @@ import { clear, el, state } from "./core.js";
 import { loadInto, loadReport, withWindow } from "./api.js";
 import { codeBlockWithCopy, errorNotice, loadingNode, prose } from "./ui.js";
 import { headRow, renderMappedSections, renderTable } from "./grid.js";
-import { viewIntro } from "./links.js";
+import { tuningLink, viewIntro } from "./links.js";
 import { renderHealth, renderSetupList } from "./shell.js";
 
 // ======================================================================
@@ -66,6 +66,14 @@ export function renderDataQuality(panel) {
       target.appendChild(renderTable(table, "diagnostics-counters-table", state.currency, { heading: false, helpInto: head, allRows: true }));
     },
     { skeleton: "rows" }
+  );
+
+  // Some advice rests on figures no page shows; the tuning file holds them (K1).
+  panel.appendChild(
+    el("p", { class: "notes", id: "data-figures" }, [
+      "Some advice rests on figures no page shows, such as cost per reply and what a summary saves. The tuning file holds them. ",
+      tuningLink("Figures behind the advice"),
+    ])
   );
 }
 

@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import itertools
+import re
+
+import pytest
+
 from claudeglass import advice, fixes, known_savers
 from claudeglass.model import (
     Column,
@@ -12,6 +17,7 @@ from claudeglass.model import (
     ReportMeta,
     ReportModel,
     Section,
+    SettingChange,
     Table,
 )
 from claudeglass.snapshots import Snapshot
@@ -97,6 +103,195 @@ def test_model_tier_cards_merge_into_one_with_a_change_per_agent_type():
     assert main_card.saving_usd == 30.0
     assert main_card.title == "Your main session could run on Sonnet"
     assert "yours to make" in main_card.why
+
+
+def _priced_report(columns, rows, name="model_swap_by_agent_type", section="model_swap") -> ReportModel:
+    table = Table(name=name, columns=[Column(key=k, label=k) for k in columns], rows=rows)
+    return ReportModel(
+        meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)),
+        sections=[Section(key=section, title=section, tables=[table])],
+        diagnostics=Diagnostics(lines=1000),
+    )
+
+
+_SWAP_COLUMNS = ["agent_type", "observed_model", "best_cheaper_alternative_model", "saving_usd", "observed_cost", "lever_cost"]
+
+
+def test_the_model_tier_cards_say_what_their_saving_was_priced_on():
+    report = _priced_report(
+        _SWAP_COLUMNS,
+        [
+            ["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0, 100.0, 80.0],
+            ["reviewer", "claude-sonnet-5", "claude-haiku-4-5-20251001", 50.0, 90.0, 70.0],
+        ],
+    )
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {"reviewer": {"source": "project"}}})
+    out = advice.finish([_tier("top-level"), _tier("reviewer")], report, snap, Units())
+    (agent_card,) = [r for r in out if r.id == "model-tier"]
+    (main_card,) = [r for r in out if r.id == "model-tier-main"]
+    # The cost of the runs the setting decides: the figure the saving is a share of.
+    assert main_card.priced_on == 80.0
+    assert agent_card.priced_on == 70.0
+    # The sentences are their own fields.
+    assert isinstance(main_card.saving_basis, str) and main_card.saving_basis
+
+
+def test_a_model_tier_card_falls_back_to_the_observed_cost_without_the_lever_cost_column():
+    report = _priced_report(
+        _SWAP_COLUMNS[:5],
+        [["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0, 100.0]],
+    )
+    out = advice.finish([_tier("top-level")], report, None, Units())
+    (main_card,) = [r for r in out if r.id == "model-tier-main"]
+    assert main_card.priced_on == 100.0
+
+
+def test_the_merged_model_tier_card_leaves_priced_on_none_when_it_covers_several_agents():
+    report = _priced_report(
+        _SWAP_COLUMNS,
+        [
+            ["reviewer", "claude-sonnet-5", "claude-haiku-4-5-20251001", 50.0, 90.0, 70.0],
+            ["general-purpose", "claude-sonnet-5", "claude-haiku-4-5-20251001", 10.0, 40.0, 20.0],
+        ],
+    )
+    out = advice.finish([_tier("reviewer"), _tier("general-purpose")], report, None, Units())
+    (card,) = [r for r in out if r.id == "model-tier"]
+    assert len(card.changes) == 2
+    assert card.priced_on is None  # one saving over two agents' costs: no single figure
+
+
+def test_a_model_tier_card_with_no_cost_in_the_table_leaves_priced_on_none():
+    out = advice.finish([_tier("reviewer")], _model_swap_report([["reviewer", "claude-sonnet-5", "claude-haiku-4-5-20251001", 50.0]]), None, Units())
+    (card,) = [r for r in out if r.id == "model-tier"]
+    assert card.priced_on is None
+
+
+def test_the_main_model_card_says_which_sessions_it_leaves_out():
+    """The main session's saving counts only the sessions its setting still
+    decides: the card says how many it leaves out, and why."""
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {}})
+
+    def main_why(already: int, before: int, picked: int = 0, own: int = 0) -> str:
+        rec = _tier("top-level")
+        for label, count in (
+            ("Main sessions already on Sonnet or smaller (not counted)", already),
+            ("Main sessions from before their project moved to Sonnet (not counted)", before),
+            ("Main sessions picked against a Sonnet setting (not counted)", picked),
+            ("Main sessions in projects that set their own model (not counted)", own),
+        ):
+            if count:
+                rec.evidence.append((label, count, "model_swap.model_swap_by_agent_type", "top-level"))
+        (card,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "model-tier-main"]
+        return card.why
+
+    assert (
+        "would cost up to 40% less. It leaves out the 5 main sessions already on Sonnet or smaller. "
+        "It's a quality trade, so it's yours to make."
+    ) in main_why(5, 0)
+    assert "It leaves out the 1 main session from before its project moved to Sonnet or smaller." in main_why(0, 1)
+    assert "It leaves out the 3 main sessions from before their project moved to Sonnet or smaller." in main_why(0, 3)
+    assert (
+        "It leaves out 10 main sessions: 7 already on Sonnet or smaller, and 3 from before their project moved there."
+        in main_why(7, 3)
+    )
+    assert "It leaves out" not in main_why(0, 0)
+    # Picks against a Sonnet setting, and projects that set their own model.
+    assert "It leaves out the 1 main session picked against a Sonnet setting." in main_why(0, 0, 1)
+    assert "It leaves out the 4 main sessions picked against a Sonnet setting." in main_why(0, 0, 4)
+    assert "It leaves out the 1 main session in a project with its own model." in main_why(0, 0, 0, 1)
+    assert "It leaves out the 6 main sessions in projects that set their own model." in main_why(0, 0, 0, 6)
+    # Three or four reasons (H10): no list, the counts are in the evidence lines and the tip.
+    assert (
+        "It leaves out 12 main sessions that already ran on Sonnet or smaller or that a settings change would not "
+        "reach." in main_why(7, 3, 2)
+    )
+    assert (
+        "It leaves out 10 main sessions that a settings change would not reach." in main_why(0, 3, 2, 5)
+    )
+    assert (
+        "It leaves out 8 main sessions: 3 from before their project moved to Sonnet or smaller, and 5 in projects "
+        "that set their own model." in main_why(0, 3, 0, 5)
+    )
+    assert (
+        "It leaves out 4 main sessions that already ran on Sonnet or smaller or that a settings change would not "
+        "reach." in main_why(1, 1, 1, 1)
+    )
+    assert "already says" not in main_why(0, 0, 4)
+    assert "It leaves out 4 main sessions: 3 already on Sonnet or smaller, and 1 from before its project moved there." in main_why(3, 1)
+    assert (
+        "It leaves out 2 main sessions: 1 from before its project moved to Sonnet or smaller, and 1 in a project "
+        "with its own model." in main_why(0, 1, 0, 1)
+    )
+    for counts in itertools.product((0, 1, 3), repeat=4):
+        for sentence in re.split(r"(?<=[.!?])\s+", main_why(*counts)):
+            if sentence.startswith("It leaves out"):
+                assert len(sentence.split()) <= 25, (counts, sentence)
+
+
+def test_a_main_setting_at_sonnet_or_smaller_gets_no_main_card_in_any_view():
+    """G3, now a backstop: the saving reads the same setting, so a priced
+    figure never meets a setting at Sonnet or smaller; if one did, the card
+    would not offer to raise it."""
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
+
+    def snap(model: str) -> Snapshot:
+        data = {"agents": {}, "effective": {"model": model}, "effective_provenance": {"model": "user"}}
+        return Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+
+    for projects in (("C--Dev-a", "C--Dev-b"), ("C--Dev-a",)):
+        report.meta.projects = projects
+        for model in ("sonnet", "haiku", "claude-haiku-4-5-20251001"):
+            out = advice.finish([_tier("top-level")], report, snap(model), Units())
+            assert not [r for r in out if r.id == "model-tier-main"], (projects, model)
+
+
+def test_in_a_view_of_several_projects_the_main_card_stays_when_the_setting_already_says_opus():
+    """H4 above the Sonnet line: sessions on Fable, the setting on Opus. One
+    setting can't say what every project ran, so with several projects the
+    card stays with no change to make; one project's view drops it."""
+    report = _model_swap_report([["top-level", "claude-fable-5-1", "claude-opus-5-5", 30.0]])
+    data = {"agents": {}, "effective": {"model": "opus"}, "effective_provenance": {"model": "user"}}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+
+    def main_cards():
+        return [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"]
+
+    report.meta.projects = ("C--Dev-a", "C--Dev-b")
+    (card,) = main_cards()
+    assert card.changes == [] and card.saving_usd == 30.0
+    assert "Your model setting already says Opus, and the sessions it counts still ran on a larger model." in card.why
+    assert card.action == "Keep routine work on your setting. Pick a larger model only for work that needs it."
+    report.meta.projects = ("C--Dev-a",)
+    assert main_cards() == []
+
+
+def test_the_main_card_reads_the_setting_the_saving_reads():
+    """In a view of one project the card's current value, and where its
+    change goes, are the lever's reading (ReportMeta.main_model_setting),
+    not the project's last snapshot."""
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 30.0]])
+    report.meta.projects = ("C--Dev-a",)
+    data = {"agents": {}, "effective": {"model": "sonnet"}, "effective_provenance": {"model": "user"}}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+
+    def main_change(reading):
+        report.meta.main_model_setting = reading
+        cards = [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"]
+        return cards[0].changes[0] if cards else None
+
+    change = main_change({"value": "opus", "scope": "user"})
+    assert (change.current, change.value, change.scope) == ("opus", "sonnet", "user")
+    assert change.note == "This changes the model for your main session in every project."
+    change = main_change({"value": "opus", "scope": "project-local"})
+    assert (change.current, change.scope) == ("opus", "project-local")
+    assert change.note == "This changes the model for your main session in this project only."
+    # The reading at Sonnet: no card, whatever the snapshot says.
+    data["effective"]["model"] = "opus"
+    assert main_change({"value": "sonnet", "scope": "user"}) is None
+    # No reading (several projects, or none recorded): the view's own setting.
+    change = main_change({})
+    assert change.current == "opus"
 
 
 def test_the_model_tier_card_names_runs_an_agent_file_does_not_decide():
@@ -226,6 +421,7 @@ def test_cache_ttl_and_effort_cards_are_dropped_when_already_set():
         ts="2026-09-20T00:00:00Z",
         data={
             "effective": {"effortLevel": "Medium"},
+            "effective_provenance": {"effortLevel": "project_shared"},
             "agents": {"verification-runner": {"source": "user", "experimental.cacheTtl": "1h"}},
         },
     )
@@ -236,9 +432,28 @@ def test_cache_ttl_and_effort_cards_are_dropped_when_already_set():
             agent_type="verification-runner",
             evidence=[("TTL recommendation", "switch to 1h", "ttl", "verification-runner")],
         ),
-        Recommendation(id="effort-mismatch", severity="advice"),
+        Recommendation(id="effort-mismatch", severity="advice", scope="repo"),
     ]
     assert advice.finish(recs, report, snap, Units()) == []
+
+
+def test_the_ttl_switch_card_says_the_observed_cost_its_saving_is_a_share_of():
+    report = _priced_report(
+        ["agent_type", "cost_observed", "saving_usd"],
+        [["verification-runner", 40.0, 6.0]],
+        name="ttl_by_agent_type",
+        section="ttl",
+    )
+    rec = Recommendation(
+        id="ttl-switch",
+        severity="advice",
+        agent_type="verification-runner",
+        evidence=[("TTL recommendation", "switch to 1h", "ttl", "verification-runner")],
+    )
+    (out,) = advice.finish([rec], report, None, Units())
+    assert out.saving_usd == 6.0 and out.priced_on == 40.0
+    (bare,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert bare.priced_on is None
 
 
 def test_already_set_matches_model_aliases_and_maps():
@@ -288,6 +503,26 @@ def test_compaction_window_wins_over_churn_and_takes_the_setting_from_long_conte
     assert long_ctx.lever is None and long_ctx.changes == [] and long_ctx.category == "workflow"
     # Sorted by saving within a severity.
     assert ids[0] == "compaction-window"
+
+
+def test_the_compaction_window_card_says_the_observed_cost_its_saving_is_a_share_of():
+    window = _compaction(
+        "compaction-window",
+        title="Set autoCompactWindow to at least 250,000",
+        evidence=[
+            ("Observed cost (top-level, window=none)", 60.0, "x", "none"),
+            ("Candidate 250,000: modelled saving after rediscovery correction", 12.0, "x", "250,000"),
+        ],
+    )
+    (out,) = [r for r in advice.finish([window], _model_swap_report([]), None, Units()) if r.id == "compaction-window"]
+    assert out.priced_on == 60.0
+    bare = _compaction(
+        "compaction-window",
+        title="Set autoCompactWindow to at least 250,000",
+        evidence=[("Candidate 250,000: modelled saving after rediscovery correction", 12.0, "x", "250,000")],
+    )
+    (out,) = [r for r in advice.finish([bare], _model_swap_report([]), None, Units()) if r.id == "compaction-window"]
+    assert out.priced_on is None
 
 
 def test_compaction_window_is_dropped_when_already_at_or_below_the_floor():
@@ -595,8 +830,38 @@ def test_effort_mismatch_from_reported_work_is_explained_as_measured():
         "Claude reported 6 of your messages as easy work, yet they ran at high effort or above, and up to 55% of "
         "their output was thinking."
     )
-    assert out.changes[0].key == "effortLevel" and out.changes[0].value == "medium"
+    assert out.changes == [] and out.variant == "session"
     assert out.estimated_saving.startswith("About ")
+
+
+def test_effort_mismatch_fallback_why_gives_the_light_share():
+    rec = Recommendation(
+        id="effort-mismatch",
+        severity="advice",
+        category="settings",
+        title="x",
+        lever="effortLevel",
+        evidence=[
+            ("Thinking share at xhigh effort", 41.0, "agents.topology_effort_tokens", "xhigh"),
+            ("docs-or-light-edit sessions in corpus", 6, "sessions.sessions_by_purpose", "docs-or-light-edit"),
+        ],
+    )
+    purposes = Table(
+        name="sessions_by_purpose",
+        title="Sessions by purpose",
+        columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
+        rows=[["docs-or-light-edit", 6], ["general-dev", 4]],
+    )
+    report = ReportModel(meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)),
+                         sections=[Section(key="sessions", title="Sessions", tables=[purposes])],
+                         diagnostics=Diagnostics(lines=1000))
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {}})
+    (out,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "effort-mismatch"]
+    assert out.why == (
+        "At high effort or above, 41% of Claude's output was thinking, yet 6 of 10 (60%) of your sessions "
+        "are docs or light edits that rarely need it."
+    )
+    assert "many" not in out.why
 
 
 def test_effort_mismatch_change_keeps_the_recommendations_own_scope():
@@ -622,6 +887,7 @@ def test_effort_mismatch_change_keeps_the_recommendations_own_scope():
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {}})
     (out,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "effort-mismatch"]
     assert out.changes[0].scope == "project-local"
+    assert out.action == "Make medium your default effort, and raise it with /effort for the tasks that need it."
 
 
 # -- long-context-share: evidence lookup, title, tokensave variant --------
@@ -830,46 +1096,6 @@ def test_limit_pressure_card_names_the_burst_only_when_it_stands_out_by_ten_poin
     assert "agents worked at once" not in why(10.0, 60.0)
 
 
-def _batch_probes(agent_type: str = "Explore", **kw) -> Recommendation:
-    return Recommendation(
-        id="agent-batch-probes",
-        severity="advice",
-        category="workflow",
-        title="placeholder",
-        lever=None,
-        agent_type=agent_type,
-        saving_usd=kw.pop("saving_usd", 6.0),
-        evidence=[
-            ("Replies it made", 400, "habits.habits_probes", agent_type),
-            ("Single read-only calls", 190, "habits.habits_probes", agent_type),
-            ("Of them by shell command", kw.pop("shell", 30), "habits.habits_probes", agent_type),
-            ("Re-reads a batch would spare", 12.0, "habits.habits_probes", agent_type),
-        ],
-        **kw,
-    )
-
-
-def test_agent_batch_probes_names_the_counts_and_the_line_to_add_and_quotes_an_upper_bound():
-    (card,) = advice.finish([_batch_probes()], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
-    assert card.title == "Explore looks things up one call at a time"
-    assert "one read-only call and nothing else in 190 of its 400 replies" in card.why
-    assert "30 of the calls were shell commands such as cat or grep." in card.why
-    # The line to paste is the one the Work habits table's help names, word for word.
-    assert f'Add "{fixes.BATCH_PROBES_LINE}" to its agent definition or the prompt that starts it.' in card.action
-    assert card.estimated_saving.startswith("At most ")
-    assert "halved" in card.saving_basis
-
-
-def test_agent_batch_probes_leaves_the_shell_sentence_out_when_no_lookup_was_a_shell_command():
-    (card,) = advice.finish([_batch_probes(shell=0)], _model_swap_report([]), None, Units())
-    assert "shell commands" not in card.why
-
-
-def test_agent_batch_probes_for_workflow_agents_points_at_the_scripts_prompts():
-    (card,) = advice.finish([_batch_probes("workflow-subagent")], _model_swap_report([]), None, Units())
-    assert "the prompt in each workflow script that starts it" in card.action
-
-
 def _plan_rounds(**kw) -> Recommendation:
     return Recommendation(
         id="plan-rounds",
@@ -906,3 +1132,337 @@ def test_plan_rounds_without_numbers_says_it_without_counts():
     (card,) = advice.finish([rec], _model_swap_report([]), None, Units())
     assert card.why.startswith("You often send a plan back before you approve it")
     assert fixes.CRITIQUE_PLAN_LINE in card.action
+
+
+def test_a_plugin_agent_is_left_out_of_the_model_card():
+    plugin = "pr-review-toolkit:code-reviewer"
+    report = _model_swap_report(
+        [
+            [plugin, "claude-opus-5-5", "claude-sonnet-5-5", 30.0],
+            ["implementer", "claude-opus-5-5", "claude-sonnet-5-5", 20.0],
+        ]
+    )
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {"implementer": {"source": "user"}}})
+    out = advice.finish([_tier(plugin, scope="repo"), _tier("implementer", scope="repo")], report, snap, Units())
+    fixes.attach_fixes(out)
+    (card,) = [r for r in out if r.id == "model-tier"]
+    assert [(c.agent, c.value) for c in card.changes] == [("implementer", "sonnet")]
+    assert card.why.endswith(" pr-review-toolkit:code-reviewer is left out: its plugin sets its model.")
+    assert ":" not in str(fixes.project_prompt(out)["files"])
+
+
+def _plugin_file_change(rec_id: str, agent: str):
+    key, value = {
+        "spawn-tools-list": ("tools", ["Read"]),
+        "spawn-claude-md": ("omitClaudeMd", True),
+        "spawn-unused-skills": ("disallowedTools", ["Skill"]),
+        "spawn-unused-mcp": ("disallowedTools", ["mcp__a"]),
+    }.get(rec_id, (None, None))
+    if key is None:
+        return []
+    return [SettingChange(target="agent", key=key, agent=agent, value=value)]
+
+
+@pytest.mark.parametrize("rec_id", sorted(fixes.PLUGIN_AGENT_FILE_CARDS))
+def test_a_card_that_edits_a_plugin_agents_file_is_information_only(rec_id):
+    agent = "pr-review-toolkit:code-reviewer"
+    rec = Recommendation(
+        id=rec_id,
+        severity="advice",
+        category="settings",
+        title="t",
+        agent_type=agent,
+        changes=_plugin_file_change(rec_id, agent),
+    )
+    (rec,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    fixes.attach_fixes([rec])
+    assert rec.severity == "info"
+    assert rec.changes == []
+    assert rec.fixes == []
+    assert rec.action == (
+        "pr-review-toolkit:code-reviewer comes from the pr-review-toolkit plugin. Its file belongs to the "
+        "plugin, and the plugin's next update would replace any edit to it."
+    )
+
+
+def _reported_effort_rec(**kw) -> Recommendation:
+    return Recommendation(
+        id="effort-mismatch",
+        severity="advice",
+        category="settings",
+        title="x",
+        lever="effortLevel",
+        saving_usd=1.5,
+        evidence=[
+            ("Easy messages at high effort", 6, "habits.habits_effort_fit", "easy:high"),
+            ("Easy work at high effort, thinking share of output", 55.0, "habits.habits_effort_fit", "easy:high"),
+        ],
+        **kw,
+    )
+
+
+def _effort_card(snapshot_data: dict, **kw) -> Recommendation:
+    report = ReportModel(meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)), sections=[],
+                         diagnostics=Diagnostics(lines=1000))
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=snapshot_data)
+    (out,) = [r for r in advice.finish([_reported_effort_rec(**kw)], report, snap, Units()) if r.id == "effort-mismatch"]
+    fixes.attach_fixes([out])
+    return out
+
+
+@pytest.mark.parametrize(
+    "snapshot_data",
+    [
+        {"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "user"}},
+        {"effective": {}},
+        {
+            "effective": {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+            "effective_provenance": {"modelSettings": "user"},
+        },
+    ],
+)
+def test_the_effort_card_asks_for_the_effort_command_when_user_settings_cannot_set_it(snapshot_data):
+    out = _effort_card(snapshot_data)
+    assert out.changes == []
+    assert out.variant == "session"
+    assert out.action == (
+        "Run /effort medium in a session on each model you use. Claude Code saves it for that model. "
+        "Raise it with /effort when a task needs it."
+    )
+    assert out.fixes[0]["command"] is None and out.fixes[0]["prompt"] == ""
+    assert fixes.project_prompt([out])["cards"] == 0
+
+
+def test_the_effort_card_says_the_variable_wins_while_it_is_set():
+    out = _effort_card(
+        {
+            "effective": {"effortLevel": "high"},
+            "effective_provenance": {"effortLevel": "user"},
+            "content_layers": {"effort_level_env_set": True},
+        }
+    )
+    assert out.changes == []
+    assert out.variant == "env"
+    assert out.action == (
+        "CLAUDE_CODE_EFFORT_LEVEL is set, and it wins over /effort and every effort setting. "
+        "Set it to medium where you set it, or remove it."
+    )
+    assert "CLAUDE_CODE_EFFORT_LEVEL" in out.fixes[0]["prompt"] and out.fixes[0]["command"] is None
+    assert fixes.fix_group(out, None) == ("Your shell profile or a settings file's env block", "several")
+
+
+def test_an_effort_card_stays_when_the_medium_is_in_user_settings():
+    # A user-level medium does not reach Opus 5.5 and later, so the evidence stands.
+    report = _model_swap_report([])
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {"effortLevel": "Medium"}})
+    (out,) = advice.finish([Recommendation(id="effort-mismatch", severity="advice")], report, snap, Units())
+    assert out.id == "effort-mismatch" and out.variant == "session"
+
+
+def test_a_compaction_card_names_a_model_whose_own_window_wins():
+    window = _compaction("compaction-window", title="Set autoCompactWindow to at least 200,000")
+    snap = Snapshot(
+        path=None,
+        ts="2026-09-20T00:00:00Z",
+        data={"effective": {"autoCompactWindow": 400000, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}},
+    )
+    (out,) = [r for r in advice.finish([window], _model_swap_report([]), snap, Units()) if r.id == "compaction-window"]
+    assert out.changes[0].key == "autoCompactWindow"
+    assert out.changes[0].note == (
+        "claude-opus-5-5 has its own auto-compact window, which wins for it. "
+        "To change a model's own window, run /autocompact with the new size in a session on that model."
+    )
+
+
+
+# -- N2: the effort card closes once the main session's model gets medium ------
+
+#: What /effort medium writes on Opus 5.5: its own level beside the old flat one.
+_SAVED_BY_EFFORT = {
+    "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+    "effective_provenance": {"effortLevel": "user", "modelSettings": "user"},
+}
+
+
+def _effort_on(model_cell, snapshot_data):
+    report = _model_swap_report([["top-level", model_cell, None, None]])
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=snapshot_data)
+    return [r for r in advice.finish([_reported_effort_rec()], report, snap, Units()) if r.id == "effort-mismatch"]
+
+
+def _user(effective):
+    return {"effective": effective, "effective_provenance": {key: "user" for key in effective}}
+
+
+@pytest.mark.parametrize(
+    "model_cell, snapshot_data, closed",
+    [
+        ("claude-opus-5-5", _SAVED_BY_EFFORT, True),
+        ("us.anthropic.claude-opus-5-5-v1:0", _SAVED_BY_EFFORT, True),
+        ("claude-opus-5-5 (+1 more)", _SAVED_BY_EFFORT, True),
+        ("claude-opus-5-5", _user({"modelSettings": {"claude-opus-5-5": {"effortLevel": "low"}}}), True),
+        ("claude-opus-5-5", _user({"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}}), False),
+        ("claude-opus-5", _user({"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}), False),
+        # A flat level in user settings: Opus 5.5 ignores it, Opus 5 and earlier read it.
+        ("claude-opus-5-5", _user({"effortLevel": "medium"}), False),
+        ("claude-opus-5", _user({"effortLevel": "medium"}), True),
+        ("claude-sonnet-4-5", _user({"effortLevel": "low"}), True),
+        # A project file's flat level beats a model's own level in your user settings.
+        (
+            "claude-opus-5-5",
+            {
+                "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+                "effective_provenance": {"effortLevel": "project_shared", "modelSettings": "user"},
+            },
+            False,
+        ),
+        ("claude-opus-5-5", {"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_local"}}, True),
+        # CLAUDE_CODE_EFFORT_LEVEL wins over every setting: the card stays and says so.
+        ("claude-opus-5-5", {**_SAVED_BY_EFFORT, "content_layers": {"effort_level_env_set": True}}, False),
+    ],
+)
+def test_the_effort_card_closes_once_the_main_sessions_model_gets_medium_or_lower(model_cell, snapshot_data, closed):
+    assert (_effort_on(model_cell, snapshot_data) == []) is closed
+
+
+# -- N5: with ANTHROPIC_MODEL set, a setting already on Sonnet keeps the card ----
+
+
+def test_the_main_model_card_stays_while_the_variable_picks_a_larger_model_over_a_sonnet_setting():
+    report = _model_swap_report([["top-level", "claude-opus-5-5", "claude-sonnet-5", 11.09]])
+    data = {"effective": {"model": "sonnet"}, "effective_provenance": {"model": "user"}, "env_names": ["ANTHROPIC_MODEL"]}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    (card,) = [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"]
+    assert card.changes == []
+    assert card.action == advice.MODEL_ENV_WINS
+    assert "Your model setting already says Sonnet" in card.why
+    # Without the variable the setting already says Sonnet: no card, as before.
+    data.pop("env_names")
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    assert [r for r in advice.finish([_tier("top-level")], report, snap, Units()) if r.id == "model-tier-main"] == []
+
+
+# -- R2-3: a snapshot is one project's, so in a view of several its project files say nothing ------------------
+
+
+def _effort_on_projects(model_cell, snapshot_data, projects):
+    report = _model_swap_report([["top-level", model_cell, None, None]])
+    report.meta.projects = tuple(projects)
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=snapshot_data)
+    return [r for r in advice.finish([_reported_effort_rec()], report, snap, Units()) if r.id == "effort-mismatch"]
+
+
+def test_a_project_files_effort_level_does_not_close_the_card_in_a_view_of_several_projects():
+    data = {"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_shared"}}
+    assert _effort_on_projects("claude-opus-5-5", data, ["alpha"]) == []
+    [card] = _effort_on_projects("claude-opus-5-5", data, ["alpha", "beta"])
+    assert card.variant != "applied"
+
+
+def test_your_own_user_entry_still_closes_the_card_in_a_view_of_several_projects():
+    """Guard: the user file is read by every project, so one project's snapshot speaks for all of them."""
+    data = {
+        "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+        "effective_provenance": {"effortLevel": "user", "modelSettings": "user"},
+    }
+    assert _effort_on_projects("claude-opus-5-5", data, ["alpha", "beta"]) == []
+
+
+# -- R3-VIEW-RULE: what wins is read for the change's own file and the real provenance --------------
+
+
+def _window_card(scope, effective, provenance, projects=("alpha",)):
+    rec = _compaction("compaction-window", scope=scope, title="Set autoCompactWindow to at least 200,000",
+                      evidence=[("Candidate 200,000: modelled saving after rediscovery correction", 12.0, "x", "200,000")])
+    report = _model_swap_report([["top-level", "claude-opus-5-5", None, None]])
+    report.meta.projects = tuple(projects)
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": effective, "effective_provenance": provenance})
+    [card] = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "compaction-window"]
+    return card
+
+
+def test_the_window_cards_change_to_a_project_file_says_nothing_of_a_lower_files_own_window():
+    """R3-2, the reviewer's input: the project file's flat window beats your user file's own window for
+    the model, so the card's change works and no note sends you to /autocompact."""
+    effective = {"autoCompactWindow": 300000, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}
+    card = _window_card("repo", effective, {"autoCompactWindow": "project_shared", "modelSettings": "user"})
+    [change] = card.changes
+    assert (change.key, change.scope, change.note) == ("autoCompactWindow", "repo", "")
+
+
+def test_a_models_own_window_in_the_same_file_still_gets_the_note():
+    """Guard: within one file a model's own window beats the flat one."""
+    effective = {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}
+    card = _window_card("user", effective, {"modelSettings": "user"})
+    assert card.changes[0].note == (
+        "claude-opus-5-5 has its own auto-compact window, which wins for it. " + advice._OWN_WINDOW_STEP
+    )
+
+
+def test_a_card_at_the_project_files_scope_does_not_close_in_a_view_of_several_projects():
+    """R3-1 through advice.finish with the scope recommend gives the card (the reviewer's p15b input)."""
+    data = {"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": "project_shared"}}
+    report = _model_swap_report([["top-level", "claude-opus-5-5", None, None]])
+    report.meta.projects = ("alpha", "beta")
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    [card] = [r for r in advice.finish([_reported_effort_rec(scope="repo")], report, snap, Units()) if r.id == "effort-mismatch"]
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])
+
+
+# -- R4-2: a project or managed file's own window for the main model gets the change there -------------
+
+_OWN_500K = {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+_OWN_WINDOW_NOTE = (
+    "claude-opus-5-5 has its own auto-compact window, which wins for it. "
+    "To change a model's own window, run /autocompact with the new size in a session on that model."
+)
+
+
+def _own_window_card(block_layer, flat=None, flat_layer="user", scope="user", projects=("alpha",)):
+    effective = {"modelSettings": _OWN_500K, **({"autoCompactWindow": flat} if flat else {})}
+    provenance = {"modelSettings": block_layer, **({"autoCompactWindow": flat_layer} if flat else {})}
+    return _window_card(scope, effective, provenance, projects)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_local", "project-local"), ("project_shared", "repo"), ("managed", "managed")])
+def test_the_window_card_changes_a_project_or_managed_files_own_entry_for_the_main_model(layer, scope):
+    """R4-2: the file's own entry for claude-opus-5-5 decides, so a flat window at your user file cannot reach it."""
+    card = _own_window_card(layer, flat=300000)
+    [change] = card.changes
+    assert (change.target, change.key, change.scope, change.note) == ("settings", "modelSettings", scope, "")
+    assert change.value == {"claude-opus-5-5": {"autoCompactWindow": 200000}}
+    assert change.current == {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+
+
+def test_an_own_window_in_your_user_file_keeps_the_flat_change_and_the_note():
+    """Guard (W4): /autocompact is how that entry is changed."""
+    [change] = _own_window_card("user").changes
+    assert (change.key, change.scope, change.note) == ("autoCompactWindow", "user", _OWN_WINDOW_NOTE)
+
+
+def test_a_flat_window_in_a_higher_file_than_the_own_entry_keeps_the_flat_change():
+    """Guard: Claude Code reads the files from the highest down, so the local file's flat window decides."""
+    [change] = _own_window_card("project_shared", flat=300000, flat_layer="project_local", scope="project-local").changes
+    assert (change.key, change.scope, change.value) == ("autoCompactWindow", "project-local", 200000)
+
+
+def test_in_a_view_of_several_projects_a_projects_own_window_is_not_read():
+    """Guard: the view rule took the project's block out, so the change is the flat one at your user file."""
+    [change] = _own_window_card("project_local", flat=300000, projects=("alpha", "beta")).changes
+    assert (change.key, change.scope, change.value) == ("autoCompactWindow", "user", 200000)
+
+
+def test_a_window_card_with_no_value_says_where_a_project_files_own_window_is_changed():
+    """R5-1: the churn and long-context cards carry no value, so their change stays the flat one; the note
+    then names the file that holds the main model's own window, not /autocompact, which cannot change it."""
+    rec = _compaction("compaction-churn", scope="user", title="t")
+    report = _model_swap_report([["top-level", "claude-opus-5-5", None, None]])
+    report.meta.projects = ("alpha",)
+    data = {"effective": {"modelSettings": _OWN_500K}, "effective_provenance": {"modelSettings": "project_shared"}}
+    snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data=data)
+    change = advice._window_change(rec, advice._Context(report=report, snapshot=snap, units=Units()), suggested="less")
+    assert (change.key, change.value, change.scope) == ("autoCompactWindow", None, "user")
+    assert change.note == (
+        "claude-opus-5-5 has its own auto-compact window, which wins for it. "
+        "To change a model's own window, edit its entry in this project's .claude/settings.json."
+    )

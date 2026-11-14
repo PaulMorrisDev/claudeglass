@@ -46,8 +46,9 @@ still never *silently* discards data. The store is otherwise a derived
 cache over transcripts still on disk, never the source of truth, and
 the next watcher tick repopulates a rebuilt store because
 ``known_files()`` is empty again -- except ``session_tags`` and
-``session_feedback``, ``session_plan_feedback`` and ``tip_feedback`` (your
-own tags and ratings from the dashboard), which nothing else can
+``session_feedback``, ``session_plan_feedback``, ``tip_feedback`` and
+``card_marks`` (your own tags and ratings from the dashboard, and what it
+kept of the cards it showed), which nothing else can
 re-derive: a drop-and-rebuild reads them before dropping and writes them
 straight back once the tables are recreated
 (``_export_marks``/``_reimport_marks``), so they survive even the two
@@ -212,9 +213,36 @@ def _demote_parsed(conn: sqlite3.Connection) -> int:
     return cursor.rowcount
 
 
+def _card_mark_row(row) -> dict:
+    """One ``card_marks`` row as a dict, ``folders`` and ``changes`` decoded
+    (an unreadable value reads as empty)."""
+    out = dict(row)
+    for column in ("folders", "changes"):
+        try:
+            decoded = json.loads(out[column])
+        except (TypeError, ValueError):
+            decoded = None
+        out[column] = decoded if isinstance(decoded, list) else []
+    return out
+
+
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
 
+
+#: ``card_marks``'s columns in the order the marks export reads them (the
+#: first two are its key).
+_CARD_MARK_COLUMNS = (
+    "card_key", "project", "folders", "rule_id", "agent_type", "changes", "saving_usd", "priced_on",
+    "first_shown_at", "copied_at", "bundled_at", "landed_at", "landed_exact", "updated_at",
+)
+
+
+def _card_mark_select(held: set[str]) -> str:
+    """``card_marks``'s columns for a ``SELECT``, a column the table does not
+    hold (``priced_on`` in a store an earlier build of this release made,
+    before the column was added) read as ``NULL``."""
+    return ", ".join(column if column in held else f"NULL AS {column}" for column in _CARD_MARK_COLUMNS)
 
 #: ``session_feedback``'s columns in the order the marks export reads them,
 #: and what a store from before the column existed reads as.
@@ -322,6 +350,31 @@ def _migrate_10_to_11(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "mod_events", column, "INTEGER")
 
 
+def _migrate_11_to_12(conn: sqlite3.Connection) -> None:
+    """v11 -> v12 (``schema.py``'s "Version 12" paragraph): the
+    ``card_marks`` table. Unlike the mod's events it is not re-ingestible,
+    so it is one of the protected tables (:meth:`Store._export_marks`)."""
+    conn.execute(schema.CREATE_CARD_MARKS)
+    _add_v12_columns(conn)
+
+
+#: Columns added to a version-12 table after a build of this release first
+#: stamped 12 on a store (nothing bumps the version for them): ``(table,
+#: column, type)``. The version-12 statements create them; a store made
+#: before gains them in :func:`_add_v12_columns`, from the step out of 11 and
+#: whenever it is opened at 12.
+_V12_COLUMNS = (("card_marks", "priced_on", "REAL"), ("predictions", "priced_on", "REAL"))
+
+
+def _add_v12_columns(conn: sqlite3.Connection) -> None:
+    """Give a store whose version-12 tables predate :data:`_V12_COLUMNS` the
+    columns, ``NULL`` on every row already there. Idempotent; a table that is
+    not there is left alone."""
+    for table, column, ddl_type in _V12_COLUMNS:
+        if _table_columns(conn, table):
+            _add_column_if_missing(conn, table, column, ddl_type)
+
+
 #: Additive migration ladder for :meth:`Store.migrate`, keyed by the
 #: *recorded* version being migrated away from -- ``MIGRATIONS[4]`` takes
 #: a v4 store to v5. Each step may only add columns/indexes/tables, never
@@ -338,6 +391,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     8: _migrate_8_to_9,
     9: _migrate_9_to_10,
     10: _migrate_10_to_11,
+    11: _migrate_11_to_12,
 }
 
 
@@ -485,12 +539,13 @@ class Store:
             self._local.conn = None
 
     @classmethod
-    def open_read_only(cls, path: str | Path) -> "Store | None":
+    def open_read_only(cls, path: str | Path, config_dir: str | Path | None = None) -> "Store | None":
         """A store over the file at ``path`` that only reads, for the CLI's
         own use beside a running dashboard: nothing is created, migrated or
         written, so it never waits on the dashboard's writes. ``None``
         when there is no store file or it can't be opened. Only the read
-        methods work on it."""
+        methods work on it. ``config_dir`` is the data folder beside it, for
+        what :func:`rebuild.corpus_from_store` reads there (Haiku's tags)."""
         path = Path(path)
         if not path.is_file():
             return None
@@ -499,7 +554,7 @@ class Store:
         except sqlite3.Error:
             return None
         conn.row_factory = sqlite3.Row
-        store = cls(path)
+        store = cls(path, config_dir)
         store._local.conn = conn
         return store
 
@@ -596,10 +651,11 @@ class Store:
 
     def _export_marks(
         self, conn: sqlite3.Connection
-    ) -> tuple[list[tuple], list[tuple], list[tuple], list[tuple]]:
-        """``(tag_rows, feedback_rows, plan_rows, tip_rows)`` currently in
-        ``session_tags``/``session_feedback``/``session_plan_feedback``/
-        ``tip_feedback``, or ``[]`` for a table that doesn't
+    ) -> tuple[list[tuple], list[tuple], list[tuple], list[tuple], list[tuple]]:
+        """``(tag_rows, feedback_rows, plan_rows, tip_rows, card_rows)``
+        currently in ``session_tags``/``session_feedback``/
+        ``session_plan_feedback``/``tip_feedback``/``card_marks``, or
+        ``[]`` for a table that doesn't
         exist yet (an older store, or a fresh one); a ``session_feedback``
         from before v9 reads its newer columns as empty. ROB-P6: read before
         :meth:`_drop_all_tables` runs, so :meth:`_reimport_marks` can put
@@ -631,11 +687,19 @@ class Store:
             if "tip_feedback" in tables
             else []
         )
+        cards = (
+            conn.execute(
+                f"SELECT {_card_mark_select(_table_columns(conn, 'card_marks'))} FROM card_marks"
+            ).fetchall()
+            if "card_marks" in tables
+            else []
+        )
         return (
             [tuple(row) for row in tags],
             [tuple(row) for row in feedback],
             [tuple(row) for row in plans],
             [tuple(row) for row in tips],
+            [tuple(row) for row in cards],
         )
 
     def _reimport_marks(
@@ -645,15 +709,16 @@ class Store:
         feedback: list[tuple],
         plans: list[tuple] = (),
         tips: list[tuple] = (),
+        cards: list[tuple] = (),
     ) -> None:
         """Put rows :meth:`_export_marks` read back into the just-recreated
         ``session_tags``/``session_feedback``/``session_plan_feedback``/
-        ``tip_feedback`` tables. The ``sessions`` row
+        ``tip_feedback``/``card_marks`` tables. The ``sessions`` row
         each one's ``session_id`` foreign key names doesn't exist again
         yet -- the next watcher tick repopulates it (same as every other
         table here) -- so this runs with foreign keys off, the same way
         :meth:`_drop_all_tables` already does for the drop itself."""
-        if not (tags or feedback or plans or tips):
+        if not (tags or feedback or plans or tips or cards):
             return
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
@@ -681,6 +746,12 @@ class Store:
                 "ON CONFLICT(kind, item) DO UPDATE SET answer = excluded.answer, set_at = excluded.set_at",
                 tips,
             )
+            conn.executemany(
+                f"INSERT INTO card_marks ({', '.join(_CARD_MARK_COLUMNS)}) "
+                f"VALUES ({', '.join('?' * len(_CARD_MARK_COLUMNS))}) ON CONFLICT(card_key, project) DO UPDATE SET "
+                + ", ".join(f"{column} = excluded.{column}" for column in _CARD_MARK_COLUMNS[2:]),
+                cards,
+            )
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
 
@@ -703,14 +774,14 @@ class Store:
         left a newer-than-code store's stale shape in place instead of
         rebuilding it -- still handled here, just via backup-then-drop
         rather than a silent drop). Either way, ``session_tags``,
-        ``session_feedback``, ``session_plan_feedback`` and ``tip_feedback``
-        -- genuine user data, not a re-derivable
+        ``session_feedback``, ``session_plan_feedback``, ``tip_feedback`` and
+        ``card_marks`` -- genuine user data, not a re-derivable
         cache over transcripts like the rest of the store -- are read
         before the drop and put back once the tables are recreated
         (ROB-P6, :meth:`_export_marks`/:meth:`_reimport_marks`)."""
         conn = self._connection()
         current = self.schema_version()
-        marks: tuple[list[tuple], list[tuple], list[tuple], list[tuple]] | None = None
+        marks: tuple[list[tuple], list[tuple], list[tuple], list[tuple], list[tuple]] | None = None
 
         if current is not None and current > schema.SCHEMA_VERSION:
             marks = self._export_marks(conn)
@@ -750,6 +821,7 @@ class Store:
         with conn:
             for statement in schema.ALL_STATEMENTS:
                 conn.executescript(statement)
+            _add_v12_columns(conn)
             if marks is not None:
                 self._reimport_marks(conn, *marks)
             conn.execute(
@@ -1152,6 +1224,16 @@ class Store:
             (profile_id, name, toml_path, content_hash or "", _now()),
         )
 
+    def profile_files(self) -> dict[str, str]:
+        """Every indexed user profile's id -> ``toml_path``, for the
+        watcher only (a local filesystem location, never API-returned)."""
+        rows = self._connection().execute("SELECT id, toml_path FROM profiles").fetchall()
+        return {row["id"]: row["toml_path"] for row in rows}
+
+    def forget_profile(self, profile_id: str) -> None:
+        """Drop one user profile's index row, once its file is gone."""
+        self._connection().execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+
     def record_baseline(
         self, *, project_slug: str, project_root_path: str = "", window_start: str,
         window_end: str, archetype: str | None, digest_json: str,
@@ -1430,6 +1512,87 @@ class Store:
             cursor = conn.execute("DELETE FROM mod_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
 
+    # -- what the dashboard showed of the recommendation cards (v12) -----
+
+    def mark_cards(
+        self, cards: list[dict], *, mark: str, project: str, folders: list[str], now: str | None = None
+    ) -> int:
+        """Record that the dashboard ``mark``ed these cards in one view:
+        ``"shown"`` (their titles were drawn), ``"copied"`` (a button copied
+        a card's own prompt) or ``"bundle"`` (the project's all-fixes prompt
+        was copied). ``cards`` are :func:`card_marks.card_row` dicts;
+        ``project`` is the view as the dashboard names it (the redacted slug,
+        or ``*`` for every project) and ``folders`` its raw project folder
+        names. A card's first mark sets ``first_shown_at`` (a copy of a card
+        never shown counts it shown then), and the first copy and the first
+        bundle copy are kept; every mark refreshes the card's rule, agent,
+        changes and saving and clears a landing (a card marked is in the list
+        again). ``ValueError`` for any other ``mark``, nothing written.
+        Returns how many cards it recorded."""
+        if mark not in ("shown", "copied", "bundle"):
+            raise ValueError(f"unknown card mark {mark!r}")
+        stamp = now or _now()
+        copied_at = stamp if mark == "copied" else None
+        bundled_at = stamp if mark == "bundle" else None
+        folders_json = json.dumps(list(folders), sort_keys=True, default=str)
+        conn = self._connection()
+        with _transaction(conn):
+            conn.executemany(
+                "INSERT INTO card_marks (card_key, project, folders, rule_id, agent_type, changes, saving_usd, "
+                "priced_on, first_shown_at, copied_at, bundled_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(card_key, project) DO UPDATE SET folders = excluded.folders, "
+                "rule_id = excluded.rule_id, agent_type = excluded.agent_type, changes = excluded.changes, "
+                "saving_usd = excluded.saving_usd, priced_on = excluded.priced_on, "
+                "updated_at = excluded.updated_at, "
+                "copied_at = COALESCE(card_marks.copied_at, excluded.copied_at), "
+                "bundled_at = COALESCE(card_marks.bundled_at, excluded.bundled_at), "
+                "landed_at = NULL, landed_exact = NULL",
+                [
+                    (
+                        card["key"], project, folders_json, card["rule_id"], card.get("agent_type"),
+                        json.dumps(card.get("changes") or [], sort_keys=True, default=str), card.get("saving_usd"),
+                        card.get("priced_on"), stamp, copied_at, bundled_at, stamp,
+                    )
+                    for card in cards
+                ],
+            )
+        return len(cards)
+
+    def card_marks(self, project: str | None = None) -> list[dict]:
+        """The ``card_marks`` rows (one view's when ``project`` is given),
+        oldest first, as dicts of the table's columns with ``folders`` and
+        ``changes`` decoded. Read by the landing check and the tuning
+        export; no API route returns a row."""
+        where, params = ("", ()) if project is None else (" WHERE project = ?", (project,))
+        rows = self._connection().execute(
+            f"SELECT {', '.join(_CARD_MARK_COLUMNS)} FROM card_marks{where} "
+            "ORDER BY first_shown_at, project, card_key",
+            params,
+        ).fetchall()
+        return [_card_mark_row(row) for row in rows]
+
+    def set_card_landed(self, card_key: str, project: str, landed_at: str | None, exact: bool | None) -> None:
+        """Set, or with ``None`` clear, whether one card landed in one view
+        (``landed_at``, a UTC time, and whether the settings hold the card's
+        own values). Leaves ``updated_at`` alone: a landing is not a mark, so
+        it never keeps a row past :meth:`prune_card_marks`."""
+        conn = self._connection()
+        with _transaction(conn):
+            conn.execute(
+                "UPDATE card_marks SET landed_at = ?, landed_exact = ? WHERE card_key = ? AND project = ?",
+                (landed_at, None if exact is None else int(bool(exact)), card_key, project),
+            )
+
+    def prune_card_marks(self, retention_days: int) -> int:
+        """Delete the card marks not marked within ``retention_days`` days.
+        Returns the number of rows removed."""
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - retention_days * 86400))
+        conn = self._connection()
+        with _transaction(conn):
+            cursor = conn.execute("DELETE FROM card_marks WHERE updated_at < ?", (cutoff,))
+        return cursor.rowcount
+
     def read_mod_events(self, *, event: str | None = None, since: str | None = None) -> list[dict]:
         """The stored sensor events, oldest first, as dicts of the table's
         columns without ``id`` and ``updated_at``; only those of one
@@ -1479,7 +1642,10 @@ class Store:
         stale report until some unrelated transcript/snapshot change
         happened to also invalidate it; ``session_feedback`` (v6) and, for
         the same reason, ``session_plan_feedback`` and ``tip_feedback`` (v9).
-        Used by ``api.py``'s report-model cache to know when a cached report
+        ``card_marks`` (v12) is left out on purpose: no report reads it, and a
+        mark is written each time the dashboard draws a list of cards, so a
+        mark that changed the token would rebuild the report each time the
+        page is drawn. Used by ``api.py``'s report-model cache to know when a cached report
         needs rebuilding, without exposing anything about *what* changed."""
         conn = self._connection()
         transcripts_row = conn.execute(
@@ -1861,6 +2027,19 @@ class Store:
             allowed = set(project_slugs)
             rows = [row for row in rows if row["slug"] in allowed]
         return [row["id"] for row in rows if ts_in_window(row[column], since_dt, until_dt)]
+
+    def window_session_ids(self, *, since: str | None = None, until: str | None = None) -> dict[str, str]:
+        """``{session id: raw slug}`` for the sessions a report over the window
+        counts (last reply in it, as :meth:`_session_ids_in_window`) that have a
+        top-level transcript stored, which :func:`rebuild.corpus_from_store`
+        needs to build one. For the CLI: the sessions of a window it can compare
+        with the transcripts it read from disk."""
+        since_dt, until_dt = _resolve_window(None, since, until)
+        rows = self._connection().execute(
+            "SELECT s.id, s.slug, s.last_ts FROM sessions s WHERE EXISTS "
+            "(SELECT 1 FROM transcripts t WHERE t.session_id = s.id AND t.kind = 'top-level')"
+        ).fetchall()
+        return {row["id"]: row["slug"] or "" for row in rows if ts_in_window(row["last_ts"], since_dt, until_dt)}
 
     def resolve_project_slug(self, redacted: str) -> list[str] | None:
         """The raw ``sessions.slug`` value(s) that redact
@@ -2475,19 +2654,21 @@ class Store:
 
     def upsert_prediction(
         self, *, prediction_id: str, ts: str, source: str, measure_key: str, agent: str | None,
-        predicted_usd: float | None, predicted_pct: float | None, fidelity: str,
+        predicted_usd: float | None, predicted_pct: float | None, fidelity: str, priced_on: float | None = None,
     ) -> bool:
         """Ingest one ``prediction-log.jsonl`` record
         (``watcher._scan_predictions``). A prediction is immutable once
         logged, so this is ``INSERT OR IGNORE`` keyed on ``prediction_id``
         -- a repeat tick over an already-ingested line is a no-op.
+        ``priced_on`` is what the estimate was a share of (the observed cost, or
+        the tokens per start), ``None`` when the line names none.
         Returns whether a new row was actually inserted."""
         conn = self._connection()
         cursor = conn.execute(
             "INSERT OR IGNORE INTO predictions "
-            "(id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (prediction_id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, _now()),
+            "(id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, created_at, priced_on) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (prediction_id, ts, source, measure_key, agent, predicted_usd, predicted_pct, fidelity, _now(), priced_on),
         )
         return cursor.rowcount > 0
 
@@ -2545,6 +2726,8 @@ class Store:
             "verdict": row["verdict"],
             "measured_usd": row["measured_usd"],
             "measured_pct": row["measured_pct"],
+            # A store an earlier build of this release made has no such column.
+            "priced_on": row["priced_on"] if "priced_on" in row.keys() else None,
         }
 
     def predictions(self, *, judged: bool | None = None) -> list[dict]:
@@ -2642,6 +2825,34 @@ def read_tip_feedback(path: str | Path) -> dict[tuple[str, str], dict]:
         return {}
 
 
+def read_card_marks(path: str | Path) -> list[dict] | None:
+    """:meth:`Store.card_marks`, read from the store at ``path`` without
+    writing to it, for the tuning export. ``None`` when there is no store,
+    it predates the table (a dashboard older than version 12) or it can't be
+    read: the export then leaves its ``cards`` block out, where an empty list
+    means a dashboard that showed no card."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    conn.row_factory = sqlite3.Row
+    try:
+        with contextlib.closing(conn):
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if "card_marks" not in tables:
+                return None
+            rows = conn.execute(
+                f"SELECT {_card_mark_select(_table_columns(conn, 'card_marks'))} FROM card_marks "
+                "ORDER BY first_shown_at, project, card_key"
+            ).fetchall()
+            return [_card_mark_row(row) for row in rows]
+    except sqlite3.Error:
+        return None
+
+
 def read_mod_events(path: str | Path) -> list[dict]:
     """:meth:`Store.read_mod_events`, read from the store at ``path``
     without writing to it, for the CLI's own reports. Empty when there is
@@ -2730,6 +2941,7 @@ __all__ = [
     "decode_digest_blob",
     "read_session_marks",
     "read_tip_feedback",
+    "read_card_marks",
     "read_mod_events",
     "read_predictions",
     "read_entrypoint_counts",

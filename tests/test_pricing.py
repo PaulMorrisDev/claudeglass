@@ -22,6 +22,7 @@ from claudeglass.pricing import (
     ResolvedRates,
     cache_read_savings_usd,
     effective_rates,
+    load_packaged_pricing,
     load_pricing,
     newer_version_id,
     newer_version_of,
@@ -32,6 +33,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 #: Every model id the WP2 brief requires in the packaged pricing.toml.
 REQUIRED_PACKAGED_MODEL_IDS = {
+    "claude-fable-5-2",
     "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-5-5",
@@ -49,6 +51,7 @@ REQUIRED_PACKAGED_MODEL_IDS = {
     "claude-sonnet-4",
     "claude-haiku-4-5-20251001",
     "claude-haiku-5-5",
+    "claude-mythos-5-2",
     "claude-mythos-5-1",
     "claude-3-5-haiku-20241022",
     "claude-3-5-sonnet-20241022",
@@ -85,7 +88,7 @@ def _turn(**overrides) -> model.Turn:
 
 def test_packaged_default_loads():
     pricing = load_pricing()
-    assert pricing.version == "2026-10-30"
+    assert pricing.version == "2026-11-12"
     assert pricing.currency == "USD"
     assert pricing.sha256
     assert len(pricing.sha8) == 8
@@ -104,7 +107,7 @@ def test_packaged_default_covers_every_required_model_id():
 def test_packaged_default_currency_and_version_surfaced():
     pricing = load_pricing()
     assert pricing.currency == "USD"
-    assert pricing.version == "2026-10-30"
+    assert pricing.version == "2026-11-12"
     assert pricing.source_url
 
 
@@ -275,7 +278,7 @@ def test_packaged_fable_1m_alias():
     pricing = load_pricing()
     resolved = pricing.resolve_model("fable[1m]")
     assert resolved is not None
-    assert resolved.canonical_id == "claude-fable-5-1"
+    assert resolved.canonical_id == "claude-fable-5-2"
     assert resolved.matched_via == "alias"
 
 
@@ -618,7 +621,7 @@ def test_model_ids_meta_maps_every_alias_to_its_canonical_id():
     assert meta["sonnet"] == "claude-sonnet-5-5"
     assert meta["sonnet[1m]"] == "claude-sonnet-5-5"
     assert meta["opus"] == "claude-opus-5-5"
-    assert meta["best"] == "claude-fable-5-1"
+    assert meta["best"] == "claude-opus-5-5"
     assert meta["claude-haiku-4-5"] == "claude-haiku-4-5-20251001"
 
 
@@ -695,8 +698,11 @@ def test_packaged_legacy_ids_have_no_geo_multiplier():
 @pytest.mark.parametrize(
     "model_id",
     [
+        "claude-fable-5-2",
         "claude-fable-5-1",
         "claude-fable-5",
+        "claude-mythos-5-2",
+        "claude-mythos-5-1",
         "claude-opus-5-5",
         "claude-opus-5",
         "claude-opus-4-8",
@@ -708,8 +714,9 @@ def test_packaged_legacy_ids_have_no_geo_multiplier():
     ],
 )
 def test_packaged_1m_context_models(model_id):
-    # D2/D4/COV-12/V24: Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5, Sonnet
-    # 4.6 and Opus 4.6+ have a native 1M token context window.
+    # D2/D4/COV-12/V24: Fable 5.2, 5.1 and 5, Mythos 5.2 and 5.1, Sonnet
+    # 5.5, Sonnet 5, Sonnet 4.6 and Opus 4.6+ have a native 1M token
+    # context window.
     pricing = load_pricing()
     assert pricing.models[model_id].context_window_tokens == 1_000_000
 
@@ -1402,6 +1409,7 @@ def test_model_name_reads_an_id_as_people_say_it():
     assert model_name("claude-opus-5[1m]") == "Opus 5 [1m]"
     assert model_name("gpt-4") == "gpt-4"
     assert model_names_in("claude-sonnet-5 (+2 more), not claudeglass") == "Sonnet 5 (+2 more), not claudeglass"
+    assert model_names_in("claude-mythos-5-2") == "Mythos 5.2"
 
 
 # --------------------------------------------------------------------
@@ -1493,6 +1501,90 @@ def test_fable_5_1_and_mythos_5_1_are_priced_at_the_same_list_rates():
         assert getattr(mythos, field) == getattr(fable, field), field
 
 
+def test_fable_5_2_and_mythos_5_2_are_priced_at_the_same_list_rates():
+    pricing = load_pricing()
+    fable = pricing.models["claude-fable-5-2"]
+    mythos = pricing.models["claude-mythos-5-2"]
+    for field in ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read", "context_window_tokens",
+                  "geo_multipliers", "fast"):
+        assert getattr(mythos, field) == getattr(fable, field), field
+
+
+#: P7: the 5.2 models are priced $8 / $40 in/out, $10 / $16 cache writes and
+#: $0.20 cache reads per million (the pricing page, 2026-11-12); fast mode
+#: is twice standard. Without their own rows a Fable 5.2 turn was priced at
+#: Fable 5's rates (cache reads at $1) and a Mythos 5.2 turn was not priced.
+@pytest.mark.parametrize("model_id", ["claude-fable-5-2", "claude-mythos-5-2"])
+def test_a_5_2_turn_is_priced_at_its_own_rate_card_row(model_id):
+    pricing = load_pricing()
+    resolved = pricing.resolve_model(model_id)
+    assert resolved is not None
+    assert (resolved.canonical_id, resolved.matched_via) == (model_id, "exact")
+    turn = _turn(
+        model=model_id,
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cc_5m=1_000_000,
+        cc_1h=1_000_000,
+        cache_creation_tokens=2_000_000,
+        cache_read_tokens=1_000_000,
+    )
+    cost = price_turn(turn, resolved)
+    assert cost.input_cost == pytest.approx(8.0)
+    assert cost.output_cost == pytest.approx(40.0)
+    assert cost.cache_write_cost == pytest.approx(10.0 + 16.0)
+    assert cost.cache_read_cost == pytest.approx(0.2)
+    assert cost.total == pytest.approx(74.2)
+
+
+@pytest.mark.parametrize("model_id", ["claude-fable-5-2", "claude-mythos-5-2"])
+def test_a_5_2_row_has_fast_mode_at_twice_standard_a_us_uplift_and_a_1m_window(model_id):
+    pricing = load_pricing()
+    resolved = pricing.resolve_model(model_id)
+    assert resolved is not None
+    assert resolved.rates.context_window_tokens == 1_000_000
+    assert resolved.rates.geo_multipliers == {"us": 1.1}
+    standard = price_turn(_turn(model=model_id, input_tokens=1_000_000, output_tokens=1_000_000), resolved)
+    fast = price_turn(_turn(model=model_id, input_tokens=1_000_000, output_tokens=1_000_000, speed="fast"), resolved)
+    assert fast.fast_applied is True
+    assert fast.input_cost == pytest.approx(16.0)
+    assert fast.output_cost == pytest.approx(80.0)
+    assert fast.total == pytest.approx(standard.total * 2.0)
+
+
+def test_the_fable_and_mythos_aliases_moved_to_the_5_2_rows_5_1_keeps_none_and_best_is_opus():
+    # As Opus 5.5 took "opus" from Opus 5 and Sonnet 5.5 took "sonnet" from
+    # Sonnet 5, Fable 5.2 takes "fable" and "fable[1m]" from 5.1; "best" is
+    # the same model as "opus" (model-config docs).
+    pricing = load_pricing()
+    for alias in ("fable", "fable[1m]"):
+        resolved = pricing.resolve_model(alias)
+        assert resolved is not None
+        assert (resolved.canonical_id, resolved.matched_via) == ("claude-fable-5-2", "alias"), alias
+    best = pricing.resolve_model("best")
+    assert best is not None
+    assert (best.canonical_id, best.matched_via) == ("claude-opus-5-5", "alias")
+    assert "claude-fable-5-1" not in pricing.aliases.values()
+    assert "claude-mythos-5-2" not in pricing.aliases.values()
+    assert "claude-mythos-5-1" not in pricing.aliases.values()
+    for older in ("claude-fable-5-1", "claude-mythos-5-1"):
+        resolved = pricing.resolve_model(older)
+        assert resolved is not None
+        assert (resolved.canonical_id, resolved.matched_via) == (older, "exact")
+
+
+def test_the_older_fable_and_mythos_rows_match_the_pricing_page():
+    # Saved page rows, 2026-11-12: 5.1 is $10 / $12.50 / $20 / $0.25 / $50
+    # and 5 is $10 / $12.50 / $20 / $1 / $50 (input, 5m write, 1h write,
+    # cache read, output).
+    pricing = load_pricing()
+    for model_id, cache_read in (("claude-fable-5-1", 0.25), ("claude-mythos-5-1", 0.25), ("claude-fable-5", 1.0)):
+        rates = pricing.models[model_id]
+        assert (rates.input, rates.cache_write_5m, rates.cache_write_1h, rates.cache_read, rates.output) == (
+            10.0, 12.5, 20.0, cache_read, 50.0,
+        ), model_id
+
+
 def test_an_opus_5_5_write_with_no_ttl_split_is_priced_at_the_five_minute_rate():
     pricing = load_pricing()
     resolved = pricing.resolve_model("claude-opus-5-5")
@@ -1544,3 +1636,20 @@ def test_the_output_estimate_is_used_by_the_simulation_path_too():
     partial = _turn(output_tokens=7, output_partial=True, output_tokens_est=1_000_000)
     simulated = price_turn(partial, resolved, write_split={"5m": 0}, read_tokens=0)
     assert simulated.output_cost == pytest.approx(10.0)
+
+
+def test_the_packaged_card_loads_without_a_config_or_a_path(tmp_path, monkeypatch):
+    """The packaged rows, whatever card the user keeps in their config folder, and the same object
+    each call (the tuning export's model words come from it)."""
+    claudeglass_dir = tmp_path / "claudeglass"
+    claudeglass_dir.mkdir()
+    (claudeglass_dir / "pricing.toml").write_text(
+        (FIXTURES / "pricing_min.toml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert "claude-widget-9" in load_pricing().models  # the user's card is the one load_pricing reads
+    packaged = load_packaged_pricing()
+    assert "claude-widget-9" not in packaged.models
+    assert {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001"} <= set(packaged.models)
+    assert "packaged default" in packaged.path
+    assert load_packaged_pricing() is packaged

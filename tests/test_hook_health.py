@@ -499,6 +499,16 @@ def test_a_hook_that_stopped_failing_leaves_the_tally():
     assert (stat.calls, stat.errors) == (2, 1)
 
 
+def test_an_older_digests_bare_hook_name_is_left_out_with_its_hook_behind_its_event():
+    fixed = _hook_event("hook_non_blocking_error")
+    fixed.detail.update({"script": "command hook", "hookName": "SubagentStop"})
+    broken = _hook_event("hook_non_blocking_error")
+    broken.detail.update({"script": "command hook", "hookName": "PostToolBatch"})
+    results = [_result(*[fixed] * 30, broken)]
+    [stat] = hook_health.count_hook_errors(results, stopped=["SubagentStop command hook"]).stats
+    assert (stat.hook_name, stat.calls, stat.errors) == ("PostToolBatch", 1, 1)
+
+
 # -- Phase 7: measure_hook_overhead / HookOverhead --------------------------
 
 
@@ -833,6 +843,28 @@ def test_installed_specs_is_empty_without_a_readable_settings_file(tmp_path):
     assert hook_health.installed_specs(claude) == ()
     (claude / "settings.json").write_text("[]", encoding="utf-8")
     assert hook_health.installed_specs(claude) == ()
+
+
+def test_the_leftover_entries_sentence_names_the_command_that_takes_them_out(tmp_path):
+    claude = tmp_path / "claude"
+    claude.mkdir()
+    stop, prompt = hook_health.HookSpec("capture-hook.py", "Stop"), hook_health.HookSpec("capture-hook.py", "UserPromptSubmit")
+    script = tmp_path / "hooks" / "capture-hook.py"
+    script.parent.mkdir()
+    script.write_text("# hook", encoding="utf-8")  # a needed entry is only "set up" when its script exists
+    commands = {"capture-hook.py": f'"{sys.executable}" -I -S "{script}" --config-dir "{tmp_path}"'}
+    (claude / "settings.json").write_text("{}", encoding="utf-8")
+    hook_health.connect(hook_health.plan_capture((stop, prompt), commands, claude_root=claude), now=NOW)
+    # Nothing needed: `capture connect` would do nothing, so the sentence names `capture remove`.
+    assert hook_health.check_capture((), claude_root=claude).summary() == (
+        "The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture remove' takes them out."
+    )
+    # Something needed and present, one entry left over: `capture connect` takes the leftover out.
+    assert hook_health.check_capture((stop,), claude_root=claude).summary() == (
+        "The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture connect' takes them out."
+    )
 
 
 # -- settings policies that stop the user's own hooks running at all -------

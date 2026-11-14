@@ -24,6 +24,7 @@ hook script needs (:func:`export_json`).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
@@ -79,6 +80,10 @@ TAG_VOCAB: dict[str, tuple[str, ...]] = {
     "rules": ("used", "unused"),
     # Deep, main session
     "prior": ("needed", "some", "none"),
+    # Asked once, in the reply after a summary (``Metric.compact_line``,
+    # riding on ``prior``'s switch): whether the summary left out
+    # something the work needed.
+    "lost": ("yes", "no"),
     "detour": ("none", "dead-end", "reread", "overbuilt", "env", "flaky"),
     "check": ("targeted", "full", "build", "run", "manual", "none"),
     "out": ("needed", "part", "unneeded"),
@@ -211,6 +216,15 @@ CUSTOM_LEVEL = "custom"
 #: already depend on this module.
 DEFAULT_CAPTURE_TIMEBOX_DAYS = 14
 
+#: What happens when the time-box ends (``[capture] after``): capture stops
+#: (the default), or a light sample goes on: only :data:`LIGHT_METRICS`, in
+#: at most :data:`LIGHT_SAMPLE` percent of sessions. The four are the keys
+#: most cards read and the ones the joins match sessions by. The hook keeps
+#: a copy of both (``hooks/capture_hook.py``), held to these by a test.
+AFTER_CHOICES = ("stop", "light")
+LIGHT_METRICS = ("task", "level", "size", "shift")
+LIGHT_SAMPLE = 20
+
 #: Display names for the levels, as the dashboard and CLI show them.
 LEVEL_TITLES = {
     "off": "Off",
@@ -315,7 +329,7 @@ WEB_TOOLS = ("WebFetch", "WebSearch")
 BIG_OUTPUT_TOOLS = ("Read", *WEB_TOOLS)
 
 #: Tools that start an agent or a workflow, which the coaching entry also
-#: watches (:data:`COACHING_TOOLS`) for ``report_reread``. Their results are
+#: watches (:data:`COACHING_TOOLS`) for ``split_run``. Their results are
 #: a report or a launch message, not a file or a search: neither the
 #: ``big_output`` note nor ``quiet_output`` applies to them, and the hook
 #: skips both for these names. (``AGENT_TOOLS``, further down, is the
@@ -634,7 +648,7 @@ COACH_STATE_FILE = "coach-state.json"
 #: Tools whose results a coaching note may follow: every tool the
 #: large-output note watches, ``ExitPlanMode`` for an approved plan, and
 #: the tools that start an agent or a workflow (:data:`SPAWN_TOOLS`) for
-#: ``report_reread`` and ``split_run``. The matcher is these names joined by ``|``;
+#: ``split_run``. The matcher is these names joined by ``|``;
 #: ``update --finish`` and ``capture connect`` rewrite it
 #: (``hook_health.plan_capture``, through ``cli._capture_settings_step``).
 #: A settings.json written before the shell and MCP tools were dropped
@@ -642,10 +656,10 @@ COACH_STATE_FILE = "coach-state.json"
 #: any tool not named here.
 COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode", *SPAWN_TOOLS)
 
-#: The live hints: after a tool result (the first three, and
-#: ``report_reread``, after an agent or a workflow was started in the
-#: background) and when you send a message (the rest), most useful first
-#: when more than one applies. ``split_run`` is the exception that comes
+#: The coaching hints, after a tool result (:data:`TOOL_RESULT_HINTS`) or
+#: when you send a message (the rest), most useful first when more than one
+#: applies; :func:`live_coaching_hints` says which speak. ``split_run`` is
+#: the exception that comes
 #: from two places: after an agent or workflow call, and with a background
 #: task's finishing message, because what it reports (an agent run that
 #: summarised its own context, or began from a very long brief) is
@@ -671,6 +685,55 @@ COACHING_HINTS = (
     "status_poll",
     "cold_return",
 )
+
+#: Hints whose live note is switched off: the blinded replay scored them
+#: under the 50% precision bar in their current form, so each was more
+#: often wrong than right. The hook and the mod say nothing for them, and
+#: ``SubagentStop`` keeps no count of runs for ``split_run`` while it is
+#: off (nothing reads it). The rules themselves stay, as do the figures
+#: read from the transcript (the tags in old notes), and they are still
+#: hints of :data:`COACHING_HINTS`; switching one back on is taking it out
+#: of this list. The narrowed ``quiet_output``, ``cold_return`` and
+#: ``split_run`` rules have not passed the replay live, and must pass it
+#: before any of them is taken out of the list.
+LIVE_OFF_HINTS = (
+    "plan_fresh",
+    "plan_fresh_early",
+    "split_run",
+    "quiet_output",
+    "cold_return",
+)
+
+#: Hints of :data:`COACHING_HINTS` that nothing in the hook raises any
+#: more, whether the switch is open or not: ``report_reread`` no longer
+#: speaks and its rule is gone from the hook, though its tag stays known.
+#: They are not in :data:`RETIRED_COACHING_HINTS` because that
+#: list drops a hint's words, tip and tip-table row, and the notes
+#: already in transcripts still count as the hint they were: their tip is
+#: still told from the others in the same message, and the table keeps
+#: their row. So they stay in :data:`COACHING_HINTS`, and everything that
+#: asks which hints can speak, are off, or take a threshold leaves these
+#: out.
+NO_TRIGGER_HINTS = (
+    "report_reread",
+)
+
+#: The hints the hook can give after a tool result (``PostToolUse``):
+#: ``plan_fresh`` at an approved plan, ``split_run`` after an agent or
+#: workflow call, ``quiet_output`` after a read. ``plan_fresh`` and
+#: ``split_run`` also come with a message you send; every other hint comes
+#: only then. A test holds this to the hook's own branches.
+TOOL_RESULT_HINTS = ("plan_fresh", "split_run", "quiet_output")
+
+
+def live_coaching_hints() -> list[str]:
+    """The coaching hints that speak, in :data:`COACHING_HINTS` order: not
+    switched off (:data:`LIVE_OFF_HINTS`) and still raised by the hook (not
+    :data:`NO_TRIGGER_HINTS`). The text that names the hints is built from
+    this, so switching a hint on or off is one line here and a regenerate."""
+    skip = {*LIVE_OFF_HINTS, *NO_TRIGGER_HINTS}
+    return [hint for hint in COACHING_HINTS if hint not in skip]
+
 
 #: Hints that no longer show live. Their notes are still in old
 #: transcripts, so the parser still knows the words and keeps those notes
@@ -714,17 +777,17 @@ FEEDBACK_HINTS = ("plan_check", "rating_reminder")
 CONDITIONAL_TIP_HINTS = ("big_paste",)
 
 #: The hints the ClaudeGlass mod delivers itself, in its own UI, while it
-#: is running for a session (``capture_hook._mod_present``): the capture
-#: hook leaves their notes out then, so Claude is not asked to pass on a
-#: tip you are already shown, and nothing is stamped as shown. The first
-#: four are what you do before sending (the mod's hint line shows them
-#: before the cost is paid); ``plan_fresh`` is a status line at plan
-#: approval. ``report_reread``, ``split_run`` and ``rating_reminder`` are
-#: the hook's again: the mod no longer draws agent rows or end-of-reply
-#: notes. ``plan_fresh_early``
-#: (Claude writes it inside the plan), ``quiet_output``, ``plan_check``,
-#: the facts line and the capture note steer Claude or feed a skill, so
-#: they stay with the hook. Every name is a hint of
+#: is running for a session and its present file's ``shows`` lists the
+#: surface that serves the hint (:data:`MOVED_TO_MOD_SHOWN_ON`;
+#: ``capture_hook._moved``): the capture hook leaves their notes out then,
+#: so Claude is not asked to pass on a tip you are already shown, and
+#: nothing is stamped as shown. Four are what you do before sending (the
+#: mod's hint line shows them before the cost is paid); ``plan_fresh`` is a
+#: status line at plan approval. Every other hint stays with the hook,
+#: ``split_run`` and the rating reminder too (the mod no longer draws agent
+#: rows or end-of-reply notes), and so do ``plan_check``, the facts line and
+#: the capture note, which steer Claude or feed a skill. A hint in
+#: :data:`LIVE_OFF_HINTS` is shown by neither. Every name is a hint of
 #: :data:`COACHING_HINTS` or :data:`FEEDBACK_HINTS`.
 MOVED_TO_MOD = frozenset(
     {
@@ -735,6 +798,17 @@ MOVED_TO_MOD = frozenset(
         "plan_fresh",
     }
 )
+
+#: What the mod has to have drawn (its present file's ``shows``) before
+#: the hook leaves a hint to it: the hint line serves four, the status line
+#: ``plan_fresh``. The keys are :data:`MOVED_TO_MOD`.
+MOVED_TO_MOD_SHOWN_ON = {
+    "cold_return": "hint",
+    "status_poll": "hint",
+    "drip_feed": "hint",
+    "big_paste": "hint",
+    "plan_fresh": "status",
+}
 
 #: The mod's folder under the data folder, and the two things the mod
 #: writes there for the hook and the watcher to read. The ``present``
@@ -1590,6 +1664,32 @@ COACHING_TIP = {
     ),
 }
 
+
+def tip_words(text: str) -> str:
+    """``text`` as a tip is compared: the quote mark, bold, italics and
+    backticks Claude may add or drop taken out, spaces collapsed."""
+    return " ".join(text.replace(">", " ").replace("*", "").replace("_", " ").replace("`", "").split())
+
+
+def _tip_fragment(template: str) -> str:
+    """The fixed words of a tip that identify it: its longest stretch
+    between the ``{placeholders}`` that are filled in per session."""
+    parts = re.split(r"\{[a-z_]+\}", template)
+    return tip_words(max(parts, key=lambda part: len(tip_words(part))))
+
+
+#: Each tip's own words, by hint (:func:`_tip_fragment` of
+#: :data:`COACHING_TIP`). A reply passes a note's tip on when it holds these
+#: words, not when it holds any tip (``Turn.coach_tips``).
+TIP_FRAGMENTS = {hint: _tip_fragment(tip) for hint, tip in COACHING_TIP.items()}
+
+
+def tips_in(text: str) -> tuple[str, ...]:
+    """The hints whose own tip words (:data:`TIP_FRAGMENTS`) ``text`` holds."""
+    words = tip_words(text)
+    return tuple(hint for hint, fragment in TIP_FRAGMENTS.items() if fragment in words)
+
+
 #: ``split_run``'s ``{why}``, by what was noted since the last time it was
 #: told: ``compaction`` (an agent run summarised its own context part-way
 #: through, which Claude Code does on its own), ``brief`` (a run began from
@@ -1688,7 +1788,8 @@ COACHING_TEXT = {
         when="most of the user's message is a log, a file or command output",
         then="Otherwise don't mention this note.",
     ),
-    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
+    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}."
+    " If the whole result was needed, say in one line that the ClaudeGlass note doesn't apply.",
     "report_reread": _tip_note(
         "report_reread",
         then="The user's session just started background work. Carry on exactly as you would have without this "
@@ -1766,14 +1867,102 @@ FEEDBACK_NOTE_TEXT = {
     "rating_reminder": _reminder_note(),
 }
 
-#: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
+#: ``quiet_output``'s ``{how}``: it speaks only for a whole read of a saved
+#: output (:data:`QUIET_SAVED_PATTERN`), so there is one.
 COACHING_QUIET_HOW = {
-    "Read": "read only the lines you need, with an offset and a limit",
-    "Grep": "narrow the pattern or the path, or ask for file names or counts only",
-    "Glob": "narrow the pattern",
-    "": "ask for less: a narrower query or a smaller page",
+    "Read": "Grep the saved output, or read part of it with an offset and a limit",
 }
 
+#: Where the saved outputs ``quiet_output`` is about are kept, matched on a
+#: ``Read``'s ``file_path``: the ``tool-results`` folder of the session
+#: (where Claude Code saves a result too big for the context), its
+#: ``scratchpad`` folder, and a background task's ``.output`` file.
+QUIET_SAVED_PATTERN = r"(?:^|[\\/])(?:tool-results|scratchpad)[\\/]|[\\/]tasks[\\/][^\\/]+\.output$"
+
+#: The hints only Claude sees: no tip, so no question of the tip survey
+#: (:data:`TIP_HINT_TITLES`). The daily run still mutes one that Claude
+#: called a misfire (``coaching.tip_rules``), through ``coaching.json``'s
+#: ``muted``.
+CLAUDE_ONLY_HINTS = ("quiet_output",)
+
+#: What :data:`CLAUDE_ONLY_HINTS` are about, in words, where a hint is
+#: named to you (``capture status``), as :data:`TIP_HINT_TITLES` do for
+#: the tips.
+CLAUDE_ONLY_HINT_TITLES: dict[str, str] = {"quiet_output": "reading a saved output whole"}
+
+#: What the tip question calls each tip (``{hint title}``), by hint id:
+#: one per tip in :data:`COACHING_TIP`. The ids are the closed vocabulary
+#: of the tag's ``tip_hint``.
+TIP_HINT_TITLES: dict[str, str] = {
+    "plan_fresh": "building a plan in a fresh session",
+    "plan_fresh_early": "approving a plan with a clear context",
+    "drip_feed": "sending small requests one at a time",
+    "big_paste": "pasting a lot of text",
+    "status_poll": "asking how background work is going",
+    "cold_return": "coming back after a break",
+    "report_reread": "starting background agents in a long session",
+    "split_run": "giving agents smaller pieces of work",
+}
+
+
+def _joined(parts: list[str]) -> str:
+    """``a``; ``a and b``; ``a, b and c``."""
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _coaching_notes_what() -> str:
+    """The ``coaching_notes`` metric's ``what``: the hints that speak, by
+    title (:func:`live_coaching_hints`), and that the others are off."""
+    live = live_coaching_hints()
+    titles = {**TIP_HINT_TITLES, **CLAUDE_ONLY_HINT_TITLES}
+    off = [hint for hint in COACHING_HINTS if hint not in live and hint not in NO_TRIGGER_HINTS]
+    if live:
+        speak = f"Hints that speak now: {_joined([titles[hint] for hint in live])}."
+        if off:
+            speak += " The others are off until a replay of real sessions finds their tips right more often than wrong."
+    else:
+        speak = "No hint speaks now: each is off until a replay of real sessions finds its tips right more often than wrong."
+    return (
+        "Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook "
+        "adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip. "
+        f"{speak} Vague corrections, the same request again and stopping Claude again and again are counted "
+        "after the fact on Work habits, with no live note. So is a big task without a plan."
+    )
+
+
+def _coaching_notes_why() -> str:
+    """The ``coaching_notes`` metric's ``why``: what the notes cost and
+    what each hook entry keeps, saying the cold-return and split-run parts
+    only while those hints speak."""
+    live = live_coaching_hints()
+    text = (
+        "Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to 140 "
+        "tokens, re-read on every later reply of the session. Claude Code waits for the hook after each message "
+        "you send. It also waits after each file read, web search or web fetch, approved plan, and agent or "
+        "workflow start. Setup > Capture and 'claudeglass capture status' show how many runs, the median time "
+        "each and the time summed, from your own sessions. A hook after each reply runs in the background and "
+        "keeps only the time and size of Claude's newest reply."
+    )
+    if "cold_return" in live:
+        text += " That keeps the cache check right after a resume."
+    if "split_run" in live:
+        text += " A hook when an agent run ends keeps only whether it ended too big, as counts."
+    return text
+
+
+#: A message that, sent after a break, is not new work and so gets no
+#: ``cold_return`` receipt: a go-ahead that carries on ("yes, fix the
+#: wrapper", "you may merge all the PRs", "go ahead and ...") or a retry
+#: ("try again"), matched on the whole message, at most
+#: :data:`COLD_SKIP_MAX_CHARS` characters. The plain go-ahead
+#: (:data:`GO_PATTERN`) is skipped too.
+COLD_SKIP_PATTERN = (
+    r"(?:please\s+)?(?:(?:try|retry|run|do)(?: it| that| this)?(?: again| once more)|retry|try again|again)"
+    r"[\s!.,]*(?:please)?[\s!.]*"
+    r"|(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm)\b[\s,.!:\-]+\S.*"
+    r"|(?:you (?:may|can|could)|go ahead(?: and)?|please go ahead(?: and)?|feel free to)\s+\S.*"
+)
+COLD_SKIP_MAX_CHARS = 80
 
 @dataclass(frozen=True, slots=True)
 class Metric:
@@ -1822,6 +2011,11 @@ class Metric:
     main_extra_untagged: str = ""
     #: The note a PostToolUse hook adds after a matching tool result.
     tool_note: str = ""
+    #: A key line only a compaction's note carries (the SessionStart whose
+    #: source is ``compact``, in the main session, while Claude writes the
+    #: tags): after the key lines and before the skip line. Its key rides on
+    #: this metric's switch (``capture_tags.MAIN_TAG_FIELDS``).
+    compact_line: str = ""
     #: Other metrics it can't work without (a subagent's extras ride on
     #: ``result``).
     requires: tuple[str, ...] = ()
@@ -2039,6 +2233,8 @@ METRICS: tuple[Metric, ...] = (
         hooks=("SessionStart",),
         main_line="prior: needed|some|none (how much of the earlier conversation this work needed; always none "
         "on the first message)",
+        compact_line="lost: yes|no, in your next final reply only (yes = the summary just made left out something "
+        "this work needed, so you read it again or asked)",
         out_chars=10,
     ),
     Metric(
@@ -2052,10 +2248,10 @@ METRICS: tuple[Metric, ...] = (
         powers=("verification",),
         tag="check=targeted|full|build|run|manual|none",
         hooks=("SessionStart",),
-        main_line="check: targeted|full|build|run|manual|none (how you verified the change: targeted = ran the "
-        "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
-        "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no "
-        "check, or you changed nothing)",
+        main_line="check: targeted|full|build|run|manual|none, only if this reply changed a file (how you verified "
+        "it: targeted = ran the tests for the part changed; full = ran the whole test suite; build = only built "
+        "or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no "
+        "check)",
         out_chars=12,
     ),
     Metric(
@@ -2243,7 +2439,7 @@ METRICS: tuple[Metric, ...] = (
         title="Where research happens",
         what="Search and read tokens in the main session against those in Explore agents. Also how many calls were a "
         "single lookup in a reply of its own.",
-        why="When to hand research to an agent, and when to ask for lookups to be batched.",
+        why="When to hand research to an agent.",
         powers=("research", "delegation"),
     ),
     # -- Live coaching ----------------------------------------------------
@@ -2262,24 +2458,12 @@ METRICS: tuple[Metric, ...] = (
         group="coaching",
         section="coaching",
         title="Coaching notes from Claude",
-        what="Live hints for where the status line doesn't show, such as the desktop app. When one applies, a "
-        "hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large "
-        "read or web result, an agent run that ended too big for one task (it had to summarise its own "
-        "context, or began from a very long brief), a plan approved "
-        "on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, "
-        "asking how background work is going while it still runs, or starting background agents when the session "
-        "already holds a lot of context, since each report they send back re-reads it. It also flags how you prompt: small "
-        "requests sent one at a time, or a huge paste. Vague corrections, the same request again and stopping "
-        "Claude again and again are counted after the fact on Work habits, with no live note. So is a big "
-        "task without a plan.",
-        why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
-        "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
-        "read or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show "
-        "how many runs, the median time each and the time summed, from your own sessions. A hook after each reply "
-        "runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is "
-        "right after a resume. A hook when an agent run ends keeps only whether it ended too big, as counts.",
+        what=_coaching_notes_what(),
+        why=_coaching_notes_why(),
         powers=("context", "tool_output", "delegation", "planning"),
-        hooks=("UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop"),
+        hooks=(
+            "UserPromptSubmit", "PostToolUse", *(() if "split_run" in LIVE_OFF_HINTS else ("SubagentStop",)), "Stop"
+        ),
     ),
     Metric(
         id="brief_templates",
@@ -2386,6 +2570,10 @@ DEEP_FEEDBACK_IDS = ("feedback_skill", "feedback_note", "feedback_reminder", "pl
 #: reminder. Any one of them needs the UserPromptSubmit hook
 #: (:func:`hook_specs`).
 FEEDBACK_MESSAGE_IDS = ("feedback_skill", "plan_check", "feedback_reminder")
+#: Those of :data:`FEEDBACK_MESSAGE_IDS` that still work without the hook
+#: entry: the skill only loses the facts line the entry adds. The plan check
+#: and the rating reminder do nothing at all without it.
+FEEDBACK_WORKS_WITHOUT_HOOK = ("feedback_skill",)
 
 #: CAP-5: metric ids retired from :data:`METRICS` (no longer asked, priced,
 #: or shown), kept here only so a ``config.toml`` written before the
@@ -2435,20 +2623,6 @@ FEEDBACK_FACT_KEYS = (
     "tip",
     "admits",
 )
-
-#: What the tip question calls each tip (``{hint title}``), by hint id:
-#: one per tip in :data:`COACHING_TIP`. The ids are the closed vocabulary
-#: of the tag's ``tip_hint``.
-TIP_HINT_TITLES: dict[str, str] = {
-    "plan_fresh": "building a plan in a fresh session",
-    "plan_fresh_early": "approving a plan with a clear context",
-    "drip_feed": "sending small requests one at a time",
-    "big_paste": "pasting a lot of text",
-    "status_poll": "asking how background work is going",
-    "cold_return": "coming back after a break",
-    "report_reread": "starting background agents in a long session",
-    "split_run": "giving agents smaller pieces of work",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -2784,7 +2958,6 @@ TIP_THRESHOLD_KEYS: dict[str, str] = {
     "drip_feed": "drip_count",
     "big_paste": "big_paste_tokens",
     "cold_return": "cold_min_tokens",
-    "report_reread": "report_reread_tokens",
 }
 
 
@@ -3093,11 +3266,13 @@ def active_metrics(level: str, metrics=(), feedback=()) -> tuple[str, ...]:
     return ids + tuple(i for i in FEEDBACK_IDS if i in set(feedback))
 
 
-def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGER) -> str:
+def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGER, source: str = "") -> str:
     """The note the hook adds for ``scope`` (``"main"`` at session start,
     ``"subagent"`` at agent start) with the metrics in ``ids`` switched
     on; ``""`` when none of them asks anything there. While Haiku writes
     the tags (``tagger``), the main note asks for no ``[cg: ...]`` tag.
+    ``source`` is the SessionStart's: after a compaction (``compact``) the
+    main note also carries each metric's :attr:`Metric.compact_line`.
 
     ``hooks/capture_hook.py`` builds the same text from
     ``capture-catalogue.json`` (:func:`export_json`); a test holds the two
@@ -3118,7 +3293,8 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
         (m.main_extra_untagged or m.main_extra) if untagged else m.main_extra if main else m.sub_extra
         for m in enabled
     ]
-    codes = [m.id for m, line, x in zip(enabled, lines, extras) if line or x]
+    asks = [m.compact_line if main and not untagged and source == "compact" else "" for m in enabled]
+    codes = [m.id for m, line, x, ask in zip(enabled, lines, extras, asks) if line or x or ask]
     if not codes:
         return ""
     out = [f"{NOTE_MARKER}{NOTE_VERSION} {','.join(codes)}", NOTE_INTRO]
@@ -3129,13 +3305,14 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
     before_tag = [x for m, x in zip(enabled, extras) if x and main and m.extra_before_tag]
     after_tag = [x for m, x in zip(enabled, extras) if x and not (main and m.extra_before_tag)]
     out += before_tag
-    if any(lines):
+    if any(lines) or any(asks):
         if main:
             out.append(MAIN_TAG_INTRO)
         else:
             keys = any(line for m, line in zip(enabled, lines) if m.id != "result")
             out.append(SUB_TAG_INTRO.format(tag=SUB_TAG_WITH_KEYS if keys else SUB_TAG))
         out += [line for line in lines if line]
+        out += [ask for ask in asks if ask]
         if main:
             out.append(SKIP_KEY_LINE)
     out += after_tag
@@ -3195,10 +3372,10 @@ JUDGE_LINES = {
     "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the "
     "message only makes sense with it; some = it helped; none = a fresh request, and always none on the first "
     "message)",
-    "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the "
-    "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
-    "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, "
-    "or nothing changed)",
+    "check": "check: targeted|full|build|run|manual|none, only if Claude changed a file in this exchange (how "
+    "Claude verified it: targeted = ran the tests for the part changed; full = ran the whole test suite; build "
+    "= only built or type-checked; run = ran the program itself to see it work; manual = only read it back; "
+    "none = no check)",
 }
 
 
@@ -3261,7 +3438,8 @@ def tool_suffix_chars(metric_id: str) -> int:
 def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     """The Claude Code hook entries the metrics in ``ids`` need, as
     ``(script, event, matcher, async)``: the note at session and agent
-    start, after tool results for Deep's tool notes, and the free
+    start, after tool results for Deep's tool notes (while Claude writes
+    the tags: the tool note asks for a word in the tag), and the free
     signals' events. Every entry that adds a note runs in the
     foreground: an async hook's ``additionalContext``/``systemMessage``
     does reach Claude (docs/en/hooks.md), but only on the next
@@ -3272,7 +3450,7 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     (``coaching_notes``) add the message you send and approved plans to
     that, in one PostToolUse entry shared with the tool note, and a
     ``SubagentStop`` entry that records an agent run that ended too big
-    (``split_run``). The feedback
+    (``split_run``) while that hint is on. The feedback
     items that answer a message you send (:data:`FEEDBACK_MESSAGE_IDS`) add
     that entry on their own. SessionEnd runs as the session closes, when
     nothing waits on it; the other signals run in the background. While Haiku writes the tags
@@ -3285,7 +3463,8 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     background one when ``turn_signals`` hasn't (a Custom pick of tag
     metrics alone). Coaching notes also add a background ``Stop`` entry
     (unless one of those already runs it), which prints nothing: it only
-    keeps the newest reply's time and size for the cold-return receipt."""
+    keeps the newest reply's time and size, which the hints about small
+    requests, checks on background work and cold returns read."""
     wanted = set(ids)
     haiku = HAIKU_TAGGER_HOOK in wanted and bool(tagged_keys(wanted))
     main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
@@ -3297,16 +3476,20 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     specs: list[tuple[str, str, str, bool]] = []
     if main:
         specs.append((HOOK_SCRIPT, "SessionStart", SESSION_START_MATCHER, False))
-    if agents or coach:
+    if agents or (coach and "split_run" not in LIVE_OFF_HINTS):
         # In the foreground, as Stop is for Haiku: it only hands the run to
         # a worker and returns, and claude -p exits without waiting for a
-        # background hook. Coaching notes need it too, to record that a run
-        # ended too big (``split_run``) before the foreground agent call
-        # that started it returns.
+        # background hook. Coaching notes need it too, while ``split_run`` is on,
+        # to record that a run ended too big before the foreground agent
+        # call that started it returns. While it is off the entry would
+        # start Python at every agent's end for nothing (``keep_run``).
         specs.append((HOOK_SCRIPT, "SubagentStop", "", False))
     if coach or asks_on_message:
         specs.append((HOOK_SCRIPT, "UserPromptSubmit", "", False))
-    tools = (*(BIG_OUTPUT_TOOLS if "big_output" in wanted else ()), *(COACHING_TOOLS if coach else ()))
+    # Deep's note after a large result asks for a word in the reply's tag,
+    # so it is never added while Haiku writes the tags (``capture_hook.note_for``).
+    big = "big_output" in wanted and HAIKU_TAGGER_HOOK not in wanted
+    tools = (*(BIG_OUTPUT_TOOLS if big else ()), *(COACHING_TOOLS if coach else ()))
     if tools:
         specs.append((HOOK_SCRIPT, "PostToolUse", "|".join(dict.fromkeys(tools)), False))
     for event in SIGNAL_EVENTS:
@@ -3342,6 +3525,7 @@ def export_json() -> dict:
                 "group": m.group,
                 "requires": list(m.requires),
                 "main_line": m.main_line,
+                "compact_line": m.compact_line,
                 "extra_keys": list(m.extra_keys),
                 "main_extra": m.main_extra,
                 "extra_before_tag": m.extra_before_tag,
@@ -3368,6 +3552,7 @@ def export_json() -> dict:
         "spawn_tools": list(SPAWN_TOOLS),
         "mod": {
             "moved": sorted(MOVED_TO_MOD),
+            "moved_on": dict(MOVED_TO_MOD_SHOWN_ON),
             "dir": MOD_DIR,
             "present_dir": MOD_PRESENT_DIR,
             "present_window_s": MOD_PRESENT_WINDOW_S,
@@ -3416,6 +3601,10 @@ def export_json() -> dict:
             "text": dict(COACHING_TEXT),
             "split_why": dict(COACHING_SPLIT_WHY),
             "quiet_how": dict(COACHING_QUIET_HOW),
+            "off_live": list(LIVE_OFF_HINTS),
+            "quiet_saved_pattern": QUIET_SAVED_PATTERN,
+            "cold_skip_pattern": COLD_SKIP_PATTERN,
+            "cold_skip_max_chars": COLD_SKIP_MAX_CHARS,
             "notice": dict(COACHING_NOTICE),
             "interrupt_prefix": INTERRUPT_PREFIX,
             "not_typed_prefixes": list(NOT_TYPED_PREFIXES),
@@ -3528,11 +3717,14 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     (``reminder``) and the plan check's question (``plan_check``), with
     the note that asks for either (``message_note``, the larger of the
     two); the note after a large or web tool result (``tool_note``), none
-    while Claude Haiku writes the tags. Amounts measured from transcripts
-    replace these once capture has run."""
+    while Claude Haiku writes the tags; and the note after a compaction
+    (``compact_note``), larger than ``session_note`` when a metric asks
+    once after a summary (:attr:`Metric.compact_line`). Amounts measured
+    from transcripts replace these once capture has run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
     wanted_ids = {m.id for m in enabled}
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
+    compact = note_text(ids, "main", tagger=tagger, source="compact")
     # The reminder and the plan check come on a message of yours now and
     # then, not with every reply.
     reminder = sum(m.out_chars for m in enabled if m.id == "feedback_reminder")
@@ -3555,6 +3747,7 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     )
     return {
         "session_note": round((len(main) + NOTE_WRAP_CHARS + len("SessionStart")) / 4) if main else 0,
+        "compact_note": round((len(compact) + NOTE_WRAP_CHARS + len("SessionStart")) / 4) if compact else 0,
         "subagent_note": round((len(sub) + NOTE_WRAP_CHARS + len("SubagentStart")) / 4) if sub else 0,
         "reply_tag": round((reply + frame) / 4) if reply else 0,
         "report_tag": round(report / 4),
@@ -3719,6 +3912,8 @@ def render_markdown() -> str:
         # 201/107 for Essentials against a checked-in 182/88 here).
         sizes = rough_tokens(ids)
         main_cell = f"~{sizes['session_note']} tokens" if sizes["session_note"] else "–"
+        if sizes["compact_note"] > sizes["session_note"]:
+            main_cell += f", ~{sizes['compact_note']} after a compaction"
         sub_cell = f"~${JUDGE_USD_PER_CALL:.3f}" if agent_metric_ids(ids) else "–"
         p(f"| {LEVEL_TITLES[level]} | {LEVEL_SUMMARIES[level]} | {main_cell} | {sub_cell} |")
     p(
@@ -3768,6 +3963,12 @@ def render_markdown() -> str:
             p(f"- **Captures:** {m.what}")
             p(f"- **Why:** {m.why}")
             p(f"- **Tag:** {_metric_tag_line(m)}")
+            if m.compact_line:
+                key = m.compact_line.split(":", 1)[0]
+                p(
+                    f"- **After a summary:** `{key}={'|'.join(TAG_VOCAB[key])}`, asked once, in the reply after a "
+                    f'compaction, while Claude writes the tags. The note asks: "{m.compact_line}"'
+                )
             if m.out_chars:
                 out_tokens = max(1, round(m.out_chars / 4))
                 unit = "token" if out_tokens == 1 else "tokens"
@@ -3922,7 +4123,8 @@ def render_markdown() -> str:
         "the tags it runs in the background, since it only fills in a tag Claude left out. A `claude -p` or "
         "Agent SDK run, with nobody at the screen, gets no capture note, no tags and no agent judging (its "
         "free signals are still logged). Deep's note after a large result "
-        "isn't added, as no reply carries a tag for its word. Agent runs are Haiku's to judge whichever writes "
+        "isn't added, as no reply carries a tag for its word, so capture needs no hook after a read or web "
+        "result. Agent runs are Haiku's to judge whichever writes "
         "the main session's tags."
     )
     p("")
@@ -3946,12 +4148,15 @@ def render_markdown() -> str:
         + ", ".join(f"`{t}`" for t in AGENT_ANSWER_TOOLS)
         + f") is there, or the file has stopped growing for {AGENT_JUDGE_WAIT['quiet_s']:g} seconds, or "
         f"{AGENT_JUDGE_WAIT['cap_s']:g} seconds have passed, which is a `no_answer` and no call to Haiku. Then "
-        "it reads the transcript and hands Haiku an excerpt: the agent's type, its brief (up to "
-        f"{AGENT_JUDGE_LIMITS['brief']:,} characters), what it did (model calls, tools used, the files it "
-        f"changed, the first line of up to {AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end "
+        "it reads the transcript and hands Haiku an excerpt: the agent's type and the model it ran on, its "
+        f"brief (up to {AGENT_JUDGE_LIMITS['brief']:,} characters), what Claude said as it started the run "
+        f"(the last {AGENT_JUDGE_LIMITS['earlier_report']} characters), what it did (model calls, tools used, "
+        f"the files it changed, the first line of up to {AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end "
         f"of its report (up to {AGENT_JUDGE_LIMITS['report']:,} characters) and up to "
         f"{AGENT_JUDGE_LIMITS['earlier']} earlier agent runs of the session, read from the whole of the "
-        "session's transcript (their type and the start of their brief and the end of their report), so Haiku "
+        "session's transcript (their type and model, their brief cut to "
+        f"{AGENT_JUDGE_LIMITS['earlier_brief']} characters, its start and end, and the end of their report, the "
+        f"last {AGENT_JUDGE_LIMITS['earlier_report']} characters), so Haiku "
         "can tell a re-run. Tool output is never in it."
     )
     p(
@@ -4070,7 +4275,7 @@ def render_markdown() -> str:
     )
     p(
         "- `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] "
-        "[--sample N] [--yes] [--dry-run]` — turn it on (default level: Essentials)."
+        "[--sample N] [--after stop|light] [--yes] [--dry-run]` — turn it on (default level: Essentials)."
     )
     p("- `claudeglass capture level LEVEL` — change the level.")
     p(
@@ -4091,6 +4296,18 @@ def render_markdown() -> str:
         "end time has passed counts as off here: turning it back on (`capture on`, a level, or a new end on "
         f"the Capture page) starts a new span, {DEFAULT_CAPTURE_TIMEBOX_DAYS} days unless you say otherwise."
     )
+    p("")
+    p(
+        "What happens at the end is your choice: `--after stop` (the default) stops capture, and `--after "
+        "light` keeps a light sample going instead, with \"When it ends\" on the Capture page as the same "
+        "choice. A light sample asks only for `task`, `level`, `size` and `shift` (the kind, difficulty and "
+        f"size of the work, and task changes), in {LIGHT_SAMPLE}% of sessions (1 in 5), or fewer if you "
+        "chose a smaller share. Those four are the tags most cards and the matching of sessions read, so "
+        "they stay fresh; every other tag stops at the end, and a card that rests on one says how old it "
+        "is. The banner reads \"Metrics capture: light sample\" and says when the full capture ended. "
+        "`capture off` stops the sample, and `capture on` starts full capture again. An older ClaudeGlass "
+        "ignores the choice and stops at the end."
+    )
     p(
         "- `claudeglass capture enable METRIC...` / `capture disable METRIC...` — turn individual "
         "metrics on or off; the level becomes Custom once the set no longer matches a preset."
@@ -4100,7 +4317,7 @@ def render_markdown() -> str:
         "- `claudeglass capture connect` — add the settings.json hook entries the metrics you've "
         "chosen need."
     )
-    p("- `claudeglass capture remove` — switch off and take those hook entries back out.")
+    p("- `claudeglass capture remove` — take those hook entries back out, and switch off what needs them: capture, coaching notes, the plan check and the rating reminder.")
     p("- `claudeglass capture feedback on|off` — the `/cg-feedback` skill and its status-line reminder.")
     p("- `claudeglass capture brief on|off` — the `/cg-brief` skill.")
     p(

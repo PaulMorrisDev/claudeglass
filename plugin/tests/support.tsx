@@ -77,6 +77,8 @@ export type World = {
   counted: World['shape'] | null
   /** True: a `full` session.usage is refused, as an engine without the counting would. */
   countFails: boolean
+  /** Set to a test on the written path: a write it accepts is refused, as a full disk would. */
+  failWrite: ((path: string) => boolean) | null
 }
 
 /** The coaching block of a settings file written for a user who turned coaching and the rating reminder on. */
@@ -140,7 +142,7 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   mock.env(on, { CLAUDE_CONFIG_DIR: '/cfg' })
   const files = new Map<string, string>()
   if (options.settings !== null) files.set(`${CONFIG}/claudeglass/mod/settings.json`, options.settings ?? settingsFile())
-  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project', session: options.session ?? SESSION, listed: 0, stale: null, breakdown: true, surfaces: ['terminal'], surfaceCalls: 0, asked: [], counted: null, countFails: false }
+  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project', session: options.session ?? SESSION, listed: 0, stale: null, breakdown: true, surfaces: ['terminal'], surfaceCalls: 0, asked: [], counted: null, countFails: false, failWrite: null }
   let current = usageFor(0, 0)
   let counted = usageFor(0, 0)
   world.figures = (tokens, usd) => {
@@ -169,6 +171,7 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
     return { value: files.get(key(e.path)) ?? '' } as never
   })
   on('fs.write', (_$, e) => {
+    if (world.failWrite?.(key(e.path))) throw new Error('the write failed')
     files.set(key(e.path), e.text)
     return { value: undefined } as never
   })

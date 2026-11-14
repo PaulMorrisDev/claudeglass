@@ -42,6 +42,43 @@ see them, which is exactly what `detect_drift`/`build_config_drift_table`
 exist to surface (a session whose *observed* behaviour disagrees with
 its snapshot's `effective` config implies one of these).
 
+### Which file a view reads (the view rule)
+
+Every card, Overview check, Setup goal, profile diff row, apply preview and
+fix reads a setting from the file that decides it, and a fix for it goes
+to that file: the highest layer that sets the key (`effective_provenance`;
+`modelSettings` is one file's block, as `build_effective_settings` takes
+each top-level key whole). Within one file a model's own `modelSettings`
+entry beats the file's flat value, and a higher file's flat value beats a
+lower file's entry for the model (model-config docs for effort; read in
+Claude Code 2.1.317's source for the auto-compact window, the per-model
+window work), so for the main session's effort the deciding file is the
+one `goals.main_effort_reading` names. A managed file is named, never
+offered as yours to change.
+
+A project's own files (`project_local`, `project_shared`) decide only in a
+view of that one project. A view covers several projects
+(`snapshots.several_in_view`) when its sessions come from more than one,
+or it is the all-projects view of a store that knows more than one, or its
+settings snapshots come from more than one (`spans_projects`). There a
+snapshot is one project's, so each key its project files set reads as your
+user file sets it, from the snapshot's `user_settings` (the hook's
+redacted copy of `~/.claude/settings.json`, the same redaction as
+`effective`), or as unset when your user file does not set it; managed
+settings are read as always. A card then stays open rather than closing on
+one project's file, and no fix names a project's file. `snapshots.view_settings`
+is the rule, applied once when the settings are built for the view
+(`with_every_project_agents(..., several_projects=)`, by the report, the
+CLI `check` and the dashboard; a user-scope `apply` with no project folder
+applies it when the snapshots span projects), and again on entry to
+`recommend()`, `advice.finish()`, `quick_actions.run()` and `goals.draft()`
+for a caller that passed settings not built for the view
+(`snapshots.view_spans_projects`, the report's `meta.projects`). The dict
+form those two last take has no `user_settings`, so there a project file's
+key reads as unset. The main-session model lever keeps its own per-project
+reading (`model_swap.main_setting`, `own_model_runs`), which prices each
+session against its own project's setting.
+
 ## What each layer records (`settings_layers[<layer>]`)
 
 - `present` — whether the file exists at all.
@@ -107,15 +144,50 @@ or the generic marker:
 - `modelSettings` (**PROF-03**) → `{model_id: {"effortLevel":
   str|None}}` — per-model effort overrides (`docs/en/settings-reference.md`):
   for each model id the layer names, only its own `effortLevel`, never
-  any other sub-key a future Claude Code version might add per model.
+  any other sub-key (so a model's `autoCompactWindow`, which a profile
+  may set, is not recorded; the profile diff says "not recorded" for it).
   Model ids run through the same `_clip_name` every other name in this
   schema gets. A per-model `effortLevel` here, or `CLAUDE_CODE_EFFORT_LEVEL`
   being set at all (`content_layers.effort_level_env_set` above), both
-  beat the top-level `effortLevel` scalar for that model — so a profile
-  goal drafting an `effortLevel` change checks both and, when either
-  applies, appends "Won't apply to `<model>`: … use `--effort` instead"
-  to the candidate's evidence rather than silently implying the profile
-  alone would move it (`profiles/goals.py`'s `_effort_override_note`).
+  beat the top-level `effortLevel` scalar for that model, and a profile
+  goal drafting an `effortLevel` change checks both. When
+  `CLAUDE_CODE_EFFORT_LEVEL` is set it appends "Won't apply to `<model>`: …
+  Set it to medium or remove it" to the candidate's evidence rather than silently
+  implying the profile alone would move it (`profiles/goals.py`'s
+  `_effort_override_note`); the variable beats a model's own entry too, so a
+  change to that entry would not take effect either. Otherwise, when the
+  model the cheaper setup ran on has its own `effortLevel` here (matched by
+  its canonical id, so a dated, `[1m]`, Bedrock or Vertex spelling is the
+  same model, or a bare family alias such as "sonnet"; another version of the
+  family is another entry, `_same_model`), the `tasks` goal drafts a
+  change to that model's entry — a `modelSettings` candidate, `{<model id as
+  written>: {"effortLevel": …}}` — in place of the flat `effortLevel`, which
+  the entry would beat (`_model_with_own_effort`). The `thinking` goal always
+  drafts the main session's level that way, for the model it ran on (the
+  first model of a mixed-model row), keyed by its canonical id
+  (`_canonical_model`), as `/effort` saves it; it falls back to the flat
+  `effortLevel` when no model was recorded, the name has no canonical id, or
+  the variable is set. A flat `effortLevel` in a higher file beats a model's
+  own entry in a lower one (model-config docs), so when a project file's
+  flat level decides, `thinking` drafts the flat level, and
+  `profile_overridden_by` says of a lower target's per-model row "This
+  project's <file> sets effortLevel, which wins over this model's own
+  level." The apply preview lists such a row as overridden. A per-model
+  `autoCompactWindow` row says `CLAUDE_CODE_AUTO_COMPACT_WINDOW` wins, as
+  the flat key's row does. The same rule holds for the window (read in
+  Claude Code 2.1.317's source, the per-model window work): a flat
+  `autoCompactWindow` in a higher file beats a model's own window in a lower
+  one, and the row ("This project's <file> sets autoCompactWindow, which
+  wins over this model's own window.") and the apply preview say so. A flat
+  row is called overridden by a model's own entry only when that entry is in
+  the target file or a higher one. A model's own row at a lower target says
+  "This project's <file> sets it too and wins." when that project file's
+  `modelSettings` block has the model's own entry. The window card's change
+  and the compaction check's fix carry the same note
+  (`fixes.window_change_note`, read for the change's own file), and both
+  go to the file that sets the window (see "Which file a view reads");
+  when a project or managed file's own window for the main session's model
+  decides (`goals.main_own_window`), they change that entry in that file.
 
 `effective`/`effective_provenance` merge exactly this same key set
 (`SETTINGS_SUMMARY_KEYS`) across the four layers — a value there has
@@ -198,6 +270,23 @@ resolution order). `effective_agents[name]` reduces this to exactly the
 fields a TTL/model/effort recommendation keys off:
 `{source, experimental_cache_ttl, model, effort, max_turns}`.
 
+An agent's `tools` and `disallowedTools` are stored as a list of tool
+names. A comma string (`tools: Read, Agent(a, b)`) is split at the commas
+outside parentheses, so a long line is kept whole; each entry then goes
+through the `_clip_name` every other name gets (cut at 64 characters; an
+entry that itself starts like a path or a URL is replaced by a marker, while
+a path inside an entry is kept as written), the same as the items of a YAML
+list always did.
+A snapshot written before this kept the comma string cut at 64 characters
+(61 and `...`). `load_snapshots` reads a whole string as the list of its
+entries (it depends on that snapshot alone, so the dashboard's store and a
+read from disk agree). A cut string stays as it is and is an unknown line,
+which the readers take to mean every tool, never the whole line. Where two
+snapshots are compared (`snapshots.same_tool_line`), a cut string and a list
+whose entries, joined with `, `, start with its first 61 characters are the
+same line, so the first snapshot after the upgrade is not a change to the
+line; a change before character 61 still is.
+
 ## `claude_json` — the `~/.claude.json` cross-check
 
 `~/.claude.json` is the CLI's own per-machine state file — distinct from
@@ -260,7 +349,10 @@ layer the plan's "Configuration layers" section lists:
   recommendation can flag an unusually import-heavy CLAUDE.md without
   ever reading what it imports.
 - `rules` / `commands` — count and total bytes of
-  `.claude/rules/*.md` / `.claude/commands/**/*.md`.
+  `.claude/rules/*.md` / `.claude/commands/**/*.md`. `rules` also has
+  `unscoped_bytes`: the bytes of the rules with no `paths:` frontmatter
+  key (only its presence is read), which are the ones that load at the
+  start of a session. A snapshot without it counts all rule bytes.
 - `skills` — `{project, user}`, each `{names, total_bytes, config}` from
   `.claude/skills/*/SKILL.md` (a skill directory without a `SKILL.md`
   isn't a skill Claude Code will load, so it's excluded). COV-10/PROF-09:
@@ -306,6 +398,10 @@ layer the plan's "Configuration layers" section lists:
   lever (`effortLevel`, `modelSettings.<id>.effortLevel`) and `--effort`/
   `/effort` too, so a profile candidate that would set `effortLevel`
   checks this flag first — see "PROF-03" under `effective` below.
+
+`env_names` also tells whether `ANTHROPIC_MODEL` is set, by name only.
+While it is, the main model card and the Models check offer no `model`
+change, since the variable wins over the setting.
 
 ## `project_slug`
 
@@ -369,7 +465,7 @@ one `"(unknown project)"` bucket.
   an observed Opus or Sonnet model. An alias (`opus`, `sonnet`, `haiku`,
   `fable`, `best`, with or without `[1m]`: any value with no digit once
   `[1m]` is stripped) compares by family (`workstyle.model_tier`, with
-  `best` read as Fable through the rate card), because an alias follows
+  `best` read as Opus through the rate card, as Claude Code resolves it), because an alias follows
   the newest release: `opus` against an older `claude-opus-5` session is
   not drift. Every other value (a `claude-*` id, a Bedrock or Vertex id,
   an ARN) is an explicit pin and compares exactly, by the canonical id

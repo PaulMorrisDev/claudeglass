@@ -157,6 +157,10 @@ class CaptureConfig:
     sample: int = 100
     #: ISO-8601 time capture stops by itself, or ``""`` for never.
     until: str = ""
+    #: What happens at ``until``, one of ``capture_catalogue.AFTER_CHOICES``:
+    #: capture stops, or a light sample of it goes on (:meth:`light`). A
+    #: missing key reads ``"stop"``.
+    after: str = "stop"
     #: Project slug regexes (``re.search``, case-insensitive) capture runs
     #: in; one starting ``!`` leaves matching projects out. Empty means
     #: every project.
@@ -182,17 +186,33 @@ class CaptureConfig:
         (``capture_catalogue.active_metrics``)."""
         return capture_catalogue.active_metrics(self.level, self.metrics, self.feedback)
 
-    def hook_metrics(self) -> tuple[str, ...]:
-        """What the capture hook's settings.json entries are for: the
-        metrics on, plus the coaching toggles that run through the hook
-        (``coaching_notes``), whatever the level, and
+    def running_metrics(self, now: datetime | None = None) -> tuple[str, ...]:
+        """What the capture hook runs now, as ``capture_catalogue.active_metrics``
+        lists it: the level's metrics while capture runs; once its end has
+        passed, only ``capture_catalogue.LIGHT_METRICS`` and what they need
+        while a light sample runs (:meth:`light`), else none. The feedback
+        toggles stay in every state: the hook runs the ones on your messages
+        whatever the level (``capture_hook.feedback_ids``)."""
+        if self.light(now):
+            return capture_catalogue.active_metrics(
+                capture_catalogue.CUSTOM_LEVEL, capture_catalogue.LIGHT_METRICS, self.feedback
+            )
+        if self.expired(now):
+            return capture_catalogue.active_metrics("off", (), self.feedback)
+        return self.active_metrics()
+
+    def hook_metrics(self, now: datetime | None = None) -> tuple[str, ...]:
+        """What the capture hook's settings.json entries are for: what it
+        runs now (:meth:`running_metrics`), plus the coaching toggles that
+        run through the hook (``coaching_notes``), whatever the level, and
         ``capture_catalogue.HAIKU_TAGGER_HOOK`` while Haiku writes the
         tags."""
+        metrics = self.running_metrics(now)
         hooked = tuple(
             i for i in capture_catalogue.COACHING_IDS if i in self.coaching and capture_catalogue.METRICS_BY_ID[i].hooks
         )
         haiku = (capture_catalogue.HAIKU_TAGGER_HOOK,) if self.haiku_tags else ()
-        return self.active_metrics() + hooked + haiku
+        return metrics + hooked + haiku
 
     @property
     def haiku_tags(self) -> bool:
@@ -224,6 +244,19 @@ class CaptureConfig:
         if stop is None:
             return False
         return (now or datetime.now(timezone.utc)) >= stop
+
+    @property
+    def light_share(self) -> int:
+        """The percent of sessions a light sample runs in: the hook takes
+        the smaller of ``sample`` and ``capture_catalogue.LIGHT_SAMPLE``."""
+        return min(self.sample, capture_catalogue.LIGHT_SAMPLE)
+
+    def light(self, now: datetime | None = None) -> bool:
+        """Whether a light sample is what runs now: capture is on, its end
+        has passed and ``after`` says to keep a sample
+        (``capture_catalogue.LIGHT_METRICS`` in
+        ``capture_catalogue.LIGHT_SAMPLE`` percent of sessions)."""
+        return self.is_on and self.expired(now) and self.after == "light"
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -663,6 +696,12 @@ def _build_capture_config(table: dict, path: Path) -> CaptureConfig:
         if not isinstance(value, str) or (value and _parse_iso(value) is None):
             raise ConfigError(f"config file {path}: 'capture.{key}' must be an ISO-8601 date or time, got {value!r}")
         setattr(capture, key, value)
+    after = table.get("after", capture.after)
+    if not isinstance(after, str) or after not in capture_catalogue.AFTER_CHOICES:
+        raise ConfigError(
+            f"config file {path}: 'capture.after' must be one of {list(capture_catalogue.AFTER_CHOICES)}, got {after!r}"
+        )
+    capture.after = after
     capture.projects = _capture_list(table, "projects", path)
     for pattern in capture.projects:
         try:
@@ -1140,6 +1179,7 @@ def _capture_table(capture: CaptureConfig) -> dict:
         "metrics": list(capture.metrics),
         "sample": capture.sample,
         "until": capture.until,
+        "after": capture.after,
         "projects": list(capture.projects),
         "feedback": list(capture.feedback),
         "coaching": list(capture.coaching),
@@ -1179,6 +1219,7 @@ def set_capture(
     metrics: list[str] | None = None,
     sample: int | None = None,
     until: str | None = None,
+    after: str | None = None,
     projects: list[str] | None = None,
     feedback: list[str] | None = None,
     coaching: list[str] | None = None,
@@ -1196,8 +1237,9 @@ def set_capture(
     way when the call names a level, a set of metrics or a new ``until``
     (``capture on``, a level or a new end picked on the Capture page): a
     fresh ``enabled_at``, and the default time-box when ``until`` is unsaid.
-    A change to the tagger, the sample, the project filter or the feedback
-    and coaching toggles leaves it ended. A switch from off to on that
+    A change to the tagger, the sample, the project filter, what happens at
+    the end (``after``) or the feedback and coaching toggles leaves it
+    ended. A switch from off to on that
     leaves ``until`` unsaid (``None``) gets
     :data:`~claudeglass.capture_catalogue.DEFAULT_CAPTURE_TIMEBOX_DAYS`
     days by default (CAP-8), so capture can't run forever unnoticed --
@@ -1233,6 +1275,8 @@ def set_capture(
         table["sample"] = sample
     if until is not None:
         table["until"] = until
+    if after is not None:
+        table["after"] = after
     if projects is not None:
         table["projects"] = list(projects)
     if feedback is not None:
@@ -1430,6 +1474,7 @@ def append_prediction_log(
     predicted_pct: float | None,
     fidelity: str,
     now: datetime | None = None,
+    priced_on: float | None = None,
 ) -> str:
     """Log one whatif estimate worth checking against what actually
     happened (EST-P5), so it can later be matched to a real change point
@@ -1438,7 +1483,9 @@ def append_prediction_log(
     ``service/schema.py``'s "Version 7" paragraph); ``agent`` is an agent
     type or ``None`` for a main-session/global change. Returns the
     prediction's own generated id (a stable key so re-ingesting the same
-    log line twice, e.g. on a later watcher tick, is a no-op)."""
+    log line twice, e.g. on a later watcher tick, is a no-op). ``priced_on`` is
+    what the estimate is a share of -- the observed cost it repriced, or the
+    tokens per start it takes out -- or ``None`` when it names none."""
     resolved_dir = _resolve_config_dir(config_dir)
     resolved_dir.mkdir(parents=True, exist_ok=True)
     prediction_id = uuid.uuid4().hex[:16]
@@ -1452,6 +1499,7 @@ def append_prediction_log(
         "predicted_usd": predicted_usd,
         "predicted_pct": predicted_pct,
         "fidelity": fidelity,
+        "priced_on": priced_on,
     }
     with open(resolved_dir / PREDICTION_LOG_NAME, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")

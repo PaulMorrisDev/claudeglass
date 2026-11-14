@@ -36,6 +36,7 @@ from zoneinfo import available_timezones
 
 from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, compaction, discovery, installer as installer_mod
 from . import invocation, onboarding, setup_flow
+from . import covered as covered_mod
 from . import mod_settings as mod_settings_mod
 from . import pages
 from . import haiku_tags, helptext, hook_health, probe as probe_mod, recache, signals as signals_mod, snapshots
@@ -736,7 +737,8 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         default="status",
         choices=CAPTURE_ACTIONS,
         help="status (default); on; off; level LEVEL; enable/disable METRIC...; connect (add the hook entries "
-        "the chosen metrics need to settings.json); remove (switch off and take the entries out); "
+        "the chosen metrics need to settings.json); remove (take the entries out, and switch off capture, "
+        "coaching notes, the plan check and the rating reminder, which need them); "
         "feedback on|off (the /cg-feedback skill and its status-line reminder); "
         "brief on|off (the /cg-brief skill, which checks a request against its checklist); "
         "tagger claude|haiku (who writes the tags: Claude, at the end of its replies, or Claude Haiku, asked "
@@ -783,6 +785,13 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         choices=CAPTURE_SAMPLES,
         default=None,
         help="capture this share of sessions, in percent (each session is in or out for its whole length)",
+    )
+    sub.add_argument(
+        "--after",
+        choices=capture_catalogue.AFTER_CHOICES,
+        default=None,
+        help="what happens when it ends: stop (the default), or keep a light sample: the kind, difficulty and size "
+        "of the work, and task changes, in 1 session in 5, or fewer if you chose a smaller share",
     )
     sub.add_argument("--yes", action="store_true", help="make the changes without asking (they are still printed)")
     sub.add_argument(
@@ -930,16 +939,19 @@ def _add_apply_args(sub: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_claude_root_arg(sub: argparse.ArgumentParser) -> None:
+def _add_claude_root_arg(sub: argparse.ArgumentParser, *, help: str | None = None) -> None:
     """``--claude-root`` for the commands that read or change Claude
     Code's own ``settings.json`` (``init``, ``uninstall``, ``changes``);
-    ``apply`` declares its own with the same meaning."""
+    ``apply`` declares its own with the same meaning. ``review`` and
+    ``check`` read your CLAUDE.md files and rules from it (``help`` says
+    what they do without it)."""
     sub.add_argument(
         "--claude-root",
         metavar="PATH",
         default=None,
         dest="claude_root",
-        help="the Claude Code folder holding settings.json (default: $CLAUDE_CONFIG_DIR, else ~/.claude; "
+        help=help
+        or "the Claude Code folder holding settings.json (default: $CLAUDE_CONFIG_DIR, else ~/.claude; "
         "never worked out from --config-dir)",
     )
 
@@ -1201,6 +1213,12 @@ def _make_parser() -> argparse.ArgumentParser:
             _add_probe_config_args(sub)
         if name == "apply":
             _add_apply_args(sub)
+        if name in ("review", "check"):
+            _add_claude_root_arg(
+                sub,
+                help="the Claude Code folder holding your CLAUDE.md, rules/, agents/ and skills/ "
+                "(default: the folder above --config-dir, never worked out from --projects-root)",
+            )
         if name == "review":
             sub.add_argument(
                 "what",
@@ -1472,6 +1490,28 @@ def _dashboard_tip_feedback(config_dir: Path) -> dict:
     return read_tip_feedback(config_dir / STORE_FILENAME)
 
 
+def _dashboard_card_marks(config_dir: Path) -> list[dict] | None:
+    """What the dashboard kept of the recommendation cards it showed, read
+    from ``<config-dir>/service.db`` without writing to it. ``None`` when
+    there is no store or it has no such table: the tuning export then leaves
+    its ``cards`` block out."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import read_card_marks
+
+    return read_card_marks(config_dir / STORE_FILENAME)
+
+
+def _dashboard_predictions(config_dir: Path) -> list[dict]:
+    """The estimates the dashboard logged for profile changes
+    (``predictions``), read from ``<config-dir>/service.db`` without writing to
+    it; empty when there is no store. The tuning export's ``outcomes`` block
+    reads which of them turned into a change."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import read_predictions
+
+    return read_predictions(config_dir / STORE_FILENAME)
+
+
 def _dashboard_mod_events(config_dir: Path) -> list[dict]:
     """What the ClaudeGlass mod's sensor files said, by event, read from
     ``<config-dir>/service.db`` without writing to it."""
@@ -1495,6 +1535,75 @@ def _merge_dashboard_marks(config_dir: Path, overrides: dict) -> tuple[dict, dic
     for session_id, entry in tags.items():
         merged.setdefault(session_id, {}).update(entry)
     return merged, ratings
+
+
+def _store_slugs_selected(slugs, args: argparse.Namespace, config: Config) -> set[str]:
+    """Of ``slugs`` (the dashboard's store's raw ``sessions.slug`` values, a
+    project folder's name each), those ``args`` picked, by the rule
+    ``discovery.resolve_project_dirs`` applies to the folders on disk:
+    ``--all-projects``, else ``--project-family``, else ``--project`` (or the
+    current folder's), case aside, less ``exclude_projects``. A project whose
+    folder is gone is picked the same way."""
+    from .corpus import _filter_excluded_dirs
+
+    slugs = [s for s in slugs if s]
+    if args.all_projects:
+        picked = slugs
+    elif args.project_family:
+        pattern = re.compile(args.project_family, re.IGNORECASE)
+        picked = [s for s in slugs if pattern.search(s)]
+    else:
+        wanted = {s.lower() for s in (args.project or [discovery.slug_for(os.getcwd())])}
+        picked = [s for s in slugs if s.lower() in wanted]
+    return {p.name for p in _filter_excluded_dirs([Path(s) for s in picked], config.exclude_projects)}
+
+
+def _store_coverage(
+    args: argparse.Namespace,
+    config: Config,
+    config_dir: Path,
+    corpus: Corpus,
+    *,
+    add: bool = False,
+) -> tuple[covered_mod.Coverage | None, Corpus]:
+    """``(coverage, corpus)``: what ``corpus`` (read from transcripts on disk
+    for ``args``' window) covers of the sessions the dashboard's store holds
+    for the same window and projects, read from ``<config-dir>/service.db``
+    without writing to it. With ``add``, also ``corpus`` with those sessions
+    read from the store's digests (``rebuild.add_stored_sessions``), so it
+    covers what the dashboard covers. ``(None, corpus)`` when there is no
+    store, it can't be read, none of its sessions is missing from ``corpus``,
+    or the window is one the store can't tell (``--window-by`` other than
+    ``last-reply``, or ``--limit``)."""
+    import sqlite3
+    import zlib
+
+    from .service.serve import STORE_FILENAME
+    from .service.store import Store
+
+    if args.window_by != "last-reply" or args.limit is not None:
+        return None, corpus
+    store = Store.open_read_only(config_dir / STORE_FILENAME, config_dir=config_dir)
+    if store is None:
+        return None, corpus
+    try:
+        held = store.window_session_ids(since=_window_since(args, config), until=args.until)
+        slugs = _store_slugs_selected(set(held.values()), args, config)
+        known = {sid for sid, slug in held.items() if slug in slugs}
+        read = {b.session_id for b in corpus.sessions if b.top is not None}
+        if not known - read:
+            return None, corpus
+        if not add:
+            return covered_mod.Coverage(len(known | read), len(read)), corpus
+        from .service import rebuild
+
+        merged = rebuild.add_stored_sessions(corpus, store, sorted(known - read))
+        stored = sum(1 for b in merged.sessions if b.top is not None) - len(read)
+        return covered_mod.Coverage(len(known | read), len(read), stored), merged
+    except (sqlite3.Error, ValueError, zlib.error):
+        return None, corpus
+    finally:
+        store.close()
 
 
 def _load_corpus_for_args(
@@ -1688,6 +1797,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             f"claudeglass {command}: no matching project directories under {root}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
 
     corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
@@ -1696,7 +1806,9 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             f"claudeglass {command}: no sessions found under {root} for window {window!r}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
+    coverage, _corpus = _store_coverage(args, config, config_dir, corpus)
 
     snaps = snapshots.load_snapshots(config_dir) or None
     projects = tuple(p.name for p in project_dirs)
@@ -1800,6 +1912,10 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
         # other user-facing config error in this function.
         print(f"claudeglass {command}: {exc}", file=sys.stderr)
         return 2
+    # The sessions of the window only the dashboard's store still has: the
+    # report leaves them out, and says so.
+    if coverage is not None:
+        model.meta.sessions_left_out = coverage.sessions - coverage.read
     if emit is not None:
         return emit(model, config_dir, window, since_dt, until_dt, projects)
     _emit_report_outputs(model, args)
@@ -1819,10 +1935,20 @@ def _cmd_review(args: argparse.Namespace) -> int:
         context = model.context_files or {}
         # Both follow the project: its folders' files and your own.
         only = _report_only(args, projects, config_dir)
+        claude_root, roots = _read_where(args, config_dir)
         if args.what == "skills":
-            print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period, only=only)))
+            data = skills_review.review(
+                config_dir, context, units, period, only=only, claude_root=claude_root, projects_roots=roots
+            )
+            print(skills_review.render_markdown(data))
         else:
-            review = claude_md_review.build_review(config_dir, context, projects=None if only is None else list(only))
+            review = claude_md_review.build_review(
+                config_dir,
+                context,
+                projects=None if only is None else list(only),
+                claude_root=claude_root,
+                projects_roots=roots,
+            )
             print(claude_md_review.render_markdown(review, units, period))
         return 0
 
@@ -1836,11 +1962,30 @@ def _report_only(args: argparse.Namespace, projects, config_dir) -> tuple[Path, 
     report loaded (``_cmd_report_like``'s), never ``model.meta.projects``:
     those are redacted (``Users-<user>``), so a project under a home
     folder would match no folder."""
-    from . import skills_review
+    from . import claude_md_review
 
     if args.all_projects:
         return None
-    return skills_review.project_folders_for(Path(config_dir).parent, projects)
+    return claude_md_review.folders_for_slugs(_read_where(args, config_dir)[1], projects)
+
+
+def _read_where(args: argparse.Namespace, config_dir) -> tuple[Path | None, list[Path]]:
+    """Where ``review`` and ``check`` read a project's files: Claude's own
+    folder, when ``--claude-root`` names one and otherwise ``None``, which
+    is the config folder's parent; and every
+    folder of project folders the report read (``--projects-root``, then
+    ``config.toml``'s ``extra_projects_roots``). A config folder kept apart
+    from the projects it describes, as in a container, reads the same files
+    as one beside them."""
+    try:
+        extra = load_config(Path(config_dir)).extra_projects_roots
+    except ConfigError:
+        extra = ()
+    explicit = getattr(args, "claude_root", None)
+    return (
+        _resolve_claude_root(explicit) if explicit else None,
+        discovery.projects_roots(args.projects_root, extra),
+    )
 
 
 def _period_phrase(window: str) -> str:
@@ -1866,18 +2011,30 @@ def _cmd_check(args: argparse.Namespace) -> int:
         snaps = snapshots.load_snapshots(config_dir)
         if not args.all_projects:
             snaps = snapshots.snapshots_for_projects(snaps, projects)
-        snapshot = snapshots.with_every_project_agents(snaps, snapshots.canonical_project_keys(projects))
-        agents = snapshot.data.get("effective_agents") if snapshot is not None else None
+        canonical = snapshots.canonical_project_keys(projects)
+        snapshot = snapshots.with_every_project_agents(
+            snaps, canonical,
+            several_projects=snapshots.several_in_view(projects, canonical, all_projects=args.all_projects),
+        )
+        effective_agents = snapshot.data.get("effective_agents") if snapshot is not None else None
+        agent_files = snapshot.data.get("agents") if snapshot is not None else None
+        claude_root, roots = _read_where(args, config_dir)
         ctx = quick_actions.Context(
             model=model,
             units=model.units or Units(),
             period=_period_phrase(window),
             config_dir=Path(config_dir),
             effective=snapshots.effective_config_in_force(snapshot) if snapshot is not None else {},
-            effective_agents=agents if isinstance(agents, dict) else {},
+            effective_agents=effective_agents if isinstance(effective_agents, dict) else {},
+            agents=agent_files if isinstance(agent_files, dict) else {},
             only=_report_only(args, projects, config_dir),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
+            claude_root=claude_root,
+            projects_roots=tuple(roots),
+            model_env_set=snapshots.env_var_set(snapshot, snapshots.MODEL_ENV),
+            effort_level_env_set=snapshots.effort_level_env_set(snapshot),
+            effective_provenance=snapshots.effective_provenance(snapshot) if snapshot is not None else {},
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))
@@ -2082,7 +2239,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         return err
 
     try:
-        arm_a =compare_mod.parse_arm_spec(args.arm_a)
+        arm_a = compare_mod.parse_arm_spec(args.arm_a)
         arm_b = compare_mod.parse_arm_spec(args.arm_b)
     except ValueError as exc:
         print(f"claudeglass compare: {exc}", file=sys.stderr)
@@ -2333,6 +2490,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
             f"claudeglass {command}: no matching project directories under {root}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
 
     corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
@@ -2341,7 +2499,9 @@ def _cmd_export(args: argparse.Namespace) -> int:
             f"claudeglass {command}: no sessions found under {root} for window {window!r}",
             file=sys.stderr,
         )
+        _print_nothing_read(command, args, config, config_dir)
         return 1
+    coverage, _corpus = _store_coverage(args, config, config_dir, corpus)
 
     if args.aggregate:
         from . import team as team_mod
@@ -2371,6 +2531,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
             Path(args.out).write_text(text, encoding="utf-8")
         else:
             sys.stdout.write(text)
+        if coverage is not None:
+            _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions)])
         return 0
 
     options = exports_mod.resolve_export_options(args.format, args.aggregate_only, args.hash_slugs)
@@ -2435,6 +2597,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
         sys.stdout.write(text)
         if not text.endswith("\n"):
             sys.stdout.write("\n")
+    if coverage is not None:
+        _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions)])
     return 0
 
 
@@ -2508,6 +2672,22 @@ def _tuning_refuse(command: str, headline: str, problems: list[str]) -> int:
     return 2
 
 
+def _print_coverage(command: str, lines: list[str]) -> None:
+    """Print what a command's figures cover, one line each on stderr
+    (:mod:`covered`)."""
+    for line in lines:
+        print(f"claudeglass {command}: {line}", file=sys.stderr)
+
+
+def _print_nothing_read(command: str, args: argparse.Namespace, config: Config, config_dir: Path) -> None:
+    """After a command found no project folder or no session on disk: when the
+    dashboard's store still holds sessions of the window for the projects
+    asked for, say that the figures cover none of them."""
+    coverage, _corpus = _store_coverage(args, config, config_dir, Corpus())
+    if coverage is not None:
+        _print_coverage(command, [covered_mod.gone_sentence(coverage.read, coverage.sessions)])
+
+
 def _write_file_atomic(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` through a temporary file in the same
     folder and a rename, so the file is the whole document or not there:
@@ -2558,8 +2738,12 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     it, as the dashboard and capture do. A document that fails the checks is
     printed as problem lines and nothing is written (exit 2). With ``--out``
     the file is written whole or not at all; without it the JSON is printed.
-    Your dashboard ratings and tip-card answers are read from its store
-    without writing to it, as ``report`` reads them."""
+    Your dashboard ratings and tip-card answers, what it kept of the
+    cards it showed and the estimates it logged for profile changes, are read from its store without writing to it, as
+    ``report`` reads them. When the dashboard's
+    store holds sessions of the window whose transcripts are gone, they are
+    read from its digests, so the file covers what the dashboard covers; its
+    ``coverage`` block and a line on stderr say how many."""
     from . import tuning as tuning_mod
 
     if args.path:
@@ -2590,33 +2774,53 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
     window = _window_description(args, config)
     if not project_dirs:
         print(f"claudeglass {command}: no matching project directories under {root}", file=sys.stderr)
+        _print_nothing_read(command, args, config, config_dir)
         return 1
     corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
+    coverage, corpus = _store_coverage(args, config, config_dir, corpus, add=True)
     if not corpus.sessions:
         print(f"claudeglass {command}: no sessions found under {root} for window {window!r}", file=sys.stderr)
         return 1
 
     _overrides, ratings = _merge_dashboard_marks(config_dir, {})
+    card_rows = _dashboard_card_marks(config_dir)
+    card_marks = (
+        None
+        if card_rows is None
+        else tuning_mod.CardMarks(card_rows, frozenset(p.name for p in project_dirs), bool(args.all_projects))
+    )
+    outcomes = (
+        None
+        if card_rows is None
+        else tuning_mod.OutcomeInputs(
+            card_rows, _dashboard_predictions(config_dir), frozenset(p.name for p in project_dirs), bool(args.all_projects)
+        )
+    )
     today = discovery.to_local(datetime.now(timezone.utc), config.tz).date()
     try:
-        text = tuning_mod.dumps(
-            tuning_mod.build(
-                corpus,
-                config,
-                rates,
-                config_dir=config_dir,
-                days=days,
-                today=today,
-                claude_root=_resolve_claude_root(args.claude_root),
-                ratings=ratings,
-                tip_feedback=_dashboard_tip_feedback(config_dir),
-            )
+        doc = tuning_mod.build(
+            corpus,
+            config,
+            rates,
+            config_dir=config_dir,
+            days=days,
+            today=today,
+            claude_root=_resolve_claude_root(args.claude_root),
+            ratings=ratings,
+            tip_feedback=_dashboard_tip_feedback(config_dir),
+            coverage=coverage,
+            projects_roots=_read_where(args, config_dir)[1],
+            mod_events=_dashboard_mod_events(config_dir),
+            card_marks=card_marks,
+            outcomes=outcomes,
         )
+        text = tuning_mod.dumps(doc)
     except tuning_mod.TuningError as exc:
         return _tuning_refuse(command, "the figures fail the checks, so nothing was written:", exc.problems)
 
     if not args.out:
         sys.stdout.write(text)
+        _print_coverage(command, tuning_mod.coverage_lines(doc.get("coverage")))
         return 0
     out = Path(args.out)
     try:
@@ -2631,6 +2835,7 @@ def _tuning_export(args: argparse.Namespace, command: str) -> int:
             "markdown",
         )
     )
+    _print_coverage(command, tuning_mod.coverage_lines(doc.get("coverage")))
     return 0
 
 
@@ -2687,7 +2892,13 @@ def _load_snapshot_hook_module():
     exec(code, module.__dict__)
     # The script's own install_hook copies its __file__, which is not a
     # real file inside a zipapp; copy it out of the package instead.
-    module.install_hook = lambda config_dir: hook_health.install_hook_files(config_dir, (hook_health.HOOK_SCRIPT_NAME,))[0]
+    def install_hook(config_dir):
+        written = hook_health.install_hook_files(config_dir, (hook_health.HOOK_SCRIPT_NAME,))
+        if not written:
+            raise OSError(hook_health.SNAPSHOT_HOOK_FILE_TEXT)
+        return written[0]
+
+    module.install_hook = install_hook
     return module
 
 
@@ -2700,7 +2911,11 @@ def _cmd_snapshot_config(args: argparse.Namespace) -> int:
         return 0
 
     if args.install_hook:
-        dest = hook.install_hook(config_dir)
+        try:
+            dest = hook.install_hook(config_dir)
+        except OSError:
+            print(f"{hook_health.SNAPSHOT_HOOK_FILE_TEXT}. Run 'claudeglass snapshot-config --install-hook' again.", file=sys.stderr)
+            return 2
         print(f"Installed snapshot-config hook to {dest}")
         print(
             "This does not edit settings.json - add the SessionStart fragment "
@@ -3393,7 +3608,7 @@ def _cmd_update_finish(
         except OSError:
             refreshed = []
         if refreshed:
-            stdout.write(f"Refreshed {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''} this version changed.\n")
+            stdout.write(f"Updated {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''}.\n")
         _write_mod_settings(
             config_dir, mod_settings_mod.dashboard_url(args.bind, args.port), address_known=not args.no_service
         )
@@ -3458,7 +3673,7 @@ def _cmd_update_finish(
         capture = None
         stdout.write(f"config.toml has a problem, so capture's hook entries weren't checked: {exc}\n")
     if capture is not None and capture.hooked:
-        wanted = hook_health.capture_specs(capture.hook_metrics())
+        wanted = hook_health.capture_specs(capture.hook_metrics(now))
         capture_health = hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir)
         if capture_health.blocked_by is not None:
             stdout.write(f"{hook_health.POLICY_TEXT[capture_health.blocked_by]}\n")
@@ -3666,7 +3881,12 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
     makes for a reply Claude ends without its tag otherwise."""
     rough = capture_catalogue.rough_tokens(ids, tagger)
     lines = []
-    if rough["session_note"]:
+    if rough["compact_note"] > rough["session_note"]:
+        lines.append(
+            f"about {rough['session_note']} tokens of note when a session starts or is cleared, "
+            f"and about {rough['compact_note']} when it compacts"
+        )
+    elif rough["session_note"]:
         lines.append(f"about {rough['session_note']} tokens of note when a session starts, is cleared or compacts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
@@ -3802,12 +4022,15 @@ def _capture_estimate_lines(past, units, sample: int = 100) -> list[str]:
     return lines
 
 
-def _capture_usage_lines(use, units, *, haiku: bool) -> list[str]:
+def _capture_usage_lines(use, units, *, haiku: bool, signed_out: haiku_tags.SignedOut | None = None) -> list[str]:
     """What capture measured since it was turned on. ``haiku`` is whether
     Claude Haiku writes the main session's tags: it judges agent runs
     either way, so a judged turn doesn't say who tagged your messages.
     While Claude writes them, the replies Haiku's fallback filled in are
-    told apart from the ones Claude tagged."""
+    told apart from the ones Claude tagged. ``signed_out`` is what the tag
+    files show of the judge's login: the agent runs whose call found the
+    ``claude`` command signed out, said beside the share judged, and, while
+    the judge is paused, one sentence on what to do."""
     if not use.sessions and not use.subagents:
         return [
             "No captured sessions yet: capture covers sessions, and their subagent runs, started after capture was "
@@ -3826,6 +4049,8 @@ def _capture_usage_lines(use, units, *, haiku: bool) -> list[str]:
             if use.report_coverage is not None
             else ""
         )
+        if reports and signed_out is not None and signed_out.runs_text:
+            reports += f", and {signed_out.runs_text}"
         if not haiku and use.filled_cycles and use.cycles:
             own = 100.0 * (use.tagged_cycles - use.filled_cycles) / use.cycles
             filled = 100.0 * use.filled_cycles / use.cycles
@@ -3836,6 +4061,8 @@ def _capture_usage_lines(use, units, *, haiku: bool) -> list[str]:
         else:
             who = "Claude Haiku" if haiku else "Claude"
             lines.append(f"  {who} tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
+    if signed_out is not None and signed_out.status_note:
+        lines.append(f"  {signed_out.status_note}")
     return lines
 
 
@@ -3905,6 +4132,17 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
     return 0
 
 
+#: The feedback items ``capture remove`` turns off, with the words its line uses: those that do nothing without
+#: the hook entries it takes out.
+_REMOVED_FEEDBACK_ITEMS = {
+    "plan_check": "plan check",
+    "feedback_reminder": "rating reminder",
+}
+assert set(_REMOVED_FEEDBACK_ITEMS) == set(capture_catalogue.FEEDBACK_MESSAGE_IDS) - set(
+    capture_catalogue.FEEDBACK_WORKS_WITHOUT_HOOK
+)
+
+
 def _capture_metric_changes(action: str, values: list[str], current: CaptureConfig) -> dict:
     """``set_capture`` arguments for ``enable``/``disable``. Raises
     ``ValueError`` naming an id it doesn't know."""
@@ -3958,6 +4196,10 @@ def _capture_settings_step(
         for script in hook_health.CAPTURE_SCRIPTS:
             hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[script])
         load_or_create_salt(config_dir)
+        if hook_health.missing_capture_scripts(config_dir, wanted):
+            # An entry for a script that is not there makes every hook call exit 2, a blocking error.
+            stdout.write(f"{hook_health.HOOK_FILES_INCOMPLETE_TEXT}\n")
+            return False
     commands = _capture_hook_commands(config_dir)
     if any(commands[spec.script] is None for spec in wanted):
         # ROB-P9: the Python or a hook script's own path can't be safely
@@ -4156,7 +4398,10 @@ _HAIKU_ERRORS = {
 
 
 def _haiku_lines(
-    capture: CaptureConfig, config_dir: Path, agent_replies: Callable[[], frozenset[str]] | None = None
+    capture: CaptureConfig,
+    config_dir: Path,
+    agent_replies: Callable[[], frozenset[str]] | None = None,
+    now: datetime | None = None,
 ) -> list[str]:
     """What Claude Haiku has done since capture was turned on: the main
     session's turns while it writes the tags, the replies it tags when
@@ -4166,12 +4411,15 @@ def _haiku_lines(
     ids of the agent runs from your sessions, only when a turn got no tag:
     a run logged before the ``agent`` mark left an error line that reads as
     a main-session turn's until its reply is known to be an agent's."""
-    since = datetime.fromisoformat(capture.enabled_at) if capture.enabled_at else None
+    since = discovery._parse_bound(capture.enabled_at) if capture.enabled_at else None
     agent_ids = (
         agent_replies()
         if agent_replies is not None and haiku_tags.summary(config_dir, since=since, kind="main").errors
         else None
     )
+    # What Haiku was asked for in this span: the light sample's keys while one runs, else the level's,
+    # also once the end has passed, as these lines count what it did since capture was turned on.
+    asked = capture.running_metrics(now) if capture.light(now) else capture.active_metrics()
     lines: list[str] = []
     if capture.haiku_tags:
         done = haiku_tags.summary(
@@ -4184,7 +4432,7 @@ def _haiku_lines(
                 "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
                 "change, once the hook's Stop entry is in settings.json."
             )
-    elif capture.is_on and capture_catalogue.tagged_keys(capture.active_metrics()):
+    elif capture.is_on and capture_catalogue.tagged_keys(asked):
         done = haiku_tags.summary(
             config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER, agent_reply_ids=agent_ids
         )
@@ -4192,7 +4440,7 @@ def _haiku_lines(
             lines += _haiku_done_lines(done, "filled in", "missing tag", "No tag")
         else:
             lines.append("Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one.")
-    if capture.is_on and capture_catalogue.agent_metric_ids(capture.active_metrics()):
+    if capture.is_on and capture_catalogue.agent_metric_ids(asked):
         done = haiku_tags.summary(config_dir, since=since, kind="agent", agent_reply_ids=agent_ids)
         if done.calls:
             lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
@@ -4230,15 +4478,29 @@ def _haiku_done_lines(done: haiku_tags.Summary, verb: str, what: str, none: str)
 
 
 def _capture_status(
-    capture: CaptureConfig, *, config_dir: Path, claude_root: Path, stdout, args=None, config: Config | None = None
+    capture: CaptureConfig,
+    *,
+    config_dir: Path,
+    claude_root: Path,
+    stdout,
+    args=None,
+    config: Config | None = None,
+    now: datetime | None = None,
 ) -> int:
-    stdout.write(f"Metrics capture: {capture_view.describe(capture)}\n")
-    ids = capture.active_metrics()
+    stdout.write(f"Metrics capture: {capture_view.describe(capture, now)}\n")
+    ids = capture.running_metrics(now)
     if capture.is_on:
-        if capture.expired():
+        if capture.light(now):
             stdout.write(
-                "Its end time has passed, so capture's notes, tags and signals have stopped; coaching notes and the "
-                "feedback facts line, if you have them on, still run. 'claudeglass capture on' starts capture again.\n"
+                "Its end time has passed, so full capture has stopped. A light sample goes on: Claude tags the kind, "
+                f"difficulty and size of the work, and task changes, in {capture_view.one_session_in(capture)}. "
+                "'claudeglass capture off' stops it; 'claudeglass capture on' starts full capture again.\n"
+            )
+        elif capture.expired(now):
+            stdout.write(
+                "Its end time has passed, so capture's notes, tags and signals have stopped. Coaching notes and the "
+                "feedback items on your messages still run, if you have them on. 'claudeglass capture on' starts "
+                "capture again.\n"
             )
         if capture.projects:
             only = [p for p in capture.projects if not p.startswith("!")]
@@ -4269,7 +4531,7 @@ def _capture_status(
     agent_replies = (
         (lambda: _agent_reply_ids(args, config, config_dir, capture)) if args is not None and config is not None else None
     )
-    for line in _haiku_lines(capture, config_dir, agent_replies):
+    for line in _haiku_lines(capture, config_dir, agent_replies, now):
         stdout.write(f"{line}\n")
     if args is not None and config is not None:
         for line in _capture_measured(capture, args=args, config=config, config_dir=config_dir):
@@ -4285,7 +4547,7 @@ def _capture_status(
         recommendation = _scan_hook_errors(args, config, config_dir).recommendation()
         if recommendation:
             stdout.write(f"{recommendation}\n")
-    wanted = hook_health.capture_specs(capture.hook_metrics())
+    wanted = hook_health.capture_specs(capture.hook_metrics(now))
     health = hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir, check_python=True)
     if wanted or health.extra:
         stdout.write(f"Hooks: {health.summary()}\n")
@@ -4347,7 +4609,8 @@ def _capture_measured(capture: CaptureConfig, *, args, config: Config, config_di
         corpus = _capture_corpus(args, config, config_dir, since=capture.enabled_at)
         units = _report_units(corpus, rates, config, config_dir)
         return _capture_usage_lines(
-            capture_mod.usage(corpus, rates, since=capture.enabled_at), units, haiku=capture.haiku_tags
+            capture_mod.usage(corpus, rates, since=capture.enabled_at), units, haiku=capture.haiku_tags,
+            signed_out=haiku_tags.signed_out(config_dir, since=discovery._parse_bound(capture.enabled_at)),
         )
     past, units = _capture_history(args, config, config_dir)
     return _capture_estimate_lines(past, units) if past is not None else []
@@ -4394,7 +4657,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     action = args.action
     if action == "status":
         return _capture_status(
-            current, config_dir=config_dir, claude_root=claude_root, stdout=stdout, args=args, config=config
+            current, config_dir=config_dir, claude_root=claude_root, stdout=stdout, args=args, config=config, now=now
         )
     if action == "prune":
         return _capture_prune(config_dir, retention_days=config.retention_days, dry_run=args.dry_run, stdout=stdout, now=now)
@@ -4418,6 +4681,9 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             if action == "remove" and current.coaching_notes_on:
                 # Coaching notes run through the hook entries remove takes out.
                 changes["coaching"] = [i for i in current.coaching if i != "coaching_notes"]
+            if action == "remove" and any(i in current.feedback for i in _REMOVED_FEEDBACK_ITEMS):
+                # So do the plan check and the rating reminder; the skill and its note work without them.
+                changes["feedback"] = [i for i in current.feedback if i not in _REMOVED_FEEDBACK_ITEMS]
         elif action in _SKILL_SWITCHES:
             if len(args.values) != 1 or args.values[0] not in ("on", "off"):
                 raise ValueError(f"'capture {action}' needs on or off")
@@ -4439,6 +4705,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             changes["until"] = until
         if args.sample is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
             changes["sample"] = args.sample
+        if args.after is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
+            changes["after"] = args.after
     except ValueError as exc:
         stdout.write(f"{exc}\n")
         return 2
@@ -4466,6 +4734,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                     stdout.write(f"{exc}\n")
                     return 2
                 stdout.write("Saved to config.toml.\n")
+                mod_settings_mod.refresh_coaching(config_dir)
         else:
             stdout.write(f"{title} {'are' if action == 'brief' else 'is'} already {'on' if on else 'off'}.\n")
         _capture_skill_step(
@@ -4480,7 +4749,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         if action == "feedback" and on and not args.dry_run and preview.hooked:
             # The facts line a /cg-feedback run starts with comes from the capture hook's message entry,
             # which this switch leaves to `connect` (it changes settings.json, after a yes of its own).
-            wanted = hook_health.capture_specs(preview.hook_metrics())
+            wanted = hook_health.capture_specs(preview.hook_metrics(now))
             if hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir).missing:
                 stdout.write(
                     "The facts line a survey run starts with comes from the capture hook, so it needs an entry in "
@@ -4490,18 +4759,26 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     if preview != current:
         if current.is_on and current.expired(now) and preview.is_on and not preview.expired(now):
             stdout.write("Its end time had passed, so this starts capture again for a new span.\n")
-        if capture_view.describe(current) != capture_view.describe(preview):
-            stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
+        if capture_view.describe(current, now) != capture_view.describe(preview, now):
+            stdout.write(f"Metrics capture: {capture_view.describe(current, now)} -> {capture_view.describe(preview, now)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":
             stdout.write(
                 "Deep also turns on the /cg-feedback survey with its facts line, the plan check, and Claude's "
                 "one-line reminder to run the survey. 'claudeglass capture feedback off' turns them off.\n"
             )
+        if action == "remove":
+            off_too = [name for i, name in _REMOVED_FEEDBACK_ITEMS.items() if i in current.feedback and i not in preview.feedback]
+            if off_too:
+                verb, pronoun = ("are", "they") if len(off_too) > 1 else ("is", "it")
+                stdout.write(
+                    f"The {' and the '.join(off_too)} {verb} off too: {pronoun} run{'' if len(off_too) > 1 else 's'} through "
+                    "the hook entries this took out.\n"
+                )
         if action == "disable":
             also = [m for m in current.active_metrics() if m not in preview.active_metrics() and m not in args.values]
             if also:
                 stdout.write(f"{', '.join(also)} need{'s' if len(also) == 1 else ''} {', '.join(args.values)}, so {'it goes' if len(also) == 1 else 'they go'} too.\n")
-        added =[m for m in preview.active_metrics() if m not in current.active_metrics()]
+        added = [m for m in preview.active_metrics() if m not in current.active_metrics()]
         costly = [m for m in added if capture_catalogue.asks_claude(m)]
         coaching_added = preview.coaching_notes_on and not current.coaching_notes_on
         if coaching_added:
@@ -4538,8 +4815,11 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 stdout.write(f"{exc}\n")
                 return 2
             stdout.write("Saved to config.toml. It takes effect in new sessions and subagents.\n")
+            # Whether coaching is on and the project filter are in the mod's settings file: say so now, as
+            # the dashboard's route does, so the mod hears of it within its settings reload.
+            mod_settings_mod.refresh_coaching(config_dir)
     elif action != "connect":
-        stdout.write(f"Metrics capture is already {capture_view.describe(current)}.\n")
+        stdout.write(f"Metrics capture is already {capture_view.describe(current, now)}.\n")
 
     skill_on = "feedback_skill" in preview.feedback
     brief_on = "brief_templates" in preview.coaching
@@ -4586,7 +4866,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             "The /cg-brief skill stays: it works with capture off. "
             "'claudeglass capture brief off' removes it.\n"
         )
-    wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics())
+    wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics(now))
     if action == "connect" and not preview.hooked:
         stdout.write("Capture is off, so no hook entries are needed. 'claudeglass capture on' turns it on.\n")
         return 0
@@ -4600,7 +4880,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         stdout=stdout,
         removing=action == "remove",
     )
-    if not done and wanted and not args.dry_run:
+    if not done and wanted and not args.dry_run and hook_health.check_capture(wanted, claude_root=claude_root).missing:
         stdout.write("Until then the chosen metrics can't be captured.\n")
     return 0
 
@@ -4977,7 +5257,7 @@ def _parse_set_value(raw: str, spec) -> object:
     """``--set``'s VALUE as the allowlisted key's type: true/false for a
     bool, a number for an int, a comma-separated list for a list (empty
     means an empty list), NAME:VALUE pairs for a map, else the text
-    itself."""
+    itself. ``auto`` stays text for a key that takes it or a number."""
     if spec is None:
         return raw
     if spec.kind == "bool":
@@ -4992,8 +5272,16 @@ def _parse_set_value(raw: str, spec) -> object:
             return int(raw)
         except ValueError:
             return raw
+    if spec.kind == "int|auto":
+        try:
+            return int(raw)
+        except ValueError:
+            return raw
     if spec.kind == "list[str]":
         return [item.strip() for item in raw.split(",") if item.strip()]
+    if spec.kind == "map[str,model]":
+        # Set one model's key at a time: modelSettings.<id>.<key>=VALUE.
+        return raw
     if spec.kind.startswith("map["):
         # NAME:VALUE pairs, comma-separated: skillOverrides=pdf:off,xlsx:name-only
         out: dict = {}
@@ -5028,6 +5316,10 @@ def _one_off_profile(set_values: list[str], agent: str | None):
     ``--set`` invocation would be ambiguous about scope."""
     from .profiles import schema
 
+    if agent is not None:
+        name_problem = schema.agent_name_problem(agent)
+        if name_problem is not None:
+            return None, f"--agent {schema.shown_name(agent)}: {name_problem}"
     env_items = [item for item in set_values if item.partition("=")[0].strip().startswith("env.")]
     if env_items and len(env_items) != len(set_values):
         return None, "--set: env.NAME=value can't be mixed with a settings/agent --set in the same command"
@@ -5043,6 +5335,15 @@ def _one_off_profile(set_values: list[str], agent: str | None):
             return None, f"--set {item!r}: expected KEY=VALUE"
         if env_items:
             values[key[len("env.") :]] = raw
+        elif not agent and key.startswith("modelSettings."):
+            # modelSettings.<model id>.<key>=VALUE: a model id has no dot. One
+            # entry per model; the value is read as that key's type.
+            _, _, rest = key.partition(".")
+            model_id, dot, sub_key = rest.rpartition(".")
+            if not model_id or not dot or not sub_key:
+                return None, f"--set {item!r}: expected modelSettings.<model>.<key>=VALUE"
+            entry = values.setdefault("modelSettings", {}).setdefault(model_id, {})
+            entry[sub_key] = _parse_set_value(raw, schema.MODEL_SETTINGS_ALLOWLIST.get(sub_key))
         else:
             values[key] = _parse_set_value(raw, allowlist.get(key))
     doc: dict = {"id": ONE_OFF_PROFILE_ID, "name": "One-off change"}
@@ -5144,7 +5445,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         project_keys = snapshots.snapshot_project_keys(discovery.slug_for(str(project_path)))
         latest_snapshot = snapshots.latest_for_keys(snaps, project_keys)
     else:
-        latest_snapshot = snaps[-1] if snaps else None
+        # No project named: with snapshots of several projects the newest is
+        # any one of them, so no project's own file is read (the view rule).
+        latest_snapshot = snapshots.for_view(snaps[-1], snapshots.spans_projects(snaps)) if snaps else None
 
     if args.launch:
         managed = set(snapshots.managed_keys(latest_snapshot)) if latest_snapshot else set()
@@ -5189,7 +5492,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
 
         for line in explanation:
             print(line)
-        if explanation:
+        for line in plan.role_notes:
+            print(line)
+        if explanation or plan.role_notes:
             print()
         print(plan.diff_text if plan.diff_text else "No changes to apply.")
         if plan.skipped_managed:
@@ -5225,6 +5530,8 @@ def _cmd_apply(args: argparse.Namespace) -> int:
 
     for line in explanation:
         print(line)
+    for line in plan.role_notes:
+        print(line)
     if plan.overridden:
         print("Already overridden by a higher-precedence layer (writing won't change what Claude Code uses):")
         for note in plan.overridden:
@@ -5259,7 +5566,9 @@ def _cmd_serve_purge(config_dir: Path, *, confirmed: bool, store_path: Path | No
     sidecars. The store is
     always a derived cache (never source of truth -- see
     ``service/store.py``'s module docstring), so this is safe: the next
-    ``serve`` run simply rebuilds it from the transcripts on disk.
+    ``serve`` run simply rebuilds it from the transcripts on disk. The
+    card marks (what the dashboard kept of the cards it showed) are the
+    exception: a rebuild keeps them, and this deletes them.
     Always prints exactly what it would delete; only actually deletes
     when ``confirmed`` (``--yes``) is set. Refuses while a running
     ``serve`` holds the store's lock (``service/storelock.py``): deleting

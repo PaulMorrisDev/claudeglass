@@ -10,9 +10,11 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -161,6 +163,36 @@ def test_a_subagent_that_compacts_gets_nothing_and_the_main_session_its_note(tmp
         assert _note(config_dir, _start(source="compact", transcript_path=path)) == "", path
     main = _start(source="compact", transcript_path="/home/u/.claude/projects/p/s1.jsonl")
     assert _note(config_dir, main) == cat.note_text(cat.level_metrics("essentials"), "main")
+
+
+def test_a_compaction_note_asks_lost_once(tmp_path):
+    ask = cat.METRICS_BY_ID["prior"].compact_line
+    deep = cat.level_metrics("deep")
+    config_dir = _config(tmp_path / "deep", '[capture]\nlevel = "deep"\n')
+    startup = _note(config_dir, _start())
+    assert ask not in startup and "lost" not in startup
+    assert _note(config_dir, _start(source="clear")) == startup
+    note = _note(config_dir, _start(source="compact"))
+    lines = note.splitlines()
+    # One line more than the session's note, after the key lines and before the skip line; the marker is the same.
+    assert lines.count(ask) == 1 and lines[lines.index(ask) + 1] == cat.SKIP_KEY_LINE
+    assert [line for line in lines if line != ask] == startup.splitlines()
+    assert note == cat.note_text(deep, "main", source="compact")
+    assert "prior" in lines[0].rpartition(" ")[2].split(",")
+    # A subagent's compaction gets nothing, and neither does a session where Claude does not write the tags or
+    # that never asked for prior.
+    assert _note(config_dir, _start(source="compact", agent_id="a1", agent_type="general-purpose")) == ""
+    haiku = _config(tmp_path / "haiku", '[capture]\nlevel = "deep"\ntagger = "haiku"\n')
+    assert "lost" not in _note(haiku, _start(source="compact"))
+    for n, body in enumerate(('[capture]\nlevel = "standard"\n', '[capture]\nlevel = "custom"\nmetrics = ["task", "check"]\n')):
+        assert "lost" not in _note(_config(tmp_path / f"no-prior-{n}", body), _start(source="compact"))
+    # The twin builds the same note.
+    for source in ("", "startup", "clear", "compact"):
+        assert HOOK.build_note(CATALOGUE, deep, "main", source=source) == cat.note_text(deep, "main", source=source)
+        assert HOOK.build_note(CATALOGUE, deep, "main", tagger="haiku", source=source) == cat.note_text(
+            deep, "main", tagger="haiku", source=source
+        )
+    assert HOOK.build_note(CATALOGUE, deep, "main") == startup
 
 
 def _session_file(tmp_path: Path, records: list[dict], name: str = "s1.jsonl") -> Path:
@@ -542,6 +574,56 @@ def test_capture_past_its_end_adds_nothing(tmp_path):
     assert _note(past, _start()) == ""
     future = _config(tmp_path / "future", '[capture]\nlevel = "essentials"\nuntil = "2999-01-01"\n')
     assert _note(future, _start())
+
+
+ENDED = '[capture]\nlevel = "deep"\nuntil = "2020-01-01T00:00:00+00:00"\n'
+BIG_READ = {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Read",
+            "tool_response": {"type": "text", "file": {"content": "x" * (cat.BIG_OUTPUT_TOKENS * 4)}}}
+
+
+def test_past_the_end_stop_asks_nothing(tmp_path):
+    # Today's behaviour, whether the key says stop or is missing (a config.toml from before it).
+    for name, body in {"missing": ENDED, "stop": ENDED + 'after = "stop"\n'}.items():
+        config_dir = _config(tmp_path / name, body)
+        for payload in (_start(), _start(source="compact"), _subagent(), BIG_READ,
+                        {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "prompt": "go on"}):
+            assert _note(config_dir, payload) == "", (name, payload["hook_event_name"])
+        assert HOOK._capture_for(_start(), {"capture": {"level": "deep", "until": "2020-01-01T00:00:00+00:00"}},
+                                 datetime.now(timezone.utc)) is None
+
+
+def test_past_the_end_a_light_sample_asks_four_keys_in_one_session_in_five(tmp_path):
+    assert (HOOK.LIGHT_METRICS, HOOK.LIGHT_SAMPLE) == (cat.LIGHT_METRICS, cat.LIGHT_SAMPLE) == (
+        ("task", "level", "size", "shift"), 20
+    )
+    light = _config(tmp_path / "light", ENDED + 'after = "light"\nfeedback = ["feedback_skill", "feedback_note", "plan_check"]\n')
+    expected = cat.note_text(cat.with_requirements(cat.LIGHT_METRICS), "main")
+    inside, outside = _session_id(20, inside=True), _session_id(20, inside=False)
+    note = _note(light, _start(inside))
+    assert note == expected
+    assert note.splitlines()[0] == "cg-cap v1 task,level,shift,size"
+    for key in ("task:", "level:", "size:", "shift:"):
+        assert any(line.startswith(key) for line in note.splitlines()), key
+    for key in ("brief:", "missing:", "plan:", "skill:", "prior:", "check:", "lost:"):
+        assert not any(line.startswith(key) for line in note.splitlines()), key
+    assert _note(light, _start(inside, source="compact")) == expected
+    assert _note(light, _start(outside)) == ""
+    # About one session in five is in, whatever the level it ran at.
+    inside_count = sum(HOOK.sampled_in(f"session-{n}", HOOK.LIGHT_SAMPLE) for n in range(1000))
+    assert 150 <= inside_count <= 250
+    # The sample the user chose still bounds it, and so do their projects; agents and large results get no note.
+    low = _config(tmp_path / "low", ENDED + 'after = "light"\nsample = 10\n')
+    between = next(f"session-{n}" for n in range(1000) if 10 <= int(hashlib.sha256(f"session-{n}".encode()).hexdigest()[:8], 16) % 100 < 20)
+    assert _note(low, _start(between)) == ""
+    skipped = _config(tmp_path / "skipped", ENDED + 'after = "light"\nprojects = ["!app"]\n')
+    assert _note(skipped, _start(inside)) == ""
+    assert _note(light, {**_subagent(inside)}) == "" and _note(light, {**BIG_READ, "session_id": inside}) == ""
+    # Capture off stays off whatever it was told to keep.
+    off = _config(tmp_path / "off", '[capture]\nlevel = "off"\nuntil = "2020-01-01T00:00:00+00:00"\nafter = "light"\n')
+    assert _note(off, _start(inside)) == ""
+    # A running capture is not a light sample.
+    running = _config(tmp_path / "running", '[capture]\nlevel = "deep"\nuntil = "2999-01-01"\nafter = "light"\n')
+    assert _note(running, _start(inside)) == cat.note_text(cat.level_metrics("deep"), "main")
 
 
 def test_a_large_tool_result_gets_a_one_line_note_at_deep(tmp_path):
@@ -1198,6 +1280,33 @@ def test_a_fix_after_an_approved_plan_and_a_build_gets_the_plan_check(tmp_path):
     assert _fb(tmp_path, _timeline(*WORK), "Why not rename the importer to loader instead?", session="s3") == ""
 
 
+def test_a_feedback_call_that_finds_the_claim_held_leaves_the_state_alone_and_notes_nothing(tmp_path):
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    state = config_dir / cat.COACH_STATE_FILE
+    state.write_text('{"sessions":{}}', encoding="utf-8")
+    claim = config_dir / (cat.COACH_STATE_FILE + ".claim")
+    claim.write_text("", encoding="utf-8")
+    assert _fb(tmp_path, _timeline(*WORK), FIX) == ""
+    assert state.read_text(encoding="utf-8") == '{"sessions":{}}' and claim.exists()
+    # The call that held it decided: once released, the next call asks.
+    claim.unlink()
+    assert _hint(_fb(tmp_path, _timeline(*WORK), FIX)) == "plan_check"
+    assert not claim.exists()
+
+
+def test_a_feedback_note_whose_stamp_did_not_land_is_not_given(tmp_path, monkeypatch):
+    config_dir = tmp_path / "claudeglass"
+    state = config_dir / cat.COACH_STATE_FILE
+    writes = []
+    with monkeypatch.context() as refusing:
+        refusing.setattr(HOOK, "_write_json", lambda path, data: writes.append(path) is not None and False)
+        assert _fb(tmp_path, _timeline(*WORK), FIX) == ""
+    assert writes == [state] and not state.exists()
+    # Once the write lands again the question is asked: it was skipped, not spent.
+    assert _hint(_fb(tmp_path, _timeline(*WORK), FIX)) == "plan_check"
+
+
 def test_a_plan_approved_by_a_typed_go_ahead_gets_the_plan_check_too(tmp_path):
     rejected = _comes_back("p1", error=True, text="The user doesn't want to proceed with this tool use.")
     records = _timeline(_types("Plan it"), _plans("p1"), rejected, _says("Waiting."), _types("go ahead"), *_edits(), _says("Built."))
@@ -1688,3 +1797,146 @@ def test_the_hook_adds_the_reminder_note_while_the_mod_runs(tmp_path):
     heartbeat.write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now.timestamp()}), encoding="utf-8")
     rc, out, err = _run(config_dir, payload)
     assert rc == 0 and err == "" and _hint(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "rating_reminder"
+
+
+# -- parallel appends and the job's pipe -------------------------------------------------------
+
+
+def test_parallel_signal_writes_keep_every_line(tmp_path):
+    """Eight hooks append 300 signal lines each to one month's file at once, as parallel sessions and
+    agents do: every line is there once, whole."""
+    code = (
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import capture_hook as h; "
+        "cat = h.load_catalogue(); d = Path(sys.argv[2]); "
+        "[h.write_signal(d, cat, {'ts': '2026-11-13T12:00:00Z', 'sid': sys.argv[3], 'e': 'perm', 'n': i}) "
+        "for i in range(300)]"
+    )
+    workers = [
+        subprocess.Popen([sys.executable, "-I", "-S", "-c", code, str(MODULE.parent), str(tmp_path), f"p{k}"])
+        for k in range(8)
+    ]
+    for worker in workers:
+        assert worker.wait(timeout=120) == 0
+    lines = (tmp_path / CATALOGUE["signals_dir"] / "2026-11.jsonl").read_bytes().split(b"\n")
+    assert lines[-1] == b""
+    records = [json.loads(line) for line in lines[:-1]]
+    assert len(records) == 2400
+    assert len({(r["sid"], r["n"]) for r in records}) == 2400
+
+
+def test_the_tag_file_and_the_signal_file_append_the_same_way(tmp_path, monkeypatch):
+    appended = []
+    monkeypatch.setattr(HOOK, "append_line", lambda path, line: appended.append((path.parent.name, line)))
+    HOOK.write_signal(tmp_path, CATALOGUE, {"ts": "2026-11-13T12:00:00Z", "sid": "s", "e": "perm"})
+    job = {"ts": "2026-11-13T12:00:00Z", "reply": "msg_1", "keys": ["task"], "system": "s", "excerpt": "e", "facts": {}}
+    HOOK.run_judge(tmp_path, CATALOGUE, job, ask=lambda *a: {"result": "[cg: task=bugfix]"}, now=0.0)
+    assert [folder for folder, _line in appended] == [CATALOGUE["signals_dir"], CATALOGUE["judge"]["dir"]]
+    assert all(line.endswith("\n") and line.count("\n") == 1 for _folder, line in appended)
+
+
+def test_an_append_falls_back_to_open_only_when_nothing_was_written(tmp_path, monkeypatch):
+    path = tmp_path / "a.jsonl"
+    monkeypatch.setattr(HOOK, "_WINDOWS", True)
+    monkeypatch.setattr(HOOK, "_append_windows", lambda p, data: False)
+    HOOK.append_line(path, '{"n":1}\n')
+    assert path.read_text(encoding="utf-8") == '{"n":1}\n'
+    # Written through the append-only handle: never written again.
+    monkeypatch.setattr(HOOK, "_append_windows", lambda p, data: True)
+    HOOK.append_line(path, '{"n":2}\n')
+    assert path.read_text(encoding="utf-8") == '{"n":1}\n'
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the append-only handle is Windows's own")
+def test_the_append_only_handle_makes_the_file_and_writes_at_its_end(tmp_path):
+    path = tmp_path / "dir with spaces ÄÖü 日本" / "2026-11.jsonl"
+    path.parent.mkdir()
+    assert HOOK._append_windows(path, b"a\n") and HOOK._append_windows(path, b"b\n")
+    assert path.read_bytes() == b"a\nb\n"
+    assert HOOK._append_windows(tmp_path / "missing" / "2026-11.jsonl", b"x\n") is False
+
+
+def _stand_in_worker(tmp_path: Path, delay_s: float) -> tuple[Path, Path]:
+    """A copy of the hook whose launcher is a stand-in worker: it waits ``delay_s`` seconds, as a worker
+    starting Python does, then keeps the length and hash of what it read. No model is called."""
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    shutil.copy(MODULE, hooks / cat.HOOK_MODULE)
+    got = tmp_path / "got.txt"
+    (hooks / cat.HOOK_SCRIPT).write_text(
+        "import hashlib, sys, time\n"
+        f"time.sleep({delay_s})\n"
+        "data = sys.stdin.buffer.read()\n"
+        f"open({str(got)!r}, 'w', encoding='utf-8').write(str(len(data)) + ' ' + hashlib.sha256(data).hexdigest())\n",
+        encoding="utf-8",
+    )
+    return hooks, got
+
+
+def _job_of(size: int) -> dict:
+    return {"ts": "2026-11-13T12:00:00Z", "reply": "msg_1", "keys": ["task"], "system": "s" * 3000,
+            "excerpt": "e" * size, "facts": {}}
+
+
+def _arrived(got: Path, job: dict, wait_s: float = 20.0) -> bool:
+    data = json.dumps(job).encode("utf-8")
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline and not (got.exists() and got.stat().st_size):
+        time.sleep(0.05)
+    return got.exists() and got.read_text(encoding="utf-8") == f"{len(data)} {hashlib.sha256(data).hexdigest()}"
+
+
+def test_handing_a_job_to_the_worker_does_not_wait_for_it_to_start(tmp_path):
+    """A Stop hook that hands Haiku's job to its worker returns at once, even when the worker is slow to
+    read it, and the worker still gets the whole job after the hook has exited."""
+    hooks, got = _stand_in_worker(tmp_path, 2.0)
+    job = _job_of(9000)  # bigger than the 4 KB pipe Windows makes, smaller than any other system's
+    (tmp_path / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    code = (
+        "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import capture_hook; "
+        "capture_hook.spawn_judge(Path(sys.argv[2]), json.loads(Path(sys.argv[3]).read_text(encoding='utf-8')))"
+    )
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(hooks), str(tmp_path), str(tmp_path / "job.json")],
+                          capture_output=True, timeout=30)
+    took = time.monotonic() - started
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    assert took < 1.5, took
+    assert _arrived(got, job)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="creationflags are Windows-only")
+def test_the_worker_gets_a_console_with_no_window_on_windows(tmp_path, monkeypatch):
+    """Not DETACHED_PROCESS: with no console at all, a console program the worker starts (a venv's
+    python.exe starts the real one) opens a visible window."""
+    hooks, _got = _stand_in_worker(tmp_path, 0)
+    spec = importlib.util.spec_from_file_location("_capture_hook_flags", hooks / cat.HOOK_MODULE)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    flags = []
+
+    class _Worker:
+        stdin = io.BytesIO()
+
+    def _popen(command, **options):
+        flags.append(options["creationflags"])
+        return _Worker()
+
+    monkeypatch.setattr(hook, "_job_pipe", lambda size: (_ for _ in ()).throw(OSError("no pipe")))
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    hook.spawn_judge(tmp_path, _job_of(10))
+    assert flags == [subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP]
+
+
+def test_a_job_pipe_that_cannot_be_made_hands_the_job_over_through_the_systems_own(tmp_path, monkeypatch):
+    hooks, got = _stand_in_worker(tmp_path, 0)
+    spec = importlib.util.spec_from_file_location("_capture_hook_stand_in", hooks / cat.HOOK_MODULE)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+
+    def no_pipe(size):
+        raise OSError("no pipe")
+
+    monkeypatch.setattr(hook, "_job_pipe", no_pipe)
+    job = _job_of(9000)
+    hook.spawn_judge(tmp_path, job)
+    assert _arrived(got, job)
