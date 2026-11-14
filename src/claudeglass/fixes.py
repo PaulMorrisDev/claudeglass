@@ -1149,8 +1149,9 @@ def explainer_for(rec: Recommendation, change: SettingChange) -> list[tuple[str,
         )
         if _keeps_start_without_claude_md(change):
             where += (
-                " The built-in one starts without your CLAUDE.md files, so the new file sets omitClaudeMd: true to "
-                "keep that."
+                " The built-in one starts without your CLAUDE.md files, and the new file sets omitClaudeMd: true to "
+                f"keep that. Leave that line out if you want {change.agent} to follow your CLAUDE.md rules: each "
+                "start then carries those files too."
             )
     else:
         where = f"{path}: {who}."
@@ -1200,7 +1201,9 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
             f"name, that does the same job as the built-in one and sets {change.key}: {_after(change)} in "
             "its frontmatter."
             + (
-                " Set omitClaudeMd: true there as well: the built-in one starts without my CLAUDE.md files."
+                " Set omitClaudeMd: true there as well, so it still starts without my CLAUDE.md files as the "
+                "built-in one does. Tell me I can leave that line out if I want it to follow my CLAUDE.md rules, "
+                "which every start would then carry."
                 if _keeps_start_without_claude_md(change)
                 else ""
             )

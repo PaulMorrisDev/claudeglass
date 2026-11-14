@@ -1316,9 +1316,13 @@ def test_agent_names_in_card_prompts_are_quoted_and_paths_are_not():
 
 
 _KEEP_START_WHERE = (
-    " The built-in one starts without your CLAUDE.md files, so the new file sets omitClaudeMd: true to keep that."
+    " The built-in one starts without your CLAUDE.md files, and the new file sets omitClaudeMd: true to keep that. "
+    "Leave that line out if you want {agent} to follow your CLAUDE.md rules: each start then carries those files too."
 )
-_KEEP_START_ASK = " Set omitClaudeMd: true there as well: the built-in one starts without my CLAUDE.md files."
+_KEEP_START_ASK = (
+    " Set omitClaudeMd: true there as well, so it still starts without my CLAUDE.md files as the built-in one does. "
+    "Tell me I can leave that line out if I want it to follow my CLAUDE.md rules, which every start would then carry."
+)
 
 
 def _new_file_fix(agent, key, value, *, new_file=True):
@@ -1336,7 +1340,7 @@ def _new_file_fix(agent, key, value, *, new_file=True):
 @pytest.mark.parametrize(("key", "value"), [("disallowedTools", ["Edit"]), ("model", "sonnet"), ("tools", ["Read"])])
 def test_a_new_file_for_explore_or_plan_is_told_to_keep_their_start_without_claude_md(agent, key, value):
     where, prompt = _new_file_fix(agent, key, value)
-    assert where.endswith("the new file must still do the built-in agent's job." + _KEEP_START_WHERE)
+    assert where.endswith("the new file must still do the built-in agent's job." + _KEEP_START_WHERE.format(agent=agent))
     assert f"sets {key}:" in prompt
     assert f" in its frontmatter.{_KEEP_START_ASK} Write its prompt from what you know of the built-in agent" in prompt
 
@@ -1352,7 +1356,7 @@ def test_a_new_file_for_explore_or_plan_is_told_to_keep_their_start_without_clau
 )
 def test_no_other_agent_file_change_is_told_about_omit_claude_md(agent, key, value, new_file):
     where, prompt = _new_file_fix(agent, key, value, new_file=new_file)
-    assert _KEEP_START_WHERE not in where and _KEEP_START_ASK not in prompt
+    assert _KEEP_START_WHERE.format(agent=agent) not in where and _KEEP_START_ASK not in prompt
     assert "starts without" not in where and "starts without" not in prompt
 
 

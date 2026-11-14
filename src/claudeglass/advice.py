@@ -1481,7 +1481,7 @@ def _built_in_model_note(rec: Recommendation, ctx: _Context, workflow: bool) -> 
     """The sentence a built-in agent type's inherited-model card ends with, or
     nothing for a workflow, a custom agent or one with its own file. Not for
     the asked card: a model named in the call beats an agent file's."""
-    from .recommend import agent_file_path, starts_without_claude_md
+    from .recommend import agent_file_path, claude_md_choice
 
     agent = rec.agent_type
     if workflow or agent is None or agent == "workflow-subagent":
@@ -1489,14 +1489,10 @@ def _built_in_model_note(rec: Recommendation, ctx: _Context, workflow: bool) -> 
     scope, has_file = ctx.agent_scope(agent)
     if has_file:
         return ""
-    path = agent_file_path(agent, scope)
-    if starts_without_claude_md(agent):
-        # A file that replaces Explore or Plan is sent CLAUDE.md files unless it says not to.
-        return (
-            f" Or create {path} (it replaces the built-in {agent}) and set model: sonnet and omitClaudeMd: true in "
-            f"it: the built-in {agent} starts without your CLAUDE.md files."
-        )
-    return f" Or create {path} (it replaces the built-in {agent}) and set model: sonnet in it."
+    note = f" Or create {agent_file_path(agent, scope)} (it replaces the built-in {agent}) and set model: sonnet in it."
+    # A file that replaces Explore or Plan is sent CLAUDE.md files unless it says not to.
+    choice = claude_md_choice(agent)
+    return f"{note} {choice}" if choice else note
 
 
 def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:

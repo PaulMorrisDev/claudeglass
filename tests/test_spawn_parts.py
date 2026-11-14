@@ -1227,8 +1227,8 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
 
 
 _KEEP_START = (
-    "Set omitClaudeMd: true in it too: the built-in {agent} starts without your CLAUDE.md files, "
-    "and a file that replaces it does not."
+    "The built-in {agent} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to keep that. "
+    "Leave it out if you want {agent} to follow your CLAUDE.md rules: each start then carries those files too."
 )
 
 
@@ -1246,6 +1246,7 @@ def test_a_file_that_replaces_explore_or_plan_is_told_to_keep_their_start_withou
     for rec in cards:
         assert note in rec.action, rec.id
     assert recommend_mod.starts_without_claude_md(agent)
+    assert recommend_mod.claude_md_choice(agent) == _KEEP_START.format(agent=agent)
     # A built-in with a file of its own is no longer replaced, so it is told nothing of the kind.
     recs = _recs(_report(builtin), snapshot=_snapshot({agent: {"source": "user"}}), units=Units())
     assert not any("replaces the built-in" in r.action for r in recs)
@@ -1260,6 +1261,11 @@ def test_a_file_that_replaces_another_built_in_is_not_told_to_set_omit_claude_md
         assert "omitClaudeMd" not in rec.action, rule
     assert not recommend_mod.starts_without_claude_md("general-purpose")
     assert not recommend_mod.starts_without_claude_md(None)
+
+
+@pytest.mark.parametrize("agent", ["general-purpose", "claude", "searcher", None])
+def test_the_choice_about_claude_md_is_empty_for_an_agent_that_is_sent_it(agent):
+    assert recommend_mod.claude_md_choice(agent) == ""
 
 
 @pytest.mark.parametrize("agent", sorted(recommend_mod._BUILTIN_AGENT_TYPES - recommend_mod._NOT_OVERRIDABLE))

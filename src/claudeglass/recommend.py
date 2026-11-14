@@ -262,15 +262,11 @@ def agent_file_path(agent_type: str, scope: str) -> str:
 def _built_in_note(agent_type: str, scope: str) -> str:
     """The sentence a built-in agent type's card ends with: the built-in has
     no file, but a same-named one replaces it, so the change goes there. For
-    Explore and Plan, which start without CLAUDE.md files, it says the new
-    file must keep that."""
+    Explore and Plan, which start without CLAUDE.md files, it adds the choice
+    the new file makes about them (:func:`claude_md_choice`)."""
     note = f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
-    if starts_without_claude_md(agent_type):
-        note += (
-            f" Set omitClaudeMd: true in it too: the built-in {agent_type} starts without your CLAUDE.md files, "
-            "and a file that replaces it does not."
-        )
-    return note
+    choice = claude_md_choice(agent_type)
+    return f"{note} {choice}" if choice else note
 
 
 # -- thresholds --------------------------------------------------------------
@@ -1664,6 +1660,20 @@ def starts_without_claude_md(agent_type: str | None) -> bool:
     CLAUDE.md files (:data:`_SKIPS_CLAUDE_MD`), so a file replacing it must
     set ``omitClaudeMd`` to keep that."""
     return agent_type in _SKIPS_CLAUDE_MD
+
+
+def claude_md_choice(agent_type: str | None) -> str:
+    """What a card says about CLAUDE.md files when it tells the user to create
+    a file that replaces ``agent_type``: the built-in starts without them,
+    ``omitClaudeMd: true`` keeps that, and leaving it out is the user's choice
+    (``""`` for an agent type that is sent them either way)."""
+    if not starts_without_claude_md(agent_type):
+        return ""
+    return (
+        f"The built-in {agent_type} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to "
+        f"keep that. Leave it out if you want {agent_type} to follow your CLAUDE.md rules: each start then "
+        "carries those files too."
+    )
 
 
 #: Tools that change files: an agent whose ``tools:`` line names one, and whose

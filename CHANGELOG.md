@@ -217,9 +217,11 @@ Cards and checks:
   unread-key alarm stops.
 - **Cards for built-in agents say a same-named agent file replaces the
   built-in, and name the file their fix writes** (`~/.claude/agents/`, or
-  `.claude/agents/` for a project fix). For Explore and Plan they also say
-  to set `omitClaudeMd: true` there, because the built-in ones start
-  without your CLAUDE.md files.
+  `.claude/agents/` for a project fix). For Explore and Plan, which start
+  without your CLAUDE.md files, they also say so, say to set
+  `omitClaudeMd: true` in the new file to keep that, and say you can leave
+  it out if you want them to follow your CLAUDE.md rules, at the cost of
+  carrying those files on every start.
 - **The main-session model card prices only the sessions a settings change
   would reach.** A session counts by the model it ran on. Sessions already
   on Sonnet or smaller, from before their project moved there, or picked on

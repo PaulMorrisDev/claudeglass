@@ -445,8 +445,10 @@ _BUILT_IN_GENERAL = (
 
 def _built_in_keeping_start(agent: str) -> str:
     return (
-        f" Or create ~/.claude/agents/{agent}.md (it replaces the built-in {agent}) and set model: sonnet and "
-        f"omitClaudeMd: true in it: the built-in {agent} starts without your CLAUDE.md files."
+        f" Or create ~/.claude/agents/{agent}.md (it replaces the built-in {agent}) and set model: sonnet in it. "
+        f"The built-in {agent} starts without your CLAUDE.md files. Set omitClaudeMd: true in the file to keep "
+        f"that. Leave it out if you want {agent} to follow your CLAUDE.md rules: each start then carries those "
+        "files too."
     )
 
 
