@@ -261,9 +261,14 @@ which replaces the username segment with the literal `<user>` before
 it ever reaches `/api/sessions`, `/api/session/<id>`,
 `/api/report.{json,md,html}`, or the rendered UI.
 
-Message text, tool-result content, file contents, full file paths and
-full shell commands are never written to a dataclass field, the on-disk
-cache, or any rendered output. This is enforced today by
+Message text, tool-result content and full shell commands are never
+written to a dataclass field, the on-disk cache, or any rendered output,
+and neither is a file's content or path, with these exceptions. Each
+parsed transcript's meta holds the transcript's own path and its project
+folder name (`TranscriptMeta.path` and `project_slug`), so the on-disk
+cache (`cache/`) keeps both; `tests/test_privacy.py` allows
+`TranscriptMeta.path` by name. And `apply`'s backups (`backups/`) are whole
+files, byte for byte. This is enforced today by
 `tests/test_privacy.py` (walks every field `parse_transcript` produces
 and asserts no `str` field exceeds 64 characters outside a small named
 allowlist, and that command-prefix fields never exceed 40) and
@@ -718,6 +723,9 @@ later request of the main session until a summary keeps them
 after Claude's first reply, the mod asks Claude Code for the token count
 `/context` makes (`plugin/hooks/track.ts`); that is not a model reply.
 ClaudeGlass's own Python code is not involved in any of these.
+ClaudeGlass writes `<config-dir>/mod/settings.json` for the mod to read,
+and it holds your `[capture] projects` and `exclude_projects` patterns as
+you wrote them (`mod_settings.py`).
 
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:
@@ -905,9 +913,12 @@ error naming the pattern, so a typo can't quietly stop a project being
 excluded. This covers reading transcripts, and the capture and coaching
 hooks. The SessionStart hook (`snapshot-config.py`) does not read
 `config.toml`, so it still records that project's settings (redacted as
-for any project), the names of its agents, plugins and MCP servers, and
-the names and sizes of its CLAUDE.md files, rules, commands and skills,
-under a hash of its folder name. The mod's coaching hints follow
+for any project), the names of its agents, plugins and MCP servers, the
+names and sizes of its CLAUDE.md files, rules, commands and skills, its
+output style names, the size of its auto-memory, and the id, cost,
+duration, token counts and lines added and removed of its last session
+that `~/.claude.json` keeps for it, under an unsalted hash of its folder
+name. The mod's coaching hints follow
 `exclude_projects`, but its band, keep list and sensor still run in an
 excluded project, and the dashboard reads the sensor's counts by session
 (`service/watcher.py`, `plugin/hooks/settings.ts`).

@@ -144,9 +144,12 @@ These settings live in `config.toml`, in the config folder
   against project folder names and ignoring case. A matching project's
   transcripts are never read at all, not only hidden from the output. The
   SessionStart hook still records that project's settings (redacted as
-  for any project), the names of its agents, plugins and MCP servers, and
-  the names and sizes of its CLAUDE.md files, rules, commands and skills,
-  under a hash of its folder name. Use it for a confidential repo. A
+  for any project), the names of its agents, plugins and MCP servers, the
+  names and sizes of its CLAUDE.md files, rules, commands and skills, its
+  output style names, the size of its auto-memory, and the id, cost,
+  duration, token counts and lines added and removed of its last session
+  that `~/.claude.json` keeps for it, under an unsalted hash of its folder
+  name. Use it for a confidential repo. A
   pattern that isn't a valid regular expression
   stops the config loading, with an error naming it. So a typo can't
   quietly stop a project being excluded. `serve --exclude-project SLUG`
