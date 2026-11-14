@@ -513,8 +513,10 @@ __version__ = "0.17.0"
 #: (``command hook 2``) is labelled with its event (``SubagentStop command
 #: hook 2``); ``tools-used`` and ``session-owner`` lines are ignored and no
 #: longer counted as unknown. No row in ``measured.FIELD_VERSIONS``, on
-#: purpose: no field was added, and a session whose transcript is gone keeps
-#: the labels and causes it was read with.
+#: purpose: no field was added. A session whose transcript is gone keeps the
+#: cause it was read with, and its bare display name is read behind its event
+#: where runs are counted (``parse.hook_run_label``), so a hook's older and
+#: newer runs share a row.
 PARSER_VERSION = 53
 
 #: Bump when the model.py contract changes in a way that invalidates the

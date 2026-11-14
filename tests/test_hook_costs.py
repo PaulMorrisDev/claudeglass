@@ -954,6 +954,58 @@ def test_failures_read_before_tools_were_kept_do_not_hide_that_it_stopped():
     assert row.stopped()
 
 
+def _clean_runs(label: str, n: int, *, hook="SubagentStop", day="2026-09-21") -> list[model.Event]:
+    detail = {"hookName": hook, "durationMs": 10, "script": label}
+    return [
+        model.Event(kind=EventKind.HOOK_OUTPUT, subkind="hook_success", ts=f"{day}T10:{i:02d}:00Z", detail=dict(detail))
+        for i in range(n)
+    ]
+
+
+def test_an_older_digests_bare_name_is_judged_with_the_new_label_where_runs_are_counted():
+    # A session whose transcript is gone keeps the label it was read with: the bare name. Runs read since
+    # carry the event too. One hook, one row, and its old failures end once it has run clean.
+    old = _result(
+        [_turn(1)],
+        [_failed("command hook", relative=False, hook="SubagentStop", ts=f"2026-09-20T10:{i:02d}:00Z") for i in range(15)],
+        "old",
+    )
+    new = _result([_turn(1)], _clean_runs("SubagentStop command hook", 40), "new")
+    report = _report([old, new])
+    [row] = [r for r in report.sections[0].tables[1].rows]
+    assert row[0] == "SubagentStop command hook"
+    assert _hook_row(report, "SubagentStop command hook")["failed"] == 15
+    assert _hook_row(report, "SubagentStop command hook")["stopped"] == "yes"
+    assert _rules(report) == []
+
+
+def test_a_bare_name_with_no_known_event_stays_bare():
+    for hook in ("other", None):
+        detail = {"script": "command hook", "durationMs": 10}
+        if hook:
+            detail["hookName"] = hook
+        event = model.Event(kind=EventKind.HOOK_OUTPUT, subkind="hook_success", ts="2026-09-20T10:00:00Z", detail=detail)
+        assert list(compute_hook_costs([_result([_turn(1)], [event])], PRICING).hooks) == ["command hook"]
+
+
+@pytest.mark.parametrize(
+    ("detail", "label"),
+    [
+        ({"script": "guard.ps1", "hookName": "Stop"}, "guard.ps1"),
+        ({"script": "jq -r .tool_input.command <path>", "hookName": "Stop"}, "jq -r .tool_input.command <path>"),
+        ({"script": "Stop command hook", "hookName": "Stop"}, "Stop command hook"),
+        ({"script": "Stop command hook", "hookName": "SubagentStop"}, "Stop command hook"),
+        ({"script": "command hook", "hookName": "other"}, "command hook"),
+        ({"script": "command hook"}, "command hook"),
+        ({"script": "command hook 2", "hookName": "SessionStart"}, "SessionStart command hook 2"),
+        ({"hookName": "Stop"}, None),
+        ({}, None),
+    ],
+)
+def test_hook_run_label_puts_a_bare_display_name_behind_its_event(detail, label):
+    assert parse_mod.hook_run_label(detail) == label
+
+
 def test_a_session_start_hook_counts_the_sessions_and_summaries_since():
     failing = [
         _result([_turn(1, ts=f"2026-09-20T0{i}:00:05Z")], [_failed(ts=f"2026-09-20T0{i}:00:00Z", hook="SessionStart")],

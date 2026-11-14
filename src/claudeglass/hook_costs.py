@@ -53,7 +53,7 @@ from typing import Callable
 from .capture_catalogue import HOOK_SCRIPT
 from .carry import boundary_turn_indices, carry_end_index, carry_rate_prefix
 from .model import Column, EventKind, Recommendation, ReportModel, Section, Table, TranscriptResult
-from .parse import BUILT_IN_TOOLS, tool_server, unnamed_hook
+from .parse import BUILT_IN_TOOLS, hook_run_label, tool_server, unnamed_hook
 from .pricing import Pricing, price_turn
 
 #: Characters per token, the approximation used throughout this report
@@ -259,8 +259,8 @@ def _events(tr: TranscriptResult, stats: HookStats, project: str) -> None:
     for event in tr.events:
         if event.kind != EventKind.HOOK_OUTPUT or event.subkind not in _RUN_SUBKINDS:
             continue
-        label = event.detail.get("script")
-        if not isinstance(label, str) or not label:
+        label = hook_run_label(event.detail)
+        if not label:
             continue
         row = stats.row(label)
         bucket = event.detail.get("hookName")
@@ -400,7 +400,7 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
     for event in tr.events:
         if event.kind != EventKind.HOOK_OUTPUT or event.subkind not in _RUN_SUBKINDS or not event.ts:
             continue
-        row = by_label.get(event.detail.get("script"))
+        row = by_label.get(hook_run_label(event.detail))
         if row is None:
             continue
         if event.ts > row.last_failed_ts:

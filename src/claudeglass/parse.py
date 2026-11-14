@@ -1959,6 +1959,22 @@ def unnamed_hook(label) -> tuple[str, str] | None:
     return ("", label) if _HOOK_DISPLAY_NAME_RE.fullmatch(label) else None
 
 
+def hook_run_label(detail) -> str | None:
+    """The label of a hook run, from its event's ``detail``: its ``script``,
+    or ``None`` when it has none. A session whose transcript is gone keeps
+    the label it was read with before parser 53, the bare display name
+    (``command hook``); where the run's event is a known one, that name is
+    read behind it (``SubagentStop command hook``), so a hook's older and
+    newer runs are one hook. Any other label is returned as it is."""
+    label = detail.get("script") if isinstance(detail, dict) else None
+    if not isinstance(label, str):
+        return None
+    event = detail.get("hookName")
+    if event in events_mod._HOOK_EVENT_NAMES and unnamed_hook(label) == ("", label):
+        return f"{event} {label}"
+    return label
+
+
 def _hook_script_is_relative(command: str) -> bool:
     """Whether ``command`` names its script by a relative path
     (``.claude/hooks/guard.ps1``), which only resolves when Claude Code

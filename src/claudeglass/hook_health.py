@@ -64,6 +64,7 @@ from typing import Iterable
 
 from . import capture_catalogue, compaction, discovery, snapshots
 from .model import EventKind, TranscriptResult
+from .parse import hook_run_label
 
 HOOK_SCRIPT_NAME = "snapshot-config.py"
 
@@ -1495,7 +1496,7 @@ def count_hook_errors(results: Iterable[TranscriptResult], stopped: Iterable[str
             name = event.detail.get("hookName")
             if not isinstance(name, str):
                 continue
-            if event.subkind == "hook_non_blocking_error" and event.detail.get("script") in quiet:
+            if event.subkind == "hook_non_blocking_error" and hook_run_label(event.detail) in quiet:
                 continue
             stat = tally.setdefault(name, HookErrorStat(hook_name=name))
             stat.calls += 1
