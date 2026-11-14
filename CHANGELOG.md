@@ -169,6 +169,8 @@ Capture and dashboard:
 - **The Stop hook no longer waits for Haiku's worker to start on
   Windows**, a wait measured at 160 to 420 ms a turn on a large session.
   The job still goes through a pipe, never a file.
+- **Haiku's worker no longer opens a console window on Windows** when the
+  hook runs a virtual environment's Python.
 
 Cards and checks:
 

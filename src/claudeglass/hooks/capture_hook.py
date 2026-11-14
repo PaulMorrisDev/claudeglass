@@ -4692,7 +4692,10 @@ def spawn_judge(config_dir: Path, job: dict) -> None:
 
     options: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
-        options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # A console of its own with no window, not DETACHED_PROCESS: a
+        # worker with no console at all gives any console program it starts
+        # a new, visible window -- a venv's python.exe is such a launcher.
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
     # -I -S as the hook itself runs: no user site or PYTHON* settings.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import io
 import json
 import os
 import re
@@ -1901,6 +1902,29 @@ def test_handing_a_job_to_the_worker_does_not_wait_for_it_to_start(tmp_path):
     assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
     assert took < 1.5, took
     assert _arrived(got, job)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="creationflags are Windows-only")
+def test_the_worker_gets_a_console_with_no_window_on_windows(tmp_path, monkeypatch):
+    """Not DETACHED_PROCESS: with no console at all, a console program the worker starts (a venv's
+    python.exe starts the real one) opens a visible window."""
+    hooks, _got = _stand_in_worker(tmp_path, 0)
+    spec = importlib.util.spec_from_file_location("_capture_hook_flags", hooks / cat.HOOK_MODULE)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    flags = []
+
+    class _Worker:
+        stdin = io.BytesIO()
+
+    def _popen(command, **options):
+        flags.append(options["creationflags"])
+        return _Worker()
+
+    monkeypatch.setattr(hook, "_job_pipe", lambda size: (_ for _ in ()).throw(OSError("no pipe")))
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    hook.spawn_judge(tmp_path, _job_of(10))
+    assert flags == [subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP]
 
 
 def test_a_job_pipe_that_cannot_be_made_hands_the_job_over_through_the_systems_own(tmp_path, monkeypatch):
