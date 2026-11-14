@@ -100,13 +100,21 @@ def test_parser_51_redefined_the_shell_read_and_the_code_write_counts():
 def test_parser_52_added_the_background_waiting_flag_a_status_check_needs():
     # 52: Turn.background_waiting. A digest from parser 51 or earlier does not hold it, so its status checks
     # are counted as read by an older version, never as moments with nothing to say.
-    assert PARSER_VERSION == 52
+    assert PARSER_VERSION >= 52
     assert FIELD_VERSIONS["background_waiting"] == 52
     assert not measures(TranscriptResult(parser_version=51), "background_waiting")
     assert measures(TranscriptResult(parser_version=52), "background_waiting")
     assert is_older(TranscriptResult(parser_version=51))
     assert not is_older(TranscriptResult(parser_version=52))
     assert tuple(OCCASION_FIELDS) == ("background_waiting",)
+
+
+def test_parser_53_read_hook_labels_and_causes_differently_and_added_no_field():
+    # 53: the missing-script cause, a hook's event in its label, and two ignored line types. No field was
+    # added, so a session whose transcript is gone keeps the labels and causes it was read with.
+    assert PARSER_VERSION == 53
+    assert NEWEST == 52
+    assert not is_older(TranscriptResult(parser_version=52))
 
 
 def test_a_result_built_in_memory_reads_as_current():

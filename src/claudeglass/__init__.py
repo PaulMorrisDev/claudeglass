@@ -508,7 +508,14 @@ __version__ = "0.17.0"
 #: the tuning export and the Capture page. A pre-52 digest has none; a
 #: transcript still on disk is re-read, and one Claude Code deleted keeps its
 #: old digest, which those figures leave out.
-PARSER_VERSION = 52
+#: Bumped to 53: Claude Code's "Hook script appears to be missing" is read as
+#: ``not-found``; a hook recorded under Claude Code's display name
+#: (``command hook 2``) is labelled with its event (``SubagentStop command
+#: hook 2``); ``tools-used`` and ``session-owner`` lines are ignored and no
+#: longer counted as unknown. No row in ``measured.FIELD_VERSIONS``, on
+#: purpose: no field was added, and a session whose transcript is gone keeps
+#: the labels and causes it was read with.
+PARSER_VERSION = 53
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract
