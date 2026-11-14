@@ -1973,7 +1973,7 @@ def hook_run_label(detail) -> str | None:
     if not isinstance(label, str):
         return None
     event = detail.get("hookName")
-    if event in events_mod._HOOK_EVENT_NAMES and unnamed_hook(label) == ("", label):
+    if isinstance(event, str) and event in events_mod._HOOK_EVENT_NAMES and unnamed_hook(label) == ("", label):
         return f"{event} {label}"
     return label
 

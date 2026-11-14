@@ -1003,6 +1003,8 @@ def test_a_bare_name_with_no_known_event_stays_bare():
         ({"script": "Stop command hook", "hookName": "SubagentStop"}, "Stop command hook"),
         ({"script": "command hook", "hookName": "other"}, "command hook"),
         ({"script": "command hook"}, "command hook"),
+        # A stored digest's event that is no string leaves the name alone.
+        ({"script": "command hook", "hookName": ["SubagentStop"]}, "command hook"),
         ({"script": "command hook 2", "hookName": "SessionStart"}, "SessionStart command hook 2"),
         ({"hookName": "Stop"}, None),
         ({}, None),
