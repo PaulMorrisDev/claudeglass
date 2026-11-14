@@ -164,6 +164,18 @@ def test_a_windows_variable_in_the_command_is_flagged_not_relative(tmp_path: Pat
     [
         ("", 127, "not-found"),
         ("python.exe: can't open file 'x.py': [Errno 2] No such file or directory", 2, "not-found"),
+        (
+            "Hook script appears to be missing — the hook exited 2. Treating as non-blocking. "
+            "If this is a plugin hook, check the plugin install (run /plugin).",
+            2,
+            "not-found",
+        ),
+        (
+            'Hook script appears to be missing — "py guard.py" exited 2 with: boom. Treating as non-blocking.',
+            2,
+            "not-found",
+        ),
+        ("The hook exited 2", 2, "failed"),
         ("Hook timed out after 60s", 1, "timeout"),
         ("Traceback: KeyError", 1, "failed"),
     ],

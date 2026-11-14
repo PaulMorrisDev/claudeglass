@@ -1911,7 +1911,8 @@ _HOOK_SCRIPT_RE = re.compile(
 )
 #: A hook that failed because its script or program wasn't there.
 _HOOK_NOT_FOUND_RE = re.compile(
-    r"does not exist|No such file|can't open file|cannot find|is not recognized as|command not found",
+    r"does not exist|No such file|can't open file|cannot find|is not recognized as|command not found"
+    r"|hook script appears to be missing",
     re.IGNORECASE,
 )
 _HOOK_TIMEOUT_RE = re.compile(r"timed? ?out", re.IGNORECASE)
