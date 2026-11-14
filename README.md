@@ -29,7 +29,8 @@ Code login.
 <sub><i>The Overview page. Synthetic data, 30-day window, subscription billing.</i></sub>
 
 **Try it in a minute.** `check` reads your history and prints what to
-change. It sets nothing up and changes nothing:
+change. It changes nothing in Claude Code. It keeps a cache of what it
+read in `~/.claude/claudeglass` (add `--no-cache` to skip it):
 
 ```bash
 python -m pip install claudeglass
@@ -48,8 +49,7 @@ answered from your own sessions:
 
 - **"Which sessions were expensive, and why?"** Every session and
   subagent run is priced, and the expensive ones say what drove the
-  cost: a long context, a cache rebuild, a large tool output, or
-  thinking.
+  cost: a long context, a cache rebuild, subagents or thinking.
 - **"Am I on the right model?"** It finds agents on Opus or Sonnet doing
   work a cheaper model finishes just as well, and checks whether cheaper
   runs had to be redone by a larger model. It also names the agents that
@@ -84,7 +84,8 @@ Amounts follow how you pay: a share of your usage limits on a Pro or Max
 plan, dollars on pay-per-token billing.
 
 **Nothing changes by itself.** Every recommendation is a prompt you give
-Claude or a command you run, and every command has a `--dry-run`.
+Claude or a command you run, and every ClaudeGlass command has a
+`--dry-run`.
 
 ## Who it's for
 
@@ -184,7 +185,8 @@ metrics capture choices.
 
 Go to **http://127.0.0.1:8765** in your browser. On the first start, a
 banner shows its progress while it reads your history. That takes
-seconds to a few minutes, and figures fill in as it goes.
+seconds to a few minutes. When it's done, press **Redraw figures** to see
+all of it.
 
 Start with the Overview. It answers three questions: is anything wrong,
 did your changes work, and where do your tokens go. Then open
@@ -206,9 +208,8 @@ made for a desktop browser window.
 | From a local copy | `python -m pip install <folder>`, or `pipx install <folder>` | pip |
 | Single file | Download [`claudeglass.pyz`](https://github.com/PaulMorrisDev/claudeglass/releases/latest/download/claudeglass.pyz) from the latest release, then run `python claudeglass.pyz` wherever this page says `python -m claudeglass` | Python only |
 
-The package has no runtime Python dependencies. `rich` is an optional
-extra for nicer terminal output. The dashboard's d3 and fonts ship
-inside the package, pinned by sha256.
+The package has no runtime Python dependencies. The dashboard's d3 and
+fonts ship inside the package, pinned by sha256.
 [`docs/first-run.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/first-run.md) walks through each route on a
 locked-down work machine.
 
@@ -218,7 +219,8 @@ locked-down work machine.
 
 ClaudeGlass was called claude-token-lens up to version 0.8.0. 0.9.0 is a
 fresh install, not an upgrade: remove the old tool first, then follow
-the quick start above.
+the quick start above. A copy older than 0.4.0 has no `uninstall`: run
+`python -m pip install claude-token-lens==0.8.0` first.
 
 ```powershell
 python -m claude_token_lens uninstall --dry-run
@@ -298,7 +300,7 @@ billing, amounts are what you pay.
 
 <sub><i>A recommendation on the Actions page. Synthetic data.</i></sub>
 
-Each recommendation card explains the change before offering it. It
+Each recommendation card explains the change it offers. It
 says what the setting controls, its value now and after, which file it's
 written to and who that affects. Then it gives the expected effect, the
 trade-off, and how to undo it. There are two ways to make the change:
@@ -381,12 +383,14 @@ Look at what would be removed first:
 python -m claudeglass uninstall --revert-changes --delete-data --dry-run
 ```
 
-Then run the same command without `--dry-run`. It stops the dashboard,
-removes its logon task, its hooks, status line and skills, undoes any
-setting changes you made through this tool, and deletes its data,
-asking before each step. Leave out `--revert-changes` to keep your
-setting changes, or `--delete-data` to keep your history. If you added
-the mod, remove it with `claude plugin uninstall claudeglass`. Finally:
+Then run the same command without `--dry-run`. It removes its logon
+task (stopping the dashboard it started), its hooks, status line and
+skills, undoes the setting changes you made through this tool unless you
+edited the file since, and deletes its data unless a change is still in
+place. It asks before each removal. Leave out `--revert-changes` to keep
+your setting changes, or `--delete-data` to keep your history. If you
+added the mod, remove it with `claude plugin uninstall claudeglass`.
+Finally:
 
 ```powershell
 python -m pip uninstall claudeglass
@@ -403,10 +407,10 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 
 ## What it does to Claude Code, and how to undo it
 
-- **It uses no Claude tokens unless you turn on metrics capture or
-  coaching notes.** Otherwise it only reads files Claude Code has
-  already written. Both are off by default, and both are described
-  below.
+- **It uses no Claude tokens unless you turn on metrics capture,
+  coaching notes or one of its skills (`/cg-feedback`, `/cg-brief`).**
+  Otherwise it only reads files Claude Code has already written. All are
+  off by default, and each is described below.
 - **It changes nothing on its own.** `init`, `capture` and `update` show
   each change to Claude Code's `settings.json` and ask first, and back
   the file up before changing it. The dashboard never changes it.
@@ -425,16 +429,17 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 |---|---|---|
 | A SessionStart hook (`snapshot-config.py`) that records your settings as each session starts. It runs in the background. | `init`, when you connect | None |
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
-| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep while Claude writes the tags. It is also on UserPromptSubmit while `/cg-feedback`, the plan check or the rating reminder is on, so with sharper tips and at Deep. | [Metrics capture](#metrics-capture) | See its levels |
-| The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools, an approved plan and a call that starts an agent or a workflow, never after a shell or MCP tool; also on SubagentStop while the hint about agent runs that end too big is on. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
+| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SubagentStop from Essentials up, on SessionStart from Essentials up unless Claude Haiku writes the tags, and on PostToolUse at Deep while Claude writes the tags. It is also on UserPromptSubmit while `/cg-feedback`, the plan check or the rating reminder is on, so with sharper tips and at Deep. | [Metrics capture](#metrics-capture) | See its levels |
+| The same hook on UserPromptSubmit, and on PostToolUse after a file read, a web search or fetch, an approved plan and a call that starts an agent or a workflow, never after a shell, Grep, Glob or MCP tool. It also runs in the background on Stop. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
 | The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
 | The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
 
 To see everything it installed, run `python -m claudeglass changes`
 or open the Data quality page; both say how to undo each item.
 `python -m claudeglass capture remove` takes capture's and coaching's
-entries out of `settings.json`. To remove it completely, see
-[Uninstalling](#uninstalling).
+entries out of `settings.json`, and switches off capture, coaching
+notes, the plan check and the rating reminder, which need them. The
+skills stay. To remove it completely, see [Uninstalling](#uninstalling).
 
 ### Metrics capture
 
@@ -447,7 +452,7 @@ one before it:
 | Free | Signals from hooks, logged to a local file. | – | – | – |
 | Essentials | A tag on each message's work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~435 tokens | ~15 tokens | ~$0.002 |
 | Standard | What the request lacked, planning and skills, and Haiku's view of each subagent's brief. | ~566 tokens | ~24 tokens | ~$0.002 |
-| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~674 tokens | ~29 tokens | ~$0.002 |
+| Deep | How much earlier context was needed, how the change was checked, whether a summary lost something the work needed (asked once, after the summary), and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~674 tokens | ~29 tokens | ~$0.002 |
 
 The note is written to the prompt cache once, then read from it on each
 later reply. Capture switches itself off 14 days after you turn it on:
@@ -462,9 +467,8 @@ its reply. When it ends a piece of work without one, Claude Haiku writes
 it in the background, for about $0.002 a call. `python -m claudeglass
 capture tagger haiku` has Claude Haiku write every tag after each turn
 instead, for about $0.002 a turn. Claude's replies then carry no tag,
-and at Essentials and Standard its
-session-start note goes too. Either way, Haiku judges each finished
-subagent run, and the subagent itself is asked for nothing.
+and the session-start note goes too. Either way, Haiku judges each
+finished subagent run, and the subagent itself is asked for nothing.
 
 [`docs/capture.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/capture.md)
 lists every metric, what it costs and what it feeds.
@@ -509,7 +513,8 @@ this once at a Claude Code terminal prompt:
 /plugin install claudeglass --marketplace PaulMorrisDev/claudeglass
 ```
 
-It acts only on a press: it changes no setting and sends nothing for you.
+Apart from telling each summary what to keep, it acts only on a press:
+it changes no setting and sends nothing for you.
 See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/mod.md).
 
 ## Privacy
@@ -519,8 +524,8 @@ See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/
   names and sizes of your CLAUDE.md files, skills and plugins. It keeps
   environment variable names, never their values, apart from a few
   numeric limits. With coaching notes on, the hook reads each message
-  you send, and your recent ones, for their length, timing and shared
-  words. Nothing about your words is kept.
+  you send, and your recent ones, for their length, timing and a few
+  fixed phrases. Nothing about your words is kept.
 - **What it keeps.** Counts, token totals, costs and short labels such
   as tool and model names, in `~/.claude/claudeglass`. Never message
   text, tool output, file contents or full commands. The dashboard's own
@@ -578,7 +583,7 @@ review, with the tests that back each point.
   docs call the transcript format internal, and it changes between
   versions. The parser skips what it doesn't know rather than failing.
   It is tested against transcripts from Claude Code 2.1 (2.1.260 to
-  2.1.283), on Windows and Linux with Python 3.11 and 3.12.
+  2.1.320), on Windows and Linux with Python 3.11 and 3.12.
 - **Quality, fully.** A what-if estimate can't see whether a cheaper
   setting makes Claude less thorough. The quality signals on
   **Agents & context › Quality** help you check after a change.
@@ -649,7 +654,7 @@ The dashboard's Glossary page uses the same words, term for term.
 - **Context**: Everything Claude reads on a reply: system prompt, tools, CLAUDE.md files and the conversation so far.
 - **Startup context**: What Claude reads before your first message, or before a subagent's task: system prompt, tool list, CLAUDE.md files, skills and more.
 - **Prompt cache**: A copy of the start of the context kept on Anthropic's side, so the next reply can re-read it cheaply instead of paying full price.
-- **Cache read**: Re-reading context from the prompt cache, for a small part of the normal input price: a tenth or a twentieth, depending on the model.
+- **Cache read**: Re-reading context from the prompt cache, for a small part of the normal input price: from a tenth to a fortieth, depending on the model.
 - **Cache write**: Putting context into the prompt cache. Costs more than normal input: 1.25 times for a 5-minute lifetime, 2 times for 1 hour.
 - **Cache rebuild**: Writing context to the cache again because the cached copy expired or something early in the conversation changed.
 - **Cache lifetime (TTL)**: How long the prompt cache stays warm after a reply: 5 minutes or 1 hour. On a Pro or Max plan within its usage limits, the main session gets 1 hour by default. Otherwise, and for subagents, the default is 5 minutes. A pause longer than this means a rebuild.
@@ -716,7 +721,7 @@ python -m pip install -e .[test]
 python -m pytest -q
 ```
 
-Use conventional commits (`feat(parse): ...`, `docs(readme): ...`), one
+Write each commit subject as one plain sentence saying what changed, one
 focused change per commit. [`tests/helpers.py`](https://github.com/PaulMorrisDev/claudeglass/blob/main/tests/helpers.py) has
 the fixture builders the tests use, such as `turn_line` and
 `write_jsonl`; start there before writing a fixture by hand. Dashboard

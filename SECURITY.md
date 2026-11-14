@@ -738,9 +738,9 @@ both loopback-only as just described. The package has zero runtime
 Python dependencies (`pyproject.toml`'s `dependencies = []`). The
 dashboard vendors d3 and two fonts, pinned by sha256 in
 `service/static/THIRD_PARTY.sha256`, and makes no remote requests.
-`rich` is an optional, opt-in extra for nicer terminal output, not a
-networking dependency. Pricing comes from a user-edited local `pricing.toml`,
-never a live lookup — there is no code path that could fetch it.
+The `rich` extra declared in `pyproject.toml` is not imported by any
+code, and is not a networking dependency. Pricing comes from a
+user-edited local `pricing.toml`, never a live lookup — there is no code path that could fetch it.
 
 For the CLI's analytics/report subcommands this is a structural
 guarantee: nothing to call out to, because they contain no networking
