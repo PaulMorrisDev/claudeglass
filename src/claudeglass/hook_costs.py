@@ -605,7 +605,7 @@ def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recomme
         title = f"{len(failing)} of your hooks failed {failed:,} times: {_names(labels)}"
     sessions = int(_num(top.get("failed_sessions")))
     why = (
-        f"A hook that fails doesn't do its job. {labels[0]} failed in {sessions:,} sessions"
+        f"A hook that fails doesn't do its job. {labels[0]} failed in {sessions:,} session{'' if sessions == 1 else 's'}"
         + (f", most recently at {top['last_failed']}" if top.get("last_failed") else "")
         + (f": {cause}." if cause else ".")
     )

@@ -943,7 +943,7 @@ def test_a_hook_that_has_not_run_enough_since_is_still_a_card_saying_when_it_las
     assert _hook_row(report)["stopped"] == "no"
     [rec] = _rules(report)
     assert rec.why == (
-        "A hook that fails doesn't do its job. guard.ps1 failed in 1 sessions, most recently at 2026-09-20 10:20 UTC: "
+        "A hook that fails doesn't do its job. guard.ps1 failed in 1 session, most recently at 2026-09-20 10:20 UTC: "
         "script not found (relative path). If you've fixed it since, this goes once it has run enough times "
         "without failing."
     )
