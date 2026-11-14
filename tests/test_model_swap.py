@@ -456,6 +456,20 @@ def test_a_fork_has_no_lever_and_claude_code_picks_its_model_whatever_runs_besid
     assert _row_cells(model_swap.build_section(stats), "fork")["lever"] == "none (Claude Code picks)"
 
 
+@pytest.mark.parametrize(
+    ("agent", "lever"),
+    [
+        ("Explore", "model and omitClaudeMd: true in a new Explore.md (overrides the built-in)"),
+        ("Plan", "model and omitClaudeMd: true in a new Plan.md (overrides the built-in)"),
+        ("general-purpose", "model in a new general-purpose.md (overrides the built-in)"),
+        ("claude-implementer", "model in claude-implementer.md"),
+    ],
+)
+def test_a_built_in_started_without_claude_md_names_that_in_its_lever(agent, lever):
+    stats = model_swap.compute_model_swap([_run(OPUS, agent)], PRICING)
+    assert _row_cells(model_swap.build_section(stats), agent)["lever"] == lever
+
+
 # -- unknown model ---------------------------------------------------------------
 
 

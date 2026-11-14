@@ -222,7 +222,8 @@ Cards and checks:
   `omitClaudeMd: true` in the new file to keep that, and say you can leave
   it out if you want them to follow your CLAUDE.md rules, at the cost of
   carrying those files on every start. `report --patch-set` adds that line
-  to a new Explore.md or Plan.md.
+  to a new Explore.md or Plan.md, and the models table names it in the
+  lever.
 - **The main-session model card prices only the sessions a settings change
   would reach.** A session counts by the model it ran on. Sessions already
   on Sonnet or smaller, from before their project moved there, or picked on

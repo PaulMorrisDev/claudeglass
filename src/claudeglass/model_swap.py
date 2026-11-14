@@ -694,8 +694,10 @@ def _lever_label(key: str, workflow_only: bool = False) -> str:
     edit, so it takes a new same-named agent file; a workflow script sets
     the model for its unnamed agents (``workflow_only``: every run in the
     row was started by one, by the transcripts' kind), and Claude Code
-    picks it for fork and untyped subagents."""
-    from .recommend import _BUILTIN_AGENT_TYPES
+    picks it for fork and untyped subagents. A new file for Explore or Plan
+    also sets ``omitClaudeMd``: they start without CLAUDE.md files, and a file
+    that replaces them is sent those unless it says not to."""
+    from .recommend import _BUILTIN_AGENT_TYPES, starts_without_claude_md
 
     if key == "top-level":
         return "model (settings.json)"
@@ -704,7 +706,8 @@ def _lever_label(key: str, workflow_only: bool = False) -> str:
     if key in _NO_AGENT_FILE:
         return "none (Claude Code picks)"
     if key in _BUILTIN_AGENT_TYPES:
-        return f"model in a new {key}.md (overrides the built-in)"
+        lever = "model and omitClaudeMd: true" if starts_without_claude_md(key) else "model"
+        return f"{lever} in a new {key}.md (overrides the built-in)"
     return f"model in {key}.md"
 
 
