@@ -75,6 +75,9 @@ def test_a_hook_is_labelled_by_its_script_or_a_redacted_command_prefix(command, 
         ("command hook 2", "SessionStart", "SessionStart command hook 2"),
         ("  command hook 12 ", "Stop", "Stop command hook 12"),
         ("http hook", "Stop", "Stop http hook"),
+        ("agent hook 3", "Stop", "Stop agent hook 3"),
+        ("mcp_tool hook", "PreToolUse", "PreToolUse mcp_tool hook"),
+        ("make hook", "Stop", "make hook"),
         ("command hook", "other", "command hook"),
         ("bash hook.sh", "Stop", "hook.sh"),
         ("Checking UI changes", "Stop", "Checking UI changes"),
@@ -98,6 +101,8 @@ def test_a_hook_recorded_under_claude_codes_display_name_is_labelled_by_its_even
         ("Checking UI changes", None),
         ("hook.sh", None),
         ("Nonsense command hook", None),
+        ("make hook", None),
+        ("Stop make hook", None),
         ("", None),
     ],
 )
@@ -323,6 +328,7 @@ def test_context_a_hook_recorded_without_its_command_adds_is_paired_with_its_run
     [
         ("command hook 4", "PreToolUse command hook 4"),
         ("bash guard.sh", "guard.sh"),
+        ("make hook", "make hook"),
     ],
 )
 def test_a_block_by_a_hook_recorded_without_its_command_is_counted_by_its_event(tmp_path: Path, command, label):

@@ -1903,9 +1903,12 @@ _ERROR_COMMAND_WRONG_RE = re.compile(
 #: [<command>]: <message>``. Group 1 is the hook's event, group 2 its command.
 _HOOK_BLOCK_RE = re.compile(r"^(\w+):[\w.-]+ hook error: \[(.+?)\]: ")
 #: The name Claude Code shows for a hook it records without its command:
-#: ``command hook``, ``http hook``, with `` 2`` added when an event runs
-#: several. Nothing a command you wrote would look like.
-_HOOK_DISPLAY_NAME_RE = re.compile(r"[a-z_]+ hook(?: \d{1,3})?")
+#: the hook's type and the word ``hook`` (``command hook``, ``http hook``),
+#: with `` 2`` added when an event runs several. The types are Claude
+#: Code's own, so a command such as ``make hook`` is still a command.
+_HOOK_DISPLAY_NAME_RE = re.compile(
+    r"(?:command|prompt|agent|http|mcp_tool|script|callback|function) hook(?: [0-9]{1,3})?"
+)
 #: A hook script's file name inside its command: the label a hook is
 #: shown by. The character class stops at path separators, so a
 #: directory never comes with it.
