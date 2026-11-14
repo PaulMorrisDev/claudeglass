@@ -310,7 +310,7 @@ runs this; its recommendation cards show the command for you to run.
 and what it refuses to do.
 
 ```powershell
-python -m claudeglass apply --set effortLevel=medium --scope user --dry-run
+python -m claudeglass apply --set autoCompactWindow=150000 --scope user --dry-run
 python -m claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --dry-run
 python -m claudeglass apply interactive-chat --dry-run
 python -m claudeglass apply --revert 20260919T100252Z

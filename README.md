@@ -10,8 +10,9 @@ evidence from your own sessions, what it trades away, and how to undo
 it.
 
 It runs on your computer: no telemetry, no API key, no account, and no
-runtime dependencies. Only the optional metrics capture asks Claude
-anything, through your own Claude Code login.
+runtime dependencies. Only the optional metrics capture, and the mod
+when you press its buttons, ask Claude anything, through your own Claude
+Code login.
 
 [![PyPI](https://img.shields.io/pypi/v/claudeglass?label=pypi)](https://pypi.org/project/claudeglass/)
 [![Python 3.11 or newer](https://img.shields.io/badge/python-3.11%2B-3776ab)](https://github.com/PaulMorrisDev/claudeglass/blob/main/pyproject.toml)
@@ -132,7 +133,7 @@ python -m pip install claudeglass
 python -m claudeglass --version
 ```
 
-The second line should print `claudeglass 0.11.0` or later. Prefer an
+The second line should print `claudeglass 0.17.0` or later. Prefer an
 isolated install? `pipx install claudeglass` or
 `uv tool install claudeglass` work too.
 
@@ -151,7 +152,9 @@ It asks up to four questions:
    `settings.json` that records which settings each session ran with,
    and, unless you have one already, a status line that logs your
    usage-limit readings. The dashboard uses them to show what changed
-   and what that did. Neither adds tokens.
+   and what that did. Neither adds tokens. Claude Code runs a status
+   line only in a terminal, so in the desktop app amounts stay at
+   list-price equivalents.
 3. **Start the dashboard when you log on.** Say yes. It starts straight
    away, and again every time you log on.
 4. **Sharper tips**, optional and off unless you say yes. Claude ends
@@ -309,7 +312,7 @@ trade-off, and how to undo it. There are two ways to make the change:
   such as:
 
   ```powershell
-  python -m claudeglass apply --set effortLevel=medium --scope user --dry-run
+  python -m claudeglass apply --set autoCompactWindow=150000 --scope user --dry-run
   ```
 
   `--dry-run` explains the change and prints the diff without writing
@@ -382,7 +385,8 @@ Then run the same command without `--dry-run`. It stops the dashboard,
 removes its logon task, its hooks, status line and skills, undoes any
 setting changes you made through this tool, and deletes its data,
 asking before each step. Leave out `--revert-changes` to keep your
-setting changes, or `--delete-data` to keep your history. Finally:
+setting changes, or `--delete-data` to keep your history. If you added
+the mod, remove it with `claude plugin uninstall claudeglass`. Finally:
 
 ```powershell
 python -m pip uninstall claudeglass
@@ -421,7 +425,7 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 |---|---|---|
 | A SessionStart hook (`snapshot-config.py`) that records your settings as each session starts. It runs in the background. | `init`, when you connect | None |
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
-| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep while Claude writes the tags. | [Metrics capture](#metrics-capture) | See its levels |
+| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep while Claude writes the tags. It is also on UserPromptSubmit while `/cg-feedback`, the plan check or the rating reminder is on, so with sharper tips and at Deep. | [Metrics capture](#metrics-capture) | See its levels |
 | The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools, an approved plan and a call that starts an agent or a workflow, never after a shell or MCP tool; also on SubagentStop while the hint about agent runs that end too big is on. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
 | The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
 | The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
@@ -442,7 +446,7 @@ one before it:
 | Off | Nothing. | – | – | – |
 | Free | Signals from hooks, logged to a local file. | – | – | – |
 | Essentials | A tag on each message's work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~435 tokens | ~15 tokens | ~$0.002 |
-| Standard | What the request lacked, planning, skills and research, and Haiku's view of each subagent's model and brief. | ~566 tokens | ~24 tokens | ~$0.002 |
+| Standard | What the request lacked, planning and skills, and Haiku's view of each subagent's brief. | ~566 tokens | ~24 tokens | ~$0.002 |
 | Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~674 tokens | ~29 tokens | ~$0.002 |
 
 The note is written to the prompt cache once, then read from it on each
@@ -495,9 +499,11 @@ turns on coaching notes. See
 The ClaudeGlass mod is a plugin that runs inside Claude Code. A one-line band
 above the prompt says how full the context is. Every conversation summary
 (compaction) is told what to keep. The Checkpoint pane shows what a summary
-dropped and puts it back in one press. The mod also warns you before a costly
-send. It works in the terminal and in the desktop app's Code tab, and needs
-Claude Code 2.1.286 or later. Type this once at a Claude Code terminal prompt:
+dropped and puts it back in one press. With coaching notes on, a hint line
+under the prompt warns you before a costly send in the terminal, and
+`/glass guard` makes such a send ask first. It works in the terminal and in
+the desktop app's Code tab, and needs Claude Code 2.1.286 or later. Type
+this once at a Claude Code terminal prompt:
 
 ```
 /plugin install claudeglass --marketplace PaulMorrisDev/claudeglass
@@ -517,15 +523,20 @@ See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/
   words. Nothing about your words is kept.
 - **What it keeps.** Counts, token totals, costs and short labels such
   as tool and model names, in `~/.claude/claudeglass`. Never message
-  text, tool output, file contents, full paths or full commands. A test
-  checks every field it reads from a transcript.
+  text, tool output, file contents or full commands. The dashboard's own
+  store keeps the paths of your transcript files, project folders and
+  profile files for its bookkeeping, and never shows them. A test checks
+  every field it reads from a transcript.
 - **What goes online.** ClaudeGlass itself sends nothing, except
   `update`, which runs pip to download the new version from GitHub.
   There's no telemetry and no update check. The dashboard listens only
   on 127.0.0.1, so other machines can't open it unless you pass
   `--allow-remote`. It loads nothing from the internet, and a test fails
   if its server opens an outbound connection. Metrics capture is the
-  exception: it asks Claude Haiku, as the next point says.
+  exception: it asks Claude Haiku, as the next point says. The mod calls
+  Claude Haiku through Claude Code only when you press it:
+  `/glass tighten` sends your draft, and Check with a model sends the
+  summary and your keep list.
 - **What metrics capture and coaching notes send.** Both are off by
   default.
   - Their notes go into your Claude Code sessions, so they reach
@@ -533,10 +544,11 @@ See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/
     its replies, and this tool reads them from your transcripts.
   - From Essentials up, the capture hook sends Claude Haiku a short
     excerpt of each finished subagent run, through your own Claude Code
-    login. The excerpt holds the run's brief, the end of its report,
-    the files it changed and the first line of its shell commands, each
-    cut to a set length. Haiku judges every run this way, whoever
-    writes the tags.
+    login. The excerpt holds the run's brief, what Claude said as it
+    started the run, the end of its report, the files it changed, the
+    first line of its shell commands and a short view of up to 4 earlier
+    agent runs in the session, each cut to a set length. Haiku judges
+    every run this way, whoever writes the tags.
   - With `tagger = "haiku"`, the hook also sends Haiku an excerpt of
     each turn, mainly your message and the end of Claude's reply, and
     Haiku writes the tag. Otherwise it sends the same excerpt only when
@@ -593,7 +605,9 @@ has the detail.
   while the dashboard runs, writes a one-month finance summary as
   Markdown and HTML.
 - **Confidential projects.** `exclude_projects` in `config.toml` keeps a
-  project out of everything; its transcripts are never read. See
+  project's transcripts from ever being read. The SessionStart hook
+  still records that project's settings and the names and sizes of its
+  CLAUDE.md files. See
   [Settings for teams and enterprise](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/team.md#settings-for-teams-and-enterprise).
 
 ## Documentation

@@ -704,6 +704,13 @@ ended without one; the call is Claude Code's, with your own login,
 and the hook imports no networking module (see "Claude Haiku as the
 tagger", "Claude Haiku as the fallback" and "Agent runs" above).
 
+**The Claude Code mod** ([docs/mod.md](docs/mod.md)) is a separate plugin
+that runs inside Claude Code. It calls Claude Haiku, through Claude
+Code's own login, only when you press it: `/glass tighten` sends your
+draft, and "Check with a model" sends the summary and the keep list. The
+mod makes no other call, and ClaudeGlass's own Python code is not
+involved in these calls (`plugin/hooks/command.ts`, `$.model.complete`).
+
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:
 `_cmd_update` (`cli.py`) shells out to `pip install --upgrade
@@ -887,7 +894,10 @@ slug matches is excluded from discovery entirely — never scanned, never
 parsed, never appearing in a cache file — not merely hidden from
 output. A malformed regex stops `config.toml` from loading, with an
 error naming the pattern, so a typo can't quietly stop a project being
-excluded.
+excluded. This covers reading transcripts, and the capture and coaching
+hooks. The SessionStart hook (`snapshot-config.py`) does not read
+`config.toml`, so it still records that project's settings and the names
+and sizes of its CLAUDE.md files.
 
 ```toml
 exclude_projects = ["^confidential-", "client-acme$"]
