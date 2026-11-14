@@ -438,7 +438,16 @@ def test_the_cards_stay_through_finish_and_sort_advice_first():
 
 # -- built-in agent types -----------------------------------------------------------
 
-_BUILT_IN = " Or create ~/.claude/agents/Explore.md (it replaces the built-in Explore) and set model: sonnet in it."
+_BUILT_IN_GENERAL = (
+    " Or create ~/.claude/agents/general-purpose.md (it replaces the built-in general-purpose) and set model: sonnet in it."
+)
+
+
+def _built_in_keeping_start(agent: str) -> str:
+    return (
+        f" Or create ~/.claude/agents/{agent}.md (it replaces the built-in {agent}) and set model: sonnet and "
+        f"omitClaudeMd: true in it: the built-in {agent} starts without your CLAUDE.md files."
+    )
 
 
 def test_the_model_cards_for_a_built_in_agent_say_a_same_named_file_replaces_it():
@@ -446,8 +455,11 @@ def test_the_model_cards_for_a_built_in_agent_say_a_same_named_file_replaces_it(
     # so the file is no lever there.
     asked = _finish(_rec("agent-model-asked", agent_type="Explore", severity="info", workflow_runs=0))
     assert "replaces the built-in" not in asked.action
-    inherited = _finish(_rec(agent_type="Explore", workflow_runs=0))
-    assert inherited.action.endswith(_BUILT_IN)
+    # Explore and Plan start without CLAUDE.md files, and a file that replaces them keeps that only if it says so.
+    for agent in ("Explore", "Plan"):
+        assert _finish(_rec(agent_type=agent, workflow_runs=0)).action.endswith(_built_in_keeping_start(agent))
+    assert _finish(_rec(agent_type="general-purpose", workflow_runs=0)).action.endswith(_BUILT_IN_GENERAL)
+    assert "omitClaudeMd" not in _finish(_rec(agent_type="general-purpose", workflow_runs=0)).action
     # Not for a custom agent, a workflow, or a card that looks fixed.
     assert "replaces" not in _finish(_rec(agent_type="claude-implementer", workflow_runs=0)).action
     assert "replaces" not in _finish(_rec(workflow_runs=2)).action

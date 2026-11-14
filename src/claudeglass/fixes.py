@@ -1124,6 +1124,16 @@ def _to_larger_model(change: SettingChange) -> bool:
     return after in _MODEL_ORDER and before in _MODEL_ORDER and _MODEL_ORDER.index(after) > _MODEL_ORDER.index(before)
 
 
+def _keeps_start_without_claude_md(change: SettingChange) -> bool:
+    """Whether ``change`` is a new file for a built-in that Claude Code starts
+    without CLAUDE.md files (Explore, Plan) and does not set omitClaudeMd
+    itself, so the file must be told to."""
+    # recommend imports this module, so it is imported here.
+    from .recommend import starts_without_claude_md
+
+    return change.new_agent_file and change.key != "omitClaudeMd" and starts_without_claude_md(change.agent)
+
+
 def explainer_for(rec: Recommendation, change: SettingChange) -> list[tuple[str, str]]:
     what, tradeoff, caveat = SETTING_TEXT.get(change.key, (f"The {change.key} setting.", "", ""))
     if _to_larger_model(change):
@@ -1137,6 +1147,11 @@ def explainer_for(rec: Recommendation, change: SettingChange) -> list[tuple[str,
             f"A new file, {path}. {change.agent} is built into Claude Code; an agent file with the same "
             "name replaces it, so the new file must still do the built-in agent's job."
         )
+        if _keeps_start_without_claude_md(change):
+            where += (
+                " The built-in one starts without your CLAUDE.md files, so the new file sets omitClaudeMd: true to "
+                "keep that."
+            )
     else:
         where = f"{path}: {who}."
     saving = change.saving or rec.estimated_saving
@@ -1183,7 +1198,13 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
         ask = (
             f"{named} is a built-in Claude Code agent. Create {path}, a custom agent with the same "
             f"name, that does the same job as the built-in one and sets {change.key}: {_after(change)} in "
-            f"its frontmatter. Write its prompt from what you know of the built-in agent{keep_tools}."
+            "its frontmatter."
+            + (
+                " Set omitClaudeMd: true there as well: the built-in one starts without my CLAUDE.md files."
+                if _keeps_start_without_claude_md(change)
+                else ""
+            )
+            + f" Write its prompt from what you know of the built-in agent{keep_tools}."
         )
         if prepare:
             ask += " " + prepare

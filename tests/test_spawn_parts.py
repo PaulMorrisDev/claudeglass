@@ -1226,6 +1226,42 @@ def test_built_in_agent_cards_say_a_same_named_file_in_agents_replaces_it():
     assert not any("replaces the built-in" in r.action for r in recs)
 
 
+_KEEP_START = (
+    "Set omitClaudeMd: true in it too: the built-in {agent} starts without your CLAUDE.md files, "
+    "and a file that replaces it does not."
+)
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_a_file_that_replaces_explore_or_plan_is_told_to_keep_their_start_without_claude_md(agent):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    note = (
+        f"A file at ~/.claude/agents/{agent}.md replaces the built-in {agent}, so make the change there. "
+        + _KEEP_START.format(agent=agent)
+    )
+    recs = [r for r in _recs(_report(builtin), units=Units()) if r.agent_type == agent]
+    cards = [r for r in recs if r.id in ("spawn-unused-skills", "spawn-unused-mcp")]
+    assert {r.id for r in cards} == {"spawn-unused-skills", "spawn-unused-mcp"}
+    for rec in cards:
+        assert note in rec.action, rec.id
+    assert recommend_mod.starts_without_claude_md(agent)
+    # A built-in with a file of its own is no longer replaced, so it is told nothing of the kind.
+    recs = _recs(_report(builtin), snapshot=_snapshot({agent: {"source": "user"}}), units=Units())
+    assert not any("replaces the built-in" in r.action for r in recs)
+
+
+def test_a_file_that_replaces_another_built_in_is_not_told_to_set_omit_claude_md():
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc("general-purpose", spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    for rule in ("spawn-unused-skills", "spawn-unused-mcp"):
+        (rec,) = [r for r in _recs(_report(builtin), units=Units()) if r.id == rule and r.agent_type == "general-purpose"]
+        assert "replaces the built-in general-purpose, so make the change there." in rec.action, rule
+        assert "omitClaudeMd" not in rec.action, rule
+    assert not recommend_mod.starts_without_claude_md("general-purpose")
+    assert not recommend_mod.starts_without_claude_md(None)
+
+
 @pytest.mark.parametrize("agent", sorted(recommend_mod._BUILTIN_AGENT_TYPES - recommend_mod._NOT_OVERRIDABLE))
 @pytest.mark.parametrize("writer", [False, True])
 def test_the_folder_a_built_in_agents_card_names_is_the_one_its_fix_writes_to(agent, writer):

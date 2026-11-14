@@ -1315,6 +1315,47 @@ def test_agent_names_in_card_prompts_are_quoted_and_paths_are_not():
     assert 'First check that "Explore"\'s prompt never tells it to use a tool' in fix["prompt"]
 
 
+_KEEP_START_WHERE = (
+    " The built-in one starts without your CLAUDE.md files, so the new file sets omitClaudeMd: true to keep that."
+)
+_KEEP_START_ASK = " Set omitClaudeMd: true there as well: the built-in one starts without my CLAUDE.md files."
+
+
+def _new_file_fix(agent, key, value, *, new_file=True):
+    from claudeglass.fixes import build_fix
+    from claudeglass.model import Recommendation, SettingChange
+
+    change = SettingChange(target="agent", key=key, agent=agent, value=value, new_agent_file=new_file)
+    rec = Recommendation(id="spawn-cost", title="x", agent_type=agent, changes=[change])
+    fix = build_fix(rec, change)
+    where = dict(map(tuple, fix["explainer"]))["Where and who it affects"]
+    return where, fix["prompt"]
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+@pytest.mark.parametrize(("key", "value"), [("disallowedTools", ["Edit"]), ("model", "sonnet"), ("tools", ["Read"])])
+def test_a_new_file_for_explore_or_plan_is_told_to_keep_their_start_without_claude_md(agent, key, value):
+    where, prompt = _new_file_fix(agent, key, value)
+    assert where.endswith("the new file must still do the built-in agent's job." + _KEEP_START_WHERE)
+    assert f"sets {key}:" in prompt
+    assert f" in its frontmatter.{_KEEP_START_ASK} Write its prompt from what you know of the built-in agent" in prompt
+
+
+@pytest.mark.parametrize(
+    ("agent", "key", "value", "new_file"),
+    [
+        ("general-purpose", "disallowedTools", ["Edit"], True),
+        ("general-purpose", "model", "sonnet", True),
+        ("Explore", "omitClaudeMd", True, True),
+        ("Explore", "model", "sonnet", False),
+    ],
+)
+def test_no_other_agent_file_change_is_told_about_omit_claude_md(agent, key, value, new_file):
+    where, prompt = _new_file_fix(agent, key, value, new_file=new_file)
+    assert _KEEP_START_WHERE not in where and _KEEP_START_ASK not in prompt
+    assert "starts without" not in where and "starts without" not in prompt
+
+
 def test_every_workflow_prompt_template_formats_for_a_plain_and_a_plugin_agent_name():
     """build_fixes fills a template with the quoted name (``agent``), the bare one for a path
     (``agent_file``) and ``action``; no template may raise or leave a placeholder behind."""

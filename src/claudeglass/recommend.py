@@ -261,8 +261,16 @@ def agent_file_path(agent_type: str, scope: str) -> str:
 
 def _built_in_note(agent_type: str, scope: str) -> str:
     """The sentence a built-in agent type's card ends with: the built-in has
-    no file, but a same-named one replaces it, so the change goes there."""
-    return f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
+    no file, but a same-named one replaces it, so the change goes there. For
+    Explore and Plan, which start without CLAUDE.md files, it says the new
+    file must keep that."""
+    note = f"A file at {agent_file_path(agent_type, scope)} replaces the built-in {agent_type}, so make the change there."
+    if starts_without_claude_md(agent_type):
+        note += (
+            f" Set omitClaudeMd: true in it too: the built-in {agent_type} starts without your CLAUDE.md files, "
+            "and a file that replaces it does not."
+        )
+    return note
 
 
 # -- thresholds --------------------------------------------------------------
@@ -1649,6 +1657,14 @@ def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Reco
 #: Built-in agent types that Claude Code already starts without CLAUDE.md
 #: (its sub-agents docs), so omitClaudeMd means nothing for them.
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
+
+
+def starts_without_claude_md(agent_type: str | None) -> bool:
+    """Whether ``agent_type`` is a built-in that Claude Code starts without
+    CLAUDE.md files (:data:`_SKIPS_CLAUDE_MD`), so a file replacing it must
+    set ``omitClaudeMd`` to keep that."""
+    return agent_type in _SKIPS_CLAUDE_MD
+
 
 #: Tools that change files: an agent whose ``tools:`` line names one, and whose
 #: ``disallowedTools:`` line does not withhold it, is a writer.
