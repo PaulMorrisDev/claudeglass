@@ -459,3 +459,13 @@ def test_diff_against_effective_rows_are_privacy_clean():
                 "current_provenance": row.current_provenance,
             }
         )
+
+
+def test_split_agent_key_finds_a_dotted_agent_name():
+    from claudeglass.profiles.diff import split_agent_key
+
+    assert split_agent_key("agents.implementer.v2.model") == ("implementer.v2", "model")
+    assert split_agent_key("agents.a.b.experimental.cacheTtl") == ("a.b", "experimental.cacheTtl")
+    assert split_agent_key("agents.reviewer.experimental.cacheTtl") == ("reviewer", "experimental.cacheTtl")
+    with pytest.raises(ValueError):
+        split_agent_key("settings.model")

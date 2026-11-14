@@ -553,6 +553,34 @@ def auto_compact_window_env_set(snapshot: Snapshot | None) -> bool:
     )
 
 
+#: Picks the main session's model over the model setting from any file
+#: (model-config docs: /model, --model, then this, then the setting).
+MODEL_ENV = "ANTHROPIC_MODEL"
+
+
+def env_var_set(snapshot: Snapshot | None, name: str) -> bool:
+    """Whether ``name`` was set when ``snapshot`` was taken: in the hook's
+    own environment (``env_names``) or a settings file's env block
+    (``effective_env_names``). Names only, never values. ``False`` for a
+    snapshot that records neither, so a card reads as it did before."""
+    if snapshot is None:
+        return False
+    names: set[str] = set()
+    for field in ("env_names", "effective_env_names"):
+        value = snapshot.data.get(field)
+        if isinstance(value, list):
+            names.update(str(n) for n in value)
+    return name in names
+
+
+def effort_level_env_set(snapshot: Snapshot | None) -> bool:
+    """Whether ``CLAUDE_CODE_EFFORT_LEVEL`` was set when ``snapshot`` was
+    taken (``content_layers.effort_level_env_set``). It wins over /effort
+    and every effort setting."""
+    layers = snapshot.data.get("content_layers") if snapshot is not None else None
+    return bool(isinstance(layers, dict) and layers.get("effort_level_env_set"))
+
+
 def auto_compact_window(snapshot: Snapshot | None) -> int | None:
     """The auto-compact window, in tokens, a session under ``snapshot``
     runs at: ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` when it's set (clamped to
@@ -753,16 +781,26 @@ def spans_projects(snapshots: list[Snapshot], canonical: Mapping[str, str] | Non
     return len(set(latest_snapshot_per_project(snapshots, canonical)) - {_UNKNOWN_PROJECT}) > 1
 
 
-def _user_settings_for_project_levers(data: dict) -> None:
-    """In ``data`` (a copy of one snapshot's), each settings lever that
-    snapshot's own project files set reads as your user settings set it:
-    their value, or unset when they set none. A project's own setting holds
-    in that project alone. ``effective`` and ``effective_provenance`` are
-    replaced, never changed in place."""
-    effective, provenance = data.get("effective"), data.get("effective_provenance")
-    if not isinstance(effective, dict) or not isinstance(provenance, dict):
-        return
-    user = data.get("user_settings") if isinstance(data.get("user_settings"), dict) else {}
+def view_settings(
+    effective: dict, provenance: dict, several_projects: bool, user_settings: dict | None = None
+) -> tuple[dict, dict]:
+    """The view rule (docs/config-layers.md, "Which file a view reads"):
+    the settings a card, check, goal, profile row or fix reads, and so the
+    file its change goes to, is the one that decides the key
+    (``effective_provenance``) -- but a project's own files
+    (:data:`PROJECT_LAYERS`) decide only in a view of that one project.
+
+    With ``several_projects`` a snapshot is one project's, so each key its
+    project files set reads as your user file sets it (``user_settings``,
+    which the config hook records with the same redaction as ``effective``)
+    or, when that file does not set it or ``user_settings`` was not passed,
+    as unset: a card then stays open and a fix goes to your user file.
+    ``modelSettings`` is one file's block (``build_effective_settings``), so
+    it is replaced whole. ``managed`` binds every project and is kept.
+    Returns new dicts; the same rule twice changes nothing more."""
+    if not several_projects or not isinstance(effective, dict) or not isinstance(provenance, dict):
+        return effective, provenance
+    user = user_settings if isinstance(user_settings, dict) else {}
     effective, provenance = dict(effective), dict(provenance)
     for key, layer in list(provenance.items()):
         if layer not in _PROJECT_LAYERS:
@@ -772,11 +810,47 @@ def _user_settings_for_project_levers(data: dict) -> None:
         else:
             effective.pop(key, None)
             del provenance[key]
-    data["effective"], data["effective_provenance"] = effective, provenance
+    return effective, provenance
+
+
+def for_view(snapshot: Snapshot | None, several_projects: bool) -> Snapshot | None:
+    """``snapshot`` with :func:`view_settings` applied to its settings, from
+    its own ``user_settings``; ``snapshot`` itself when nothing changes."""
+    if snapshot is None or not several_projects:
+        return snapshot
+    effective, provenance = snapshot.data.get("effective"), snapshot.data.get("effective_provenance")
+    if not isinstance(provenance, dict) or not any(layer in _PROJECT_LAYERS for layer in provenance.values()):
+        return snapshot
+    data = dict(snapshot.data)
+    data["effective"], data["effective_provenance"] = view_settings(
+        effective if isinstance(effective, dict) else {}, provenance, True, data.get("user_settings")
+    )
+    return Snapshot(path=snapshot.path, ts=snapshot.ts, data=data)
+
+
+def several_in_view(
+    view_slugs: Iterable[str], canonical: Mapping[str, str] | None = None, *, all_projects: bool = False
+) -> bool:
+    """Whether a view covers more than one project, for :func:`view_settings`:
+    the projects of ``view_slugs`` (transcript slugs, a project's two
+    drive-letter spellings folded by :func:`snapshot_project_key`) and, for an
+    all-projects view, every project ``canonical``
+    (:func:`canonical_project_keys`) knows, whatever the window holds."""
+    names = {snapshot_project_key(str(slug)) for slug in view_slugs}
+    if all_projects and canonical:
+        names |= set(canonical.values())
+    return len(names) > 1
+
+
+def view_spans_projects(report: object) -> bool:
+    """Whether ``report`` covers more than one project (``meta.projects``):
+    what the advice, the checks and the goals each apply :func:`view_settings`
+    by on entry, for a caller that did not build its settings for the view."""
+    return len(getattr(getattr(report, "meta", None), "projects", ()) or ()) > 1
 
 
 def with_every_project_agents(
-    snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None
+    snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None, *, several_projects: bool = False
 ) -> Snapshot | None:
     """The newest snapshot that records settings, with its ``agents`` and
     ``effective_agents`` widened to every project's latest snapshot
@@ -794,11 +868,12 @@ def with_every_project_agents(
     snapshot's agents map, when it has one, is the whole list of them:
     another project's older snapshot cannot bring back a user agent deleted
     since (a built-in it overrode would still read as overridden). Settings,
-    provenance and managed keys stay the newest snapshot's, but when
-    ``snapshots`` come from more than one project (:func:`spans_projects`) a
-    setting that snapshot's own project files set reads as your user settings
-    set it (:func:`_user_settings_for_project_levers`): it holds in that
-    project alone. ``None`` when ``snapshots`` is empty.
+    provenance and managed keys stay the newest snapshot's, but in a view
+    of several projects -- ``several_projects`` (the caller's view,
+    :func:`several_in_view`) or ``snapshots`` from more than one project
+    (:func:`spans_projects`) -- a setting that snapshot's own project files
+    set reads as your user settings set it (:func:`view_settings`): it holds
+    in that project alone. ``None`` when ``snapshots`` is empty.
     """
     base = next((s for s in reversed(snapshots) if isinstance(s.data.get("effective"), dict)), None)
     if base is None:
@@ -806,11 +881,7 @@ def with_every_project_agents(
     if base is None:
         return None
     widened = widen_agents(base, latest_snapshot_per_project(snapshots, canonical).values())
-    if not spans_projects(snapshots, canonical):
-        return widened
-    data = dict(widened.data)
-    _user_settings_for_project_levers(data)
-    return Snapshot(path=widened.path, ts=widened.ts, data=data)
+    return for_view(widened, several_projects or spans_projects(snapshots, canonical))
 
 
 def widen_agents(base: Snapshot, latest: Iterable[Snapshot]) -> Snapshot:
@@ -1145,7 +1216,7 @@ def _model_family(model_id: object, resolve_model) -> object:
 
 def _family_tier(model_id: object, resolve_model) -> int:
     """:func:`workstyle.model_tier` of ``model_id``'s canonical id (so
-    ``"best"`` reads as Fable through the rate card's alias), or ``-1``
+    ``"best"`` reads as Opus through the rate card's alias), or ``-1``
     when it names no known family or isn't a string."""
     family = _model_family(model_id, resolve_model)
     return model_tier(family) if isinstance(family, str) else -1
@@ -1162,7 +1233,9 @@ def _settings_model_agrees(snap_value: object, observed_value: object, resolve_m
       -- agrees with any model of its family, compared through
       :func:`workstyle.model_tier`. An alias follows the newest release,
       so a session on an older model of the same family (``opus`` against
-      ``claude-opus-5`` once ``opus`` means Opus 5.5) isn't drift.
+      ``claude-opus-5`` once ``opus`` means Opus 5.5) isn't drift. No
+      alias names Mythos, so an alias never agrees with a Mythos session
+      although it ranks with Fable.
     - Every other value -- a ``claude-*`` id, a Bedrock or Vertex id, an
       ARN -- is an explicit pin and compares exactly, by canonical id
       (:func:`_model_family`), so a pin moved from Opus 4.1 to 4.5 still
@@ -1179,6 +1252,9 @@ def _settings_model_agrees(snap_value: object, observed_value: object, resolve_m
         if base == "opusplan":
             return _family_tier(observed_value, resolve_model) in _OPUSPLAN_TIERS
         if base and not any(char.isdigit() for char in base):
+            # No alias names Mythos, so an alias never agrees with it.
+            if "mythos" in str(_model_family(observed_value, resolve_model)).lower():
+                return False
             snap_tier = _family_tier(snap_value, resolve_model)
             observed_tier = _family_tier(observed_value, resolve_model)
             if snap_tier >= 0 and observed_tier >= 0:
@@ -1722,6 +1798,10 @@ __all__ = [
     "layers",
     "latest_snapshot_per_project",
     "spans_projects",
+    "view_settings",
+    "for_view",
+    "several_in_view",
+    "view_spans_projects",
     "build_effective_config_table",
     "build_config_layers_table",
     "build_config_groups_table",

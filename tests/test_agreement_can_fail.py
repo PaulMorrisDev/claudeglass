@@ -191,17 +191,17 @@ def test_check_7_reports_a_check_that_sets_what_a_card_sets_to_another_value(pro
 
     real = quick_actions.run
 
-    def other_effort(check_id, ctx):
+    def other_model(check_id, ctx):
         result = real(check_id, ctx)
-        if check_id == "effort":
+        if check_id == "models":
             for fix in result["fixes"]:
-                if fix.get("command") and "effortLevel=medium" in fix["command"]:
-                    fix["command"] = fix["command"].replace("effortLevel=medium", "effortLevel=low")
+                if fix.get("command") and "model=sonnet" in fix["command"]:
+                    fix["command"] = fix["command"].replace("model=sonnet", "model=haiku")
         return result
 
-    monkeypatch.setattr(quick_actions, "run", other_effort)
+    monkeypatch.setattr(quick_actions, "run", other_model)
     problems = agreement.check_same_setting(inp.with_skip(inp.skip))
-    assert any(p.startswith("effort sets effortLevel to effortLevel=low") for p in problems), problems
+    assert any(p.startswith("models sets model to model=haiku") for p in problems), problems
 
 
 def _with_cards(inp, *recs):

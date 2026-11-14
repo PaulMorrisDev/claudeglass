@@ -37,8 +37,9 @@ artefacts — see [docs/deploy.md](docs/deploy.md).
   a list of entries as written, each cut at 64 characters. An entry that
   itself starts like a path or a URL is replaced by a marker, like every
   other name; a path inside an entry such as `Bash(cat /home/u/x.txt)` is
-  kept as written up to the cut), MCP server names, and enabled plugin
-  names.
+  kept as written up to the cut; an agent's name is cut at 128 characters,
+  the longest ClaudeGlass takes in, and every other name at 64), MCP server
+  names, and enabled plugin names.
 - Environment variable **names** matching `ANTHROPIC_*` / `CLAUDE_*` /
   `OTEL_*` (plus a short fixed list of irregularly-named levers) —
   never their values, with one exception: `MAX_THINKING_TOKENS`,
@@ -310,6 +311,10 @@ files, depending on `--scope`:
   configures — only the allowlisted frontmatter keys are patched in
   place; every surrounding character (comments, unrelated keys,
   formatting) is preserved verbatim.
+- An agent name is checked before any path is built. It holds only
+  letters, digits, single dots, underscores and hyphens, and starts with
+  a letter or digit. So `<name>.md` is always a file in that agents
+  folder, from a profile, the dashboard or `--agent`.
 - `<config-dir>/backups/<ts>/...` — a byte-for-byte pre-image of every
   file above, written *before* the new content, plus a `manifest.json`
   recording which backup corresponds to which target.
@@ -809,6 +814,9 @@ The dashboard never changes your Claude Code configuration. A
 recommendation or profile gives you a prompt to paste into Claude Code
 (which asks your permission before editing anything under `.claude`)
 and a `claudeglass apply ... --dry-run` command to run yourself.
+An agent's name appears in a prompt in quotes, and only when it passes the
+agent-name rule. A card about an agent whose name fails it offers no prompt
+or command.
 The service's few write routes touch only its own files: session tags
 (`mode`/`purpose`), your `/cg-feedback` rating (`POST
 /api/sessions/<id>/feedback` — the closed checkbox vocabulary of the

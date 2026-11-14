@@ -2740,3 +2740,61 @@ def test_review_claude_md_reads_the_projects_roots_it_was_given(tmp_path, capsys
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
     assert str(project / "CLAUDE.md") in out, out
+
+
+def test_apply_agent_refuses_a_name_that_leaves_the_agents_folder(tmp_path, capsys):
+    rule = (
+        "an agent name holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters"
+    )
+    plugin = "this is a plugin's agent, and a profile can change only your own agent files"
+    root = tmp_path / "root"
+    (root / "skills" / "x").mkdir(parents=True)
+    skill = root / "skills" / "x" / "SKILL.md"
+    skill.write_text("---\nname: x\n---\nbody\n", encoding="utf-8")
+    for name in ("../skills/x/SKILL", "..\\skills\\x\\SKILL", "plugin:agent"):
+        code = cli.main(
+            [
+                "apply",
+                "--set",
+                "model=haiku",
+                "--agent",
+                name,
+                "--scope",
+                "user",
+                "--yes",
+                "--claude-root",
+                str(root),
+                "--config-dir",
+                str(tmp_path / "cfg"),
+            ]
+        )
+        err = capsys.readouterr().err
+        assert code == 2, name
+        expected = rule if ":" not in name else plugin
+        assert f"claudeglass apply: --agent {name!r}: {expected}" in err
+    assert skill.read_text(encoding="utf-8") == "---\nname: x\n---\nbody\n"
+
+
+# -- R3-VIEW-RULE: a user-scope preview with snapshots of several projects names no project's file --
+
+
+def test_cmd_apply_user_scope_names_no_projects_file_when_snapshots_span_projects(tmp_path, capsys):
+    config_dir = tmp_path / "tl"
+    snapshots_dir = config_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    for ts, folder, provenance in (("20260101T000000Z", "project-b", {}),
+                                   ("20260201T000000Z", "project-a", {"effortLevel": "project_shared"})):
+        (snapshots_dir / f"{ts}.json").write_text(json.dumps({
+            "ts": ts, "schema_version": 2,
+            "project_slug": snapshot_project_key(discovery.slug_for(str(tmp_path / folder))),
+            "effective": {"effortLevel": "high"} if provenance else {},
+            "effective_provenance": provenance,
+            "user_settings": {},
+        }), encoding="utf-8")
+    root = tmp_path / "claude"
+    root.mkdir()
+    exit_code = cli.main(["apply", "--set", "effortLevel=medium", "--scope", "user", "--config-dir", str(config_dir),
+                          "--claude-root", str(root), "--dry-run"])
+    assert exit_code == 0
+    assert "this project's shared settings" not in capsys.readouterr().out

@@ -231,8 +231,8 @@ def check_tools_lines(inp: Inputs) -> list[str]:
     """Check 1. For each ``spawn-tools-list`` card: every tool its agent
     called in at least :data:`context_budget.REMOVABLE_USE_SHARE` of the
     spawns it was offered to is on the suggested line, unless the agent's own
-    ``tools:`` line already lacks it or its ``disallowedTools:`` line withholds it; for the workflow card every writing or
-    shell tool any workflow agent called is on it too. The tools called are
+    ``tools:`` line already lacks it or its ``disallowedTools:`` line withholds it; every writing or
+    shell tool any run of that agent called is on it too. The tools called are
     the report's own (``agent_startup_diet`` and ``agent_startup_tools``)."""
     problems: list[str] = []
     tables = tables_of(inp.model)
@@ -254,15 +254,15 @@ def check_tools_lines(inp: Inputs) -> list[str]:
             continue
         called = {name: "called in at least the bar's share of its spawns" for name in _names(row.get("keep_tools"))}
         for name in _names(row.get("rule_kept_tools")):
-            called.setdefault(name, "called by a workflow agent")
+            called.setdefault(name, "called by a run of this agent")
         for tool in rarely:
             if tool.get("agent_type") != agent:
                 continue
             used, offered = tool.get("used_spawns") or 0, tool.get("offered_spawns") or 0
             if offered and used / offered >= bar:
                 called.setdefault(tool["tool"], f"called in {used} of {offered} spawns")
-            elif workflow and used and tool["tool"] in context_budget._WRITER_TOOLS:
-                called.setdefault(tool["tool"], f"called by a workflow agent in {used} of {offered} spawns")
+            elif used and tool["tool"] in context_budget._WRITER_TOOLS:
+                called.setdefault(tool["tool"], f"called by a run of this agent in {used} of {offered} spawns")
         file = inp.agents.get(agent) or {}
         own = recommend.read_agent_tools(file.get("tools"), file.get("disallowedTools")) if not workflow else None
         for name, why in sorted(called.items()):
@@ -273,7 +273,22 @@ def check_tools_lines(inp: Inputs) -> list[str]:
                     f"{_who(rec)}: the suggested line leaves out {name}, {why} "
                     f"(line: {', '.join(line)})"
                 )
+        # N3: a tool the why says stays is on the line.
+        for name in _why_stays(rec):
+            if not any(recommend._entry_covers(entry, name) for entry in line):
+                problems.append(f"{_who(rec)}: the why says {name} stays, but the line leaves it out (line: {', '.join(line)})")
     return problems
+
+
+_WHY_STAYS = re.compile(r"\. ([^.]*?) stays? too because")
+
+
+def _why_stays(rec) -> list[str]:
+    """The tools a tools card's why says stay on the line ("Bash and Edit stay too because ...")."""
+    found = _WHY_STAYS.search(rec.why or "")
+    if not found:
+        return []
+    return [name.strip() for name in re.split(r", | and ", found.group(1)) if name.strip()]
 
 
 # -- 2. a card's agents folder is its fix's folder ----------------------------
@@ -329,6 +344,7 @@ _OVERVIEW_FUNCTIONS = (
     ("page-overview.js", "usdOf"),
     ("page-overview.js", "combinedSaving"),
     ("page-overview.js", "agentModelItems"),
+    ("page-overview.js", "ignoredSavings"),
     ("page-overview.js", "availableSaving"),
 )
 
@@ -371,11 +387,15 @@ def overview_saving(inp: Inputs, recs: list, skip) -> float:
         row["ignored"] = rec.key in skip
         rows.append(row)
     preamble = _declaration("page-overview.js", "LEVER_RULES") + _declaration("page-overview.js", "AGENT_MODEL_RULES")
+    preamble += _declaration("page-overview.js", "LEVER_CARD")
     preamble += _declaration("page-actions.js", "RULE_AREA") + _declaration("ui.js", "SEVERITY_ORDER")
     preamble += 'var MAIN_AGENT = "top-level";\nvar WORKFLOW_AGENT = "workflow-subagent";\n'
     names = {"model_swap_by_agent_type"}
     tables = {t["name"]: t for t in (to_jsonable(t) for s in inp.model.sections for t in s.tables) if t["name"] in names}
-    expression = f"availableSaving([], groupRecommendations({json.dumps(rows)}), {json.dumps(tables)})"
+    expression = (
+        f"availableSaving([], groupRecommendations({json.dumps(rows)}), {json.dumps(tables)}, "
+        f"groupRecommendations({json.dumps(rows)}, {{ignored: true}}))"
+    )
     return float(run_node(list(_OVERVIEW_FUNCTIONS), expression, preamble=preamble))
 
 
@@ -547,7 +567,7 @@ def check_bundle(inp: Inputs) -> list[str]:
     """Check 5. ``fixes.project_prompt`` over the project's cards: the fixed
     and info cards it leaves out are exactly the fixed and info cards, the
     cards it uses are no more than the cards with a prompt to give and, with
-    the ones left out for being unconfirmed or managed, no fewer; an empty
+    the ones left out for being unconfirmed or managed or to try first, no fewer; an empty
     prompt means no cards and a prompt means some; every ``files`` entry is
     one concrete file that the prompt has a heading for and has a one-file fix
     under it; the same cards in the opposite order give the same counts; and no
@@ -566,10 +586,10 @@ def check_bundle(inp: Inputs) -> list[str]:
     live = [rec for rec in on_offer if rec.variant != "fixed" and rec.severity != "info" and _prompt_fixes(rec)]
     if data["cards"] > len(live):
         problems.append(f"the bundle uses {data['cards']} cards, only {len(live)} have a prompt to give")
-    if len(live) > data["cards"] + left["unconfirmed"] + left["managed"]:
+    if len(live) > data["cards"] + left["unconfirmed"] + left["managed"] + left["trial"]:
         problems.append(
             f"{len(live)} cards have a prompt to give but the bundle uses {data['cards']} and leaves out "
-            f"{left['unconfirmed']} unconfirmed and {left['managed']} managed"
+            f"{left['unconfirmed']} unconfirmed and {left['managed']} managed and {left['trial']} to try first"
         )
     if bool(prompt) != bool(data["cards"]):
         problems.append(f"the bundle has {data['cards']} cards and {'a' if prompt else 'no'} prompt")

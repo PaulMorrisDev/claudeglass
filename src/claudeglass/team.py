@@ -114,7 +114,7 @@ MIN_SESSIONS = 5
 #: document's ``machine_id`` reaches ``save_team_document``'s output
 #: path verbatim, so anything looser than "exactly what our own
 #: exporter writes" is a traversal surface.
-_MACHINE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+_MACHINE_ID_RE = re.compile(r"^[0-9a-f]{12}\Z")
 
 #: ``generated_at`` is always the ISO-8601 UTC "basic" shape the
 #: exporter writes (``_resolve_generated_at`` in ``cli.py`` can also

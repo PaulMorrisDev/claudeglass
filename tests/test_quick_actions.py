@@ -16,6 +16,7 @@ from claudeglass import agent_models, capture_catalogue, discovery, known_savers
 from claudeglass import quick_actions as qa
 from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
 from claudeglass.model import Recommendation, SettingChange
+from claudeglass.profiles import goals
 from claudeglass.units import Units
 
 from test_whatif import _model, _table
@@ -47,6 +48,9 @@ def _ctx(tmp_path, model=None, **kw):
         skip_keys=kw.get("skip_keys", frozenset()),
         since_ts=kw.get("since_ts"),
         until_ts=kw.get("until_ts"),
+        model_env_set=kw.get("model_env_set", False),
+        effort_level_env_set=kw.get("effort_level_env_set", False),
+        **({"effective_provenance": kw["effective_provenance"]} if "effective_provenance" in kw else {}),
     )
 
 
@@ -216,6 +220,110 @@ def test_models_check_offers_a_fix_per_cheaper_model_with_a_dry_run_command(tmp_
     assert explore["command"].endswith("--dry-run") and "--agent Explore" in explore["command"]
     assert any("Saves 8.00 USD" in text for _h, text in explore["explainer"])
     assert result["table"]["rows"][0][0] == "Main session"
+
+
+def test_the_models_check_says_anthropic_model_wins(tmp_path):
+    from claudeglass import advice
+
+    plain = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}))
+    result = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}, model_env_set=True))
+
+    def main_fixes(res):
+        return [f for f in res["fixes"] if "--set model=" in (f["command"] or "") and "--agent" not in f["command"]]
+
+    assert main_fixes(plain) and not main_fixes(result)
+    # The agent's own model change is not touched by the variable.
+    assert [f["title"] for f in result["fixes"]] == ["Explore: use haiku"]
+    tip = {"title": "ANTHROPIC_MODEL picks your main session's model", "text": advice.MODEL_ENV_WINS}
+    assert tip in result["tips"] and tip not in plain["tips"]
+
+
+_ENV_TIP_TITLE = "ANTHROPIC_MODEL picks your main session's model"
+_BLOCKED_SUMMARY = (
+    "The main session would have cost less on sonnet, but ANTHROPIC_MODEL picks its model, so there is no setting "
+    "to change."
+)
+
+
+def _env_model(*, main_pct=40.0, explore_cheaper=False):
+    """``_full_model`` with the main session's cheaper-model share set, and
+    Explore's cheaper model kept or taken away."""
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-1] = main_pct
+    if not explore_cheaper:
+        swap.rows[1][-3], swap.rows[1][-2] = None, 0
+    return model
+
+
+def _env_tip(result):
+    from claudeglass import advice
+
+    return [t for t in result["tips"] if t["title"] == _ENV_TIP_TITLE and t["text"] == advice.MODEL_ENV_WINS]
+
+
+def test_the_models_check_says_so_when_the_variable_blocks_the_only_change(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(), effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["status"] == "ok"
+    assert result["summary"] == _BLOCKED_SUMMARY
+    assert "Every agent is already" not in result["summary"]
+    assert len(_env_tip(result)) == 1
+    assert [f for f in result["fixes"] if "Main session" in f["title"]] == []
+
+
+def test_the_models_check_adds_no_variable_tip_for_a_change_it_would_not_draft(tmp_path):
+    """The main session's cheaper model saves less than the goal's bar, so the
+    variable blocks nothing: no tip, and the summary is the unset one."""
+    under = _env_model(main_pct=goals.MIN_SHARE_PCT - 1)
+    result = qa.run("models", _ctx(tmp_path, model=under, effective_agents={"Explore": {}}, model_env_set=True))
+    unset = qa.run("models", _ctx(tmp_path, model=under, effective_agents={"Explore": {}}))
+    assert _env_tip(result) == []
+    assert result["summary"] == unset["summary"] and result["summary"].startswith("Every agent is already")
+    assert result["tips"] == unset["tips"]
+
+
+def test_the_models_check_keeps_the_variable_tip_when_the_setting_already_names_the_model(tmp_path):
+    """Fable sessions, the setting on Opus (the case ``_models_main_picked``
+    says): the variable tip stays beside the "already says" sentences."""
+    model = _full_model()
+    swap = model.sections[0].tables[0]
+    swap.rows[0][-4], swap.rows[0][-3] = "claude-fable-5-1", "claude-opus-4-7"
+    swap.rows[1][-3], swap.rows[1][-2] = None, 0
+    _with_session_counts(model, (29, 24, 0, 5), (10, 10, 0, 0))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective={"model": "opus"}, model_env_set=True))
+    assert len(_env_tip(result)) == 1
+    assert result["summary"] == (
+        "Your model setting already says opus. 24 main sessions in this window still ran on a larger model."
+    )
+
+
+def test_the_models_check_keeps_an_agent_change_and_the_variable_tip_together(tmp_path):
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(explore_cheaper=True),
+                                   effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["Explore: use haiku"]
+    assert len(_env_tip(result)) == 1
+
+
+def test_the_models_check_adds_no_variable_tip_for_an_ignored_main_model_card(tmp_path):
+    model = _env_model()
+    model.recommendations = [_main_sonnet_card()]
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}},
+                                   skip_keys=frozenset({"model-tier-main"}), model_env_set=True))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert _env_tip(result) == []
+    assert [f for f in result["fixes"] if "Main session" in f["title"]] == []
+    # What the variable blocks, an ignored card takes out of too: the check says
+    # what it says without the variable.
+    assert result["summary"] == qa._IGNORED_ONLY
+    # The same with an agent-model card flagged: the "act" branch's sentence.
+    model.recommendations.append(_agent_model_rec("agent-model-inherited", "advice", _INHERITED, prompt="Set the model.",
+                                                  key="agent-model-inherited:workflow-subagent"))
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}},
+                                   skip_keys=frozenset({"model-tier-main"}), model_env_set=True))
+    assert result["status"] == "act"
+    assert "The only other change this check would suggest is on a card you ignored." in result["summary"]
+    assert _env_tip(result) == []
 
 
 def test_models_check_says_where_each_agents_model_is_set(tmp_path):
@@ -2490,6 +2598,61 @@ def test_the_effort_check_drops_a_thinking_candidate_an_ignored_card_already_sug
     assert result["summary"] == IGNORED_ONLY
 
 
+def _main_effort_card(variant="session", changes=()):
+    """The main session's effort card as advice.py writes it: the user-scope
+    ("session") and env variants carry no change."""
+    return Recommendation(
+        id="effort-mismatch", key="effort-mismatch", severity="advice", category="settings",
+        title="High effort is being spent on light work", why="why", action="action", variant=variant,
+        changes=list(changes),
+    )
+
+
+def _main_on(model, model_id):
+    swap = model.sections[0].tables[0]
+    # _full_model appends its own observed_model column; a row reads the last one.
+    for i, column in enumerate(swap.columns):
+        if column.key == "observed_model":
+            swap.rows[0][i] = model_id
+    return model
+
+
+def test_the_effort_check_sets_the_main_sessions_level_for_the_model_it_ran_on(tmp_path):
+    # On Opus 5.5 a user-level effortLevel does nothing; the per-model entry is what /effort saves.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card()]
+    [fix] = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    assert fix["command"] == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope user --dry-run"
+    )
+
+
+def test_an_ignored_main_effort_card_drops_the_checks_per_model_candidate(tmp_path):
+    # The card has no change, and the candidate's key differs from it, so only the card's own key can match.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card()]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"})))
+    assert result["status"] == "ok" and not result["fixes"]
+    assert result["summary"] == IGNORED_ONLY
+
+
+def test_the_effort_check_offers_no_settings_command_while_the_effort_variable_is_set(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    model.recommendations = [_main_effort_card(variant="env")]
+    fixes = qa.run("effort", _ctx(tmp_path, model=model))["fixes"]
+    assert not [f for f in fixes if f.get("command") and "effortLevel" in f["command"]]
+
+
+def test_a_project_effort_card_is_the_checks_only_main_session_fix(tmp_path):
+    # A project file's effortLevel outranks a user-level per-model entry, so the goal's entry would do nothing.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    change = SettingChange(target="settings", key="effortLevel", value="medium", scope="repo")
+    model.recommendations = [_main_effort_card(variant="", changes=[change])]
+    main = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert [f["key"] for f in main] == ["effortLevel"]
+
+
 @pytest.mark.parametrize("check", [c for c in qa.CHECKS if c.rule_ids], ids=lambda c: c.id)
 def test_an_ignored_card_adds_no_fix_tip_or_title_to_the_check_it_belongs_to(tmp_path, check):
     cards = [
@@ -2912,3 +3075,431 @@ def test_models_check_reads_the_main_setting_the_saving_reads(tmp_path):
     assert "--scope project-local" not in fix["command"]
     assert main_fixes({"value": "sonnet", "scope": "user"}, "opus") == []
     assert main_fixes({}, "sonnet") == []
+
+
+@pytest.mark.parametrize(
+    "observed", ["us.anthropic.claude-opus-5-5-v1:0", "claude-opus-5-5@20260101", "claude-opus-5-5[1m]"],
+)
+def test_the_effort_checks_command_names_the_canonical_id_and_apply_reads_it(tmp_path, observed):
+    import shlex
+
+    from claudeglass import cli
+
+    model = _main_on(_full_model(), observed)
+    model.recommendations = [_main_effort_card()]
+    [fix] = [f for f in qa.run("effort", _ctx(tmp_path, model=model))["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    words = shlex.split(fix["command"])
+    item = words[words.index("--set") + 1]
+    profile, error = cli._one_off_profile([item], None)
+    assert error is None and profile.settings == {"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+
+
+def test_a_plugin_agent_that_did_worse_is_a_tip_with_no_command(tmp_path):
+    worse = {**_WORSE, "agent_type": "superpowers:explorer"}
+    result = qa.run("quality", _ctx(tmp_path, model=_quality_model([{**_AGENT, "unfinished_pct": 3.0}], [worse])))
+    assert not result["fixes"]
+    [tip] = result["tips"]
+    assert tip["text"].endswith(" It comes from the superpowers plugin, so there is no agent file of yours to change.")
+
+
+def test_a_plugin_agent_retried_on_a_larger_model_names_its_plugin_not_an_agent_file(tmp_path):
+    retried = {**_RETRIED, "agent_type": "superpowers:explorer"}
+    result = qa.run("quality", _ctx(tmp_path, model=_quality_model([{**_AGENT, "unfinished_pct": 3.0}], retried=[retried])))
+    assert not result["fixes"]
+    [tip] = result["tips"]
+    assert "Its agent file" not in tip["text"]
+    assert tip["text"].endswith(
+        " It comes from the superpowers plugin, so there is no agent file of yours to change. "
+        "Don't pick haiku for this agent's work."
+    )
+
+
+# -- N2: once the main session's effort is set, the check says so --------------
+
+
+def test_the_effort_check_says_the_level_is_already_set_once_effort_medium_is_saved(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    effective = {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective=effective,
+                                   effective_provenance={"effortLevel": "user", "modelSettings": "user"}))
+    assert [f for f in result["fixes"] if f.get("agent") is None] == []
+    assert qa._EFFORT_ALREADY_SET.format(level="medium", model="claude-opus-5-5") in result["summary"]
+    assert "No agent spends more than" not in result["summary"]
+
+
+def test_a_user_level_medium_does_not_count_as_set_on_opus_5_5(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "medium"},
+                                   effective_provenance={"effortLevel": "user"}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    assert fix["title"] == "Main session: effort medium on claude-opus-5-5"
+    assert "already" not in result["summary"]
+
+
+def test_the_effort_check_never_says_the_level_is_set_while_the_variable_decides(tmp_path):
+    """CLAUDE_CODE_EFFORT_LEVEL beats every setting, so "already medium" would say a setting decides when the
+    variable does, even when no effort card (which fires on light work only) is there to say so."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    effective = {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}
+    provenance = {"effortLevel": "user", "modelSettings": "user"}
+    plain = qa.run("effort", _ctx(tmp_path, model=model, effective=effective, effective_provenance=provenance))
+    assert "is already medium" in plain["summary"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective=effective, effective_provenance=provenance,
+                                   effort_level_env_set=True))
+    assert "is already medium" not in result["summary"]
+
+
+# -- the effort check while CLAUDE_CODE_EFFORT_LEVEL decides ---------------------
+
+_LEFT_TO_ENV = (
+    "The main session spends {share} of its output thinking, but CLAUDE_CODE_EFFORT_LEVEL sets its effort, "
+    "so there is no setting to change. Set the variable to medium where you set it, or remove it."
+)
+
+
+def _with_reviewer_over_the_bar(model):
+    """``_thinking_rows``'s main session at 40%, and a ``reviewer`` row at 40% too."""
+    (table,) = [t for s in model.sections if s.key == "agents" for t in s.tables if t.name == "topology_effort_by_agent_type"]
+    keys = [c.key for c in table.columns]
+    row = list(table.rows[0])
+    row[keys.index("agent_type")] = "reviewer"
+    table.rows.append(row)
+    return model
+
+
+def _effort_level_fixes(result) -> list:
+    return [f for f in result["fixes"] if "effortLevel" in (f["command"] or "") + (f["prompt"] or "")]
+
+
+def test_the_effort_check_offers_no_setting_while_the_variable_decides_and_no_card_exists(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    assert not [r for r in model.recommendations if r.id == "effort-mismatch"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True))
+    assert result["status"] == "ok"
+    assert _effort_level_fixes(result) == [] and result["fixes"] == []
+    assert result["summary"] == _LEFT_TO_ENV.format(share="40%")
+
+
+def test_the_effort_check_keeps_another_agents_fix_and_adds_the_sentence_while_the_variable_decides(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    _with_reviewer_over_the_bar(model)
+    ctx = dict(model=model, effective_agents={"reviewer": {}})
+    plain = qa.run("effort", _ctx(tmp_path, **ctx))
+    assert [f["title"] for f in plain["fixes"] if f.get("agent") is not None] == ["reviewer: effort medium"]
+    result = qa.run("effort", _ctx(tmp_path, effort_level_env_set=True, **ctx))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["reviewer: effort medium"]
+    assert result["summary"].endswith(" " + _LEFT_TO_ENV.format(share="40%"))
+
+
+def test_an_open_env_effort_card_keeps_its_fix_and_the_check_adds_no_sentence(tmp_path):
+    """Guard (passes before and after): the card already carries the variable's advice."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(variant="env")]
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True))
+    assert [f for f in result["fixes"] if f.get("card") == "effort-mismatch"]
+    assert "CLAUDE_CODE_EFFORT_LEVEL sets its effort" not in result["summary"]
+
+
+def test_the_effort_check_is_what_it_was_with_the_variable_unset(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert result["summary"] == (
+        "1 of your agents or sessions spent more than 20% of their output thinking. Thinking is billed as output; "
+        "a lower effort thinks less, but how much less isn't measured, so check {{page:changes}} after a few sessions."
+    )
+    assert [f["title"] for f in result["fixes"]] == ["Main session: effort medium on claude-opus-5-5"]
+
+
+# -- N5: the variable, not the setting, picks the main session's model ---------
+
+
+def test_the_models_check_names_the_variable_when_the_setting_already_says_sonnet(tmp_path):
+    from claudeglass import advice
+
+    result = qa.run("models", _ctx(tmp_path, model=_env_model(), effective={"model": "sonnet"},
+                                   effective_agents={"Explore": {}}, model_env_set=True))
+    assert result["summary"] == qa._MAIN_MODEL_LEFT_TO_ENV.format(model="sonnet")
+    assert len(_env_tip(result)) == 1
+    main = next(row for row in result["table"]["rows"] if row[0] == "Main session")
+    assert main[3] == "ANTHROPIC_MODEL"
+    # Without the variable the settings set it, and nothing is said of one.
+    plain = qa.run("models", _ctx(tmp_path, model=_env_model(), effective={"model": "sonnet"}, effective_agents={"Explore": {}}))
+    assert next(row for row in plain["table"]["rows"] if row[0] == "Main session")[3] == "settings"
+    assert _env_tip(plain) == [] and advice.MODEL_ENV_WINS not in plain["summary"]
+
+
+def test_in_a_view_of_several_projects_a_project_files_medium_is_not_called_already_set(tmp_path):
+    # R2-3: one project's snapshot says nothing about the other projects in the view.
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    kw = dict(effective={"effortLevel": "medium"}, effective_provenance={"effortLevel": "project_shared"})
+    assert "is already medium" in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]
+    model.meta = NS(projects=("alpha", "beta"))
+    assert "is already medium" not in qa.run("effort", _ctx(tmp_path, model=model, **kw))["summary"]
+
+
+def _expected_flat_effort_fix(scope, current="high"):
+    """What ``fixes.build_fix`` gives a main-session ``effortLevel`` change at ``scope``."""
+    from claudeglass.fixes import build_fix
+
+    change = SettingChange(target="settings", key="effortLevel", agent=None, value="medium", current=current, scope=scope)
+    rec = Recommendation(id="quick-action", title="t", scope="user", why="w", changes=[change])
+    return build_fix(rec, change)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_shared", "repo"), ("project_local", "project-local")])
+def test_the_effort_checks_flat_level_fix_goes_to_the_project_file_that_sets_it(tmp_path, layer, scope):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "high"},
+                                   effective_provenance={"effortLevel": layer}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    expected = _expected_flat_effort_fix(scope)
+    assert fix["key"] == "effortLevel"
+    assert fix["command"] == expected["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+    assert "~/.claude/settings.json" not in fix["prompt"] and "--scope user" not in fix["command"]
+
+
+def test_in_a_view_of_several_projects_the_flat_level_fix_goes_to_no_projects_file(tmp_path):
+    # A model id with no canonical form gets the flat level even in a view of several
+    # projects; the snapshot is one project's, so its file is not where the fix goes.
+    model = _main_on(_full_model(), "my-gateway-model")
+    _thinking_rows(model, 40.0)
+    kw = {"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": "project_shared"}}
+    model.meta = NS(projects=("alpha", "beta"))
+    result = qa.run("effort", _ctx(tmp_path, model=model, **kw))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    expected = _expected_flat_effort_fix("")
+    assert fix["key"] == "effortLevel"
+    assert fix["command"] == expected["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+
+
+# -- R3-VIEW-RULE: a check's fix goes to the file that decides, read only in a view of one project ---
+
+
+def _window_model(projects=("alpha",), main=None):
+    sections = [NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+        {"window": 200000, "compactions_per_session": 2.0, "cost": 70.0, "delta_pct": -30.0},
+        {"window": 300000, "compactions_per_session": 1.5, "cost": 90.0, "delta_pct": -10.0},
+        {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
+    ])])]
+    if main:
+        sections.append(NS(key="model_swap", tables=[_table("model_swap_by_agent_type", [
+            {"agent_type": "top-level", "observed_model": main}])]))
+    return NS(sections=sections, context_files={}, recommendations=[], meta=NS(projects=tuple(projects)))
+
+
+def _window_fix(tmp_path, effective, provenance, projects=("alpha",), main=None):
+    result = qa.run("compaction", _ctx(tmp_path, model=_window_model(projects, main), effective=effective,
+                                       effective_provenance=provenance))
+    [fix] = result["fixes"]
+    return fix
+
+
+@pytest.mark.parametrize("layer, scope, file", [
+    ("project_shared", "repo", ".claude/settings.json"),
+    ("project_local", "project-local", ".claude/settings.local.json"),
+])
+def test_the_compaction_checks_fix_goes_to_the_project_file_that_sets_the_window(tmp_path, layer, scope, file):
+    """R3-3, the reviewer's input: the project file's window outranks your user file."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": layer})
+    assert f"--scope {scope}" in fix["command"]
+    assert fix["prompt"].splitlines()[0].endswith(f"In {file}, set autoCompactWindow to 200000.")
+
+
+def test_the_compaction_checks_fix_under_a_project_window_says_nothing_of_your_own_window(tmp_path):
+    """R3-2's case on the check: the project file's flat window beats your user file's own window."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}},
+                      {"autoCompactWindow": "project_shared", "modelSettings": "user"})
+    assert "--scope repo" in fix["command"] and "own auto-compact window" not in fix["prompt"]
+
+
+def test_in_a_view_of_several_projects_the_compaction_checks_fix_goes_to_your_user_file(tmp_path):
+    """Guard: one project's file is not where a fix for every project goes."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": "project_shared"}, ("alpha", "beta"))
+    assert "--scope user" in fix["command"]
+
+
+def test_the_compaction_check_under_a_managed_window_asks_your_administrator(tmp_path):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000}, {"autoCompactWindow": "managed"})
+    assert fix["command"] is None
+    assert "administrator" in fix["prompt"]
+
+
+def test_the_effort_checks_fix_goes_to_a_project_files_own_entry_for_the_model(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model,
+                                   effective={"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+                                   effective_provenance={"modelSettings": "project_shared"}))
+    [fix] = [f for f in result["fixes"] if f.get("agent") is None]
+    assert fix["command"] == (
+        "claudeglass apply --set modelSettings.claude-opus-5-5.effortLevel=medium --scope repo --project-dir . --dry-run"
+    )
+
+
+def test_the_compaction_checks_fix_says_a_models_own_window_wins_as_the_card_does(tmp_path):
+    """Within one file a model's own window beats the flat one: the card's note, on the check's fix."""
+    from claudeglass.advice import _OWN_WINDOW_STEP
+
+    fix = _window_fix(tmp_path, {"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 500000}}}, {"modelSettings": "user"})
+    assert f"claude-opus-5-5 has its own auto-compact window, which wins for it. {_OWN_WINDOW_STEP}" in fix["prompt"]
+
+
+# -- R4-1: the effort check while managed settings decide the main session's effort ----------------
+
+_LEFT_TO_MANAGED = (
+    "The main session spends {share} of its output thinking, but your organisation's managed settings set its "
+    "effort, so only your administrator can change it."
+)
+_MANAGED_HIGH = dict(effective={"effortLevel": "high"}, effective_provenance={"effortLevel": "managed"})
+
+
+def test_the_effort_check_says_your_administrator_sets_it_under_a_managed_level_and_no_card(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    assert not [r for r in model.recommendations if r.id == "effort-mismatch"]
+    result = qa.run("effort", _ctx(tmp_path, model=model, **_MANAGED_HIGH))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == _LEFT_TO_MANAGED.format(share="40%")
+    assert "No agent spends more than" not in result["summary"]
+
+
+def test_the_effort_check_keeps_another_agents_fix_and_adds_the_managed_sentence(tmp_path):
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    _with_reviewer_over_the_bar(model)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective_agents={"reviewer": {}}, **_MANAGED_HIGH))
+    assert result["status"] == "act"
+    assert [f["title"] for f in result["fixes"]] == ["reviewer: effort medium"]
+    assert [f for f in result["fixes"] if f.get("agent") is None] == []
+    assert result["summary"].endswith(" " + _LEFT_TO_MANAGED.format(share="40%"))
+
+
+def test_an_open_managed_effort_card_keeps_its_fix_and_the_check_adds_no_managed_sentence(tmp_path):
+    """Guard (passes before and after): the card already carries the administrator request as its fix."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(changes=[
+        SettingChange(target="settings", key="effortLevel", value="medium", current="high", scope="managed")
+    ])]
+    result = qa.run("effort", _ctx(tmp_path, model=model, **_MANAGED_HIGH))
+    assert [f for f in result["fixes"] if f.get("card") == "effort-mismatch"]
+    assert "managed settings set its effort" not in result["summary"]
+
+
+def test_the_variables_sentence_shows_not_the_managed_one_while_the_variable_is_set_too(tmp_path):
+    """Guard (passes before and after): the two sentences never both show."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effort_level_env_set=True, **_MANAGED_HIGH))
+    assert result["summary"] == _LEFT_TO_ENV.format(share="40%")
+
+
+def test_a_managed_medium_is_already_set_and_the_check_adds_no_managed_sentence(tmp_path):
+    """Guard (passes before and after): a managed level that is already low or medium says so as it does today."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    result = qa.run("effort", _ctx(tmp_path, model=model, effective={"effortLevel": "medium"},
+                                   effective_provenance={"effortLevel": "managed"}))
+    assert qa._EFFORT_ALREADY_SET.format(level="medium", model="claude-opus-5-5") in result["summary"]
+    assert "managed settings set its effort" not in result["summary"]
+
+
+# -- R4-2: a project or managed file's own window for the main model gets the change there -------------
+
+_OWN_500K = {"claude-opus-5-5": {"autoCompactWindow": 500000}}
+
+
+def _expected_own_window_fix(scope):
+    """What ``fixes.build_fix`` gives the main model's own window entry changed to 200,000 at ``scope``."""
+    from claudeglass.fixes import build_fix
+
+    change = SettingChange(target="settings", key="modelSettings", value={"claude-opus-5-5": {"autoCompactWindow": 200000}},
+                           current=_OWN_500K, scope=scope)
+    rec = Recommendation(id="quick-action", title="x", scope="user", changes=[change])
+    return build_fix(rec, change)
+
+
+@pytest.mark.parametrize("layer, scope", [("project_local", "project-local"), ("project_shared", "repo")])
+def test_the_compaction_checks_fix_changes_a_project_files_own_window_entry_for_the_main_model(tmp_path, layer, scope):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": layer}, main="claude-opus-5-5")
+    expected = _expected_own_window_fix(scope)
+    assert fix["key"] == "modelSettings"
+    assert fix["command"] == expected["command"] and f"--scope {scope}" in fix["command"]
+    assert fix["prompt"].splitlines()[0] == expected["prompt"].splitlines()[0]
+    assert "~/.claude/settings.json" not in fix["prompt"] and "/autocompact" not in fix["prompt"]
+
+
+def test_the_compaction_check_asks_your_administrator_to_change_a_managed_own_window_entry(tmp_path):
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": "managed"}, main="claude-opus-5-5")
+    expected = _expected_own_window_fix("managed")
+    assert fix["command"] is None and expected["command"] is None
+    # The request is the same up to the reason each gives for it.
+    head = expected["prompt"].split("saying why:")[0]
+    assert head and fix["prompt"].startswith(head)
+    assert "administrator" in fix["prompt"]
+
+
+def test_an_own_window_in_your_user_file_keeps_the_checks_flat_change_and_its_note(tmp_path):
+    """Guard (W4): /autocompact is how that entry is changed."""
+    fix = _window_fix(tmp_path, {"modelSettings": _OWN_500K}, {"modelSettings": "user"}, main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope user" in fix["command"]
+    assert "claude-opus-5-5 has its own auto-compact window, which wins for it." in fix["prompt"]
+
+
+def test_a_flat_window_in_a_higher_file_than_the_own_entry_keeps_the_checks_flat_change(tmp_path):
+    """Guard: the local file's flat window decides over the shared file's own entry."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "project_local", "modelSettings": "project_shared"}, main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope project-local" in fix["command"]
+
+
+def test_in_a_view_of_several_projects_the_check_does_not_read_a_projects_own_window(tmp_path):
+    """Guard: the view rule took the project's block out, so the flat change goes to your user file."""
+    fix = _window_fix(tmp_path, {"autoCompactWindow": 300000, "modelSettings": _OWN_500K},
+                      {"autoCompactWindow": "user", "modelSettings": "project_local"}, ("alpha", "beta"),
+                      main="claude-opus-5-5")
+    assert fix["key"] == "autoCompactWindow" and "--scope user" in fix["command"]
+
+
+# -- R5-2: an ignored main effort card is why the check has nothing, whatever would have drafted the change --
+
+
+@pytest.mark.parametrize("variable_set", [False, True])
+def test_an_ignored_main_effort_card_under_a_managed_level_is_why_the_check_has_nothing(tmp_path, variable_set):
+    """Under a managed level the thinking goal drafts no main-session change to remove, so the check used to
+    fall back to "No agent spends more than 20%" beside a table that shows 40%."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 40.0)
+    model.recommendations = [_main_effort_card(changes=[
+        SettingChange(target="settings", key="effortLevel", value="medium", current="high", scope="managed")
+    ])]
+    ctx = _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"}), effort_level_env_set=variable_set,
+               **_MANAGED_HIGH)
+    result = qa.run("effort", ctx)
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert result["summary"] == qa._IGNORED_ONLY
+
+
+def test_an_ignored_main_effort_card_with_the_main_session_under_the_bar_changes_nothing(tmp_path):
+    """Guard: under the threshold the check's own sentence is true, card or no card."""
+    model = _main_on(_full_model(), "claude-opus-5-5")
+    _thinking_rows(model, 10.0)
+    model.recommendations = [_main_effort_card()]
+    result = qa.run("effort", _ctx(tmp_path, model=model, skip_keys=frozenset({"effort-mismatch"}), **_MANAGED_HIGH))
+    assert result["summary"].startswith("No agent spends more than")

@@ -277,10 +277,17 @@ export function renderProfiles(panel) {
       }
       var skipped = body.data.skipped_managed || [];
       var projectAgents = body.data.skipped_project_agents || [];
+      // Agents whose names ClaudeGlass can't use: counted, never named.
+      var nameAgents = body.data.skipped_name_agents || 0;
       saveCurrentStatus.textContent =
         'Saved as "' + (body.data.name || body.data.id) + '".' +
         (skipped.length ? " Left out, because your organisation's policy sets them: " + skipped.join(", ") + "." : "") +
-        (projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "");
+        (projectAgents.length ? " Left out, because they belong to one project: " + projectAgents.join(", ") + "." : "") +
+        (nameAgents === 1
+          ? " Left out, because of its name: one agent. A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens. It starts with a letter or digit and is at most 128 characters. Rename it to include it."
+          : nameAgents > 1
+            ? " Left out, because of their names: " + nameAgents + " agents. A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens. It starts with a letter or digit and is at most 128 characters. Rename each to include it."
+            : "");
       toast("Your current settings are saved as a profile.");
       refreshList();
     });
@@ -313,6 +320,14 @@ function renderProfilesList(data, container) {
     if (profile.for && profile.for.length) meta.push("for " + profile.for.join(", ").replace(/-/g, " "));
     if (profile.updated_at) meta.push("saved " + String(profile.updated_at).slice(0, 10));
     card.appendChild(el("p", { class: "profile-card-meta", text: meta.join(" · ") }));
+
+    if (profile.problem) {
+      // A saved file that fails the checks: why, and where its file is.
+      // Nothing to show or apply, so no summary and no button.
+      card.appendChild(el("p", { class: "notes", text: profile.problem }));
+      cards.appendChild(card);
+      return;
+    }
 
     var summary = el("p", { class: "profile-card-summary" });
     card.appendChild(summary);
@@ -474,7 +489,7 @@ function renderProfileDetail(profile, container) {
   container.appendChild(scopeRow);
   var estimate = el("div", { class: "profile-estimate" });
   container.appendChild(estimate);
-  var logEstimate = renderProfileEstimate(profile, estimate);
+  var estimator = renderProfileEstimate(profile, estimate);
   var body = el("div");
   container.appendChild(body);
   function load() {
@@ -482,7 +497,9 @@ function renderProfileDetail(profile, container) {
       body,
       withWindow("/api/profiles/" + encodeURIComponent(profile.id) + "/diff?scope=" + encodeURIComponent(scopeSelect.value)),
       function (data, box) {
-        renderProfileDiff(data, box, logEstimate);
+        // The estimate prices what this target changes, so it is redrawn with each diff.
+        estimator.show(data);
+        renderProfileDiff(data, box, estimator.log);
       }
     );
   }
@@ -592,6 +609,14 @@ function renderProfileEditor(container, profiles, onSaved) {
   });
 }
 
+// The profiles "Start from" offers: one whose file fails the checks gets a 409 when picked, and its
+// card already says why it can't be used.
+function startFromProfiles(profiles) {
+  return profiles.filter(function (p) {
+    return !p.problem;
+  });
+}
+
 function buildProfileEditor(container, schema, profiles, onSaved) {
   var form = el("form", { class: "profile-form" });
   container.appendChild(
@@ -603,7 +628,7 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
 
   var startSelect = el("select", { id: "profile-form-start" });
   startSelect.appendChild(el("option", { value: "", text: "An empty profile" }));
-  profiles.forEach(function (p) {
+  startFromProfiles(profiles).forEach(function (p) {
     startSelect.appendChild(el("option", { value: p.id, text: p.name || p.id }));
   });
   var idInput = el("input", { type: "text", id: "profile-form-id", required: true, placeholder: "my-profile" });
@@ -639,10 +664,29 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       : "";
     carriedLine.hidden = !carriedModelSettings;
   }
+  // A "Start from" profile's role ([roles.writer]) is carried through as it is, so a
+  // copy changes the agent that writes code at every target, as the original does.
+  var carriedRoles = null;
+  var carriedRolesLine = el("p", { class: "notes", id: "profile-form-roles", hidden: true });
+  function showCarriedRoles() {
+    var writer = carriedRoles && carriedRoles.writer;
+    var labels = profileLeverLabels(schema);
+    carriedRolesLine.textContent = writer
+      ? "For the agent that writes code: " +
+        Object.keys(writer)
+          .map(function (key) {
+            return (labels[key] || key) + " " + _diffRowValue(writer[key]);
+          })
+          .join(", ") +
+        ". It goes to each of your agents named like implementer, fixer or builder that can edit files."
+      : "";
+    carriedRolesLine.hidden = !writer;
+  }
 
   form.appendChild(el("h3", { text: "Settings for one agent" }));
   form.appendChild(el("p", { class: "notes", text: "Written to that agent's file. Use the agent's name as it appears under Agents & context." }));
   var agentBlocks = [];
+  form.appendChild(carriedRolesLine);
   var agentsWrap = el("div", { class: "agent-blocks" });
   form.appendChild(agentsWrap);
   var addAgentBtn = button("Add an agent", { variant: "quiet", icon: "plus" });
@@ -713,6 +757,7 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       if (v !== undefined) doc.settings[f.lever.key] = v;
     });
     if (carriedModelSettings) doc.settings.modelSettings = carriedModelSettings;
+    if (carriedRoles) doc.roles = carriedRoles;
     agentBlocks.forEach(function (block) {
       var agentName = block.name.value.trim();
       if (!agentName) return;
@@ -736,6 +781,8 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
     agentBlocks.length = 0;
     carriedModelSettings = null;
     showCarriedModelSettings();
+    carriedRoles = null;
+    showCarriedRoles();
     if (!startSelect.value) return;
     fetchJson("/api/profiles/" + encodeURIComponent(startSelect.value)).then(function (result) {
       var body = result.body;
@@ -743,11 +790,14 @@ function buildProfileEditor(container, schema, profiles, onSaved) {
       var p = body.data;
       carriedModelSettings = p.settings.modelSettings || null;
       showCarriedModelSettings();
+      carriedRoles = p.roles && Object.keys(p.roles).length ? p.roles : null;
+      showCarriedRoles();
       settingFields.forEach(function (f) {
         setLeverValue(f, p.settings[f.lever.key]);
       });
-      Object.keys(p.agents || {}).forEach(function (agentName) {
-        addAgentBlock(agentName, p.agents[agentName]);
+      // Only the agents the profile names itself: a role stays a role (carriedRoles).
+      Object.keys(p.own_agents || {}).forEach(function (agentName) {
+        addAgentBlock(agentName, p.own_agents[agentName]);
       });
       if (!nameInput.value) nameInput.value = (p.name || p.id) + " (my copy)";
     });
@@ -1061,45 +1111,83 @@ function renderGoalDraft(draft, container, onSaved) {
   });
 }
 
-// Returns a function that logs this estimate (at most once), so Setup can
-// later check it against what the change did.
+// The settings and agent keys a profile's diff (GET /api/profiles/<id>/diff)
+// changes at its target, as /api/whatif takes them: a row your policy locks,
+// or one already set to the value, changes nothing and is left out.
+function profileChangeFromDiff(diff) {
+  var change = { settings: {}, agents: {} };
+  (diff.settings || []).concat(diff.agents || []).forEach(function (row) {
+    if (row.managed || diffRowSame(row)) return;
+    if (row.agent) {
+      change.agents[row.agent] = change.agents[row.agent] || {};
+      change.agents[row.agent][row.setting] = row.proposed_value;
+    } else if (row.model) {
+      // settings.modelSettings.<model>.<key>: the setting is "modelSettings.<key>".
+      change.settings.modelSettings = change.settings.modelSettings || {};
+      change.settings.modelSettings[row.model] = change.settings.modelSettings[row.model] || {};
+      change.settings.modelSettings[row.model][row.setting.slice("modelSettings.".length)] = row.proposed_value;
+    } else {
+      change.settings[row.setting] = row.proposed_value;
+    }
+  });
+  return change;
+}
+
+// Returns {show, log}: show(diff) draws the estimate of what that diff's
+// target changes; log() logs the one last drawn (at most once), so Setup
+// can later check it against what the change did.
 function renderProfileEstimate(profile, container) {
   var request = null;
   var logged = false;
-  Promise.all([fetchJson("/api/profiles/" + encodeURIComponent(profile.id)), loadProfileSchema()]).then(function (results) {
-    var body = results[0].body;
-    if (!body || body.ok !== true) return;
-    var p = body.data;
-    var labels = profileLeverLabels(results[1]);
-    // F11: `tasks` is the profile's `for` words normalised to the task
-    // vocabulary (a catalogue word like "implementation" isn't one, and
-    // /api/whatif rejects it); several scale by their combined share.
-    var tasks = p.tasks && p.tasks.length ? p.tasks.join(",") : "";
-    var url = withWindow("/api/whatif") + (tasks ? "&task=" + encodeURIComponent(tasks) : "");
-    request = { url: url, settings: p.settings || {}, agents: p.agents || {} };
-    postJson(url, { settings: request.settings, agents: request.agents }).then(function (res) {
-      var data = res.body && res.body.ok === true ? res.body.data : null;
-      if (!data || !data.rows.length) return;
-      clear(container);
-      container.appendChild(el("h3", { text: "Estimated effect" }));
-      renderWhatIf(data, container);
-      container.appendChild(
-        simpleTable(
-          [{ label: "Change" }, { label: "Effect" }, { label: "How it was worked out" }],
-          data.rows.map(function (row) {
-            return [
-              (labels[row.key] || row.key) + (row.agent ? " (" + row.agent + ")" : "") + ": " + _diffRowValue(row.value),
-              row.effect_text,
-              (row.fidelity_text + " " + row.basis).trim(),
-            ];
-          })
-        )
-      );
+  var ticket = 0;
+  var ready = Promise.all([fetchJson("/api/profiles/" + encodeURIComponent(profile.id)), loadProfileSchema()]);
+  function show(diff) {
+    var mine = ++ticket;
+    request = null;
+    clear(container);
+    ready.then(function (results) {
+      if (mine !== ticket) return;
+      var body = results[0].body;
+      if (!body || body.ok !== true) return;
+      var p = body.data;
+      var labels = profileLeverLabels(results[1]);
+      // F11: `tasks` is the profile's `for` words normalised to the task
+      // vocabulary (a catalogue word like "implementation" isn't one, and
+      // /api/whatif rejects it); several scale by their combined share.
+      var tasks = p.tasks && p.tasks.length ? p.tasks.join(",") : "";
+      var url = withWindow("/api/whatif") + (tasks ? "&task=" + encodeURIComponent(tasks) : "");
+      var change = profileChangeFromDiff(diff);
+      if (!Object.keys(change.settings).length && !Object.keys(change.agents).length) return;
+      request = { url: url, settings: change.settings, agents: change.agents };
+      postJson(url, { settings: change.settings, agents: change.agents }).then(function (res) {
+        if (mine !== ticket) return;
+        var data = res.body && res.body.ok === true ? res.body.data : null;
+        if (!data || !data.rows.length) return;
+        clear(container);
+        renderWhatIf(data, container);
+        // renderWhatIf clears the container first, so the heading goes in after it.
+        container.insertBefore(el("h3", { text: "Estimated effect" }), container.firstChild);
+        container.appendChild(
+          simpleTable(
+            [{ label: "Change" }, { label: "Effect" }, { label: "How it was worked out" }],
+            data.rows.map(function (row) {
+              return [
+                (labels[row.key] || row.key) + (row.agent ? " (" + row.agent + ")" : "") + ": " + _diffRowValue(row.value),
+                row.effect_text,
+                (row.fidelity_text + " " + row.basis).trim(),
+              ];
+            })
+          )
+        );
+      });
     });
-  });
-  return function () {
-    if (logged || !request) return;
-    logged = true;
-    postJson(request.url, { settings: request.settings, agents: request.agents, log: true });
+  }
+  return {
+    show: show,
+    log: function () {
+      if (logged || !request) return;
+      logged = true;
+      postJson(request.url, { settings: request.settings, agents: request.agents, log: true });
+    },
   };
 }

@@ -1781,3 +1781,36 @@ def test_hook_health_managed_dir_matches_the_snapshot_hooks(monkeypatch, platfor
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setenv("ProgramFiles", r"C:\fake-program-files")
     assert hook_health._real_managed_settings_dir() == hook.default_managed_settings_dir()
+
+
+def test_the_hook_keeps_an_agent_name_up_to_the_longest_the_rule_takes(tmp_path):
+    from claudeglass.profiles import schema
+
+    hook = _load_hook_module()
+    assert hook._MAX_AGENT_NAME_CHARS == schema.AGENT_NAME_MAX
+    assert hook._MAX_NAME_CHARS == 64  # every other name keeps its cap
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    long_ok = "w" * 90 + "-writer"
+    too_long = "x" * 200
+    (agents / "a.md").write_text(f"---\nname: {long_ok}\ntools: Read, Edit\n---\n", encoding="utf-8")
+    (agents / "b.md").write_text(f"---\nname: {too_long}\n---\n", encoding="utf-8")
+    (agents / "c.md").write_text("---\nname: /home/u/x\n---\n", encoding="utf-8")
+    names = set(hook._load_agents(agents, "user"))
+    assert long_ok in names and schema.agent_name_problem(long_ok) is None
+    [cut] = [n for n in names if n.startswith("x")]
+    assert len(cut) == 128 and cut.endswith("...") and schema.agent_name_problem(cut) is not None
+    assert any(n.startswith("<redacted path/url") for n in names)
+
+
+def test_a_writer_whose_name_has_65_to_128_characters_is_resolved_not_called_unusable(tmp_path):
+    from claudeglass.profiles import roles
+
+    hook = _load_hook_module()
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    name = "code-" + "w" * 70 + "-writer"
+    (agents / "a.md").write_text(f"---\nname: {name}\ntools: Read, Edit\n---\n", encoding="utf-8")
+    recorded = {n: {"tools": f.get("tools")} for n, f in hook._load_agents(agents, "user").items()}
+    assert roles.unusable_writers(recorded) == 0
+    assert roles.writers(recorded) == (name,)

@@ -91,10 +91,11 @@ representative model is resolved through `Pricing.aliases[family]` —
 the public alias table `pricing.py` already exposes — never a
 hardcoded model id. If a future rate card drops a family's bare alias
 entirely, the affected row reports "unknown tier" instead of guessing
-at a stale id.
+at a stale id. Mythos ranks with Fable, at whose prices the rate card lists
+it, so a Mythos main session is offered Opus.
 
-Today's packaged rate card points `fable` and `best` at
-`claude-fable-5-2`, `opus` at `claude-opus-5-5`, `sonnet` and
+Today's packaged rate card points `fable` at
+`claude-fable-5-2`, `opus` and `best` at `claude-opus-5-5`, `sonnet` and
 `sonnet[1m]` at `claude-sonnet-5-5`, and `haiku` at
 `claude-haiku-5-5`. The `sonnet` aliases moved from
 `claude-sonnet-5` to `claude-sonnet-5-5` with the card dated 2026-10-01;
@@ -102,8 +103,9 @@ Today's packaged rate card points `fable` and `best` at
 ran on it are still priced as themselves. The `haiku` alias moved from
 `claude-haiku-4-5-20251001` to `claude-haiku-5-5` with the card dated
 2026-10-30; Haiku 4.5 keeps its own row, so sessions that ran on it are
-still priced as themselves. The `fable` and `best` aliases moved from
-`claude-fable-5-1` to `claude-fable-5-2` with the card dated 2026-11-12;
+still priced as themselves. The `fable` alias moved from
+`claude-fable-5-1` to `claude-fable-5-2`, and `best` moved to
+`claude-opus-5-5`, as Claude Code resolves it, with the card dated 2026-11-12;
 Fable 5.1 keeps its own row, so sessions that ran on it are still priced
 as themselves. A rate card of your own sets its own aliases.
 
@@ -153,7 +155,14 @@ though its project's setting said Sonnet or smaller when it started
 (`picked_runs`), and, in a view of several projects, one in a project
 whose own settings file sets `model` (`own_model_runs`), which a change to
 your user settings can't reach. A project that follows your user settings
-reads them from every snapshot after its own latest one. The main-model
+reads them from every snapshot after its own latest one. While
+`ANTHROPIC_MODEL` is set in a project's latest snapshot (by name only,
+`change_points.model_env_set`), its setting picks no session's model, so no
+session counts as picked against it or as from before a move of it; the
+transcripts decide alone, and the Models check says "The main session
+would have cost less on <model>, but ANTHROPIC_MODEL picks its model, so
+there is no setting to change." The Changes page's outcome rows still
+read whether the setting agreed, as they did. The main-model
 card, the Models check, the what-if and the profile goal read the same
 setting, so none of them offers a change the saving doesn't count.
 

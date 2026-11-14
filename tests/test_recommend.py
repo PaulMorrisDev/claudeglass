@@ -1930,7 +1930,9 @@ def test_effort_mismatch_fires_with_evidence_per_purpose_row():
     # purpose group-by by session (no report table carries both), so
     # the approximation is disclosed in the action text rather than
     # presented as a genuine per-session join.
-    assert "not only the light ones" in rec.changes[0].note
+    # No snapshot is given, so effortLevel is not known to be a project, local or managed key: the card
+    # asks for /effort, which Claude Code saves per model, and offers no change.
+    assert rec.changes == [] and rec.variant == "session"
     # No snapshot given -- _lever_scope has nothing to consult, so this
     # defaults to "user" rather than raising.
     assert rec.scope == "user"
@@ -3444,3 +3446,83 @@ def test_effort_mismatch_names_no_old_date_when_a_cited_row_is_fresh():
 def test_effort_mismatch_direct_path_needs_enough_easy_high_effort_thinking(cycles):
     r = _add_section(_base_report(), _habits_section(cycles))
     assert not any(rec.id == "effort-mismatch" for rec in recommend_fn(r, config=_config(), archetype=None))
+
+
+# -- R3-VIEW-RULE: the file that decides, read only in a view of that one project -----------------
+
+
+def _effort_report_on(model_cell, projects):
+    """The light-work effort report with the main session on ``model_cell``, for ``projects``."""
+    r = _base_report()
+    r = _add_section(r, Section(key="sessions", title="Sessions", tables=[Table(
+        name="sessions_by_purpose", title="Sessions by purpose",
+        columns=[Column(key="purpose", label="Purpose"), Column(key="sessions", label="Sessions")],
+        rows=[["docs-or-light-edit", 6], ["general-dev", 3], ["review", 2]])]))
+    r = _add_section(r, Section(key="agents", title="Agents", tables=[Table(
+        name="topology_effort_tokens", title="Effort tokens",
+        columns=[Column(key="effort", label="Effort"), Column(key="turns", label="Turns"),
+                 Column(key="output_tokens", label="Output tokens"), Column(key="thinking_tokens", label="Thinking tokens"),
+                 Column(key="thinking_share", label="Thinking share", kind="pct")],
+        rows=[["high", 100, 10_000, 4_000, 40.0]])]))
+    r = _add_section(r, Section(key="model_swap", title="Model swap", tables=[Table(
+        name="model_swap_by_agent_type", title="Model swap",
+        columns=[Column(key="agent_type", label="Agent type"), Column(key="observed_model", label="Observed model"),
+                 Column(key="best_cheaper_alternative_model", label="Alternative"),
+                 Column(key="saving_usd", label="Saving", kind="money")],
+        rows=[["top-level", model_cell, None, None]])]))
+    r.meta.projects = tuple(projects)
+    return r
+
+
+def _effort_card(data, projects, model_cell="claude-opus-5-5"):
+    snap = Snapshot(path=None, ts="2026-10-20T00:00:00Z", data={"agents": {}, **data})
+    recs = recommend_fn(_effort_report_on(model_cell, projects), config=_config(), archetype=None, snapshot=snap)
+    return next((rec for rec in recs if rec.id == "effort-mismatch"), None)
+
+
+_PROJECT_FLAT = {"effortLevel": "project_shared"}
+
+
+def test_in_a_view_of_several_projects_a_project_files_medium_does_not_close_the_effort_card():
+    """R3-1, the reviewer's input through recommend(): one project's file says nothing of the others."""
+    card = _effort_card({"effective": {"effortLevel": "medium"}, "effective_provenance": _PROJECT_FLAT}, ["alpha", "beta"])
+    assert card is not None
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])
+
+
+def test_in_a_view_of_several_projects_the_effort_card_names_no_projects_file():
+    """R3-1: with the snapshot's project at flat high, the card's fix is the user one the check and goal give."""
+    card = _effort_card({"effective": {"effortLevel": "high"}, "effective_provenance": _PROJECT_FLAT}, ["alpha", "beta"])
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])
+
+
+def test_in_a_view_of_several_projects_your_user_files_entry_still_closes_the_effort_card():
+    """Guard: your user file is read in every project, so its own entry for the model decides there."""
+    data = {
+        "effective": {"effortLevel": "high", "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+        "effective_provenance": {"effortLevel": "project_shared", "modelSettings": "user"},
+        "user_settings": {"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}},
+    }
+    assert _effort_card(data, ["alpha", "beta"]) is None
+
+
+@pytest.mark.parametrize("layer, scope", [("project_shared", "repo"), ("project_local", "project-local")])
+def test_in_one_project_the_project_files_flat_level_still_decides_the_effort_card(layer, scope):
+    """Guard: in a view of one project its own file decides, and the fix goes there."""
+    assert _effort_card({"effective": {"effortLevel": "medium"}, "effective_provenance": {"effortLevel": layer}}, ["alpha"]) is None
+    card = _effort_card({"effective": {"effortLevel": "high"}, "effective_provenance": {"effortLevel": layer}}, ["alpha"])
+    assert [(c.key, c.value, c.scope) for c in card.changes] == [("effortLevel", "medium", scope)]
+
+
+def test_a_project_files_own_entry_for_the_model_gets_the_effort_cards_change():
+    """The project file's own entry for the model beats an entry in your user file, so /effort, which
+    saves to your user file, would change nothing: the change goes to that entry in that file."""
+    data = {"effective": {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}},
+            "effective_provenance": {"modelSettings": "project_shared"}}
+    card = _effort_card(data, ["alpha"])
+    assert [(c.key, c.value, c.scope) for c in card.changes] == [
+        ("modelSettings", {"claude-opus-5-5": {"effortLevel": "medium"}}, "repo")
+    ]
+    # In a view of several projects that file is one project's: the user path, as for the flat level.
+    card = _effort_card(data, ["alpha", "beta"])
+    assert (card.variant, card.scope, card.changes) == ("session", "user", [])

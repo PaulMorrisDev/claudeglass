@@ -564,6 +564,17 @@ redundant read in `topology_redundant_reads`), is still more
 than 5% of observed cost (`1 - switch_pct`) and more than $1.00
 (`switch_usd`). The action says the figure is modelled, not observed.
 See [`docs/compaction-sim.md`](compaction-sim.md#the-report-section).
+Its change goes to the file that sets the window (a project's local file
+too), never a project's in a view of several projects, and it says a
+model's own window wins only when that window is in the same file or a
+higher one. The Overview compaction check's fix goes to the same file
+with the same note; under a managed window it asks your administrator.
+When a project or managed file's own window for the main session's model
+decides (`goals.main_own_window`), both change that entry there instead.
+The note's last sentence says how to change a model's own window in the
+file that holds it: /autocompact for your user file, an edit of the entry
+for a project file, your administrator for managed settings. A managed
+flat window carries no note unless the own window is managed too.
 Once the sweep has priced the main sessions, `compaction-churn` is
 dropped and `long-context-share` keeps only its workflow advice, whether
 or not `compaction-window` fires: the replay is the one answer on the
@@ -2114,7 +2125,7 @@ one.
   measured (list prices) and `window_days`. `rare_sizes` gives each
   rarely used tool's definition, deferred names and instructions in tokens
   per spawn (`tool=definition/deferred/instructions`), so a card can work
-  the amounts out again for the tools the agent's file still lists. `rule_kept_tools` names the tools the `workflow-subagent` rule put in `keep_tools`, which the card's why names apart. Whether the skills list and the
+  the amounts out again for the tools the agent's file still lists. `rule_kept_tools` names the tools that write files or run commands which a run of that agent called on any model, so `keep_tools` holds them; the card's why names apart only those still on the line it proposes, so a tool the agent's file no longer offers, or one its `disallowedTools` withholds, is never said to stay. Whether the skills list and the
   agent list really go with their tools is not in Claude Code's docs, so
   the `spawn-tools-list` card asks for a before and after check.
 - `agent_startup_servers` — per agent type (report only): one row per MCP
@@ -2573,6 +2584,8 @@ The dashboard never changes your Claude Code settings. Each change comes
 with the prompt and, for a plain setting, the command. The command's
 `--dry-run` shows the diff first, and a real run prints how to undo it.
 
+A plugin's agent (`plugin:agent`) has no file of yours, so a card that would edit its file is information only, and the model card leaves it out.
+
 Rules implemented today, in the order they run. From `recommend.py`'s
 own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `notification-invalidation`, `batch-instructions`, `subagent-volume`,
@@ -2617,7 +2630,28 @@ cites the cell it used:
   50, unvalidated) and the thinking share over the high, xhigh and max
   rows together (weighted by output tokens) is over the threshold. It cites
   each of those rows' own thinking share and output tokens, and the card says
-  "N of M (P%)" and the pooled percent.
+  "N of M (P%)" and the pooled percent. The card offers no settings change
+  in user settings or while `CLAUDE_CODE_EFFORT_LEVEL` is set: Opus 5.5 and
+  later ignore a user `effortLevel`, so it asks for `/effort medium`. In a
+  project, local or managed file it changes `effortLevel` there, or the
+  model's own entry when that file decides by it (the file
+  `goals.main_effort_reading` names, config-layers.md's view rule). Outside the
+  variable's case the card closes once the settings already give the main
+  session's model `low` or `medium` (`goals.main_effort_reading`): its own
+  `modelSettings` entry, matched by canonical id, unless a flat `effortLevel`
+  in a higher file wins; a flat level in a project, local or managed file;
+  a flat user level only on Opus 5, Fable 5.1, Fable 5 and earlier models.
+  A session on two models is read for its first one. In a view of several
+  projects a project file's level is not read: the snapshot is one
+  project's, so the card reads your user file's level, stays open without
+  one and offers the user path. The card is dropped, not shown as fixed, and Your changes
+  shows the saved setting as a settings change. The Overview effort check follows the card
+  (`quick_actions._main_effort_already_set`). While the variable is set and
+  no main-session effort card is open, the check offers no setting for the
+  main session and says the variable decides
+  (`quick_actions._main_effort_left_to_env`). Under a managed effort level
+  above medium and no effort card it says your administrator sets it
+  (`quick_actions._main_effort_left_to_managed`).
 - `spawn-claude-md` is held back when at least as many of an agent type's
   runs said they used CLAUDE.md as said they didn't (a tie holds it back),
   and cites the ones that didn't. With no runs that said, it still fires.

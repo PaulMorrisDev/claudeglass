@@ -65,7 +65,10 @@ def test_the_grouping_is_written_once_and_exported() -> None:
 def test_the_overview_counts_and_links_the_groups_actions_shows() -> None:
     render = _body("page-overview.js", "renderOverview")
     assert "var groups = groupRecommendations(recs);" in render
-    assert "facts.saving = availableSaving(levers, groups, reportTables);" in render
+    assert (
+        "facts.saving = availableSaving(levers, groups, reportTables, groupRecommendations(recs, { ignored: true }));"
+        in render
+    )
     assert "facts.worth = rows" in render
     # "Anything wrong?": every check, with the Actions items its rules
     # raised on the same row; an item no check draws on is a row too.
@@ -276,10 +279,14 @@ def _combined(items: list[dict], spend: dict[str, float]) -> float:
     return float(_node([("page-overview.js", "combinedSaving")], expression))
 
 
-def _available(levers: list[dict], groups: list[dict], agents: list[list]) -> float:
+def _available(levers: list[dict], groups: list[dict], agents: list[list], ignored: tuple | list = ()) -> float:
     """``availableSaving`` from page-overview.js, run in Node, over the
-    model lever's rows by agent type ([agent_type, observed_cost, saving_usd])."""
-    preamble = "".join(_declaration_source(_static_text("page-overview.js"), name) + ";\n" for name in ("LEVER_RULES", "AGENT_MODEL_RULES"))
+    model lever's rows by agent type ([agent_type, observed_cost, saving_usd]).
+    ``ignored`` are the groups of the cards you ignored."""
+    preamble = "".join(
+        _declaration_source(_static_text("page-overview.js"), name) + ";\n"
+        for name in ("LEVER_RULES", "AGENT_MODEL_RULES", "LEVER_CARD")
+    )
     preamble += 'var MAIN_AGENT = "top-level";\nvar WORKFLOW_AGENT = "workflow-subagent";\n'
     functions = [
         ("charts-types.js", "tableObjects"),
@@ -287,11 +294,14 @@ def _available(levers: list[dict], groups: list[dict], agents: list[list]) -> fl
         ("page-overview.js", "usdOf"),
         ("page-overview.js", "combinedSaving"),
         ("page-overview.js", "agentModelItems"),
+        ("page-overview.js", "ignoredSavings"),
         ("page-overview.js", "availableSaving"),
     ]
     columns = [{"key": "agent_type"}, {"key": "observed_cost"}, {"key": "saving_usd"}]
     tables = {"model_swap_by_agent_type": {"columns": columns, "rows": agents}}
-    expression = f"availableSaving({json.dumps(levers)}, {json.dumps(groups)}, {json.dumps(tables)})"
+    expression = (
+        f"availableSaving({json.dumps(levers)}, {json.dumps(groups)}, {json.dumps(tables)}, {json.dumps(list(ignored))})"
+    )
     return float(_node(functions, expression, preamble=preamble))
 
 
@@ -362,6 +372,47 @@ def test_an_info_card_adds_nothing_to_the_headline() -> None:
     assert _available([], [info], []) == 0
     assert abs(_available([], [advice], []) - 38.26) < 1e-9
     assert _available([], [info, advice], []) == _available([], [advice], [])
+
+
+#: The cards you ignored, as ``groupRecommendations(recs, { ignored: true })`` groups them.
+_IGNORED_MAIN = {
+    "id": "model-tier-main",
+    "severity": "advice",
+    "members": [{"id": "model-tier-main", "key": "model-tier-main", "agent_type": None, "changes": [{"key": "model", "agent": None}]}],
+}
+_IGNORED_AGENT = {
+    "id": "model-tier",
+    "severity": "advice",
+    "members": [{"id": "model-tier", "key": "model-tier", "agent_type": None, "changes": [{"key": "model", "agent": "Explore"}]}],
+}
+
+
+def test_an_ignored_main_session_card_takes_its_model_row_out_of_the_headline() -> None:
+    agents = [["top-level", 100, 40], ["Explore", 50, 10]]
+    levers = [{"key": "model_swap", "usd": 50}]
+    assert _available(levers, [], agents) == pytest.approx(50)
+    assert _available(levers, [], agents, [_IGNORED_MAIN]) == pytest.approx(10)
+
+
+def test_an_ignored_agent_model_card_takes_out_only_its_agents_rows() -> None:
+    agents = [["top-level", 100, 40], ["Explore", 50, 10]]
+    levers = [{"key": "model_swap", "usd": 50}]
+    assert _available(levers, [], agents, [_IGNORED_AGENT]) == pytest.approx(40)
+
+
+def test_an_ignored_card_takes_out_the_lever_it_is_the_finding_of() -> None:
+    agents = [["top-level", 100, 0]]
+    levers = [{"key": "carry", "usd": 20}, {"key": "waste", "usd": 10}, {"key": "compaction_sim", "usd": 30}]
+
+    def g(rule: str) -> dict:
+        return {"id": rule, "severity": "advice", "members": [{"id": rule, "key": rule, "agent_type": None}]}
+
+    assert _available(levers, [], agents) == pytest.approx(49.6)
+    assert _available(levers, [], agents, [g("tool-output-carry")]) == pytest.approx(37.0)
+    assert _available(levers, [], agents, [g("wasted-turns")]) == pytest.approx(44.0)
+    assert _available(levers, [], agents, [g("compaction-window")]) == pytest.approx(28.0)
+    # Another card that shares the compaction lever's carried context is not its finding.
+    assert _available(levers, [], agents, [g("plan-handoff")]) == pytest.approx(49.6)
 
 
 # -- every model id finds its prices ------------------------------------------
@@ -1292,3 +1343,31 @@ def test_an_empty_status_line_table_reads_by_why_it_is_empty() -> None:
     # A word the grid has no sentence for falls back to the table's plain one, never to nothing.
     assert _empty_text({"name": "context_budget_statusline", "empty_variant": "elsewhere"}) == _empty_text(other)
     assert _empty_text({"name": "habits_by_shape", "empty_variant": "desktop"})[0].startswith("No main sessions")
+
+
+
+# -- N4: ignoring an agent's model card keeps its open inherited card's saving --
+
+
+def test_ignoring_a_model_tier_card_counts_the_open_inherited_card_once_and_never_raises_the_headline():
+    agents = [["top-level", 100, 40], ["implementer", 60, 30], ["reviewer", 40, 10]]
+    levers = [{"key": "model_swap", "usd": 80}]
+
+    def inherited(usd):
+        return {"id": "agent-model-inherited", "severity": "advice",
+                "members": [{"id": "agent-model-inherited", "key": "agent-model-inherited:implementer",
+                             "agent_type": "implementer", "saving_usd": usd}]}
+
+    tier = {"id": "model-tier", "severity": "advice",
+            "members": [{"id": "model-tier", "key": "model-tier", "agent_type": None,
+                         "changes": [{"key": "model", "agent": "implementer"}, {"key": "model", "agent": "reviewer"}]}]}
+    open_all = _available(levers, [inherited(25)], agents)
+    ignored = _available(levers, [inherited(25)], agents, [tier])
+    without_card = _available(levers, [], agents, [tier])
+    # The inherited card is still open, so its saving is still on offer.
+    assert ignored > without_card
+    assert ignored <= open_all
+    # Counted once, and never more than the model row the ignore took out.
+    big = _available(levers, [inherited(500)], agents, [tier])
+    assert big == pytest.approx(_available(levers, [inherited(30)], agents, [tier]))
+    assert big <= _available(levers, [inherited(500)], agents)

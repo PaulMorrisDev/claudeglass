@@ -1595,10 +1595,16 @@ class FileWatcher:
         other per-file step in this module already follows.
         """
         profiles_dir = Path(self.options.config_dir) / "profiles"
+        # Before the folder check: deleting the whole folder leaves no card.
+        self._forget_deleted_profiles(stats, profiles_dir)
         if not profiles_dir.is_dir():
             return
 
         for path in sorted(profiles_dir.glob("*.toml")):
+            if not path.is_file():
+                # A link whose target is gone, or a folder named like a profile:
+                # nothing to read, and no error a person could trace to a file.
+                continue
             try:
                 text = path.read_text(encoding="utf-8")
                 profile = profile_schema.load_profile(path)
@@ -1616,6 +1622,27 @@ class FileWatcher:
             except Exception as exc:
                 stats.errors += 1
                 stats.error_messages = stats.error_messages + (f"profile ingest error: {_error_summary(exc)}",)
+
+    def _forget_deleted_profiles(self, stats: WatcherStats, profiles_dir: Path) -> None:
+        """Drop the row of a profile whose file was deleted from this config
+        folder's ``profiles`` (the dashboard tells a person to fix or delete
+        a file that fails the checks), so it leaves no card. A row whose file
+        is elsewhere (a fixture, a store moved between config folders) is
+        kept: it is not this scan's to drop. Folders are compared resolved,
+        so a row stored under a relative config folder is still this
+        folder's under the absolute one (what is stored does not change).
+        Only the folder is resolved, never the file: a file linked in from
+        elsewhere (a dotfiles manager) is this folder's, and when its target
+        is deleted the link is no file any more."""
+        try:
+            folder = profiles_dir.resolve()
+            for profile_id, toml_path in self.store.profile_files().items():
+                path = Path(toml_path)
+                if path.parent.resolve() == folder and not path.is_file():
+                    self._time_store(stats, self.store.forget_profile, profile_id)
+        except Exception as exc:
+            stats.errors += 1
+            stats.error_messages = stats.error_messages + (f"profile ingest error: {_error_summary(exc)}",)
 
     def _scan_predictions(self, stats: WatcherStats) -> None:
         """Ingest every record in ``<config_dir>/prediction-log.jsonl``

@@ -526,9 +526,14 @@ that order, each as a heading with a one-line answer beside it.
    of it), taken from what the others leave (`combinedSaving`). A cheaper
    model prices the fewer tokens earlier summaries leave, so the two
    multiply. An action a Savings lever already counts (`LEVER_RULES`) is
-   left out. An inherited agent-model action's saving joins only while
+   left out. A card you ignored takes out its model row or the lever it is
+   the finding of (`LEVER_CARD`). An inherited agent-model action's saving joins only while
    its card is Worth considering, and only where the model lever has no
-   saving for that agent type (`agentModelItems`): a workflow agent's,
+   saving for that agent type (`agentModelItems`). A lever row a card you
+   ignored takes out does not count as that saving, so the inherited action
+   still joins, but at most at the ignored row's saving: ignoring a card
+   never raises the headline, and an agent type is never counted twice. A
+   workflow agent's,
    which has no lever, is a share of all the spend. The other two
    agent-model cards add nothing. A card at For your information level
    adds nothing either: the headline counts only the changes worth
@@ -820,18 +825,20 @@ detail scrolls) and the one picked.
   actions" and the checks' links (`groupRecommendations` leaves them out
   unless asked), and **Start from my recommendations**. The models and habits checks
   no longer lead with an ignored card. The Overview's
-  available saving comes from the report's tables, so it still counts
-  them.
+  available saving leaves out what an ignored card is the finding of: its
+  model row, or its lever (`ignoredSavings`).
 - **Copy prompt** (with a project picked): one button above the inbox
   copies every to-do card's prompt for that project in one go, under a
   header line per file (`/api/recommendations/prompt`). It leaves out
   ignored cards, cards whose fix has landed (the "fixed" variant),
-  information-only cards, unconfirmed changes and managed settings. The
+  information-only cards, unconfirmed changes, managed settings and the
+  model changes a card says to try first. The
   prompt states the setting changes' closing (show me the diff, restart)
   once, a workflow fix keeps its own diff line, and the
   note beside the button gives the number of open fixes, then how many
   files they edit, plus the fixes that span several files or set a
-  standing rule and the ones that touch no file. If the browser refuses
+  standing rule and the ones that touch no file. When a model change is
+  left out, the note says so. If the browser refuses
   to copy (the Claude Desktop browser pane refuses the Clipboard API, and
   a page served over plain http has none), the copy is tried again
   through a selected text field;

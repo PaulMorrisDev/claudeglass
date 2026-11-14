@@ -114,6 +114,7 @@ from pathlib import Path
 
 from .. import snapshots as snapshots_mod
 from . import roles as roles_mod
+from . import schema as schema_mod
 from .frontmatter import FrontmatterError, parse_frontmatter, patch_frontmatter
 from .schema import SETTINGS_ALLOWLIST, Profile
 
@@ -643,7 +644,20 @@ def plan_apply(
             role_left = tuple(n for n in roles_mod.writers(agent_files) if n not in patchable)
             role_patched = resolved.matched.get("writer", ())
             role_notes = _role_notes(role_patched, role_left, role_label)
+        unusable = roles_mod.unusable_writers(agent_files)
+        if unusable:
+            role_notes = (*role_notes, roles_mod.unusable_writers_note(unusable))
         profile = resolved.profile
+    # Every agent name becomes a path below; one that is not one file name
+    # inside the agents folder is refused before any path is built (a
+    # loaded profile was checked already; this covers one built in code).
+    bad_names = [
+        f"agent {schema_mod.shown_name(name)}: {problem}"
+        for name in sorted(profile.agents)
+        if (problem := schema_mod.agent_name_problem(name)) is not None
+    ]
+    if bad_names:
+        raise ApplyError(bad_names)
     # An agent the profile names whose file is not <agents folder>/<name>.md but
     # is elsewhere under the folder: the user has it, apply cannot patch it.
     left_elsewhere: list[str] = []
@@ -810,6 +824,23 @@ def plan_apply(
                 continue
             if precedence[layer] < target_rank:
                 overridden.append(f"{key}: already set by {_LAYER_LABEL.get(layer, layer)}, which takes precedence")
+        # N6, R2-4: a model's own effort level or window loses to a higher file's flat key.
+        models = settings_changes.get("modelSettings")
+        for own_key in ("effortLevel", "autoCompactWindow"):
+            flat_layer = provenance.get(own_key)
+            if not (
+                isinstance(models, dict)
+                and flat_layer in precedence
+                and flat_layer != target_layer
+                and precedence[flat_layer] < target_rank
+            ):
+                continue
+            for model_id in sorted(models):
+                if isinstance(models[model_id], dict) and own_key in models[model_id]:
+                    overridden.append(
+                        f"modelSettings.{model_id}.{own_key}: {own_key} is set by "
+                        f"{_LAYER_LABEL.get(flat_layer, flat_layer)}, which takes precedence"
+                    )
         env_provenance = snapshot.data.get("effective_env_provenance") if snapshot is not None else None
         if env_changes and isinstance(env_provenance, dict):
             for name in sorted(env_changes):
@@ -960,7 +991,11 @@ def explain_plan(plan: ApplyPlan) -> list[str]:
             where = f"{action.path} ({_SCOPE_WORDS.get(plan.scope, plan.scope)})"
         for change in changes:
             subject = f"{change['key']} for {change['agent']}" if change["agent"] else change["key"]
-            what, tradeoff, caveat = SETTING_TEXT.get(change["key"], ("", "", ""))
+            # modelSettings.<id>.<key> is explained as modelSettings.<key> (fixes.SETTING_TEXT).
+            parts = change["key"].split(".")
+            per_model = parts[0] == "modelSettings" and len(parts) == 3
+            text_key = f"modelSettings.{parts[-1]}" if per_model else change["key"]
+            what, tradeoff, caveat = SETTING_TEXT.get(text_key, ("", "", ""))
             lines.append(f"Change: {subject}")
             if what:
                 lines.append(f"  What it controls: {what}")

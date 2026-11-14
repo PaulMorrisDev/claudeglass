@@ -101,7 +101,10 @@ observed model (the model-swap table's own per-agent-type column) is
 Opus 5.5 or a Fable model: thinking can't be turned down on those
 models, so the lever has nothing to show for itself there (V26).
 
-Any other key says "not estimated" rather than guessing. Changes
+Any other key says "not estimated" rather than guessing. In a
+profile's drawer the estimate prices only what the chosen target
+changes: the rows of its diff, leaving out a key your policy locks or
+one already set to the value. Picking another target redraws it. Changes
 overlap, so a total of several rows is rough. Each profile's detail
 shows the same estimate.
 
@@ -210,8 +213,10 @@ in that project alone. "Set in" names
 the file the change is written to and, when something wins over it, says so
 in the same cell: a project file that sets the key too (only when a project
 is picked, since otherwise the settings are whichever project's were
-recorded last), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or `CLAUDE_CODE_EFFORT_LEVEL`
-being set, or a model with an effort level of its own. Then three ways to use it:
+recorded last), `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_EFFORT_LEVEL`
+or `ANTHROPIC_MODEL` being set, or a model with an effort level of its own.
+A row that sets `effortLevel` for your user settings says Opus 5.5 and later
+ignore it there, and the prompt says the same. Then three ways to use it:
 a prompt that asks Claude to make the changes and show you the diff
 first (`fixes.profile_prompt`), the `claudeglass apply <id>
 --dry-run` command, and a one-session `--launch` trial that changes no
@@ -378,6 +383,13 @@ modelSettings = { "claude-opus-5-5" = { "effortLevel" = "medium", "autoCompactWi
 
 ### `agents.<name>` (per-agent frontmatter overrides)
 
+`<name>` is the agent's name as Claude Code knows it. It holds only
+letters, digits, single dots, underscores and hyphens, starts with a
+letter or digit, and has at most 128 characters. Any other name is
+refused, so the name is always one file in the agents folder and one word
+in a prompt. A plugin's agent (`my-plugin:reviewer`) is refused: it has no
+file in your agents folders.
+
 | Key | Type | Allowed values | Doc reference |
 |---|---|---|---|
 | `model` | string | any | `docs/config-layers.md#effective_agents` |
@@ -426,6 +438,9 @@ goes to. An agent is a writer when both hold:
   `NotebookEdit`. A tools line that is not known (no line, cut off, or no
   config snapshot) counts as every tool.
 
+An agent whose name breaks that rule is never a writer. It is left out and
+counted, never named, in the drawer and in `apply`'s output.
+
 `roles.resolve(profile, agents)` copies the role's keys onto every writer
 it finds. An agent the profile also names in `[agents.<name>]` keeps its
 own value for any key it sets (explicit wins, key by key). A role that
@@ -438,9 +453,12 @@ Where the agents come from:
 - **Dashboard** (`GET /api/profiles/<id>/diff`): the agents the latest
   config snapshot recorded, those from `~/.claude/agents` for the user
   target and those from the project's `.claude/agents` for either project
-  target. `GET /api/profiles/<id>` (the card, the estimate, "Start from")
-  reads both together, returns `agents` as resolved and `roles` as
-  written, and counts only the resolved keys. When no snapshot has
+  target. `GET /api/profiles/<id>` (the card) reads both together,
+  returns `agents` as resolved, `own_agents` and `roles` as written, and
+  counts only the resolved keys. "Start from" copies `own_agents` and
+  `roles`, so the copy resolves its role wherever it is used, like the
+  original. The estimate follows the drawer's target (see the diff
+  route). When no snapshot has
   recorded the user's agents, the role's keys are left out and the drawer
   says the agents have not been recorded yet. At a project target the
   drawer reads the picked project's own agents; with no project picked it

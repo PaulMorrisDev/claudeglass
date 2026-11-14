@@ -721,6 +721,17 @@ def test_a_rerun_of_a_brief_on_a_higher_tier_is_a_retry_for_the_model_even_far_b
         assert record["agent"].split().count("retry=model") == 1 and "retry=brief" not in record["agent"]
 
 
+def test_a_rerun_on_mythos_after_sonnet_is_a_retry_for_the_model_and_after_fable_is_not():
+    """Mythos is priced as Fable, so the hook ranks it as Fable (workstyle._SAME_TIER_AS)."""
+    tiers = tuple(CATALOGUE["judge"]["agent"]["model_tiers"])
+    assert HOOK._model_tier("claude-mythos-5-2", tiers) == HOOK._model_tier("claude-fable-5-2", tiers) == 3
+    earlier_sonnet = [{"brief": "do x", "model": "claude-sonnet-5-5"}]
+    assert HOOK._derived_retry("do x", "claude-mythos-5-2", earlier_sonnet, tiers) is True
+    # The same tier is not a step up.
+    earlier_fable = [{"brief": "do x", "model": "claude-fable-5-2"}]
+    assert HOOK._derived_retry("do x", "claude-mythos-5-2", earlier_fable, tiers) is False
+
+
 @pytest.mark.parametrize("first, again, same_brief", [
     ("claude-sonnet-5", "claude-sonnet-5", True),   # the same tier again is not a step up
     ("claude-opus-4-7", "claude-sonnet-5", True),   # a lower tier is not either
@@ -1695,7 +1706,8 @@ def test_capture_tagger_asks_first_and_says_what_it_sends(claude_dir):
 
 
 def test_capture_status_says_what_haiku_did(claude_dir):
-    set_capture(claude_dir, level="essentials", tagger="haiku", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    # No end, so capture still runs whatever the clock says: what an ended capture shows is tested apart.
+    set_capture(claude_dir, level="essentials", tagger="haiku", until="", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
     rc, out = _capture(claude_dir, "status")
     assert "tags by Haiku" in out and "hasn't tagged a turn yet" in out
     assert f"a Claude Haiku call of about ${cat.JUDGE_USD_PER_CALL:.4f} after each of your messages" in out
@@ -2405,7 +2417,7 @@ def test_a_fallback_tag_lands_on_the_untagged_reply_and_never_over_claudes_own(t
 
 
 def test_capture_status_says_what_haiku_filled_in_while_claude_writes_the_tags(claude_dir):
-    set_capture(claude_dir, level="essentials", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    set_capture(claude_dir, level="essentials", until="", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
     rc, out = _capture(claude_dir, "status")
     assert "Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one." in out
     assert "tags by Haiku" not in out

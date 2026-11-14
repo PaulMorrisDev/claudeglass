@@ -89,7 +89,8 @@ def test_a_custom_agent_with_a_tools_line_gets_a_card_that_leaves_tools_out(buil
     line = reviewer[0].changes[0].value
     assert "Read" in line and "Grep" in line and "NotebookEdit" not in line, line
     rows = {row["agent_type"]: row for row in agreement.tables_of(inp.model)["agent_startup_diet"]}
-    assert "Bash" in rows["reviewer"]["rare_tools"] and "Edit" in rows["reviewer"]["keep_tools"]
+    assert "Bash" in rows["reviewer"]["keep_tools"] and "Bash" in rows["reviewer"]["rule_kept_tools"]
+    assert "Edit" in rows["reviewer"]["keep_tools"]
     # A second agent whose tools line is a list with one MCP tool in it, which it calls: the
     # card writes the tool as the file has it.
     implementer = [r for r in _cards(inp, "spawn-tools-list") if r.agent_type == "claude-implementer"]
@@ -272,3 +273,14 @@ def test_the_denied_profile_has_an_agent_whose_file_withholds_a_tool_its_spawns_
     for name in NAMES:
         if name != "denied":
             assert not any("disallowedTools" in entry for entry in built(name)[1].agents.values()), name
+
+
+
+def test_check_1_reads_the_tools_a_why_says_stay():
+    # N3: check 1 holds every tool the why says stays to the suggested line.
+    import agreement
+    from types import SimpleNamespace as NS
+
+    assert agreement._why_stays(NS(why="In 20 spawns ... each start: x. Bash and Edit stay too because some of its runs called them.")) == ["Bash", "Edit"]
+    assert agreement._why_stays(NS(why="In 20 spawns ... each start: x. Bash stays too because workflow agents called it.")) == ["Bash"]
+    assert agreement._why_stays(NS(why="No such sentence.")) == []

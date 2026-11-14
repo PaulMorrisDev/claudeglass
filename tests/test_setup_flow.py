@@ -208,7 +208,7 @@ def test_connecting_adds_the_stop_entry_and_the_plan_matcher_when_coaching_notes
     assert sorted(hooked) == sorted([
         ("UserPromptSubmit", "", False),
         ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
-        ("SubagentStop", "", False),
+        *([] if "split_run" in cat.LIVE_OFF_HINTS else [("SubagentStop", "", False)]),
         ("Stop", "", True),
     ])
     assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in hooked)["PostToolUse"]

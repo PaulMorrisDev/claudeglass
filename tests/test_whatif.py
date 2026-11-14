@@ -165,7 +165,8 @@ def _swap_model(columns: dict, model_ids: dict | None = None):
 
 def test_an_alias_prices_at_the_column_the_rate_card_names():
     # "best" names no column itself; the rate card's alias table puts it
-    # on Fable 5.1, as it does "sonnet[1m]" on Sonnet 5.5.
+    # on whichever row it names (here a fixture's own table), as it does
+    # "sonnet[1m]" on Sonnet 5.5.
     columns = {"cost_claude-fable-5-1": 70.0, "cost_claude-sonnet-5-5": 30.0, "cost_claude-sonnet-5": 25.0}
     model = _swap_model(columns, {"best": "claude-fable-5-1", "sonnet[1m]": "claude-sonnet-5-5"})
     [best] = whatif.estimate({"model": "best"}, {}, model, UNITS, period=PERIOD)["rows"]
@@ -312,6 +313,13 @@ def test_whatif_does_not_estimate_model_settings():
     # beside another setting it still gets its own row
     rows = _estimate({"modelSettings": value, "fastMode": False})["rows"]
     assert [r["key"] for r in rows] == ["modelSettings", "fastMode"]
+
+
+def test_a_per_model_effort_level_is_estimated_like_the_flat_one():
+    # The thinking goal's main-session change gives the same basis as effortLevel.
+    flat = _estimate({"effortLevel": "medium"})["rows"][0]
+    [row] = _estimate({"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})["rows"]
+    assert row["basis"] == flat["basis"] and row["fidelity"] == "none" and row["saving_usd"] is None
 
 
 def test_fast_mode_on_is_not_simulated():

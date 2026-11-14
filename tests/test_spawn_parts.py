@@ -175,7 +175,7 @@ def test_large_claude_md_on_a_custom_agent_suggests_omit_claude_md():
     # The rules the agent needs are moved into its own prompt before the
     # flag is set; the command, which only sets the flag, says so.
     prompt = rec.fixes[0]["prompt"]
-    assert prompt.index("List the rules reviewer needs") < prompt.index("set omitClaudeMd to true")
+    assert prompt.index('List the rules "reviewer" needs') < prompt.index("set omitClaudeMd to true")
     assert "~/.claude/agents/reviewer.md" in prompt
     assert "only sets the flag" in rec.fixes[0]["command_warning"]
     # The generic spawn-cost advice is not repeated for a covered agent type.
@@ -282,13 +282,36 @@ def test_tools_list_keeps_the_tools_called_in_at_least_a_tenth_of_the_spawns():
 
 
 def test_a_tool_called_in_under_a_tenth_of_the_spawns_is_left_off_the_list():
-    # Bash in 1 of 20 is 5%: below the tenth, so it is listed as rarely used.
-    acc = _diet_acc("searcher", uses={"Read": 20, "Grep": 20, "Bash": 1})
+    # WebFetch in 1 of 20 is 5%: below the tenth, so it is listed as rarely used.
+    acc = _diet_acc("searcher", uses={"Read": 20, "Grep": 20, "WebFetch": 1})
     recs = _recs(_report(acc), snapshot=_snapshot({"searcher": {"source": "user"}}), units=Units())
     rec = _tools_rec(recs, "searcher")
     assert rec.changes[0].value == ["Grep", "Read"]
-    assert "Rarely used, so left out" in rec.action and "Bash" in rec.action.split("Rarely used")[1]
+    assert "Rarely used, so left out" in rec.action and "WebFetch" in rec.action.split("Rarely used")[1]
     assert "fewer than 10%" in rec.action
+
+
+def test_a_named_agent_keeps_the_tools_that_write_or_run_commands_once_any_run_called_them():
+    # The named agent writes code: Edit, Write and Bash were called by runs on another model than the one the
+    # card is measured on, or by one run in twenty on it. Taking them off its line would break its job.
+    chars = {"Read": 1500, "Grep": 1200, "Edit": 9000, "Write": 9000, "Bash": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+    snap = _snapshot({"implementer": {"source": "project"}})
+
+    def card(uses, other=None):
+        acc = _diet_acc("implementer", spawns=20, uses=uses, chars=chars)
+        if other:
+            acc.tool_uses["claude-sonnet-5"] = other
+        return _tools_rec(_recs(_report(acc), snapshot=snap, units=Units()), "implementer")
+
+    rec = card({"Read": 20, "Grep": 20}, other={"Edit": 6, "Write": 3, "Bash": 6})
+    assert rec.changes[0].value == ["Bash", "Edit", "Grep", "Read", "Write"]
+    assert rec.why.endswith("Bash, Edit and Write stay too because some of implementer's runs called them.")
+    assert rec.saving_usd == pytest.approx(0.81)
+    rec = card({"Read": 20, "Grep": 20, "Edit": 1, "Bash": 1})
+    assert rec.changes[0].value == ["Bash", "Edit", "Grep", "Read"]
+    assert "Write" in rec.action.split("Rarely used")[1]
+    assert rec.why.endswith("Bash and Edit stay too because some of implementer's runs called them.")
+    assert rec.saving_usd == pytest.approx(1.1138, abs=1e-4)
 
 
 def test_the_card_notes_the_tools_claude_code_adds_and_asks_for_a_before_and_after_check():
@@ -393,7 +416,7 @@ def test_the_tools_list_card_is_priced_on_the_model_that_recorded_tools_not_the_
     assert rec.saving_usd == pytest.approx(row["saving_usd"])
 
 
-def test_workflow_tools_that_write_or_run_commands_are_never_rare_once_any_spawn_called_them():
+def test_tools_that_write_or_run_commands_are_never_rare_once_any_run_called_them():
     # Edit and PowerShell are offered to every spawn and each was called by
     # one spawn on another model than the one the card is measured on (and by
     # none on it), so the measured family alone would call them rare.
@@ -413,9 +436,10 @@ def test_workflow_tools_that_write_or_run_commands_are_never_rare_once_any_spawn
     assert row["keep_tools"] == "Edit, Grep, PowerShell, Read"
     # The saving comes from the final keep list, so it only goes down.
     assert 0 < row["saving_usd"] < plain["saving_usd"]
-    # Any other agent type is measured as before.
+    # Any other agent type keeps them too.
     other = card("searcher", other_family=True)
-    assert {"Edit", "PowerShell"} <= set(other["rare_tools"].split(", "))
+    assert other["keep_tools"] == "Edit, Grep, PowerShell, Read"
+    assert {"Edit", "PowerShell"}.isdisjoint(other["rare_tools"].split(", "))
 
 
 def test_the_why_counts_the_tools_that_cleared_the_bar_not_the_ones_a_rule_added():
@@ -1518,3 +1542,35 @@ def test_a_tool_the_deny_line_withholds_is_not_said_to_be_missing_from_the_tools
     _recs_mixed, card = _tools_card_for(line=["Read", "Skill", "WebFetch", "NotebookEdit"], denied="Bash")
     assert " Bash is on its disallowedTools line, so it isn't added." in card.action
     assert " Grep isn't on its tools line, so it isn't added." in card.action
+
+
+def test_a_plugin_agents_tools_card_is_information_only():
+    acc = _diet_acc("pr-review-toolkit:code-reviewer", spawns=20, uses={"Read": 20, "Grep": 20})
+    recs = _recs(_report(acc), snapshot=_snapshot({}), units=Units())
+    rec = _tools_rec(recs, "pr-review-toolkit:code-reviewer")
+    assert rec.severity == "info" and rec.changes == [] and rec.fixes == []
+    assert fixes.project_prompt([rec])["left_out"]["info"] == 1
+
+
+
+# -- N3: the why names only run-called tools that are on the line --------------
+
+_N3_CHARS = {"Read": 1500, "Grep": 1200, "Edit": 9000, "Write": 9000, "Bash": 9000, "NotebookEdit": 16000, "WebFetch": 8000}
+
+
+def _n3_card(entry, uses, other):
+    acc = _diet_acc("implementer", spawns=20, uses=uses, chars=_N3_CHARS)
+    acc.tool_uses["claude-sonnet-5"] = other
+    return _tools_rec(_recs(_report(acc), snapshot=_snapshot({"implementer": {"source": "project", **entry}})), "implementer")
+
+
+def test_the_why_does_not_say_a_tool_stays_when_the_agents_tools_line_lacks_it():
+    rec = _n3_card({"tools": ["Read", "Grep", "Bash", "NotebookEdit", "WebFetch"]}, {"Read": 20, "Grep": 20}, {"Edit": 6, "Bash": 6})
+    assert "Edit isn't on its tools line, so it isn't added." in rec.action
+    assert rec.why.endswith("Bash stays too because some of implementer's runs called it.")
+
+
+def test_the_why_does_not_say_a_tool_stays_when_the_deny_line_withholds_it():
+    rec = _n3_card({"disallowedTools": ["Bash"]}, {"Read": 20, "Grep": 20, "Edit": 8}, {"Bash": 4})
+    assert "Bash is on its disallowedTools line, so it isn't added." in rec.action
+    assert "stays too" not in rec.why and "stay too" not in rec.why

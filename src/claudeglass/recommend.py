@@ -180,9 +180,11 @@ from .snapshots import (
     cut_off_name,
     effective_config,
     effective_provenance,
+    for_view,
     list_text,
     managed_keys,
     split_tool_line,
+    view_spans_projects,
 )
 from .units import NO_LIMIT_SHARE_HINT, Units
 
@@ -2126,6 +2128,9 @@ def _tools_list_card(
     # a tool a known line lacks did.
     rule_kept = _split_names(row.get("rule_kept_tools"))
     cleared = [name for name in _split_names(row["keep_tools"]) if name not in rule_kept]
+    # N3: the why names only the run-called tools that are on the line; one the
+    # agent's own tools or disallowedTools line keeps off is in the action instead.
+    rule_kept = [name for name in rule_kept if name in on_line]
     why = (
         f"In {measured} spawns, {agent_type} called {len(cleared)} of the tools it was offered in at least "
         f"{pct}% of them. Leaving out the rest takes about {dropped:,.0f} tokens out of each start: "
@@ -2133,7 +2138,8 @@ def _tools_list_card(
     )
     if rule_kept:
         one = len(rule_kept) == 1
-        why += f" {_join_names(rule_kept)} {'stays' if one else 'stay'} too because workflow agents called {'it' if one else 'them'}."
+        who = "workflow agents" if workflow else f"some of {agent_type}'s runs"
+        why += f" {_join_names(rule_kept)} {'stays' if one else 'stay'} too because {who} called {'it' if one else 'them'}."
     evidence = [_evidence("Spawns with tools recorded", measured, "agent_startup", "agent_startup_diet", agent_type)]
     definitions = diet.get("dropped_definitions")
     if _is_number(definitions):
@@ -3223,6 +3229,9 @@ def recommend(
 
     if not _meets_min_sample(report, th):
         return []
+    # The view rule (snapshots.view_settings): every rule's scope and "now"
+    # reads the file that decides, never one project's in a view of several.
+    snapshot = for_view(snapshot, view_spans_projects(report))
 
     # v4 wiring round: each of these four modules carries its own RULES
     # (and its own from_config-built thresholds) rather than a native

@@ -1419,3 +1419,101 @@ def test_map_settings_merge_by_name_and_revert_cleanly(tmp_path):
     assert data["enabledPlugins"] == {"a@m": True, "b@m": False}
     apply_mod.revert(result.ts, config_dir=config_dir)
     assert settings_path.read_bytes() == original
+
+
+def test_plan_apply_refuses_an_agent_name_nothing_checked(tmp_path):
+    from claudeglass.profiles.schema import Profile
+
+    rule = (
+        "an agent name holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters"
+    )
+    root = tmp_path / "root"
+    (root / "agents").mkdir(parents=True)
+    with pytest.raises(apply_mod.ApplyError) as raised:
+        apply_mod.plan_apply(
+            Profile(id="x", agents={"../x": {"model": "sonnet"}}),
+            scope="user",
+            project_path=None,
+            config_dir=tmp_path / "cfg",
+            claude_root=root,
+        )
+    assert raised.value.reasons == [f"agent '../x': {rule}"]
+
+
+def test_apply_leaves_out_a_writer_file_with_an_unusable_name(tmp_path):
+    from claudeglass.profiles import catalogue
+
+    root = tmp_path / "root"
+    (root / "agents").mkdir(parents=True)
+    (root / "agents" / "fixer x.md").write_text("---\nname: fixer x\ntools: Read, Edit\n---\n", encoding="utf-8")
+    plan = apply_mod.plan_apply(
+        catalogue.get("implementation-heavy"),
+        scope="user",
+        project_path=None,
+        config_dir=tmp_path / "cfg",
+        claude_root=root,
+    )
+    assert not [a for a in plan.actions if a.kind == "agent_frontmatter"]
+    assert (
+        "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
+        "A name ClaudeGlass can use holds only letters, digits, single dots, underscores and hyphens, "
+        "starts with a letter or digit, and is at most 128 characters. Rename it to include it."
+    ) in plan.role_notes
+
+
+def test_a_per_model_effort_level_merges_and_is_explained_like_the_flat_one(tmp_path):
+    # The thinking goal's main-session change, applied over a file that already has modelSettings.
+    from claudeglass.fixes import SETTING_TEXT
+
+    claude_root = tmp_path / ".claude"
+    claude_root.mkdir()
+    (claude_root / "settings.json").write_text(json.dumps({"modelSettings": {
+        "claude-opus-5-5": {"autoCompactWindow": 500000}, "claude-fable-5-2": {"effortLevel": "high"}}}), encoding="utf-8")
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    plan = apply_mod.plan_apply(
+        profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass", claude_root=claude_root,
+    )
+    action = next(a for a in plan.actions if a.kind == "settings")
+    assert json.loads(action.new_bytes)["modelSettings"] == {
+        "claude-opus-5-5": {"autoCompactWindow": 500000, "effortLevel": "medium"}, "claude-fable-5-2": {"effortLevel": "high"}}
+    lines = apply_mod.explain_plan(plan)
+    assert "Change: modelSettings.claude-opus-5-5.effortLevel" in lines
+    assert f"  What it controls: {SETTING_TEXT['modelSettings.effortLevel'][0]}" in lines
+    assert any(line.startswith("  Trade-off: Lower effort can miss things") for line in lines)
+
+
+def test_the_apply_preview_says_a_project_files_flat_effort_beats_a_models_own_level(tmp_path):
+    # N6: within a file a model's own level wins; across files the higher file's flat level does.
+    claude_root = tmp_path / ".claude"
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    snap = _snapshot(effective={"effortLevel": "high"}, effective_provenance={"effortLevel": "project_shared"})
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass",
+                                claude_root=claude_root, snapshot=snap)
+    assert plan.overridden == (
+        "modelSettings.claude-opus-5-5.effortLevel: effortLevel is set by this project's shared settings "
+        "(.claude/settings.json), which takes precedence",
+    )
+    same_file = apply_mod.plan_apply(profile, scope="repo", project_path=project, config_dir=claude_root / "claudeglass",
+                                     claude_root=claude_root, snapshot=snap)
+    assert same_file.overridden == ()
+
+
+def test_the_apply_preview_says_a_project_files_flat_window_beats_a_models_own_window(tmp_path):
+    # R2-4: within a file a model's own window wins; across files the higher file's flat window does.
+    claude_root = tmp_path / ".claude"
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    snap = _snapshot(effective={"autoCompactWindow": 400000}, effective_provenance={"autoCompactWindow": "project_shared"})
+    profile = _profile(settings={"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}}})
+    plan = apply_mod.plan_apply(profile, scope="user", project_path=None, config_dir=claude_root / "claudeglass",
+                                claude_root=claude_root, snapshot=snap)
+    assert plan.overridden == (
+        "modelSettings.claude-opus-5-5.autoCompactWindow: autoCompactWindow is set by this project's shared settings "
+        "(.claude/settings.json), which takes precedence",
+    )
+    same_file = apply_mod.plan_apply(profile, scope="repo", project_path=project, config_dir=claude_root / "claudeglass",
+                                     claude_root=claude_root, snapshot=snap)
+    assert same_file.overridden == ()

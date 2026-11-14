@@ -2126,3 +2126,105 @@ def test_a_tick_prunes_card_marks_past_the_signal_retention(tmp_path: Path, stor
 
     assert stats.errors == 0
     assert [r["card_key"] for r in store.card_marks()] == ["today"]
+
+
+def test_a_deleted_profile_file_leaves_no_row(tmp_path, store):
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "keep.toml").write_text('id = "keep"\n', encoding="utf-8")
+    (folder / "gone.toml").write_text('id = "gone"\n', encoding="utf-8")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["gone", "keep"]
+    (folder / "gone.toml").unlink()
+    stats = watcher.run_once()
+    assert stats.errors == 0
+    assert [p["id"] for p in store.profiles()] == ["keep"]
+
+
+def test_deleting_the_whole_profiles_folder_leaves_no_row(tmp_path, store):
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "keep.toml").write_text('id = "keep"\n', encoding="utf-8")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["keep"]
+    (folder / "keep.toml").unlink()
+    folder.rmdir()
+    stats = watcher.run_once()
+    assert stats.errors == 0
+    assert store.profiles() == []
+
+
+def test_a_row_whose_file_is_elsewhere_is_kept(tmp_path, store):
+    """A fixture row (or a store moved between config folders) is never the watcher's to drop."""
+    options = _options(tmp_path)
+    (options.config_dir / "profiles").mkdir(parents=True, exist_ok=True)
+    store.upsert_profile(profile_id="p1", name="p1", toml_path=str(tmp_path / "elsewhere" / "p1.toml"))
+    FileWatcher(store, options).run_once()
+    assert [p["id"] for p in store.profiles()] == ["p1"]
+
+
+def test_a_row_stored_under_a_relative_config_folder_is_dropped_by_the_absolute_one(tmp_path, store, monkeypatch):
+    """The prune compares resolved folders: a row stored while the service ran with a relative --config-dir
+    is dropped once its file is deleted and the service runs with the absolute one. What is stored stays as
+    it was written."""
+    monkeypatch.chdir(tmp_path)
+    relative = Path("cfg")
+    folder = relative / "profiles"
+    folder.mkdir(parents=True)
+    (folder / "gone.toml").write_text('id = "gone"\n', encoding="utf-8")
+    FileWatcher(store, _options(tmp_path, config_dir=relative)).run_once()
+    assert [p["id"] for p in store.profiles()] == ["gone"]
+    assert not Path(store.profile_files()["gone"]).is_absolute()
+    (folder / "gone.toml").unlink()
+    stats = FileWatcher(store, _options(tmp_path, config_dir=(tmp_path / "cfg").resolve())).run_once()
+    assert stats.errors == 0
+    assert store.profiles() == []
+
+
+def test_a_row_stored_under_the_absolute_config_folder_is_dropped_by_the_relative_one(tmp_path, store, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    folder = tmp_path / "cfg" / "profiles"
+    folder.mkdir(parents=True)
+    (folder / "gone.toml").write_text('id = "gone"\n', encoding="utf-8")
+    FileWatcher(store, _options(tmp_path, config_dir=tmp_path / "cfg")).run_once()
+    assert [p["id"] for p in store.profiles()] == ["gone"]
+    (folder / "gone.toml").unlink()
+    stats = FileWatcher(store, _options(tmp_path, config_dir=Path("cfg"))).run_once()
+    assert stats.errors == 0
+    assert store.profiles() == []
+
+
+def test_a_row_whose_relative_path_resolves_to_another_folder_is_kept(tmp_path, store, monkeypatch):
+    """The same relative path means another file from another folder: that row is not this scan's to drop."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cfg" / "profiles").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    store.upsert_profile(profile_id="p1", name="p1", toml_path=str(Path("other") / "p1.toml"))
+    FileWatcher(store, _options(tmp_path, config_dir=Path("cfg"))).run_once()
+    assert [p["id"] for p in store.profiles()] == ["p1"]
+
+
+def test_a_linked_profile_file_whose_target_is_deleted_leaves_no_row(tmp_path, store):
+    """A dotfiles manager links the file in: the folder is compared, the link is not followed."""
+    options = _options(tmp_path)
+    folder = options.config_dir / "profiles"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "dotfiles" / "linked.toml"
+    target.parent.mkdir()
+    target.write_text('id = "linked"\n', encoding="utf-8")
+    try:
+        (folder / "linked.toml").symlink_to(target)
+    except OSError:
+        pytest.skip("this machine does not let the test make a symbolic link")
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+    assert [p["id"] for p in store.profiles()] == ["linked"]
+    target.unlink()
+    # The dangling link is no file: it is not read, so no scan counts an error for it.
+    stats = watcher.run_once()
+    assert store.profiles() == []
+    assert stats.errors == 0

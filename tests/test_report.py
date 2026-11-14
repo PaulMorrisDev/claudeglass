@@ -2254,3 +2254,111 @@ def test_g3s_guard_never_meets_a_priced_main_session(tmp_path):
         priced += counted
         assert not (counted and model_swap.at_main_floor(reading["value"])), name
     assert priced == 8 + 5
+
+
+def test_a_mythos_main_session_gets_the_main_model_card(tmp_path):
+    """Mythos is on the rate card at Fable's prices, so it ranks with Fable
+    and a Mythos main session is offered Opus, as one on Fable is."""
+    folder = "C--Dev-alpha"
+    _main_sessions(tmp_path, folder, _days("claude-mythos-5-2", range(0, 8)))
+    config_dir = tmp_path / "tl"
+    _r11_snapshots(config_dir, folder, ("20260930T090000Z", "claude-mythos-5-2", "user"))
+    corpus = load_corpus([tmp_path / "projects" / folder], since="2000-01-01")
+    report = build_report(
+        corpus, PRICING, Config(), projects=(folder,), window="w", snapshots=load_snapshots(config_dir),
+        config_dir=config_dir,
+    )
+    (card,) = [r for r in report.recommendations if r.id == "model-tier-main"]
+    assert card.title == "Your main session could run on Opus"
+    assert [(c.current, c.value, c.scope) for c in card.changes] == [("claude-mythos-5-2", "opus", "user")]
+    assert card.saving_usd == pytest.approx(9.664, abs=1e-3)
+    assert "ran on Mythos 5.2" in card.why
+    swap = next(s for s in report.sections if s.key == "model_swap")
+    table = next(t for t in swap.tables if t.name == "model_swap_by_agent_type")
+    keys = [c.key for c in table.columns]
+    top = next(dict(zip(keys, row)) for row in table.rows if row[keys.index("agent_type")] == "top-level")
+    assert top["best_cheaper_alternative_model"] == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize("field", ["env_names", "effective_env_names"])
+def test_the_main_card_offers_no_setting_while_anthropic_model_is_set(tmp_path, field):
+    """ANTHROPIC_MODEL wins over the model setting from any file, so the card keeps its /model trial and
+    offers no change or command; without the variable it offers the setting as before."""
+    from test_change_points import _snapshot
+
+    folder = "C--Dev-alpha"
+
+    def card(env_names):
+        root = tmp_path / ("with" if env_names else "without")
+        _main_sessions(root, folder, _days(_R11_OPUS, range(0, 8)))
+        config_dir = root / "tl"
+        sections = {"user_settings": {"model": "opus"}}
+        if env_names:
+            sections[field] = env_names
+        _snapshot(config_dir, "20260930T090000Z", {"model": "opus"}, {"model": "user"},
+                  slug=snapshot_project_key(folder), **sections)
+        corpus = load_corpus([root / "projects" / folder], since="2000-01-01")
+        report = build_report(
+            corpus, PRICING, Config(), projects=(folder,), window="w", snapshots=load_snapshots(config_dir),
+            config_dir=config_dir,
+        )
+        (found,) = [r for r in report.recommendations if r.id == "model-tier-main"]
+        return found
+
+    plain = card([])
+    assert plain.changes[0].value == "sonnet"
+    set_card = card(["ANTHROPIC_MODEL"])
+    assert set_card.changes == []
+    assert all(fix["command"] is None for fix in set_card.fixes)
+    assert set_card.action == (
+        "Try Sonnet for a session or two of routine work (/model sonnet) and compare the results before making "
+        "it your default. ANTHROPIC_MODEL is set, and it wins over your model setting. To keep a model, change "
+        "the variable where you set it: your shell profile or a settings file's env block."
+    )
+    assert set_card.saving_usd == plain.saving_usd
+
+
+# -- N5: while ANTHROPIC_MODEL is set, no session is a pick against the setting --
+
+
+def test_no_main_session_is_a_pick_while_the_model_variable_is_set(tmp_path):
+    from test_change_points import _snapshot
+
+    _main_sessions(tmp_path, "C--Dev-alpha", _opus_days(6))
+    _snapshot(tmp_path / "tl", "20260930T090000Z", {"model": "sonnet"}, {"model": "user"},
+              slug=snapshot_project_key("C--Dev-alpha"), user_settings={"model": "sonnet"}, env_names=["ANTHROPIC_MODEL"])
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], tmp_path / "tl")
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [None] * 6
+    stats = model_swap.compute_model_swap(sessions["C--Dev-alpha"], PRICING, main_lever=lever)
+    assert stats.by_key["top-level"].picked_runs == 0
+    # The same setting without the variable: every Opus session was picked against it.
+    plain = tmp_path / "tl2"
+    _snapshot(plain, "20260930T090000Z", {"model": "sonnet"}, {"model": "user"},
+              slug=snapshot_project_key("C--Dev-alpha"), user_settings={"model": "sonnet"})
+    _corpus, _keys, lever, sessions = _r11_lever(tmp_path, ["C--Dev-alpha"], plain)
+    assert [lever(tr) for tr in sessions["C--Dev-alpha"]] == [model_swap.PICKED] * 6
+
+
+# -- R3-VIEW-RULE: the report tells the settings builder what its view covers -----------------------
+
+
+def test_the_report_tells_the_settings_builder_when_its_view_covers_several_projects(tmp_path, monkeypatch):
+    from claudeglass import snapshots as snapshots_mod
+
+    seen = []
+    real = snapshots_mod.with_every_project_agents
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("several_projects"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(snapshots_mod, "with_every_project_agents", spy)
+    for folder in ("C--Dev-alpha", "C--Dev-beta"):
+        _main_sessions(tmp_path, folder, _days(_R11_OPUS, range(0, 3)))
+    config_dir = tmp_path / "tl"
+    # Snapshots of one project only: they do not span projects, the view does.
+    _r11_snapshots(config_dir, "C--Dev-alpha", ("20260930T090000Z", "opus", "user"))
+    corpus = load_corpus([tmp_path / "projects" / f for f in ("C--Dev-alpha", "C--Dev-beta")], since="2000-01-01")
+    build_report(corpus, PRICING, Config(), projects=("C--Dev-alpha", "C--Dev-beta"), window="w",
+                 snapshots=load_snapshots(config_dir), config_dir=config_dir)
+    assert True in seen

@@ -621,7 +621,7 @@ def test_model_ids_meta_maps_every_alias_to_its_canonical_id():
     assert meta["sonnet"] == "claude-sonnet-5-5"
     assert meta["sonnet[1m]"] == "claude-sonnet-5-5"
     assert meta["opus"] == "claude-opus-5-5"
-    assert meta["best"] == "claude-fable-5-2"
+    assert meta["best"] == "claude-opus-5-5"
     assert meta["claude-haiku-4-5"] == "claude-haiku-4-5-20251001"
 
 
@@ -1409,6 +1409,7 @@ def test_model_name_reads_an_id_as_people_say_it():
     assert model_name("claude-opus-5[1m]") == "Opus 5 [1m]"
     assert model_name("gpt-4") == "gpt-4"
     assert model_names_in("claude-sonnet-5 (+2 more), not claudeglass") == "Sonnet 5 (+2 more), not claudeglass"
+    assert model_names_in("claude-mythos-5-2") == "Mythos 5.2"
 
 
 # --------------------------------------------------------------------
@@ -1551,14 +1552,18 @@ def test_a_5_2_row_has_fast_mode_at_twice_standard_a_us_uplift_and_a_1m_window(m
     assert fast.total == pytest.approx(standard.total * 2.0)
 
 
-def test_the_fable_and_mythos_aliases_moved_to_the_5_2_rows_and_5_1_keeps_none():
+def test_the_fable_and_mythos_aliases_moved_to_the_5_2_rows_5_1_keeps_none_and_best_is_opus():
     # As Opus 5.5 took "opus" from Opus 5 and Sonnet 5.5 took "sonnet" from
-    # Sonnet 5, Fable 5.2 takes "fable", "fable[1m]" and "best" from 5.1.
+    # Sonnet 5, Fable 5.2 takes "fable" and "fable[1m]" from 5.1; "best" is
+    # the same model as "opus" (model-config docs).
     pricing = load_pricing()
-    for alias in ("fable", "fable[1m]", "best"):
+    for alias in ("fable", "fable[1m]"):
         resolved = pricing.resolve_model(alias)
         assert resolved is not None
         assert (resolved.canonical_id, resolved.matched_via) == ("claude-fable-5-2", "alias"), alias
+    best = pricing.resolve_model("best")
+    assert best is not None
+    assert (best.canonical_id, best.matched_via) == ("claude-opus-5-5", "alias")
     assert "claude-fable-5-1" not in pricing.aliases.values()
     assert "claude-mythos-5-2" not in pricing.aliases.values()
     assert "claude-mythos-5-1" not in pricing.aliases.values()

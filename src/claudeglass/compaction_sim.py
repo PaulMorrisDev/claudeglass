@@ -1419,7 +1419,8 @@ def _scope_and_lever_note(snapshot: Snapshot | None) -> tuple[str, str]:
     Since ``autoCompactWindow`` is always a plain settings key, this
     module instead reads which of the four real settings layers
     (``snapshots.SETTINGS_LAYER_NAMES``) actually set the effective
-    value, and reports "user" or "project" per the brief's convention
+    value, and reports "user", "project" (the shared file) or
+    "project-local" (the local one, so its change goes there) per the brief's convention
     (with "managed" doing what it always does everywhere else: named,
     not offered as user-actionable).
 
@@ -1437,7 +1438,7 @@ def _scope_and_lever_note(snapshot: Snapshot | None) -> tuple[str, str]:
         if layer == "project_shared":
             return "project", "the env block of <project>/.claude/settings.json"
         if layer == "project_local":
-            return "project", "the env block of <project>/.claude/settings.local.json"
+            return "project-local", "the env block of <project>/.claude/settings.local.json"
         return "user", "the env block of ~/.claude/settings.json"
     keys = set(managed_keys(snapshot))
     if "autoCompactWindow" in keys:
@@ -1446,7 +1447,7 @@ def _scope_and_lever_note(snapshot: Snapshot | None) -> tuple[str, str]:
     if layer == "project_shared":
         return "project", "<project>/.claude/settings.json"
     if layer == "project_local":
-        return "project", "<project>/.claude/settings.local.json"
+        return "project-local", "<project>/.claude/settings.local.json"
     return "user", "~/.claude/settings.json"
 
 

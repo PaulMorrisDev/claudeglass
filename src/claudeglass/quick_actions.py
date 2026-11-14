@@ -22,10 +22,11 @@ from typing import Callable
 
 from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
-from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note
+from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, already_set, build_fix, build_fixes, fix_note, plugin_of, window_change_note
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE, current_diet
+from .snapshots import MODEL_ENV, view_settings, view_spans_projects
 from .units import Units
 
 TOP = whatif.TOP
@@ -64,6 +65,15 @@ class Context:
     #: and skill listings, never your own files.
     claude_root: Path | None = None
     projects_roots: tuple[Path, ...] | None = None
+    #: Whether ANTHROPIC_MODEL was set when the settings were read
+    #: (``snapshots.env_var_set``): it wins over the model setting.
+    model_env_set: bool = False
+    #: Whether CLAUDE_CODE_EFFORT_LEVEL was set when the settings were read
+    #: (``snapshots.effort_level_env_set``): it wins over every effort setting.
+    effort_level_env_set: bool = False
+    #: N2: each effective key's settings layer (``snapshots.effective_provenance``),
+    #: for the effort level in force (``goals.main_effort_reading``).
+    effective_provenance: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,12 +201,45 @@ def _rec_fixes(recs) -> list[dict]:
     return out
 
 
+def _plugin_tip(agent: str | None) -> str:
+    """The sentence a tip about a plugin's agent ends with ("" for any
+    other agent): no profile or command can change that agent."""
+    plugin = plugin_of(agent)
+    if plugin is None:
+        return ""
+    return f" It comes from the {plugin} plugin, so there is no agent file of yours to change."
+
+
 def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
     """A goal candidate as a fix: the same explainer, prompt and command
     a recommendation's change gets."""
     agent = candidate["agent"]
-    estimate = candidate.get("estimate") or {}
     fields = ctx.effective_agents.get(agent) if agent else None
+    # A project's own agent file, not one in ~/.claude/agents; the main
+    # model's change goes where the setting the saving reads lives; any other
+    # setting to the file that decides it (the view rule).
+    scope = (
+        "repo" if isinstance(fields, dict) and fields.get("source") == "project"
+        else _main_scope(ctx) if not agent and candidate["key"] == "model"
+        else _settings_scope(ctx, candidate["key"]) if not agent else ""
+    )
+    own = (
+        goals.main_own_window(ctx.effective, ctx.effective_provenance, _main_observed_model(whatif._Tables(ctx.model)))
+        if not agent and candidate["key"] == "autoCompactWindow" and candidate["value"] is not None
+        else None
+    )
+    if own is not None:
+        # A project or managed file's own window for the main model decides: that entry is the
+        # change, there, and the window note (about an entry in your user file) does not apply.
+        entry, layer, window = own
+        change = SettingChange(
+            target="settings",
+            key="modelSettings",
+            value={entry: {"autoCompactWindow": candidate["value"]}},
+            current={entry: {"autoCompactWindow": window}},
+            scope=model_swap.layer_scope(layer),
+        )
+        return _fix_for(change, candidate, title)
     change = SettingChange(
         target="agent" if agent else "settings",
         key=candidate["key"],
@@ -204,11 +247,18 @@ def _candidate_fix(ctx: Context, candidate: dict, title: str) -> dict:
         value=candidate["value"],
         current=candidate["now"],
         new_agent_file=bool(agent) and agent in _BUILTIN_AGENT_TYPES and agent not in ctx.effective_agents,
-        # A project's own agent file, not one in ~/.claude/agents; the main
-        # model's change goes where the setting the saving reads lives.
-        scope="repo" if isinstance(fields, dict) and fields.get("source") == "project"
-        else _main_scope(ctx) if not agent and candidate["key"] == "model" else "",
+        scope=scope,
+        # What wins over a flat window, as the window card's change says it.
+        note=window_change_note(scope, ctx.effective_provenance, (ctx.effective or {}).get("modelSettings"))
+        if not agent and candidate["key"] == "autoCompactWindow"
+        else "",
     )
+    return _fix_for(change, candidate, title)
+
+
+def _fix_for(change: SettingChange, candidate: dict, title: str) -> dict:
+    """``change`` as a fix, with the candidate's evidence and estimate."""
+    estimate = candidate.get("estimate") or {}
     effect = estimate.get("effect_text") or ""
     rec = Recommendation(
         id="quick-action",
@@ -241,6 +291,13 @@ def _merge_fixes(*groups: list[dict]) -> list[dict]:
 #: would have suggested: not that nothing is worth changing.
 _IGNORED_ONLY = "The only change this check would suggest is on a card you ignored."
 
+#: What the models check says when the one change it would suggest is the main
+#: session's model and ANTHROPIC_MODEL picks that model.
+_MAIN_MODEL_LEFT_TO_ENV = (
+    "The main session would have cost less on {model}, but ANTHROPIC_MODEL picks its model, "
+    "so there is no setting to change."
+)
+
 
 def _goal(ctx: Context, goal_id: str) -> dict:
     """The goal's draft without the candidates an ignored card already
@@ -254,6 +311,8 @@ def _goal(ctx: Context, goal_id: str) -> dict:
         effective_agents=ctx.effective_agents,
         period=ctx.period,
         skip_keys=ctx.skip_keys,
+        model_env_set=ctx.model_env_set,
+        provenance=ctx.effective_provenance,
     )
     ignored = _ignored_changes(ctx)
     kept, removed = [], []
@@ -286,7 +345,7 @@ def _models(ctx: Context) -> dict:
          ("cheaper", "Cheapest alternative"), ("saving", "Would save")],
         [
             [_who(r.get("agent_type")), r.get("observed_model") or "", _cell(ctx, r.get("observed_cost")),
-             _model_set_by(r), r.get("best_cheaper_alternative_model") or _no_cheaper(r), _models_saving(ctx, r)]
+             _model_set_by(r, ctx), r.get("best_cheaper_alternative_model") or _no_cheaper(r), _models_saving(ctx, r)]
             for r in rows
         ],
     )
@@ -294,7 +353,21 @@ def _models(ctx: Context) -> dict:
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_main_left_out(rows) + _models_set_elsewhere(rows)
-    picked = " ".join(text for text in (_models_main_picked(ctx, rows), _models_main_said(rows)) if text)
+    unblocked = _models_draft_without_env(ctx)
+    blocked = (
+        next((c for c in unblocked["candidates"] if c["agent"] is None and c["key"] == "model"), None)
+        if unblocked is not None
+        else None
+    )
+    removed = (unblocked or draft)["removed"]
+    main_picked = _models_main_picked(ctx, rows)
+    # N5: the cheaper model the main session would take, but the variable picks it.
+    env_model = blocked["value"] if blocked is not None else _models_env_main(ctx, rows)
+    if env_model is not None or (ctx.model_env_set and main_picked):
+        from .advice import MODEL_ENV_WINS
+
+        tips.append({"title": "ANTHROPIC_MODEL picks your main session's model", "text": MODEL_ENV_WINS})
+    picked = " ".join(text for text in (main_picked, _models_main_said(rows)) if text)
     # The agent-model cards (agents that ran on a larger model than their
     # work needed): an advice-level one makes the check "act". Each one's
     # own fix is offered either way; an info-level one with no prompt in
@@ -309,8 +382,9 @@ def _models(ctx: Context) -> dict:
         return _result(
             "ok",
             _IGNORED_ONLY
-            if draft["removed"]
+            if removed
             else picked
+            or (_MAIN_MODEL_LEFT_TO_ENV.format(model=env_model) if env_model is not None else "")
             or "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
@@ -323,7 +397,7 @@ def _models(ctx: Context) -> dict:
             "act",
             (
                 f"{flagged_text} The only other change this check would suggest is on a card you ignored."
-                if draft["removed"]
+                if removed
                 else f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount."
             )
             + (f" {picked}" if picked else ""),
@@ -364,12 +438,14 @@ def _count(value) -> int:
     return int(whatif._num(value) or 0)
 
 
-def _model_set_by(row: dict) -> str:
+def _model_set_by(row: dict, ctx: Context | None = None) -> str:
     """Where each run's model came from, per model-swap row: the settings
-    for the main session; for a subagent, its agent file, workflow scripts
-    and a model named when the run started, with how many runs each."""
+    for the main session, or ANTHROPIC_MODEL while it is set (N5: it wins
+    over the setting; its value is never recorded); for a subagent, its
+    agent file, workflow scripts and a model named when the run started,
+    with how many runs each."""
     if row.get("agent_type") == "top-level":
-        return "settings"
+        return MODEL_ENV if ctx is not None and ctx.model_env_set else "settings"
     parts = [
         f"{words} ({count:,})"
         for words, count in (
@@ -423,6 +499,17 @@ def _main_setting(ctx: Context) -> tuple:
 
 def _main_scope(ctx: Context) -> str:
     return _main_setting(ctx)[1]
+
+
+def _settings_scope(ctx: Context, key: str) -> str:
+    """The scope of the file that decides settings key ``key`` (its
+    top-level key's layer in ``effective_provenance``; ``modelSettings`` is
+    one file's block): a project, local or managed file, or ``""`` (your
+    user file) when none of those sets it. In a view of several projects
+    :func:`run` has applied the view rule, so no project's file is among
+    them (R2-1, R3-3)."""
+    layer = ctx.effective_provenance.get(key.split(".", 1)[0])
+    return model_swap.layer_scope(layer) if layer in ("project_shared", "project_local", "managed") else ""
 
 
 def _models_main_left_out(rows: list[dict]) -> list[dict]:
@@ -490,6 +577,34 @@ def _models_main_said(rows: list[dict]) -> str:
             f"{_sessions(own)} ran in projects that set their own model. Pick one of those projects to see them."
         )
     return " ".join(sentences)
+
+
+def _models_env_main(ctx: Context, rows: list[dict]) -> str | None:
+    """N5: while ANTHROPIC_MODEL is set, the cheaper model the main session's
+    row priced by a useful margin (its family alias), or ``None``. The model
+    setting may already say it; the variable picks the model anyway. ``None``
+    while the main model card is ignored: it then adds nothing to the check."""
+    if not ctx.model_env_set:
+        return None
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "model-tier-main" and rec.key in ctx.skip_keys for rec in recs):
+        return None
+    main = next((r for r in rows if r.get("agent_type") == "top-level"), None)
+    best = main.get("best_cheaper_alternative_model") if main else None
+    if not best or not whatif._num(main.get("saving_usd")) or (whatif._num(main.get("saving_pct")) or 0.0) < goals.MIN_SHARE_PCT:
+        return None
+    alias = goals._alias(best)
+    return None if model_gate.build(whatif._Tables(ctx.model)).vetoed("top-level", alias) else alias
+
+
+def _models_draft_without_env(ctx: Context) -> dict | None:
+    """The models goal's draft as it would be were ANTHROPIC_MODEL not
+    set, or ``None`` while it is not set. The variable picks the main
+    session's model, so the check offers no setting for it; this is what
+    it would have offered, and what an ignored card took out of that."""
+    if not ctx.model_env_set:
+        return None
+    return _goal(replace(ctx, model_env_set=False), "models")
 
 
 def _models_main_picked(ctx: Context, rows: list[dict]) -> str:
@@ -564,6 +679,67 @@ def _models_left_out(ctx: Context, rows: list[dict]) -> list[dict]:
     return tips
 
 
+def _main_effort_card_leads(ctx: Context) -> bool:
+    """Whether the main session's effort card, rather than the thinking
+    goal, decides the main session's effort fix. It does when the card is
+    ignored, when CLAUDE_CODE_EFFORT_LEVEL is set (no settings file can
+    win), and when the card changes a project, local or managed file,
+    whose effortLevel outranks a user-level entry. The goal's candidate and
+    the card's change differ in key, so matching by change can't see this."""
+    for rec in getattr(ctx.model, "recommendations", ()) or ():
+        if rec.id != "effort-mismatch" or getattr(rec, "agent_type", None):
+            continue
+        if rec.key in ctx.skip_keys or rec.variant == "env":
+            return True
+        if any(change.agent is None for change in rec.changes or ()):
+            return True
+    return False
+
+
+def _main_effort_card_ignored(ctx: Context) -> bool:
+    """Whether the main session's effort card is ignored while the main
+    session spends at least ``goals.THINKING_PCT`` of its output thinking.
+    The check then says an ignored card is why it has nothing, whatever
+    would have drafted the change: under a managed level the thinking goal
+    drafts no main-session change for :func:`_without_main_effort` to count."""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if not any(
+        rec.id == "effort-mismatch" and not getattr(rec, "agent_type", None) and rec.key in ctx.skip_keys for rec in recs
+    ):
+        return False
+    main = whatif._Tables(ctx.model).row("agents", "topology_effort_by_agent_type", goals.TOP)
+    return main is not None and (whatif._num(main.get("thinking_share")) or 0.0) >= goals.THINKING_PCT
+
+
+def _without_main_effort(ctx: Context, draft: dict) -> dict:
+    """The thinking goal's draft without its main-session candidate while
+    the effort card leads; ``removed`` counts it, so the check can say an
+    ignored card is why it has nothing left. While CLAUDE_CODE_EFFORT_LEVEL
+    is set and no card leads, the candidates go without being counted:
+    nothing was ignored, and no setting wins over the variable."""
+    main = [c for c in draft["candidates"] if c["agent"] is None]
+    if not main:
+        return draft
+    if not _main_effort_card_leads(ctx):
+        if not ctx.effort_level_env_set:
+            return draft
+        return {**draft, "candidates": [c for c in draft["candidates"] if c["agent"] is not None]}
+    kept = [c for c in draft["candidates"] if c["agent"] is not None]
+    return {**draft, "candidates": kept, "removed": draft["removed"] + len(main), "ignored": draft["ignored"] + main}
+
+
+def _effort_title(candidate: dict) -> str:
+    """"Main session: effort medium", and the model for a per-model level."""
+    value = candidate["value"]
+    if candidate["key"] == "modelSettings" and isinstance(value, dict):
+        return "; ".join(
+            f"{_who(candidate['agent'])}: effort {entry.get('effortLevel')} on "
+            f"{goals._canonical_model(model_id) or model_id}"
+            for model_id, entry in value.items() if isinstance(entry, dict)
+        )
+    return f"{_who(candidate['agent'])}: effort {value}"
+
+
 def _effort(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = [r for r in tables.rows("agents", "topology_effort_by_agent_type") if whatif._num(r.get("output_tokens"))]
@@ -575,17 +751,28 @@ def _effort(ctx: Context) -> dict:
         [[_who(r.get("agent_type")), f"{int(whatif._num(r.get('output_tokens')) or 0):,}",
           _pct(r.get("thinking_share"))] for r in rows],
     )
-    draft = _goal(ctx, "thinking")
+    draft = _without_main_effort(ctx, _goal(ctx, "thinking"))
     fixes = _merge_fixes(
         _rec_fixes(_recommendations(ctx, {"effort-mismatch"})),
-        _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: effort {c['value']}"),
+        _goal_fixes(ctx, draft, _effort_title),
     )
+    already = _main_effort_already_set(ctx)
+    left_to_env = _main_effort_left_to_env(ctx)
+    left_to_managed = _main_effort_left_to_managed(ctx)
     if not fixes:
         return _result(
             "ok",
-            _IGNORED_ONLY
-            if draft["removed"]
-            else f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
+            " ".join(
+                text
+                for text in (
+                    _IGNORED_ONLY if draft["removed"] or _main_effort_card_ignored(ctx) else "",
+                    already,
+                    left_to_env,
+                    left_to_managed,
+                )
+                if text
+            )
+            or f"No agent spends more than {goals.THINKING_PCT:.0f}% of its output thinking.",
             table=table,
         )
     over = sum(1 for r in rows if (whatif._num(r.get("thinking_share")) or 0.0) > goals.THINKING_PCT)
@@ -597,10 +784,116 @@ def _effort(ctx: Context) -> dict:
             else f"{len(fixes)} effort change{'s' if len(fixes) != 1 else ''} would think less."
         )
         + " Thinking is billed as output; a lower effort thinks less, but how much less isn't measured, so "
-        "check {{page:changes}} after a few sessions.",
+        "check {{page:changes}} after a few sessions."
+        + (f" {already}" if already else "")
+        + (f" {left_to_env}" if left_to_env else "")
+        + (f" {left_to_managed}" if left_to_managed else ""),
         table=table,
         fixes=fixes,
     )
+
+
+#: N2: what the effort check says of the main session once its level is set.
+_EFFORT_ALREADY_SET = (
+    "The main session's effort is already {level} for {model}, so there is no setting to change. "
+    "The table counts every reply in the window, including any from before it was set."
+)
+
+
+def _several_projects(ctx: Context) -> bool:
+    """Whether the report covers more than one project (``snapshots.view_spans_projects``)."""
+    return view_spans_projects(ctx.model)
+
+
+def _main_observed_model(tables) -> str | None:
+    """The model the main session ran on (the model_swap table's top-level row)."""
+    return next(
+        (r.get("observed_model") for r in tables.rows("model_swap", "model_swap_by_agent_type") if r.get("agent_type") == goals.TOP),
+        None,
+    )
+
+
+def _main_effort_already_set(ctx: Context) -> str:
+    """:data:`_EFFORT_ALREADY_SET` when the main session spent at least
+    ``goals.THINKING_PCT`` of its output thinking and its effort is already
+    medium or lower for its model (``goals.main_effort_reading``: why the
+    thinking goal and the effort card drop it), else ``""``. Not while
+    CLAUDE_CODE_EFFORT_LEVEL is set (``ctx.effort_level_env_set``, or the
+    effort card's ``env`` variant): no setting decides the level then."""
+    if ctx.effort_level_env_set:
+        return ""
+    tables = whatif._Tables(ctx.model)
+    main = tables.row("agents", "topology_effort_by_agent_type", goals.TOP)
+    if main is None or (whatif._num(main.get("thinking_share")) or 0.0) < goals.THINKING_PCT:
+        return ""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "effort-mismatch" and rec.variant == "env" for rec in recs):
+        return ""
+    observed = _main_observed_model(tables)
+    level = goals.main_effort_in_force(ctx.effective, ctx.effective_provenance, observed)
+    if level not in goals.EFFORT_DONE:
+        return ""
+    return _EFFORT_ALREADY_SET.format(
+        level=level, model=goals._canonical_model(goals._main_model_id(observed)) or "its model"
+    )
+
+
+#: What the effort check says when the main session thinks a lot and
+#: CLAUDE_CODE_EFFORT_LEVEL, not a setting, decides its effort.
+_MAIN_EFFORT_LEFT_TO_ENV = (
+    "The main session spends {share} of its output thinking, but CLAUDE_CODE_EFFORT_LEVEL sets its effort, "
+    "so there is no setting to change. Set the variable to medium where you set it, or remove it."
+)
+
+
+def _main_effort_left_to_env(ctx: Context) -> str:
+    """:data:`_MAIN_EFFORT_LEFT_TO_ENV` when CLAUDE_CODE_EFFORT_LEVEL is set
+    and the main session spent at least ``goals.THINKING_PCT`` of its output
+    thinking, else ``""``. Also ``""`` when a main-session effort card is
+    there: an open one already carries the same advice as a fix, and an
+    ignored one means the person said no."""
+    if not ctx.effort_level_env_set:
+        return ""
+    main = whatif._Tables(ctx.model).row("agents", "topology_effort_by_agent_type", goals.TOP)
+    if main is None or (whatif._num(main.get("thinking_share")) or 0.0) < goals.THINKING_PCT:
+        return ""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "effort-mismatch" and not getattr(rec, "agent_type", None) for rec in recs):
+        return ""
+    return _MAIN_EFFORT_LEFT_TO_ENV.format(share=_pct(main.get("thinking_share")))
+
+
+#: What the effort check says when the main session thinks a lot and your
+#: organisation's managed settings, not a setting of yours, decide its effort.
+_MAIN_EFFORT_LEFT_TO_MANAGED = (
+    "The main session spends {share} of its output thinking, but your organisation's managed settings set its "
+    "effort, so only your administrator can change it."
+)
+
+
+def _main_effort_left_to_managed(ctx: Context) -> str:
+    """:data:`_MAIN_EFFORT_LEFT_TO_MANAGED` when the main session spent at
+    least ``goals.THINKING_PCT`` of its output thinking and a managed file
+    sets its effort above medium (``goals.main_effort_reading``), else
+    ``""``. Also ``""`` while CLAUDE_CODE_EFFORT_LEVEL is set (its own
+    sentence covers that) and when a main-session effort card is there: an
+    open one carries the administrator request as its fix, and an ignored
+    one means the person said no."""
+    if ctx.effort_level_env_set:
+        return ""
+    tables = whatif._Tables(ctx.model)
+    main = tables.row("agents", "topology_effort_by_agent_type", goals.TOP)
+    if main is None or (whatif._num(main.get("thinking_share")) or 0.0) < goals.THINKING_PCT:
+        return ""
+    level, layer, _decided_by = goals.main_effort_reading(
+        ctx.effective, ctx.effective_provenance, _main_observed_model(tables)
+    )
+    if level is None or level in goals.EFFORT_DONE or layer != "managed":
+        return ""
+    recs = getattr(ctx.model, "recommendations", ()) or ()
+    if any(rec.id == "effort-mismatch" and not getattr(rec, "agent_type", None) for rec in recs):
+        return ""
+    return _MAIN_EFFORT_LEFT_TO_MANAGED.format(share=_pct(main.get("thinking_share")))
 
 
 #: The replay keeps every real summary, so it can only test smaller windows.
@@ -2306,9 +2599,9 @@ def _quality(ctx: Context) -> dict:
             f"On {row.get('model')} at effort {row.get('effort')}, {agent} did worse than on {base_model} at effort "
             f"{base_effort}: {row.get('difference')}"
         )
-        if agent == quality.MAIN or agent in _NOT_OVERRIDABLE:
+        if agent == quality.MAIN or agent in _NOT_OVERRIDABLE or plugin_of(agent) is not None:
             tips.append({"title": f"{_who(None if agent == quality.MAIN else agent)} did worse on "
-                                  f"{row.get('model')}", "text": evidence})
+                                  f"{row.get('model')}", "text": evidence + _plugin_tip(agent)})
             continue
         fields = ctx.effective_agents.get(agent) if isinstance(ctx.effective_agents.get(agent), dict) else {}
         now_model = fields.get("model")
@@ -2347,7 +2640,9 @@ def _quality(ctx: Context) -> dict:
             fixes.append(_candidate_fix(ctx, {"agent": agent, "key": "model", "value": back_to, "now": now_model,
                                               "evidence": evidence}, f"{agent}: back to {back_to}"))
             continue
-        if on_it:
+        if plugin_of(agent) is not None:
+            advice = _plugin_tip(agent) + f" Don't pick {family} for this agent's work."
+        elif on_it:
             advice = (f" One more retry and this check will offer to move it back to {back_to}." if back_to
                       and (row.get("retried") or 0) < quality.MIN_RETRIED_RUNS else "")
         else:
@@ -2521,11 +2816,23 @@ CHECKS: tuple[Check, ...] = (
 CHECK_IDS = tuple(check.id for check in CHECKS)
 
 
+def _in_view(ctx: Context) -> Context:
+    """``ctx`` with the view rule (``snapshots.view_settings``) applied to its
+    settings: in a view of several projects a key one project's file sets is
+    not read. The CLI and the dashboard already pass settings built for the
+    view; this keeps any other caller to the same rule."""
+    if not view_spans_projects(ctx.model):
+        return ctx
+    effective, provenance = view_settings(ctx.effective, ctx.effective_provenance, True)
+    return replace(ctx, effective=effective, effective_provenance=provenance)
+
+
 def run(check_id: str, ctx: Context) -> dict:
     """One check's full answer. Raises ``KeyError`` for an unknown id."""
     check = next((c for c in CHECKS if c.id == check_id), None)
     if check is None:
         raise KeyError(check_id)
+    ctx = _in_view(ctx)
     return {
         "id": check.id,
         "question": check.question,

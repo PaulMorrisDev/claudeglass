@@ -212,6 +212,11 @@ PROJECT_FILES_SHOWN = 100
 
 _RESTART_ADVICE = "Restart the dashboard: claudeglass install-service, or stop and start serve."
 
+#: Where saved profiles live by default, as a message names it: never the
+#: real path, which is a local filesystem location (docs/cli.md names the
+#: same default for --config-dir).
+_PROFILES_FOLDER_SHOWN = "~/.claude/claudeglass/profiles"
+
 #: How long the Capture tab's estimates (a replay of your last two
 #: weeks of sessions) are kept before they are worked out again, in the
 #: background: they move slowly, and each is a whole-corpus read.
@@ -409,17 +414,17 @@ def _report_json_commands(text: str) -> str:
     return invocation.rewrite_rendered(text, "json")
 
 
-_SESSION_ID_RE = re.compile(r"^/api/session/([^/]+)$")
-_SESSION_TAGS_RE = re.compile(r"^/api/sessions/([^/]+)/tags$")
-_SESSION_FEEDBACK_RE = re.compile(r"^/api/sessions/([^/]+)/feedback$")
-_PROFILE_DIFF_RE = re.compile(r"^/api/profiles/([^/]+)/diff$")
-_PROFILE_RE = re.compile(r"^/api/profiles/([^/]+)$")
-_SESSION_EXPLAIN_RE = re.compile(r"^/api/session/([^/]+)/explain$")
-_CLAUDE_MD_RE = re.compile(r"^/api/claude-md/([0-9a-f]{16})$")
-_QUICK_ACTION_RE = re.compile(r"^/api/quick-actions/([a-z0-9-]+)$")
+_SESSION_ID_RE = re.compile(r"^/api/session/([^/]+)\Z")
+_SESSION_TAGS_RE = re.compile(r"^/api/sessions/([^/]+)/tags\Z")
+_SESSION_FEEDBACK_RE = re.compile(r"^/api/sessions/([^/]+)/feedback\Z")
+_PROFILE_DIFF_RE = re.compile(r"^/api/profiles/([^/]+)/diff\Z")
+_PROFILE_RE = re.compile(r"^/api/profiles/([^/]+)\Z")
+_SESSION_EXPLAIN_RE = re.compile(r"^/api/session/([^/]+)/explain\Z")
+_CLAUDE_MD_RE = re.compile(r"^/api/claude-md/([0-9a-f]{16})\Z")
+_QUICK_ACTION_RE = re.compile(r"^/api/quick-actions/([a-z0-9-]+)\Z")
 #: A recommendation's key (``Recommendation.key``), as the ignore route
 #: accepts it.
-_REC_KEY_RE = re.compile(r"^[a-z0-9._:-]{1,200}$")
+_REC_KEY_RE = re.compile(r"^[a-z0-9._:-]{1,200}\Z")
 #: At most this many keys in one ignore request (a rule for many agent
 #: types is one item on the dashboard, and one request).
 _MAX_IGNORE_KEYS = 100
@@ -1230,7 +1235,10 @@ def make_handler(
         if project:
             snaps = snapshots_mod.snapshots_for_projects(snaps, project)
         canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
-        built = snapshots_mod.with_every_project_agents(snaps, canonical)
+        # No project picked covers every project the store knows, as the
+        # report built for the same view counts them (the view rule).
+        several = snapshots_mod.several_in_view(project or (), canonical, all_projects=not project)
+        built = snapshots_mod.with_every_project_agents(snaps, canonical, several_projects=several)
         with report_lock:
             if snapshot_parts["token"] != token:
                 snapshot_parts["token"], snapshot_parts["built"] = token, {}
@@ -1285,7 +1293,7 @@ def make_handler(
         # its settings still show (report._settings_snapshots) and the
         # report's meta.projects names it, as the CLI's does for a selected
         # folder.
-        projects =tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
+        projects = tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
         window = _window_label(window_days, since, until)
         try:
             overrides = load_session_overrides(options.config_dir)
@@ -2333,11 +2341,18 @@ def make_handler(
                 "for": list(p.for_),
                 "tasks": list(profile_catalogue.tasks_for(p)),
                 "updated_at": None,
+                "problem": None,
             }
             for p in profile_catalogue.list_profiles()
         ]
-        user_entries = [
-            {
+        # A saved file that fails the checks is listed with why, whether
+        # the store has a row for it (saved before a rule tightened) or not
+        # (the watcher never ingests a file that fails).
+        profiles_dir = Path(options.config_dir) / "profiles"
+        user_entries = []
+        for row in store.profiles():
+            path = profiles_dir / f"{row['id']}.toml"
+            user_entries.append({
                 "id": row["id"],
                 "name": row["name"],
                 "source": "user",
@@ -2345,9 +2360,24 @@ def make_handler(
                 "for": [],
                 "tasks": [],
                 "updated_at": row["updated_at"],
-            }
-            for row in store.profiles()
-        ]
+                "problem": _profile_file_problem(path) if path.is_file() else None,
+            })
+        listed = {entry["id"] for entry in user_entries}
+        for path in sorted(profiles_dir.glob("*.toml")) if profiles_dir.is_dir() else ():
+            if path.stem in listed or path.stem in profile_catalogue.CATALOGUE_IDS:
+                continue
+            problem = _profile_file_problem(path)
+            if problem is not None:
+                user_entries.append({
+                    "id": path.stem,
+                    "name": path.stem,
+                    "source": "user",
+                    "archetype": None,
+                    "for": [],
+                    "tasks": [],
+                    "updated_at": None,
+                    "problem": problem,
+                })
 
         # The profile `apply <profile>` last marked active: ignored
         # recommendations are kept per profile.
@@ -2598,6 +2628,39 @@ def make_handler(
         except (OSError, profile_schema.ProfileError, ValueError):
             return None
 
+    def _broken_profile(profile_id: str):
+        """A 409 saying why, for a saved profile file that exists but no
+        longer passes the checks (a rule tightened since it was saved), so
+        its card's drawer says what to do instead of "unknown profile".
+        ``None`` for anything else."""
+        if not profile_schema._ID_RE.match(profile_id) or profile_id in profile_catalogue.CATALOGUE_IDS:
+            return None
+        path = Path(options.config_dir) / "profiles" / f"{profile_id}.toml"
+        if not path.is_file():
+            return None
+        problem = _profile_file_problem(path)
+        return None if problem is None else _error(409, "conflict", problem)
+
+    def _profile_file_problem(path: Path) -> str | None:
+        """Why the saved profile file at ``path`` can't be used, as the
+        page shows it (its list card and its drawer's 409), or ``None``
+        when it loads. Its own problems name any agent only through
+        ``schema.shown_name``."""
+        try:
+            profile_schema.load_profile(path)
+        except profile_schema.ProfileError as exc:
+            why = "; ".join(exc.problems)
+        except ValueError as exc:  # tomllib.TOMLDecodeError
+            why = f"It isn't valid TOML ({exc})"
+        except OSError:
+            return None
+        else:
+            return None
+        return (
+            f"This profile's file doesn't pass ClaudeGlass's checks, so it can't be used. {why}. "
+            f"Fix or delete {path.name} in ClaudeGlass's profiles folder ({_PROFILES_FOLDER_SHOWN} by default)."
+        )
+
     def _recorded_agents(snapshot):
         """The snapshot's ``agents`` map (name -> entry), or ``None`` when
         there is no snapshot or it records no agents list: the dashboard
@@ -2688,10 +2751,13 @@ def make_handler(
         found = resolved.matched.get("writer")
         if found is None:
             return resolved.profile, (), ()
+        # A writer whose name fails the agent-name rule is counted, never named.
+        unusable = profile_roles.unusable_writers(here)
+        left_out = (profile_roles.unusable_writers_note(unusable),) if unusable else ()
         if len(found) > 1:
-            return resolved.profile, (profile_roles.several_writers_note(found),), found
+            return resolved.profile, (profile_roles.several_writers_note(found), *left_out), found
         if found:
-            return resolved.profile, (), found
+            return resolved.profile, left_out, found
         folder = "~/.claude/agents" if scope == "user" else ".claude/agents"
         whose = "your agents" if scope == "user" else "this project's agents"
         note = (
@@ -2703,13 +2769,13 @@ def make_handler(
         elsewhere = profile_roles.writers(there)
         if elsewhere:
             note += " " + _other_scope_note(elsewhere, scope)
-        return resolved.profile, (note,), ()
+        return resolved.profile, (note, *left_out), ()
 
     def route_profile_diff(store, query, body):
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
         if profile is None:
-            return _not_found(f"unknown profile: {profile_id!r}")
+            return _broken_profile(profile_id) or _not_found(f"unknown profile: {profile_id!r}")
 
         scope = query.get("scope") or "user"
         if scope not in _VALID_PROFILE_SCOPES:
@@ -2733,8 +2799,7 @@ def make_handler(
                 names = snapshot.data.get(field)
                 if isinstance(names, list):
                     env_names.update(str(n) for n in names)
-            content_layers = snapshot.data.get("content_layers")
-            effort_env_set = bool(isinstance(content_layers, dict) and content_layers.get("effort_level_env_set"))
+            effort_env_set = snapshots_mod.effort_level_env_set(snapshot)
             # Deviation (mirrors profiles/apply.py's own, documented
             # deviation note): snapshots.py has no effective_agents()
             # accessor, so the schema-2 field is read straight off the
@@ -2774,9 +2839,11 @@ def make_handler(
 
         def _row(row) -> dict:
             parts = row.key.split(".")
-            # agents.<agent>.<key>; the key itself may be dotted (experimental.cacheTtl).
-            name = ".".join(parts[2:]) if row.key.startswith("agents.") else ".".join(parts[1:])
-            agent = parts[1] if row.key.startswith("agents.") else None
+            # agents.<agent>.<key>: the agent's name and the key may both hold dots.
+            if row.key.startswith("agents."):
+                agent, name = profile_diff_mod.split_agent_key(row.key)
+            else:
+                agent, name = None, ".".join(parts[1:])
             # settings.modelSettings.<model id>.<key> (a model id has no dot): the
             # setting is modelSettings.<key> and the id is the row's own ``model``.
             model = None
@@ -2866,7 +2933,7 @@ def make_handler(
         profile_id = query.get("id", "")
         profile = _load_profile_by_id(profile_id)
         if profile is None:
-            return _not_found(f"unknown profile: {profile_id!r}")
+            return _broken_profile(profile_id) or _not_found(f"unknown profile: {profile_id!r}")
         # PF1: the card, the estimate and "Start from" read the agents the
         # writer role goes to among the user's own (user and project).
         resolved, _notes, _writers = _resolve_roles(
@@ -2884,6 +2951,9 @@ def make_handler(
                 "notes": profile.notes,
                 "settings": dict(profile.settings),
                 "agents": {name: dict(keys) for name, keys in resolved.agents.items()},
+                # What the profile itself names, for "Start from": a copy keeps the role
+                # as a role, not the agents it went to here.
+                "own_agents": {name: dict(keys) for name, keys in profile.agents.items()},
                 "roles": {name: dict(keys) for name, keys in profile.roles.items()},
                 "env": dict(profile.env),
                 "setting_count": setting_count,
@@ -2956,20 +3026,28 @@ def make_handler(
                 settings["modelSettings"] = kept_models
         agents: dict = {}
         skipped_project_agents: list[str] = []
+        # Agents left out because the agent-name rule refuses their names:
+        # counted, never named.
+        skipped_name_agents = 0
         for name, fields in effective_agents.items():
             if not isinstance(fields, dict):
                 continue
+            refused = profile_schema.agent_name_problem(name) is not None
             if fields.get("source") != "user":
-                if fields.get("source") == "project":
+                if fields.get("source") == "project" and not refused:
                     skipped_project_agents.append(str(name))
                 continue
             # effective_agents names a few fields its own way (max_turns).
             kept = {}
             for key in profile_schema.AGENT_ALLOWLIST:
                 value = fields.get(profile_diff_mod._EFFECTIVE_AGENT_FIELD.get(key, key))
-                if value is not None and _valid({"agents": {str(name): {key: value}}}):
+                # A refused name is tried as a stand-in, to count only an
+                # agent that would otherwise have been saved.
+                if value is not None and _valid({"agents": {"agent" if refused else str(name): {key: value}}}):
                     kept[key] = value
-            if kept:
+            if kept and refused:
+                skipped_name_agents += 1
+            elif kept:
                 agents[str(name)] = kept
         doc = {
             "id": body.get("id") or "my-current-settings",
@@ -2982,6 +3060,7 @@ def make_handler(
         if status == 201:
             payload["data"]["skipped_managed"] = sorted(k for k in profile_schema.SETTINGS_ALLOWLIST if k in managed)
             payload["data"]["skipped_project_agents"] = sorted(skipped_project_agents)
+            payload["data"]["skipped_name_agents"] = skipped_name_agents
         return status, payload
 
     def route_profiles_post(store, query, body):
@@ -3318,22 +3397,29 @@ def make_handler(
 
         return claude_md_review.folders_for_slugs(_projects_roots(), project) if project else None
 
-    def _current_settings(project=None) -> tuple[dict, dict, bool]:
+    def _current_settings(project=None) -> tuple[dict, dict, bool, bool, dict]:
         """The latest snapshot's effective settings as in force, every project's agent
         fields, and (PROF-03) whether ``CLAUDE_CODE_EFFORT_LEVEL`` is set
         -- content_layers' own flag, never a value that could be
-        anything else -- or empty/``False`` when no snapshot is recorded
+        anything else -- whether ``ANTHROPIC_MODEL`` is set (by name
+        only), and each key's layer (N2), or empty/``False`` when no snapshot is recorded
         yet. With a ``project`` filter, that project's own settings and
         agents (:func:`_config_snapshot_with_every_project_agents`)."""
         snapshot = _config_snapshot_with_every_project_agents(project)
         if snapshot is None:
-            return {}, {}, False
+            return {}, {}, False, False, {}
         agents = snapshot.data.get("effective_agents")
-        content_layers = snapshot.data.get("content_layers")
-        env_set = bool(isinstance(content_layers, dict) and content_layers.get("effort_level_env_set"))
+        env_set = snapshots_mod.effort_level_env_set(snapshot)
+        model_env_set = snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV)
         # In force, not as written: CLAUDE_CODE_AUTO_COMPACT_WINDOW beats
         # autoCompactWindow while it's set.
-        return snapshots_mod.effective_config_in_force(snapshot), agents if isinstance(agents, dict) else {}, env_set
+        return (
+            snapshots_mod.effective_config_in_force(snapshot),
+            agents if isinstance(agents, dict) else {},
+            env_set,
+            model_env_set,
+            snapshots_mod.effective_provenance(snapshot),
+        )
 
     def route_profile_goals(store, query, body):
         """Without ``goal``: the goals a profile can start from. With it:
@@ -3358,7 +3444,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, effective_agents, effort_level_env_set = _current_settings(project)
+        effective, effective_agents, effort_level_env_set, model_env_set, provenance = _current_settings(project)
         return _ok(
             goals.draft(
                 goal,
@@ -3369,6 +3455,8 @@ def make_handler(
                 period=_period_text(*window, name=query.get("window")),
                 task=task,
                 effort_level_env_set=effort_level_env_set,
+                model_env_set=model_env_set,
+                provenance=provenance,
                 skip_keys=_ignored_keys(model, query),
             )
         )
@@ -3426,7 +3514,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, _agents, _env_set = _current_settings(project)
+        effective, _agents, _env_set, _model_env_set, _provenance = _current_settings(project)
         units = _report_units(model)
         period = _period_text(*window, name=query.get("window"))
         result = whatif.estimate(
@@ -3500,6 +3588,9 @@ def make_handler(
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
             projects_roots=tuple(_projects_roots()),
+            model_env_set=snapshots_mod.env_var_set(snapshot, snapshots_mod.MODEL_ENV),
+            effort_level_env_set=snapshots_mod.effort_level_env_set(snapshot),
+            effective_provenance=snapshots_mod.effective_provenance(snapshot) if snapshot is not None else {},
         )
 
     def route_quick_actions(store, query, body):
@@ -3929,8 +4020,8 @@ def make_handler(
     def route_recommendations_prompt(store, query, body):
         """One prompt for the open fixes of the project asked about
         (``fixes.project_prompt``; ``project`` is required): ignored cards,
-        landed fixes, unconfirmed changes and managed settings are left
-        out."""
+        landed fixes, unconfirmed changes, managed settings and model
+        changes to try first are left out."""
         window, err = _window_query(query)
         if err is not None:
             return err

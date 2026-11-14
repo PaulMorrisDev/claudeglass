@@ -2011,7 +2011,11 @@ def _cmd_check(args: argparse.Namespace) -> int:
         snaps = snapshots.load_snapshots(config_dir)
         if not args.all_projects:
             snaps = snapshots.snapshots_for_projects(snaps, projects)
-        snapshot = snapshots.with_every_project_agents(snaps, snapshots.canonical_project_keys(projects))
+        canonical = snapshots.canonical_project_keys(projects)
+        snapshot = snapshots.with_every_project_agents(
+            snaps, canonical,
+            several_projects=snapshots.several_in_view(projects, canonical, all_projects=args.all_projects),
+        )
         effective_agents = snapshot.data.get("effective_agents") if snapshot is not None else None
         agent_files = snapshot.data.get("agents") if snapshot is not None else None
         claude_root, roots = _read_where(args, config_dir)
@@ -2028,6 +2032,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
             until_ts=until_dt.timestamp() if until_dt else None,
             claude_root=claude_root,
             projects_roots=tuple(roots),
+            model_env_set=snapshots.env_var_set(snapshot, snapshots.MODEL_ENV),
+            effort_level_env_set=snapshots.effort_level_env_set(snapshot),
+            effective_provenance=snapshots.effective_provenance(snapshot) if snapshot is not None else {},
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))
@@ -2232,7 +2239,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         return err
 
     try:
-        arm_a =compare_mod.parse_arm_spec(args.arm_a)
+        arm_a = compare_mod.parse_arm_spec(args.arm_a)
         arm_b = compare_mod.parse_arm_spec(args.arm_b)
     except ValueError as exc:
         print(f"claudeglass compare: {exc}", file=sys.stderr)
@@ -3666,7 +3673,7 @@ def _cmd_update_finish(
         capture = None
         stdout.write(f"config.toml has a problem, so capture's hook entries weren't checked: {exc}\n")
     if capture is not None and capture.hooked:
-        wanted = hook_health.capture_specs(capture.hook_metrics())
+        wanted = hook_health.capture_specs(capture.hook_metrics(now))
         capture_health = hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir)
         if capture_health.blocked_by is not None:
             stdout.write(f"{hook_health.POLICY_TEXT[capture_health.blocked_by]}\n")
@@ -3874,7 +3881,12 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
     makes for a reply Claude ends without its tag otherwise."""
     rough = capture_catalogue.rough_tokens(ids, tagger)
     lines = []
-    if rough["session_note"]:
+    if rough["compact_note"] > rough["session_note"]:
+        lines.append(
+            f"about {rough['session_note']} tokens of note when a session starts or is cleared, "
+            f"and about {rough['compact_note']} when it compacts"
+        )
+    elif rough["session_note"]:
         lines.append(f"about {rough['session_note']} tokens of note when a session starts, is cleared or compacts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
@@ -4385,16 +4397,11 @@ _HAIKU_ERRORS = {
 }
 
 
-def _running_metrics(capture: CaptureConfig) -> tuple[str, ...]:
-    """The metrics the hook asks for now: the level's, or only the light
-    sample's four keys once the end has passed and a light sample runs."""
-    if capture.light():
-        return capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
-    return capture.active_metrics()
-
-
 def _haiku_lines(
-    capture: CaptureConfig, config_dir: Path, agent_replies: Callable[[], frozenset[str]] | None = None
+    capture: CaptureConfig,
+    config_dir: Path,
+    agent_replies: Callable[[], frozenset[str]] | None = None,
+    now: datetime | None = None,
 ) -> list[str]:
     """What Claude Haiku has done since capture was turned on: the main
     session's turns while it writes the tags, the replies it tags when
@@ -4410,6 +4417,9 @@ def _haiku_lines(
         if agent_replies is not None and haiku_tags.summary(config_dir, since=since, kind="main").errors
         else None
     )
+    # What Haiku was asked for in this span: the light sample's keys while one runs, else the level's,
+    # also once the end has passed, as these lines count what it did since capture was turned on.
+    asked = capture.running_metrics(now) if capture.light(now) else capture.active_metrics()
     lines: list[str] = []
     if capture.haiku_tags:
         done = haiku_tags.summary(
@@ -4422,7 +4432,7 @@ def _haiku_lines(
                 "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
                 "change, once the hook's Stop entry is in settings.json."
             )
-    elif capture.is_on and capture_catalogue.tagged_keys(_running_metrics(capture)):
+    elif capture.is_on and capture_catalogue.tagged_keys(asked):
         done = haiku_tags.summary(
             config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER, agent_reply_ids=agent_ids
         )
@@ -4430,7 +4440,7 @@ def _haiku_lines(
             lines += _haiku_done_lines(done, "filled in", "missing tag", "No tag")
         else:
             lines.append("Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one.")
-    if capture.is_on and capture_catalogue.agent_metric_ids(_running_metrics(capture)):
+    if capture.is_on and capture_catalogue.agent_metric_ids(asked):
         done = haiku_tags.summary(config_dir, since=since, kind="agent", agent_reply_ids=agent_ids)
         if done.calls:
             lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
@@ -4468,21 +4478,29 @@ def _haiku_done_lines(done: haiku_tags.Summary, verb: str, what: str, none: str)
 
 
 def _capture_status(
-    capture: CaptureConfig, *, config_dir: Path, claude_root: Path, stdout, args=None, config: Config | None = None
+    capture: CaptureConfig,
+    *,
+    config_dir: Path,
+    claude_root: Path,
+    stdout,
+    args=None,
+    config: Config | None = None,
+    now: datetime | None = None,
 ) -> int:
-    stdout.write(f"Metrics capture: {capture_view.describe(capture)}\n")
-    ids = _running_metrics(capture)
+    stdout.write(f"Metrics capture: {capture_view.describe(capture, now)}\n")
+    ids = capture.running_metrics(now)
     if capture.is_on:
-        if capture.light():
+        if capture.light(now):
             stdout.write(
                 "Its end time has passed, so full capture has stopped. A light sample goes on: Claude tags the kind, "
                 f"difficulty and size of the work, and task changes, in {capture_view.one_session_in(capture)}. "
                 "'claudeglass capture off' stops it; 'claudeglass capture on' starts full capture again.\n"
             )
-        elif capture.expired():
+        elif capture.expired(now):
             stdout.write(
-                "Its end time has passed, so capture's notes, tags and signals have stopped; coaching notes and the "
-                "feedback facts line, if you have them on, still run. 'claudeglass capture on' starts capture again.\n"
+                "Its end time has passed, so capture's notes, tags and signals have stopped. Coaching notes and the "
+                "feedback items on your messages still run, if you have them on. 'claudeglass capture on' starts "
+                "capture again.\n"
             )
         if capture.projects:
             only = [p for p in capture.projects if not p.startswith("!")]
@@ -4513,7 +4531,7 @@ def _capture_status(
     agent_replies = (
         (lambda: _agent_reply_ids(args, config, config_dir, capture)) if args is not None and config is not None else None
     )
-    for line in _haiku_lines(capture, config_dir, agent_replies):
+    for line in _haiku_lines(capture, config_dir, agent_replies, now):
         stdout.write(f"{line}\n")
     if args is not None and config is not None:
         for line in _capture_measured(capture, args=args, config=config, config_dir=config_dir):
@@ -4529,7 +4547,7 @@ def _capture_status(
         recommendation = _scan_hook_errors(args, config, config_dir).recommendation()
         if recommendation:
             stdout.write(f"{recommendation}\n")
-    wanted = hook_health.capture_specs(capture.hook_metrics())
+    wanted = hook_health.capture_specs(capture.hook_metrics(now))
     health = hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir, check_python=True)
     if wanted or health.extra:
         stdout.write(f"Hooks: {health.summary()}\n")
@@ -4639,7 +4657,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     action = args.action
     if action == "status":
         return _capture_status(
-            current, config_dir=config_dir, claude_root=claude_root, stdout=stdout, args=args, config=config
+            current, config_dir=config_dir, claude_root=claude_root, stdout=stdout, args=args, config=config, now=now
         )
     if action == "prune":
         return _capture_prune(config_dir, retention_days=config.retention_days, dry_run=args.dry_run, stdout=stdout, now=now)
@@ -4731,7 +4749,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         if action == "feedback" and on and not args.dry_run and preview.hooked:
             # The facts line a /cg-feedback run starts with comes from the capture hook's message entry,
             # which this switch leaves to `connect` (it changes settings.json, after a yes of its own).
-            wanted = hook_health.capture_specs(preview.hook_metrics())
+            wanted = hook_health.capture_specs(preview.hook_metrics(now))
             if hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir).missing:
                 stdout.write(
                     "The facts line a survey run starts with comes from the capture hook, so it needs an entry in "
@@ -4760,7 +4778,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             also = [m for m in current.active_metrics() if m not in preview.active_metrics() and m not in args.values]
             if also:
                 stdout.write(f"{', '.join(also)} need{'s' if len(also) == 1 else ''} {', '.join(args.values)}, so {'it goes' if len(also) == 1 else 'they go'} too.\n")
-        added =[m for m in preview.active_metrics() if m not in current.active_metrics()]
+        added = [m for m in preview.active_metrics() if m not in current.active_metrics()]
         costly = [m for m in added if capture_catalogue.asks_claude(m)]
         coaching_added = preview.coaching_notes_on and not current.coaching_notes_on
         if coaching_added:
@@ -4848,7 +4866,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             "The /cg-brief skill stays: it works with capture off. "
             "'claudeglass capture brief off' removes it.\n"
         )
-    wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics())
+    wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics(now))
     if action == "connect" and not preview.hooked:
         stdout.write("Capture is off, so no hook entries are needed. 'claudeglass capture on' turns it on.\n")
         return 0
@@ -4862,7 +4880,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         stdout=stdout,
         removing=action == "remove",
     )
-    if not done and wanted and not args.dry_run:
+    if not done and wanted and not args.dry_run and hook_health.check_capture(wanted, claude_root=claude_root).missing:
         stdout.write("Until then the chosen metrics can't be captured.\n")
     return 0
 
@@ -5298,6 +5316,10 @@ def _one_off_profile(set_values: list[str], agent: str | None):
     ``--set`` invocation would be ambiguous about scope."""
     from .profiles import schema
 
+    if agent is not None:
+        name_problem = schema.agent_name_problem(agent)
+        if name_problem is not None:
+            return None, f"--agent {schema.shown_name(agent)}: {name_problem}"
     env_items = [item for item in set_values if item.partition("=")[0].strip().startswith("env.")]
     if env_items and len(env_items) != len(set_values):
         return None, "--set: env.NAME=value can't be mixed with a settings/agent --set in the same command"
@@ -5423,7 +5445,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         project_keys = snapshots.snapshot_project_keys(discovery.slug_for(str(project_path)))
         latest_snapshot = snapshots.latest_for_keys(snaps, project_keys)
     else:
-        latest_snapshot = snaps[-1] if snaps else None
+        # No project named: with snapshots of several projects the newest is
+        # any one of them, so no project's own file is read (the view rule).
+        latest_snapshot = snapshots.for_view(snaps[-1], snapshots.spans_projects(snaps)) if snaps else None
 
     if args.launch:
         managed = set(snapshots.managed_keys(latest_snapshot)) if latest_snapshot else set()

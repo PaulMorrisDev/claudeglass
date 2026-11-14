@@ -927,8 +927,9 @@ One prompt for a project's open fixes. Query: the same window as
 it is missing or matches no project).
 
 `data`: `{"prompt", "files": [{"file", "fixes"}, ...], "several", "other",
-"cards", "keys", "left_out": {"fixed", "info", "unconfirmed", "managed"}}`. `prompt` has
-one opening line, then each fix's own `prompt` (as in
+"cards", "keys", "left_out": {"fixed", "info", "unconfirmed", "managed", "trial"}}`. `prompt` has
+one opening line (with a second sentence when a fix sits under a file in
+`~/.claude`, which every project reads), then each fix's own `prompt` (as in
 `/api/recommendations`) minus the closing a setting change ends with (its
 "show me the diff" and restart lines), the restart reminder, or the
 question about where a standing rule applies, under a `## <file>` header
@@ -953,7 +954,9 @@ copy of the prompt can be recorded against them (`POST
 reason, so a card can count in both `cards` and `left_out`: its fix has
 landed (the `fixed` variant, which the browser never sees), it is shown
 for information only (a change that isn't safe to make without checking
-first), it is an unconfirmed change, or it is a managed setting. Ignored
+first), it is an unconfirmed change, it is a managed setting, or it is a model
+change its card says to try first (`trial`: the main session's model and an
+agent's model). Ignored
 cards are left out and not counted. `prompt` is `""` when nothing is open.
 
 ### `POST /api/recommendations/ignore`
@@ -1058,7 +1061,15 @@ the store) plus every user profile written under
 watcher's `_scan_profiles`), each tagged with which of the two it came
 from.
 
-`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null}, ...], "active_profile_id": str|null, "active_profile_name": str|null}`.
+`data`: `{"profiles": [{"id", "name", "source": "catalogue"|"user", "archetype": str|null, "for": [str, ...], "tasks": [str, ...], "updated_at": str|null, "problem": str|null}, ...], "active_profile_id": str|null, "active_profile_name": str|null}`.
+
+`problem` is `null` unless a user profile's file fails the checks. Then it
+is the same message `GET /api/profiles/<id>`'s `409` gives, and Setup ›
+Profiles shows it on the card in place of the summary and the button. Such
+a file is listed whether or not the store has a row for it (the watcher
+never ingests one that fails): its `id` and `name` are then the file name
+without `.toml`, and `updated_at` is `null`. A row whose file is deleted is
+dropped on the watcher's next tick.
 
 The list needs no report, so it answers at once and ignores `window` and
 `project`. The suggestion has its own route, below.
@@ -1121,9 +1132,13 @@ names a profile may set (`profiles.schema.ENV_ALLOWLIST`).
 ### `GET /api/profiles/<id>`
 
 One profile's contents. `404` if `<id>` names neither a catalogue id
-nor an existing `<config_dir>/profiles/<id>.toml`.
+nor an existing `<config_dir>/profiles/<id>.toml`. `409` (`conflict`) when
+the profile's saved file exists but no longer passes the checks; the
+message says why and names the file to fix or delete, in "ClaudeGlass's
+profiles folder (~/.claude/claudeglass/profiles by default)", never the
+real path. A file that isn't valid TOML gives the same `409`.
 
-`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
+`data`: `{"id", "name", "source": "catalogue"|"user", "archetype", "for": [str, ...], "tasks": [str, ...], "notes", "settings": {key: value}, "agents": {name: {key: value}}, "own_agents": {name: {key: value}}, "roles": {role: {key: value}}, "env": {NAME: value}, "setting_count": int}`.
 `roles` is the profile's `[roles.<role>]` tables as written (the only
 role is `writer`, the agent that writes code). `agents` is as resolved
 (`profiles.roles.resolve`): the profile's own agent tables, plus each
@@ -1132,6 +1147,9 @@ records (user and project agents together) that is named like a writer
 and can edit files. A role with no such agent adds nothing, and so does
 a role when no snapshot has recorded any agents. `setting_count` counts
 settings, the resolved agent keys and environment variables together.
+`own_agents` is the profile's own `[agents.<name>]` tables as written,
+with no role folded in. The editor's "Start from" copies `own_agents` and
+`roles`, so a copy keeps a role as a role.
 
 ### `GET /api/profiles/<id>/diff`
 
@@ -1144,7 +1162,9 @@ service never calls `apply`; it renders the diff and the command"). A
 store with no snapshot at all diffs against an empty effective config
 (nothing currently set, nothing managed) and says so in `notes`, rather
 than erroring. `404` if `<id>` names neither a catalogue id nor an
-existing `<config_dir>/profiles/<id>.toml`.
+existing `<config_dir>/profiles/<id>.toml`. `409` (`conflict`) when the
+profile's saved file exists but no longer passes the checks; the message
+says why and names the file to fix or delete.
 
 Query: `scope` — one of `user` (default), `project-local`, `repo` (same
 three scopes `profiles.diff`/`apply` use); `400` for anything else.
@@ -1190,8 +1210,10 @@ project file ranking above the target file that sets the key too (only when a
 `project` is asked for; without one the snapshot is whichever project's took
 it), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` over `autoCompactWindow`,
 `CLAUDE_CODE_EFFORT_LEVEL` over `effortLevel` and over a model's own
-`modelSettings.<id>.effortLevel` row, or models that have an effort
-level of their own (`modelSettings`) over `effortLevel`. The dashboard adds
+`modelSettings.<id>.effortLevel` row, `ANTHROPIC_MODEL` over `model`, models
+that have an effort level of their own (`modelSettings`) over `effortLevel`,
+or, at the `user` scope, the fact that Opus 5.5 and later ignore a user-level
+`effortLevel`. The dashboard adds
 it to the "Set in" cell after `where`. `target_file` is where the key is set
 today.
 
@@ -1473,6 +1495,10 @@ name (`"bugfix"` to `"Bug fix"`, from `capture_catalogue.TASK_LABELS`),
 `task` is the one drafted (the one asked for when it's there, else the
 first with a cheaper setup) and `note` says what was found; other goals
 return `[]`, `{}`, `null` and `null`.
+Any goal leaves out an agent no profile can name: one whose name the
+agent-name rule refuses (counted in one sentence added to `note`, never
+named) and a plugin's agent (`plugin:agent`, left out without a word, as its
+plugin owns its file).
 A candidate is ticked only when the data supports it; the main model is
 never pre-ticked. The goals that start from recommendations
 (`recommendations`, `subagents`, `models`) leave out the ones ignored in
@@ -1487,7 +1513,9 @@ that task's own share of the window (`habits_by_task`, or the agent's
 task share of its own cost for an agent candidate) — `saving_usd` is
 `null` and `basis` says why when there's no clean share to scale by.
 When the model the cheaper setup ran on already has its own effort level
-in `modelSettings` (matched by its family, and unless
+in `modelSettings` (matched by its canonical id, so a dated, `[1m]`, Bedrock or
+Vertex spelling of either is the same model, or by a bare family alias; a key
+the profile schema refuses is never reused; and unless
 `CLAUDE_CODE_EFFORT_LEVEL` is set, which beats every model's entry), `tasks`
 drafts a `modelSettings` candidate in place of the `effortLevel` one: `key`
 `"modelSettings"`, `agent` `null`, `label` "Per-model settings", and a
@@ -1498,6 +1526,24 @@ current `effortLevel` (not every model's entry), and its `estimate` is a row
 that is not simulated ("This change isn't simulated."). Its `tradeoff` is the
 `effortLevel` one's. In `profile`, the
 ticked `modelSettings` candidates are merged model by model.
+The `thinking` goal drafts the main session's level the same way for the
+model it ran on (`model_swap_by_agent_type`'s observed model, the first one
+of a mixed row), keyed by that model's canonical id (`claude-opus-5-5` for
+`us.anthropic.claude-opus-5-5-v1:0`, `claude-opus-5-5@20260101` or
+`claude-opus-5-5[1m]`; `claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
+or by the model's existing entry as written. `now` is that model's own level,
+so a top-level `effortLevel` does not count as already in effect. Without a
+recorded model, with a name that has no canonical id (a gateway's own name),
+or while `CLAUDE_CODE_EFFORT_LEVEL` is set, it drafts `effortLevel`.
+It drafts nothing when the settings already give that model `low` or
+`medium`, or a managed file sets its level (`main_effort_reading`, which
+reads `effective_provenance`: `draft(..., provenance=)`, passed by the goal
+route and the CLI). When a project, local or project-shared file's flat
+`effortLevel` is what decides, it drafts that flat level, and the evidence
+adds "This project's <file> sets effortLevel, which wins over a model's own
+level, so apply this to that file."
+While `ANTHROPIC_MODEL` is set, the `models` goal drafts no change to the main
+session's model, as the variable picks it.
 `profile` holds the ticked changes and `whatif` their combined
 estimate, scaled the same way for `tasks`. `current` returns no
 candidates (`from_current: true`): the dashboard saves your current
@@ -2190,7 +2236,8 @@ cross-site checks above run first (`403 forbidden` for a cross-site
 request, `400 bad_request` for a wrong `Content-Type` — see "Cross-site
 protection"). `400` (`error.code: "bad_request"`) if the body is not a
 JSON object, or if the schema rejects an unknown key or
-an out-of-range value — the schema's own problem text, joined with
+an out-of-range value or an agent name that breaks the rule in
+docs/profiles.md — the schema's own problem text, joined with
 `"; "` (plan: "the schema rejects anything else so a profile can never
 promise an effect the harness cannot deliver"). `409`
 (`error.code: "conflict"`) if `id` names one of the eight shipped
@@ -2232,7 +2279,10 @@ Without it, a second save is `409` (`error.code: "conflict"`, message
 allowlisted setting names left out because managed settings control
 them, and `skipped_project_agents`: the names of agents that belong to one
 project (`effective_agents` source `project`), sorted, left out (`[]` when
-there are none). Only the user's own agents (source `user`) are saved,
+there are none), and `skipped_name_agents`: how many of the user's own
+agents with something to save were left out because the agent-name rule
+refuses their names (`0` when none; counted, never named, and a project
+agent with such a name is in neither field). Only the user's own agents (source `user`) are saved,
 each with the `model`, `effort`, `maxTurns` and `experimental.cacheTtl` it
 sets (`effective_agents` calls the last two `max_turns` and
 `experimental_cache_ttl`): `apply` looks for an agent's file in the user's

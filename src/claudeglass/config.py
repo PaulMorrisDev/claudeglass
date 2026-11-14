@@ -186,19 +186,28 @@ class CaptureConfig:
         (``capture_catalogue.active_metrics``)."""
         return capture_catalogue.active_metrics(self.level, self.metrics, self.feedback)
 
+    def running_metrics(self, now: datetime | None = None) -> tuple[str, ...]:
+        """What the capture hook runs now, as ``capture_catalogue.active_metrics``
+        lists it: the level's metrics while capture runs; once its end has
+        passed, only ``capture_catalogue.LIGHT_METRICS`` and what they need
+        while a light sample runs (:meth:`light`), else none. The feedback
+        toggles stay in every state: the hook runs the ones on your messages
+        whatever the level (``capture_hook.feedback_ids``)."""
+        if self.light(now):
+            return capture_catalogue.active_metrics(
+                capture_catalogue.CUSTOM_LEVEL, capture_catalogue.LIGHT_METRICS, self.feedback
+            )
+        if self.expired(now):
+            return capture_catalogue.active_metrics("off", (), self.feedback)
+        return self.active_metrics()
+
     def hook_metrics(self, now: datetime | None = None) -> tuple[str, ...]:
-        """What the capture hook's settings.json entries are for: the
-        metrics the hook asks for now (the level's, or only
-        ``capture_catalogue.LIGHT_METRICS`` and what they need while a light
-        sample runs, :meth:`light`), plus the coaching toggles that run
-        through the hook (``coaching_notes``), whatever the level, and
+        """What the capture hook's settings.json entries are for: what it
+        runs now (:meth:`running_metrics`), plus the coaching toggles that
+        run through the hook (``coaching_notes``), whatever the level, and
         ``capture_catalogue.HAIKU_TAGGER_HOOK`` while Haiku writes the
         tags."""
-        metrics = (
-            capture_catalogue.with_requirements(capture_catalogue.LIGHT_METRICS)
-            if self.light(now)
-            else self.active_metrics()
-        )
+        metrics = self.running_metrics(now)
         hooked = tuple(
             i for i in capture_catalogue.COACHING_IDS if i in self.coaching and capture_catalogue.METRICS_BY_ID[i].hooks
         )

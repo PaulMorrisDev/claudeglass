@@ -22,9 +22,19 @@ from dataclasses import dataclass, replace
 
 from .. import agent_roles
 from ..recommend import _FILE_TOOLS, _NOT_OVERRIDABLE, read_agent_tools
-from .schema import ROLES, Profile
+from .schema import AGENT_NAME_USABLE, ROLES, Profile, agent_name_problem
 
-__all__ = ["ROLE_WORDS", "Resolved", "is_writer", "join_names", "resolve", "several_writers_note", "writers"]
+__all__ = [
+    "ROLE_WORDS",
+    "Resolved",
+    "is_writer",
+    "join_names",
+    "resolve",
+    "several_writers_note",
+    "unusable_writers",
+    "unusable_writers_note",
+    "writers",
+]
 
 #: Each role in the words a user reads it as.
 ROLE_WORDS = {"writer": "agent that writes code"}
@@ -37,8 +47,17 @@ def is_writer(name: str, fields: Mapping | None) -> bool:
     ``disallowedTools`` lines (``fields``) let it use a file-editing tool.
     A tools line that is not known (no line, cut off, no snapshot) means
     every tool, so it counts as able to edit. A name in
-    ``recommend._NOT_OVERRIDABLE`` is never a writer."""
-    if not isinstance(name, str) or name in _NOT_OVERRIDABLE:
+    ``recommend._NOT_OVERRIDABLE`` is never a writer, and neither is a name
+    that fails ``schema.agent_name_problem``."""
+    if not isinstance(name, str) or agent_name_problem(name) is not None:
+        return False
+    return _named_and_able(name, fields)
+
+
+def _named_and_able(name: str, fields: Mapping | None) -> bool:
+    """:func:`is_writer` without the name check: named like a writer and
+    able to edit files."""
+    if name in _NOT_OVERRIDABLE:
         return False
     if agent_roles.role_class(agent_roles.role_word(None, name, None)) != "writer":
         return False
@@ -63,6 +82,30 @@ def several_writers_note(names: tuple[str, ...] | list[str]) -> str:
     changed."""
     both = "both" if len(names) == 2 else "all"
     return f"{join_names(names)} are {both} named like an agent that writes code, so each gets these changes."
+
+
+def unusable_writers(agents: Mapping[str, Mapping]) -> int:
+    """How many names in ``agents`` would be writers but for a name that
+    fails ``schema.agent_name_problem``. They are counted, never named: such
+    a name may hold text meant to reach a prompt."""
+    return sum(
+        1
+        for name, fields in agents.items()
+        if isinstance(name, str) and agent_name_problem(name) is not None and _named_and_able(name, fields)
+    )
+
+
+def unusable_writers_note(count: int) -> str:
+    """The sentence for :func:`unusable_writers` (``count`` is 1 or more)."""
+    if count == 1:
+        return (
+            "One agent that writes code has a name ClaudeGlass can't use, so it is left out. "
+            f"{AGENT_NAME_USABLE} Rename it to include it."
+        )
+    return (
+        f"{count} agents that write code have names ClaudeGlass can't use, so they are left out. "
+        f"{AGENT_NAME_USABLE} Rename each to include it."
+    )
 
 
 def writers(agents: Mapping[str, Mapping]) -> tuple[str, ...]:

@@ -2945,7 +2945,7 @@ def test_an_estimate_is_logged_when_a_change_is_saved_or_its_command_copied() ->
     assert goal.index('toast("Profile saved.")') < goal.index("log: true")
     estimate = _function_source(source, "renderProfileEstimate")
     assert "if (logged || !request) return;" in estimate and "log: true" in estimate
-    assert "renderProfileDiff(data, box, logEstimate)" in _function_source(source, "renderProfileDetail")
+    assert "renderProfileDiff(data, box, estimator.log)" in _function_source(source, "renderProfileDetail")
     assert "{ onCopy: onCopy }" in _function_source(source, "renderProfileDiff")
     copy = _function_source(source, "codeBlockWithCopy")
     assert "if (ok && onCopy) onCopy();" in copy
@@ -4150,6 +4150,12 @@ def test_capture_segment_no_longer_claims_a_subagent_is_asked_for_anything() -> 
     assert "subagent starts" not in capture_view.WARNING and "when a session or subagent" not in capture_view.WARNING
 
 
+def test_the_capture_page_gives_the_note_after_a_compaction_where_it_is_bigger() -> None:
+    rough = _function_source(_static_text("page-capture.js"), "roughLine")
+    assert "rough.compact_note > rough.session_note" in rough
+    assert '" when it compacts"' in rough
+
+
 def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one() -> None:
     capture_js = _static_text("page-capture.js")
     render = _function_source(capture_js, "renderCaptureData")
@@ -4559,3 +4565,111 @@ def test_cards_are_marked_shown_from_the_list_and_the_overview_only_while_visibl
     shown = _function_source(_static_text("api.js"), "markCardsShown")
     assert 'document.visibilityState === "visible"' in shown
     assert 'document.addEventListener("visibilitychange"' in shown
+
+
+def test_the_bundle_note_says_a_model_change_is_left_out_to_try_first() -> None:
+    """``bundleLine`` ends with a sentence when the bundle left out a model
+    change its card says to try first (``left_out.trial``)."""
+    from test_ui_figures_audit import _node
+
+    def line(data: dict) -> str:
+        return _node([("page-actions.js", "bundleLine")], f"bundleLine({json.dumps(data)}, 'P')")
+
+    assert line({"files": [], "several": 1, "other": 1, "left_out": {"trial": 1}}) == (
+        "2 open fixes for P: 1 that spans several files or sets a standing rule and 1 with no file to edit. "
+        "The model change is left out: try it from its own card first."
+    )
+    assert line({"files": [{"file": "a", "fixes": 2}], "several": 0, "other": 0, "left_out": {"trial": 2}}) == (
+        "2 open fixes for P: 1 file to edit. The 2 model changes are left out: try each from its own card first."
+    )
+    assert line({"files": [{"file": "a", "fixes": 1}], "several": 0, "other": 0, "left_out": {"trial": 0}}) == (
+        "1 open fix for P: 1 file to edit."
+    )
+
+
+def test_start_from_carries_the_role_and_fills_only_the_profiles_own_agents() -> None:
+    """F1: "Start from" copies a profile's own agents and carries its role as a role, so the copy
+    shows and applies like the original at every target."""
+    editor = re.sub(r"\s+", " ", _function_source(_app_js(), "buildProfileEditor"))
+    assert "p.own_agents" in editor and "p.agents" not in editor
+    assert "carriedRoles = p.roles && Object.keys(p.roles).length ? p.roles : null;" in editor
+    assert "if (carriedRoles) doc.roles = carriedRoles;" in editor
+    assert '"For the agent that writes code: "' in editor
+    assert (
+        '". It goes to each of your agents named like implementer, fixer or builder that can edit files."' in editor
+    )
+
+
+def test_the_estimate_is_drawn_from_the_changes_the_chosen_target_makes() -> None:
+    """F2: the estimate is built from the drawer's own diff rows, so it prices what the chosen target
+    changes (not a key your policy locks or one already set) and is redrawn with each diff."""
+    source = _app_js()
+    detail = re.sub(r"\s+", " ", _function_source(source, "renderProfileDetail"))
+    assert "estimator.show(data);" in detail
+    assert "renderProfileDiff(data, box, estimator.log);" in detail
+    estimate = _function_source(source, "renderProfileEstimate")
+    assert "p.agents" not in estimate and "p.settings" not in estimate
+    assert "profileChangeFromDiff(diff)" in estimate
+    assert "if (mine !== ticket) return;" in estimate
+    assert "if (logged || !request) return;" in estimate and "log: true" in estimate
+    assert (
+        'container.insertBefore(el("h3", { text: "Estimated effect" }), container.firstChild);' in estimate
+    )
+    change = re.sub(r"\s+", " ", _function_source(source, "profileChangeFromDiff"))
+    assert "if (row.managed || diffRowSame(row)) return;" in change
+    assert "change.settings.modelSettings[row.model]" in change
+
+
+def test_save_current_settings_says_how_many_agents_were_left_out_for_their_names():
+    from claudeglass.profiles.schema import AGENT_NAME_MAX, AGENT_NAME_USABLE
+
+    js = _app_js()
+    assert "body.data.skipped_name_agents" in js
+    # The page has its own copy of the sentence, in two sentences (the copy scan allows 25 words
+    # to one): this pins it against schema.AGENT_NAME_USABLE.
+    usable = AGENT_NAME_USABLE.replace(", starts with", ". It starts with").replace(", and is at most", " and is at most")
+    assert usable.count(". ") == 1 and f"at most {AGENT_NAME_MAX} characters." in usable
+    assert f'" Left out, because of its name: one agent. {usable} Rename it to include it."' in js
+    assert (f'" Left out, because of their names: " + nameAgents + " agents. {usable} Rename each to '
+            'include it."') in js
+
+
+def test_a_profile_card_with_a_problem_shows_it_and_offers_nothing_to_open():
+    source = _function_source(_app_js(), "renderProfilesList")
+    at = source.index("if (profile.problem) {")
+    branch = source[at:source.index("return;", at) + len("return;")]
+    assert 'el("p", { class: "notes", text: profile.problem })' in branch
+    assert "cards.appendChild(card);" in branch
+    assert at < source.index("Show what it changes") and at < source.index('fetchJson("/api/profiles/"')
+
+
+def test_start_from_leaves_out_a_profile_whose_file_fails_the_checks() -> None:
+    """SR-2: picking a profile with a `problem` would clear the form, get the 409 and say nothing, so the
+    select never offers one (its card already says why it can't be used)."""
+    from test_ui_figures_audit import _node
+
+    listed = [
+        {"id": "good", "name": "Good one", "problem": None},
+        {"id": "broken", "name": "Broken one", "problem": "The file has a key ClaudeGlass doesn't know."},
+        {"id": "plain", "name": "No problem field"},
+    ]
+    shown = _node([("page-setup.js", "startFromProfiles")], f"startFromProfiles({json.dumps(listed)})")
+    assert [p["id"] for p in shown] == ["good", "plain"]
+    editor = re.sub(r"\s+", " ", _function_source(_app_js(), "buildProfileEditor"))
+    assert "startFromProfiles(profiles).forEach(function (p) { startSelect.appendChild(" in editor
+    assert "profiles.forEach" not in editor
+
+
+def test_the_before_and_after_counts_say_one_session_and_one_run() -> None:
+    """Seen in the browser pass: "1 sessions before, 3 after"."""
+    from test_ui_figures_audit import _node
+
+    def counts(label, before, after):
+        measure = {"label": label, "before_n": before, "after_n": after}
+        return _node([("page-changes.js", "countsText")], f"countsText({json.dumps(measure)})")
+
+    assert counts("Cost per session", 1, 3) == "1 session before, 3 after"
+    assert counts("Cost per session", 3, 1) == "3 sessions before, 1 after"
+    assert counts("Cost per session", 0, 2) == "0 sessions before, 2 after"
+    assert counts("general-purpose: cost per spawn", 1, 18) == "1 run before, 18 after"
+    assert counts("general-purpose: cost per spawn", 13, 18) == "13 runs before, 18 after"

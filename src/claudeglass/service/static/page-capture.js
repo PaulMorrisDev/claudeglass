@@ -156,7 +156,8 @@ function estimateLine(estimate) {
 
 function roughLine(rough) {
   var parts = [];
-  if (rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts, is cleared or compacts");
+  if (rough.compact_note > rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts or is cleared, and about " + rough.compact_note + " when it compacts");
+  else if (rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts, is cleared or compacts");
   if (rough.reply_tag) parts.push("about " + rough.reply_tag + " tokens of tag per reply");
   if (rough.message_note) parts.push("about " + rough.message_note + " tokens of note on a message of yours now and then, when a plan check or the /cg-feedback reminder is due");
   if (rough.reminder) parts.push("about " + rough.reminder + " tokens for the /cg-feedback reminder, at most once every 3 days");

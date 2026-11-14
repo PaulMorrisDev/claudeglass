@@ -1420,7 +1420,9 @@ def _main_model_lever(
     of the run that made it is headless or has fewer than
     :data:`MOVE_MIN_REPLIES` priced replies. ``None`` without a config
     folder, so every main session counts. ``loaded``: the config folder's
-    snapshots when the caller has read them already."""
+    snapshots when the caller has read them already. While ANTHROPIC_MODEL
+    is set for a project (:func:`change_points.model_env_set`) its setting is
+    not read: the variable picks the model, so the transcripts decide alone."""
     if config_dir is None:
         return None
     points = change_points_mod.transcript_points(corpus)
@@ -1436,8 +1438,12 @@ def _main_model_lever(
         keys = tuple(keys_by_session.get(session_id) or ())
         if keys not in projects:
             first, settings = change_points_mod.settings_model_crossings(snapshots, keys, model_swap.at_main_floor)
+            # N5: while ANTHROPIC_MODEL is set the setting picks no session's
+            # model, so none is a pick against it or from before a move of
+            # it; the transcripts decide alone, as with no setting recorded.
+            env = change_points_mod.model_env_set(snapshots, keys)
             projects[keys] = (
-                ([first] if first else []) + settings,
+                [] if env else ([first] if first else []) + settings,
                 _cut_time(change_points_mod.transcript_model_crossings(points, keys, model_swap.at_main_floor)),
                 several and change_points_mod.sets_own_model(snapshots, keys),
             )
@@ -2009,7 +2015,16 @@ def build_report(
     # here because the agent-model section reads the same one: an agent file
     # that names a run's model, or CLAUDE_CODE_SUBAGENT_MODEL, is not an
     # accident of inheriting.
-    latest_snapshot = snapshots_mod.with_every_project_agents(settings_snaps, canonical) if settings_snaps else None
+    # In a view of several projects no one project's files are read (the
+    # view rule, snapshots.view_settings), as the dashboard's and the CLI
+    # check's own settings are built.
+    view_slugs = {bundle.slug for bundle in corpus.sessions if bundle.slug} | set(projects)
+    several = snapshots_mod.several_in_view(view_slugs, canonical, all_projects=all_projects)
+    latest_snapshot = (
+        snapshots_mod.with_every_project_agents(settings_snaps, canonical, several_projects=several)
+        if settings_snaps
+        else None
+    )
     agent_models_stats = agent_models.compute_agent_models(
         all_results,
         pricing,

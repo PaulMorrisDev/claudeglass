@@ -64,9 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The dashboard keeps a record of the cards it showed and copied, and of
   which fixes landed** (store version 12), for the tuning file's `cards`
   block. It stays on this machine, a rebuild keeps it, and `serve --purge`
-  deletes it.
-- **Fable 5.2 and Mythos 5.2 have rate card rows, and `fable` and `best`
-  now mean Fable 5.2.** Fable 5.1 keeps its row.
+  deletes it. Going back to 0.16.0 rebuilds the store from the transcripts
+  still on disk, after copying the file to `service.db.bak-12-<time>`: a
+  session whose transcript is gone and the verdicts of judged estimates
+  drop out and stay only in that backup. Your tags, ratings and this
+  record are kept.
+- **Fable 5.2 and Mythos 5.2 have rate card rows, `fable` now means Fable
+  5.2, and `best` means Opus 5.5,** the model Claude Code gives it. Fable
+  5.1 keeps its row.
 - **`check` and `review` take `--claude-root`**, the folder that holds your
   CLAUDE.md, rules, agents and skills.
 
@@ -91,6 +96,8 @@ Capture and dashboard:
 - **Copy buttons work in the desktop app's browser pane.** When the browser
   refuses the clipboard, the copy is tried again through a selected text
   field.
+- **The Changes page says "1 session before"**, where it said "1 sessions
+  before".
 - **The Overview's headline saving leaves out cards shown for information
   only.**
 - **Claude Haiku waits an hour when the `claude` command isn't signed in**,
@@ -115,6 +122,53 @@ Capture and dashboard:
   than the one the change sets are left out, and so is a project whose
   sessions before the change never ran the old one. When none is left, the
   Changes page says the change has not changed what you paid.
+- **"Start from" a profile that changes the agent that writes code keeps
+  that change as it is.** The copy names the role, not the agents found
+  on this machine, so it shows and applies like the original at every
+  target. Before, it named one agent, and `apply` refused the copy or
+  dropped the change. Make such a copy again to get this.
+  `GET /api/profiles/<id>` adds `own_agents`.
+- **The estimate beside a profile prices only what the chosen target
+  changes.** It is redrawn when you pick another target, and leaves out
+  settings your policy locks and values already set. Before, it priced
+  the agent that writes code where no agent file changes, and copying the
+  prompt logged that estimate. Its "Estimated effect" heading shows again.
+- **An agent whose name has a dot, such as `implementer.v2`, gets its own
+  file and key** in a profile's prompt, table and file changes. Before,
+  they named `implementer.md` and `v2.model`.
+- **Agent names are checked wherever ClaudeGlass takes one in.** A name
+  holds only letters, digits, single dots, underscores and hyphens, starts
+  with a letter or digit, and has at most 128 characters. A profile,
+  `POST /api/profiles` or `apply --agent` with another name is refused, so
+  `apply` can no longer write a file outside the agents folders. A card
+  about such an agent offers no prompt, and a writer with such a name is
+  left out and counted, never named; both state what a usable name is. Goal
+  drafts and "Save my current settings" leave such agents out and say how
+  many, and goal drafts and quality tips no longer offer a change to a
+  plugin's agent. Agent names in copied prompts are in quotes. A saved
+  profile that breaks the rule is listed in Setup › Profiles with why
+  and which file to fix or delete, and its card goes once the file is
+  deleted. The snapshot hook now keeps agent names up to 128 characters,
+  so a writer with a name of 65 to 128 characters is no longer called
+  unusable.
+- **An id, model id or card key with a line break at its end is
+  refused.** A profile id like that gave an error 500 on Windows.
+- **During a light sample, capture keeps the hook entry the plan check and
+  the rating reminder need.** `capture connect` no longer offers to take it
+  out, and `capture status` counts both again. Past its end, capture asks
+  only for the entries that still run.
+- **No hook runs where nothing switched on uses it.** Coaching notes no
+  longer start Python at every agent's end, and Deep adds no hook after
+  each read or web result while Haiku writes the tags. `capture status`
+  names a leftover entry and the command that takes it out.
+- **docs/capture.md names the question Deep asks after a summary**
+  (`lost=yes|no`), and the note after a compaction is given its own size:
+  about 709 tokens at Deep. `capture status` and Setup › Capture say so too.
+- **Parallel sessions and agents no longer lose signal or tag lines on
+  Windows.** Each line is now added in one step the system keeps whole.
+- **The Stop hook no longer waits for Haiku's worker to start on
+  Windows**, a wait measured at 160 to 420 ms a turn on a large session.
+  The job still goes through a pipe, never a file.
 
 Cards and checks:
 
@@ -159,10 +213,89 @@ Cards and checks:
 - **The tools, skills and MCP cards read the agent's `disallowedTools`.** A
   tool on it is not offered again, an entry such as `Bash(git push *)`
   withholds the whole tool, and the tools card says a withheld tool is on
-  that line.
+  that line. Its why says a tool stays only when it is on the line the card
+  proposes.
 - **The CLAUDE.md and skills checks read the project folders the report
   read**, and the CLAUDE.md check offers its cards' fixes when no file
   shows how often it was sent.
+- **A change to one model's own setting gets a command apply accepts.**
+  The checks gave modelSettings as one value apply refused; the command now
+  sets modelSettings.<model>.<key> for each.
+- **A main session on Mythos gets the main model card.** Mythos ranks with
+  Fable, at whose prices the rate card lists it, so the card offers Opus and
+  the Models table no longer says the family is not recognised. The capture
+  hook also counts a brief run again on Mythos after a smaller model as a
+  retry for the model.
+- **The project's one prompt for every open fix leaves out model changes.**
+  The main session's model and an agent's model are for you to try first
+  from their own card, so pasting the prompt no longer makes them lasting.
+  The note beside the button says so, and the prompt says when a file it
+  edits is read in every project.
+- **A plugin's agent no longer gets a fix for a file that cannot exist.**
+  Its file belongs to the plugin, so a card that would edit it is shown
+  for information only, the model card leaves it out, and no prompt names
+  a path under ~/.claude/agents for it.
+- **The effort card no longer offers a setting that would do nothing.**
+  Opus 5.5 and later ignore effortLevel in your user settings, so the card
+  asks for /effort medium, which Claude Code saves per model. While
+  CLAUDE_CODE_EFFORT_LEVEL is set, it says the variable wins. The
+  auto-compact cards name a model whose own window wins. The card goes once
+  the main session's model already has low or medium from the file that
+  decides it, and the effort check says the level is already set. In a view
+  of several projects only your own and managed settings count, on the card
+  as on the check and the goal: a project's medium no longer closes the card
+  and its high no longer sends the fix to that project's file. A project
+  file's own entry for the model gets the change there.
+- **The thinking goal and the Overview effort check set the main session's
+  effort for the model it ran on, as /effort does.** A user-level
+  effortLevel did nothing on Opus 5.5 and later. The entry goes under the
+  model's canonical id, so a dated, [1m], Bedrock or Vertex id gets one
+  `apply` accepts, and a model name it cannot read gets the plain effort
+  level. It drafts nothing when the level is already medium or lower, and
+  changes a project file's flat effortLevel when that is what wins.
+- **The effort check follows the effort card.** Ignoring the card removes
+  the check's main-session change. While CLAUDE_CODE_EFFORT_LEVEL is set
+  or a project effort card is open, the check offers no user-level effort
+  command. With the variable set, a goal's effort change says to change
+  or remove it; it used to suggest --effort, which the variable beats.
+  With the variable set and no effort card, the check says the variable
+  decides and offers no command. Under a managed effort level and no
+  effort card, it says your administrator sets it; with the card ignored,
+  it says the change is on a card you ignored.
+- **A model's own effort entry is matched by its canonical id**, so its
+  dated, [1m], Bedrock and Vertex spellings count, and an entry for
+  another version of the family is no longer changed in its place. The
+  apply preview explains a per-model effort level or window the way it
+  explains the flat setting.
+- **The Overview's headline saving leaves out cards you ignored.** An
+  ignored model card takes out its main session or agent row, and an
+  ignored auto-compact, tool-output or wasted-replies card takes out its
+  lever. Ignoring a card never raises the headline, and no agent is
+  counted twice.
+- **The main session's model card offers no setting while ANTHROPIC_MODEL
+  is set.** The variable wins over the model setting, so the card, the
+  Models check and the profile diff say so instead, and the Setup goal
+  drafts no change to it. A snapshot from before this reads as not set.
+  No session counts as picked against a setting the variable beats, and the
+  Models check says so when the cheaper model is the variable's to set.
+- **A profile that sets effortLevel in your user settings says Opus 5.5
+  and later ignore it there.** The diff row and the prompt suggest /effort
+  on each model, or a project target, where it applies to every model.
+  A model's own effortLevel row says when a project file's flat level wins
+  over it, and the apply preview lists it as overridden. The same holds for
+  a model's own auto-compact window, and a flat row is no longer called
+  overridden by a model's own entry in a lower file.
+- **The auto-compact card and the compaction check change the file that
+  sets the window.** Under a project file's window the check's fix goes to
+  that file, not your user settings, and the card no longer says a model's
+  own window in a lower file wins over its change. A project's local file
+  is named as itself. Under a managed window the check asks your
+  administrator. The check's fix says when a model's own window wins, as
+  the card does. A user-scope apply preview names no project's file when
+  your snapshots come from several projects. A project or managed file's own
+  window for the main session's model gets the change there. A note about
+  a model's own window says how to change it in the file that holds it,
+  and a managed window carries no such note for an own window below it.
 
 Coaching:
 
@@ -198,11 +331,11 @@ Coaching:
   A card closes when the rare tools left on it fall under the bar, a card
   never adds a tool, and `advisor` is listed with the tools Claude Code always
   adds. A known tools line also stops the generic `spawn-cost` card.
-- **The workflow tools card keeps Edit, Write, MultiEdit, NotebookEdit, Bash
-  and PowerShell on its line once any workflow agent called them, on any
-  model,** and its saving is for that line. Earlier versions could leave
-  them off: if you made an agent file from that line, add back the ones
-  your workflow agents use.
+- **The tools card keeps Edit, Write, MultiEdit, NotebookEdit, Bash and
+  PowerShell on its line once any run of that agent called them, on any
+  model,** for every agent, and its saving is for that line. Earlier
+  versions could leave them off: if you made an agent file from that
+  line, add back the ones the agent uses.
 - **The subagent startup write is priced at the first call's own 5-minute and
   1-hour split**, and at the 5-minute rate when it recorded none.
 - **`spawn-claude-md` holds back on a tie** between runs that said they used

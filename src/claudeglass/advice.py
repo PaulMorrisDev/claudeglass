@@ -50,16 +50,23 @@ from datetime import date
 from typing import Callable
 
 from . import cost_centres, known_savers, model_gate, model_swap, whatif
-from .fixes import CRITIQUE_PLAN_LINE, already_set
+from .fixes import CRITIQUE_PLAN_LINE, OWN_WINDOW_STEP, PLUGIN_AGENT_FILE_CARDS, already_set, plugin_of, profile_overridden_by, window_change_note
 from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
 from .snapshots import (
     AUTO_COMPACT_WINDOW_ENV,
+    MODEL_ENV,
     Snapshot,
     auto_compact_window,
     auto_compact_window_env_set,
     effective_config,
+    effective_config_in_force,
+    effective_provenance,
+    effort_level_env_set,
+    env_var_set,
+    for_view,
+    view_spans_projects,
 )
 from .units import NO_LIMIT_SHARE_HINT, Units
 
@@ -242,8 +249,8 @@ def _left_out_note(left_out: list[tuple[str, str]]) -> str:
 
 
 def _several_projects(ctx: _Context) -> bool:
-    """Whether the report covers more than one project."""
-    return len(getattr(getattr(ctx.report, "meta", None), "projects", ()) or ()) > 1
+    """Whether the report covers more than one project (``snapshots.view_spans_projects``)."""
+    return view_spans_projects(ctx.report)
 
 
 def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recommendation]:
@@ -261,10 +268,15 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
     # it gets a card of its own, ranked after every other advice card
     # (finish's sort); subagents share the merged card.
     left_out: dict[bool, list[tuple[str, str]]] = {True: [], False: []}
+    #: A plugin's agents: their model is set in the plugin's own file.
+    plugins: dict[bool, list[str]] = {True: [], False: []}
     rows = []
     for rec in tier:
         agent = rec.agent_type or "top-level"
         if agent in NOT_OVERRIDABLE:
+            continue
+        if plugin_of(agent):
+            plugins[agent == "top-level"].append(agent)
             continue
         alt = ctx.cell("model_swap", "model_swap_by_agent_type", agent, "best_cheaper_alternative_model")
         saving = ctx.cell("model_swap", "model_swap_by_agent_type", agent, "saving_usd")
@@ -275,11 +287,14 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         if not alt:
             continue
         now = _main_setting(ctx)[0] if agent == "top-level" else ctx.agent_now(agent, "model")
+        # N5: while ANTHROPIC_MODEL is set the setting picks no session's model,
+        # so one that already says the cheaper model is no reason to drop the card.
+        model_env = agent == "top-level" and env_var_set(ctx.snapshot, MODEL_ENV)
         # A main-session setting at Sonnet or smaller is never raised (G3).
         # The saving reads the same setting, so it prices nothing then.
-        main_there = agent == "top-level" and model_swap.at_main_floor(now)
+        main_there = agent == "top-level" and model_swap.at_main_floor(now) and not model_env
         if main_there or already_set("model", _family_alias(alt), now) and not (
-            agent == "top-level" and _several_projects(ctx)
+            agent == "top-level" and (_several_projects(ctx) or model_env)
         ):
             # Already on the cheaper model. In a view of several projects one
             # setting can't say what every project ran, so the main card
@@ -310,7 +325,15 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
     agent_rows = [r for r in rows if r[1] != "top-level"]
     out = list(rest)
     if agent_rows:
-        out.append(_agent_tier_card(agent_rows, left_out[False], tier, ctx))
+        card = _agent_tier_card(agent_rows, left_out[False], tier, ctx)
+        if plugins[False]:
+            names = plugins[False]
+            one = len(names) == 1
+            card.why += (
+                f" {_listed(names)} {'is' if one else 'are'} left out: {'its' if one else 'their'} plugin sets "
+                f"{'its' if one else 'their'} model."
+            )
+        out.append(card)
     if main_rows:
         out.append(_main_tier_card(main_rows[0], left_out[True], ctx))
     return out
@@ -385,6 +408,13 @@ def _left_out_sentence(rec: Recommendation) -> str:
     return f" It leaves out {sum(n for n, _one, _many in parts):,} main sessions: {listed}."
 
 
+#: Said on the main model's card and check while ANTHROPIC_MODEL is set.
+MODEL_ENV_WINS = (
+    "ANTHROPIC_MODEL is set, and it wins over your model setting. To keep a model, change the variable where "
+    "you set it: your shell profile or a settings file's env block."
+)
+
+
 def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) -> Recommendation:
     """The main session's model, one tier down. ``model_swap`` never
     suggests Haiku here (its ``main_floor`` verdict), so this is only ever
@@ -398,6 +428,8 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
     # project's sessions ran on a larger one anyway. A setting at Sonnet or
     # smaller never gets here (_merge_model_tier).
     set_already = already_set("model", _family_alias(alt), current)
+    # ANTHROPIC_MODEL wins over the setting from any file: no change to it would take effect.
+    model_env = env_var_set(ctx.snapshot, MODEL_ENV)
     if set_already:
         since += f" Your model setting already says {family}, and the sessions it counts still ran on a larger model."
     scope = "managed" if rec.scope == "managed" else (
@@ -428,15 +460,21 @@ def _main_tier_card(row: tuple, left_out: list[tuple[str, str]], ctx: _Context) 
         )
         + _left_out_note(left_out),
         action=(
-            "Keep routine work on your setting. Pick a larger model only for work that needs it."
-            if set_already
-            else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
-            "the results before making it your default."
+            # N5: the setting already says it, so the variable is the one plain action.
+            MODEL_ENV_WINS
+            if set_already and model_env
+            else (
+                "Keep routine work on your setting. Pick a larger model only for work that needs it."
+                if set_already
+                else f"Try {family} for a session or two of routine work (/model {_family_alias(alt)}) and compare "
+                "the results before making it your default."
+            )
+            + (" " + MODEL_ENV_WINS if model_env else "")
         ),
         lever="model",
         scope=rec.scope,
         evidence=list(rec.evidence),
-        changes=[] if set_already else [change],
+        changes=[] if set_already or model_env else [change],
         estimated_saving=ctx.money(saving, prefix="At most "),
         saving_basis=ctx.basis(_TIER_BASIS),
         saving_usd=saving,
@@ -568,6 +606,9 @@ def _drop_applied(recs: list[Recommendation]) -> list[Recommendation]:
     is dropped."""
     out = []
     for rec in recs:
+        # N2: a card with no setting to change whose ask is already in force.
+        if rec.variant == "applied":
+            continue
         if rec.changes:
             pending = [c for c in rec.changes if not already_set(c.key, c.value, c.current)]
             if not pending:
@@ -579,18 +620,11 @@ def _drop_applied(recs: list[Recommendation]) -> list[Recommendation]:
 
 # -- per-rule wording ------------------------------------------------------------
 
-#: ``compaction_sim._scope_and_lever_note`` (compaction_sim.py is outside
-#: this work package's file list -- P5 owns it) still returns ``"project"``
-#: for a value set at either the project_shared or the project_local
-#: layer, one token short of this module's/``fixes.py``'s ``"repo"``/
-#: ``"project-local"`` split. Folded to ``"repo"`` here so every
+#: ``compaction_sim._scope_and_lever_note`` returns ``"project"`` for a
+#: value the project's shared file sets (and ``"project-local"`` for the
+#: local one); folded to ``fixes.py``'s ``"repo"`` here so every
 #: ``SettingChange`` this module builds carries a scope ``fixes.py``'s
-#: ``_SETTINGS_WHERE``/``command_for`` actually recognise -- COV-01's
-#: project-local precision is still lost for ``compaction-window``
-#: specifically (it can name the wrong of the two project-scoped files
-#: when the value is actually project-local); every other rule's scope
-#: (``recommend.py``'s own ``_lever_scope``, fixed for COV-01) already
-#: distinguishes the two correctly.
+#: ``_SETTINGS_WHERE``/``command_for`` recognise.
 _SCOPE_ALIASES = {"project": "repo"}
 
 
@@ -606,20 +640,60 @@ def _advice_scope(rec_scope: str) -> str:
     return _SCOPE_ALIASES.get(rec_scope, rec_scope)
 
 
+#: Said after the sentence naming a model whose own window wins.
+_OWN_WINDOW_STEP = OWN_WINDOW_STEP
+
+
 def _window_change(rec: Recommendation, ctx: _Context, *, value: int | None = None, suggested: str) -> SettingChange:
     """A change to the auto-compact window. While
     CLAUDE_CODE_AUTO_COMPACT_WINDOW is set it overrides autoCompactWindow,
     so the change goes to the variable, in a settings file's env block
-    (whose value replaces the shell's)."""
+    (whose value replaces the shell's). A model's own window, saved with
+    /autocompact, wins over the setting for that model when it is in the
+    change's own file or a higher one, so the change's note names it
+    (``fixes.window_change_note``, as the compaction check's fix says). A
+    project or managed file's own window for the main model, which decides
+    when no flat window sits in a higher file (``goals.main_own_window``),
+    is the change itself."""
     now = ctx.window_now()
     if not auto_compact_window_env_set(ctx.snapshot):
+        scope = _advice_scope(rec.scope)
+        if scope in ("repo", "project-local") and _several_projects(ctx):
+            # The view rule: a scope worked out from one project's file is not
+            # where a change for several projects goes.
+            scope = "user"
+        if value is not None and ctx.snapshot is not None:
+            from .profiles import goals
+
+            own = goals.main_own_window(
+                effective_config(ctx.snapshot),
+                effective_provenance(ctx.snapshot),
+                ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model"),
+            )
+            if own is not None:
+                # A project or managed file's own window for the main model decides, so
+                # that entry is the change, there (the effort card's rule, for the window).
+                entry, layer, window = own
+                return SettingChange(
+                    target="settings",
+                    key="modelSettings",
+                    value={entry: {"autoCompactWindow": value}},
+                    current={entry: {"autoCompactWindow": window}},
+                    suggested=suggested,
+                    scope=model_swap.layer_scope(layer),
+                )
         return SettingChange(
             target="settings",
             key="autoCompactWindow",
             value=value,
             current=now,
             suggested=suggested,
-            scope=_advice_scope(rec.scope),
+            scope=scope,
+            note=window_change_note(
+                scope, effective_provenance(ctx.snapshot), effective_config(ctx.snapshot).get("modelSettings")
+            )
+            if ctx.snapshot is not None
+            else "",
         )
     from .recommend import _env_lever_scope
 
@@ -812,6 +886,77 @@ def _pooled_thinking_share(rec: Recommendation) -> float | None:
     return sum(shares.values()) / len(shares)
 
 
+def _effort_lever(rec: Recommendation, ctx: _Context, note: str) -> None:
+    """The effort card's action and change. CLAUDE_CODE_EFFORT_LEVEL wins
+    over /effort and every effort setting, and no settings file can change
+    it. In user settings, Opus 5.5 and later models ignore the top-level
+    effortLevel, and /effort saves a level per model instead (the
+    settings-reference and model-config docs). A project, local or managed
+    file's effortLevel applies to every model, so only there is it the
+    change; when such a file decides the main model's level by its own
+    entry for the model, the change is to that entry (the view rule: the
+    file that decides, ``goals.main_effort_reading``)."""
+    scope = _advice_scope(rec.scope)
+    if effort_level_env_set(ctx.snapshot):
+        rec.variant = "env"
+        rec.action = (
+            "CLAUDE_CODE_EFFORT_LEVEL is set, and it wins over /effort and every effort setting. "
+            "Set it to medium where you set it, or remove it."
+        )
+        rec.changes = []
+        return
+    from .profiles import goals
+
+    snapshot = ctx.snapshot
+    effective = effective_config_in_force(snapshot) if snapshot is not None else {}
+    observed = ctx.cell("model_swap", "model_swap_by_agent_type", "top-level", "observed_model")
+    provenance = effective_provenance(snapshot) if snapshot is not None else {}
+    level, layer, decided_by = goals.main_effort_reading(effective, provenance, observed)
+    if level in goals.EFFORT_DONE:
+        # N2: the main session's model already gets medium or lower, from
+        # whichever file decides it (/effort's own save among them).
+        rec.variant = "applied"
+        rec.changes = []
+        return
+    decider = layer or provenance.get("effortLevel")
+    if scope != "managed" and (decider is not None or _several_projects(ctx)):
+        # The file that decides the main model's level (its own entry or the
+        # flat level), else the flat key's file, both as the view reads them;
+        # in a view of several projects never one project's file. A snapshot
+        # that records no layer leaves the rule's own scope.
+        scope = model_swap.layer_scope(decider) if decider in ("project_shared", "project_local", "managed") else "user"
+        rec.scope = scope
+    if scope in ("repo", "project-local", "managed"):
+        rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
+        entry = goals.main_effort_entry(effective, observed) if decided_by == "modelSettings" else None
+        rec.changes = [
+            SettingChange(
+                target="settings",
+                key="modelSettings",
+                value={entry: {"effortLevel": "medium"}},
+                current={entry: {"effortLevel": level}},
+                note=note,
+                scope=scope,
+            )
+            if entry
+            else SettingChange(
+                target="settings",
+                key="effortLevel",
+                value="medium",
+                current=ctx.setting_now("effortLevel"),
+                note=note,
+                scope=scope,
+            )
+        ]
+        return
+    rec.variant = "session"
+    rec.action = (
+        "Run /effort medium in a session on each model you use. Claude Code saves it for that model. "
+        "Raise it with /effort when a task needs it."
+    )
+    rec.changes = []
+
+
 def _explain_effort_mismatch(rec: Recommendation, ctx: _Context) -> None:
     if any(source == "habits.habits_effort_fit" for _label, _value, source, _row in rec.evidence):
         _explain_effort_mismatch_reported(rec, ctx)
@@ -826,17 +971,7 @@ def _explain_effort_mismatch(rec: Recommendation, ctx: _Context) -> None:
     else:
         rec.why = f"{lead}yet most of your sessions are docs or light edits that rarely need it."
     rec.why = rec.why[:1].upper() + rec.why[1:]
-    rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
-    rec.changes = [
-        SettingChange(
-            target="settings",
-            key="effortLevel",
-            value="medium",
-            current=ctx.setting_now("effortLevel"),
-            note="The high-effort thinking share is measured across all sessions, not only the light ones.",
-            scope=_advice_scope(rec.scope),
-        )
-    ]
+    _effort_lever(rec, ctx, "The high-effort thinking share is measured across all sessions, not only the light ones.")
 
 
 def _explain_effort_mismatch_reported(rec: Recommendation, ctx: _Context) -> None:
@@ -849,17 +984,7 @@ def _explain_effort_mismatch_reported(rec: Recommendation, ctx: _Context) -> Non
         f"Claude reported {easy} of your messages as easy work, yet they ran at high effort or above"
         + (f", and up to {max(shares):.0f}% of their output was thinking." if shares else ".")
     )
-    rec.action = "Make medium your default effort, and raise it with /effort for the tasks that need it."
-    rec.changes = [
-        SettingChange(
-            target="settings",
-            key="effortLevel",
-            value="medium",
-            current=ctx.setting_now("effortLevel"),
-            note="Measured on the messages Claude reported as easy (metrics capture).",
-            scope=_advice_scope(rec.scope),
-        )
-    ]
+    _effort_lever(rec, ctx, "Measured on the messages Claude reported as easy (metrics capture).")
     rec.estimated_saving = ctx.money(rec.saving_usd, prefix="About ")
     rec.saving_basis = ctx.basis("Half the thinking on those messages, at list price. Not measured.")
 
@@ -1538,12 +1663,36 @@ _SEVERITY_ORDER = {"action": 0, "advice": 1, "info": 2}
 _LAST_IN_GROUP = frozenset({"model-tier-main"})
 
 
+def _plugin_agent_info(rec: Recommendation) -> None:
+    """A card whose only fix edits a plugin agent's own file is information
+    only: that file is the plugin's, and its next update replaces any edit.
+    A card for how the main session uses the agent keeps its fix, with no
+    agent file named (run-split's ``plugin-agent`` prompt)."""
+    plugin = plugin_of(rec.agent_type)
+    if plugin is None:
+        return
+    if rec.id == "run-split" and not rec.variant:
+        rec.variant = "plugin-agent"
+        return
+    if rec.id not in PLUGIN_AGENT_FILE_CARDS:
+        return
+    rec.severity = "info"
+    rec.changes = []
+    rec.lever = None
+    rec.action = (
+        f"{rec.agent_type} comes from the {plugin} plugin. Its file belongs to the plugin, and the plugin's "
+        "next update would replace any edit to it."
+    )
+
+
 def finish(
     recs: list[Recommendation], report: ReportModel, snapshot: Snapshot | None, units: Units | None
 ) -> list[Recommendation]:
     """Consolidate, reword and order ``recs`` (see the module docstring).
     Returns a new list; the recommendations in it are changed in place."""
-    ctx = _Context(report=report, snapshot=snapshot, units=units)
+    # The view rule (snapshots.view_settings), for a caller that did not
+    # build ``snapshot`` for the view.
+    ctx = _Context(report=report, snapshot=for_view(snapshot, view_spans_projects(report)), units=units)
     recs = _merge_model_tier(list(recs), ctx)
     recs = _consolidate_compaction(recs, ctx)
     # Nothing in an agent file can change how Claude Code starts these.
@@ -1552,6 +1701,7 @@ def finish(
         explain = _EXPLAIN.get(rec.id)
         if explain is not None:
             explain(rec, ctx)
+        _plugin_agent_info(rec)
         if rec.scope == "managed" and rec.changes and "administrator" not in rec.action:
             rec.action += " Your organisation's managed settings set this, so only your administrator can change it."
     recs = _drop_applied(recs)

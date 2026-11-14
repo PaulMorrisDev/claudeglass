@@ -397,7 +397,7 @@ _WORKFLOW_PROMPTS = {
     ),
     "agent-report-size": (
         "{agent} sends back long final reports, and each one stays in my main session's context. Please "
-        "read {agent}'s agent file (~/.claude/agents/{agent}.md or .claude/agents/{agent}.md, or a folder inside them) and propose "
+        "read {agent}'s agent file (~/.claude/agents/{agent_file}.md or .claude/agents/{agent_file}.md, or a folder inside them) and propose "
         "one or two lines for its prompt asking for a short report: findings, file paths and next steps, "
         "not the working. If no file there names {agent} in its frontmatter, it is built into Claude Code: propose a sentence I "
         "can add to the task prompts I send it instead. Show me the diff before saving. Claude Code will ask "
@@ -475,12 +475,21 @@ _WORKFLOW_PROMPTS = {
         "session. Show me the diff before saving. Claude Code will ask my permission before editing files under "
         ".claude."
     ),
+    # A plugin's agent: its file is the plugin's, so no line in it is proposed.
+    "run-split:plugin-agent": (
+        "My {agent} runs get long, and every later reply reads again all the run has read. Please add a short "
+        "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
+        "is large, give it one part per run, and start a fresh {agent} for the next part with a short note of "
+        "what's done, what's left and the files involved, rather than one long run. "
+        "Show me the diff before saving. Claude Code will ask my permission before editing files under "
+        ".claude."
+    ),
     "run-split": (
         "My {agent} runs get long, and every later reply reads again all the run has read. Please add a short "
         "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
         "is large, give it one part per run, and start a fresh {agent} for the next part with a short note of "
         "what's done, what's left and the files involved, rather than one long run. If {agent} has an agent file "
-        "(~/.claude/agents/{agent}.md or .claude/agents/{agent}.md, or a folder inside them), propose a line asking it to end each run with "
+        "(~/.claude/agents/{agent_file}.md or .claude/agents/{agent_file}.md, or a folder inside them), propose a line asking it to end each run with "
         "that note. Show me the diff before saving. Claude Code will ask my permission before editing files under "
         ".claude."
     ),
@@ -521,6 +530,11 @@ _WORKFLOW_PROMPTS = {
         "those tools in its tools: line, then pass its name as agentType in the call's options. Show me each "
         "new agent file and each changed call before saving anything. Claude Code will ask my permission "
         "before editing files under .claude."
+    ),
+    "effort-mismatch:env": (
+        "Please find where CLAUDE_CODE_EFFORT_LEVEL is set: my shell profile, or the env block of "
+        "~/.claude/settings.json or this project's .claude/settings.json. Propose setting it to medium, or "
+        "removing it so my saved levels apply. Show me the diff before saving."
     ),
     "effort-mismatch": (
         "Please check the current effortLevel in ~/.claude/settings.json (or the relevant agent's "
@@ -697,6 +711,13 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "not thought of yet.",
         "Remove the instruction from your CLAUDE.md and approve plans as they come.",
     ),
+    "run-split:plugin-agent": (
+        "Nowhere in Claude Code's config: how the main session hands work to this agent. The prompt adds an "
+        "instruction to your CLAUDE.md, and leaves the agent's file to its plugin.",
+        "Each fresh run knows only its task and the note, so it may read some files again, and a thin note can "
+        "miss a decision the last run made.",
+        "Remove the instruction from your CLAUDE.md.",
+    ),
     "run-split": (
         "Nowhere in Claude Code's config: how the main session hands work to this agent. The prompt adds an "
         "instruction to your CLAUDE.md, and a line to the agent's file if it has one.",
@@ -785,6 +806,20 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "workflow agents, so a job that needs a tool few jobs use must keep it.",
         "Take agentType out of the call, or put the tool back in the agent file's list (Claude Code shows the "
         "change before saving it).",
+    ),
+    "effort-mismatch:session": (
+        "The effort level Claude Code saves for each model you run /effort medium on, in your user settings. "
+        "/effort raises it again for a single task.",
+        "Lower effort can miss things on hard problems. You trade that risk against thinking spent on work that "
+        "did not need it.",
+        "Run /effort with the level you had before, on that model.",
+    ),
+    "effort-mismatch:env": (
+        "CLAUDE_CODE_EFFORT_LEVEL, where you set it: your shell profile or a settings file's env block. While "
+        "it is set, it wins over /effort and every effort setting.",
+        "Lower effort can miss things on hard problems. You trade that risk against thinking spent on work that "
+        "did not need it.",
+        "Set the variable back to the level it had.",
     ),
     "effort-mismatch": (
         "settings.json's effortLevel (or an agent's own effort frontmatter field), at whichever scope "
@@ -959,6 +994,30 @@ def _model_family(model_id: str) -> str:
     return model_id
 
 
+def plugin_of(agent_type: object) -> str | None:
+    """The plugin an agent type comes from, or ``None``. Claude Code names a
+    plugin's agents ``<plugin>:<name>``, and no other agent name may hold a
+    colon (sub-agents docs)."""
+    if isinstance(agent_type, str) and ":" in agent_type:
+        return agent_type.split(":", 1)[0] or None
+    return None
+
+
+#: Cards whose only fix edits the agent's own file. A plugin's agent has no
+#: file of the user's own, so for one of these the card is information only.
+PLUGIN_AGENT_FILE_CARDS = frozenset(
+    {
+        "spawn-tools-list",
+        "spawn-claude-md",
+        "spawn-unused-skills",
+        "spawn-unused-mcp",
+        "spawn-cost",
+        "agent-report-size",
+        "ttl-switch",
+    }
+)
+
+
 def already_set(key: str, value, now) -> bool:
     """Whether ``now`` already is ``value``, so offering the change would
     do nothing. A model id matches its family's alias ("claude-sonnet-5"
@@ -1024,7 +1083,18 @@ def command_for(change: SettingChange, scope: str) -> str | None:
     scope = change.scope or scope
     if change.value is None or change.new_agent_file or scope == "managed":
         return None
-    parts = ["claudeglass", "apply", "--set", f"{change.key}={_cli_value(change.value)}"]
+    if change.key == "modelSettings" and isinstance(change.value, dict):
+        # apply reads one model's key as modelSettings.<model>.<key>=VALUE.
+        sets = [
+            f"modelSettings.{model}.{sub}={_cli_value(value)}"
+            for model, entry in change.value.items()
+            for sub, value in entry.items()
+        ]
+    else:
+        sets = [f"{change.key}={_cli_value(change.value)}"]
+    parts = ["claudeglass", "apply"]
+    for item in sets:
+        parts += ["--set", item]
     if change.target == "agent" and change.agent:
         parts += ["--agent", change.agent]
     if scope in ("repo", "project-local"):
@@ -1102,13 +1172,15 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
             f"{rec.why or rec.title} Keep it under 120 words and don't change any files."
         )
     path, _ = _where(change, rec.scope)
-    subject = f"the {change.agent} agent" if change.target == "agent" else "my Claude Code settings"
-    prepare = _PREPARE.get(change.key, "").format(agent=change.agent, path=path)
+    # The agent's name is quoted where it stands as a word; inside a path it is bare.
+    named = json.dumps(change.agent) if change.agent else "this agent"
+    subject = f"the {named} agent" if change.target == "agent" else "my Claude Code settings"
+    prepare = _PREPARE.get(change.key, "").format(agent=named, path=path)
     if change.new_agent_file:
         # A tools list is the point of the file, so only another key keeps the tools.
         keep_tools = "" if change.key == "tools" else ", and keep its tools the same"
         ask = (
-            f"{change.agent} is a built-in Claude Code agent. Create {path}, a custom agent with the same "
+            f"{named} is a built-in Claude Code agent. Create {path}, a custom agent with the same "
             f"name, that does the same job as the built-in one and sets {change.key}: {_after(change)} in "
             f"its frontmatter. Write its prompt from what you know of the built-in agent{keep_tools}."
         )
@@ -1173,14 +1245,52 @@ PROFILE_SCOPE_WHERE = {
 def profile_change_where(key: str, scope: str) -> str:
     """The file a profile diff row's dotted ``key`` (``settings.<name>``,
     ``agents.<agent>.<name>`` or ``env.<NAME>``) is written to under
-    ``scope``."""
+    ``scope``. An agent name may hold dots (``split_agent_key``)."""
+    from .profiles.diff import split_agent_key
+
     settings_path, agent_path, _ = PROFILE_SCOPE_WHERE.get(scope, PROFILE_SCOPE_WHERE["user"])
     if key.startswith("agents."):
-        return agent_path.format(agent=key.split(".")[1])
+        return agent_path.format(agent=split_agent_key(key)[0])
     if key.startswith("env."):
         return f"{settings_path} (env block)"
     return settings_path
 
+
+#: A model's own setting, in the words of "wins over this model's own ...".
+_MODEL_OWN_WORDS = {"effortLevel": "level", "autoCompactWindow": "window"}
+
+#: Said after the sentence naming a model whose own window wins, when that
+#: window is in your user file: /autocompact saves it there.
+OWN_WINDOW_STEP = "To change a model's own window, run /autocompact with the new size in a session on that model."
+#: The same, for an own window a project file holds ({file}) and for one in
+#: managed settings: /autocompact cannot change either.
+_OWN_WINDOW_STEP_PROJECT = "To change a model's own window, edit its entry in this project's {file}."
+_OWN_WINDOW_STEP_MANAGED = (
+    "Your organisation's managed settings set a model's own window, so only your administrator can change it."
+)
+
+
+def window_change_note(scope: str, provenance: dict, model_settings: dict | None) -> str:
+    """The note on a change to the flat ``autoCompactWindow`` at ``scope``,
+    for the window card and the compaction check alike: the models whose own
+    window, in that file or a higher one, wins over it
+    (:func:`profile_overridden_by` rule 5 with the real target and
+    ``provenance``), and how to change one in the file that holds it
+    (``modelSettings`` is one file's block); ``""`` when none does. A managed
+    flat window is the highest file's, so only a managed own window beats it."""
+    own_layer = provenance.get("modelSettings") or "user"
+    if scope == "managed" and own_layer != "managed":
+        return ""
+    own = profile_overridden_by("settings.autoCompactWindow", scope or "user", provenance, (), False, model_settings, False)
+    if not own:
+        return ""
+    if own_layer == "managed":
+        step = _OWN_WINDOW_STEP_MANAGED
+    elif own_layer in _OVERRIDING_PROJECT_FILE:
+        step = _OWN_WINDOW_STEP_PROJECT.format(file=_OVERRIDING_PROJECT_FILE[own_layer])
+    else:
+        step = OWN_WINDOW_STEP
+    return f"{own} {step}"
 
 #: The project file a ``snapshots.SETTINGS_LAYER_NAMES`` layer is, for the
 #: "sets it too and wins" sentence. ``managed`` is not here: the diff
@@ -1189,6 +1299,13 @@ _OVERRIDING_PROJECT_FILE = {
     "project_local": ".claude/settings.local.json",
     "project_shared": ".claude/settings.json",
 }
+
+
+#: A user-level effortLevel, which current models ignore (model-config docs).
+USER_EFFORT_IGNORED = (
+    "Opus 5.5 and later ignore effortLevel in user settings. Run /effort on each model, or apply this profile to "
+    "a project, where it applies to every model."
+)
 
 
 def profile_overridden_by(
@@ -1205,16 +1322,28 @@ def profile_overridden_by(
 
     1. A settings key that a project file ranking above ``scope``'s file
        (``snapshots.SETTINGS_LAYER_NAMES``, ``apply._SCOPE_LAYER``) sets
-       too, per ``provenance`` (``{key: layer}``). Said only when a
+       too, per ``provenance`` (``{key: layer}``); for a model's own row,
+       a project file whose ``modelSettings`` block has that model's entry. Said only when a
        ``project_picked``: with none, the snapshot is whichever project's
        took it, and the sentence would name a project the reader did not
        choose.
-    2. ``settings.autoCompactWindow`` while ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
-       is among ``env_names``.
+    1b. ``settings.modelSettings.<id>.effortLevel`` (or ``.autoCompactWindow``)
+       while such a project file sets the flat key of the same name: a higher
+       file's flat value beats a lower file's per-model entry (N6, R2-4).
+    2. ``settings.autoCompactWindow``, or a model's own window, while
+       ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` is among ``env_names``.
+    2b. ``settings.model`` while ``ANTHROPIC_MODEL`` is among ``env_names``.
     3. ``settings.effortLevel`` while ``effort_env_set``
        (``CLAUDE_CODE_EFFORT_LEVEL``).
     4. ``settings.effortLevel`` while ``model_settings`` (the effective
-       ``modelSettings``) gives models an effort level of their own.
+       ``modelSettings``) gives models an effort level of their own, in the
+       target's file or a higher one (``provenance["modelSettings"]``): a
+       flat value in the target file beats an entry in a lower file.
+    4b. ``settings.effortLevel`` at the user target, with none of the
+       above: Opus 5.5 and later ignore it in user settings
+       (:data:`USER_EFFORT_IGNORED`).
+    5. ``settings.autoCompactWindow`` while ``model_settings`` gives models
+       an auto-compact window of their own, placed as in rule 4.
 
     Pure: the caller reads the snapshot."""
     from .profiles.apply import _SCOPE_LAYER
@@ -1226,6 +1355,13 @@ def profile_overridden_by(
     precedence = {name: rank for rank, name in enumerate(snapshots_mod.SETTINGS_LAYER_NAMES)}
     target = _SCOPE_LAYER.get(scope)
     layer = provenance.get(key)
+    model_parts = key.split(".")
+    own_key = model_parts[2] if len(model_parts) == 3 and model_parts[0] == "modelSettings" else None
+    entry = (model_settings or {}).get(model_parts[1]) if own_key is not None else None
+    if isinstance(entry, dict) and own_key in entry:
+        # A model's own entry: modelSettings is one file's block, so the entry
+        # is that file's, and a higher file's entry for the model wins (R3).
+        layer = provenance.get("modelSettings")
     if (
         project_picked
         and target in precedence
@@ -1233,10 +1369,28 @@ def profile_overridden_by(
         and precedence[layer] < precedence[target]
     ):
         return f"This project's {_OVERRIDING_PROJECT_FILE[layer]} sets it too and wins."
-    if key == "autoCompactWindow" and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
+    flat_layer = provenance.get(own_key) if own_key in _MODEL_OWN_WORDS else None
+    if (
+        flat_layer is not None
+        and project_picked
+        and target in precedence
+        and flat_layer in _OVERRIDING_PROJECT_FILE
+        and precedence[flat_layer] < precedence[target]
+    ):
+        # N6: a higher file's flat value beats a lower file's per-model entry.
+        return (
+            f"This project's {_OVERRIDING_PROJECT_FILE[flat_layer]} sets {own_key}, "
+            f"which wins over this model's own {_MODEL_OWN_WORDS[own_key]}."
+        )
+    # A model's own entry wins over the flat key only in the target's file or
+    # a higher one (R2-2); with a target that is no known layer, as before.
+    own_layer = provenance.get("modelSettings") or "user"
+    own_wins = target not in precedence or own_layer not in precedence or precedence[own_layer] <= precedence[target]
+    if key == "model" and snapshots_mod.MODEL_ENV in env_names:
+        return f"{snapshots_mod.MODEL_ENV} is set and wins over this setting."
+    if (key == "autoCompactWindow" or own_key == "autoCompactWindow") and snapshots_mod.AUTO_COMPACT_WINDOW_ENV in env_names:
         return f"{snapshots_mod.AUTO_COMPACT_WINDOW_ENV} is set and wins over this setting."
-    model_parts = key.split(".")
-    if effort_env_set and len(model_parts) == 3 and model_parts[0] == "modelSettings" and model_parts[2] == "effortLevel":
+    if effort_env_set and own_key == "effortLevel":
         # A model's own effort level loses to the variable too.
         return "CLAUDE_CODE_EFFORT_LEVEL is set and wins over this setting."
     if key == "effortLevel":
@@ -1245,19 +1399,34 @@ def profile_overridden_by(
         ids = sorted(
             str(model)
             for model, entry in (model_settings or {}).items()
-            if isinstance(entry, dict) and entry.get("effortLevel")
+            if own_wins and isinstance(entry, dict) and entry.get("effortLevel")
         )
         if len(ids) == 1:
             return f"{ids[0]} has its own effort level, which wins for it."
         if ids:
             return f"{join_names(ids)} have their own effort level, which wins for them."
+        if scope == "user":
+            return USER_EFFORT_IGNORED
+    if key == "autoCompactWindow":
+        ids = sorted(
+            str(model)
+            for model, entry in (model_settings or {}).items()
+            if own_wins and isinstance(entry, dict) and entry.get("autoCompactWindow") is not None
+        )
+        if len(ids) == 1:
+            return f"{ids[0]} has its own auto-compact window, which wins for it."
+        if ids:
+            return f"{join_names(ids)} have their own auto-compact window, which wins for them."
     return None
 
 
 def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
     """A self-contained prompt asking Claude to make a profile's changes
     by hand: one line per changed, unmanaged key, naming the file, the
-    old and the new value."""
+    old and the new value, and what wins over it (a row's
+    ``overridden_by``, see :func:`profile_overridden_by`) when something does."""
+    from .profiles.diff import split_agent_key
+
     _, _, who = PROFILE_SCOPE_WHERE.get(scope, PROFILE_SCOPE_WHERE["user"])
     lines = [f'I want to apply the settings profile "{name}" to Claude Code. It affects {who}. Make these changes:']
     for row in rows:
@@ -1267,7 +1436,7 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
         parts = key.split(".")
         where = profile_change_where(key, scope)
         if key.startswith("agents."):
-            field = f"{'.'.join(parts[2:])} in the frontmatter"
+            field = f"{split_agent_key(key)[1]} in the frontmatter"
         elif key.startswith("env."):
             field = f"the environment variable {parts[1]}"
         elif key.startswith("settings.modelSettings.") and len(parts) == 4:
@@ -1278,6 +1447,7 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
         lines.append(
             f"- In {where}, set {field} to {json.dumps(row.get('proposed_value'))} "
             f"(now: {_human(row.get('current_value')) if row.get('recorded') is not False else 'not recorded'})."
+            + (f" {row['overridden_by']}" if row.get("overridden_by") else "")
         )
     if len(lines) == 1:
         return f'The settings profile "{name}" matches your current settings; there is nothing to change.'
@@ -1289,7 +1459,38 @@ def profile_prompt(name: str, rows: list[dict], scope: str) -> str:
     return "\n".join(lines)
 
 
+#: The explainer row of a fix left out because its agent's name fails
+#: ``schema.agent_name_problem`` (plugin agents allowed).
+NO_FIX_FOR_NAME = (
+    "No fix to copy",
+    "ClaudeGlass can't put this agent's name in a prompt or a command. A name ClaudeGlass can use holds only "
+    "letters, digits, single dots, underscores and hyphens, starts with a letter or digit, and is at most 128 "
+    "characters. Rename the agent, and cards about its later runs can offer a fix.",
+)
+
+
+def _unusable_agent(*names: str | None) -> bool:
+    """Whether any of ``names`` (``None`` skipped) is an agent name no
+    prompt or command may hold. A plugin's agent (``plugin:agent``) passes."""
+    from .profiles.schema import agent_name_problem
+
+    return any(name is not None and agent_name_problem(name, plugin=True) is not None for name in names)
+
+
+def _no_fix(key: str | None, agent: str | None) -> dict:
+    return {
+        "key": key,
+        "agent": agent,
+        "explainer": [list(NO_FIX_FOR_NAME)],
+        "command": None,
+        "command_warning": "",
+        "prompt": "",
+    }
+
+
 def build_fix(rec: Recommendation, change: SettingChange) -> dict:
+    if _unusable_agent(rec.agent_type, change.agent if change.target == "agent" else None):
+        return _no_fix(change.key, change.agent)
     return {
         "key": change.key,
         "agent": change.agent,
@@ -1349,19 +1550,24 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     ``"id:variant"`` over plain ``id`` in both dicts, falling back to the
     plain id when there's no variant-specific entry (see
     :data:`Recommendation.variant`). A prompt template may use
-    ``{agent}`` (``rec.agent_type``) and ``{action}`` (``rec.action``,
-    for a card whose fix differs per item it lists). A purely informational id (no
+    ``{agent}`` (``rec.agent_type``, in quotes, for where the name stands
+    as a word), ``{agent_file}`` (the bare name, for a path) and
+    ``{action}`` (``rec.action``, for a card whose fix differs per item it
+    lists). A card whose agent's name fails ``agent_name_problem`` gets no
+    prompt and a "No fix to copy" explainer row instead. A purely informational id (no
     change proposed) has an explainer but no prompt: ``prompt`` is then
     ``""``, and the render layer (``render/markdown.py``,
     ``render/html.py``, the dashboard's ``ui.js`` and ``page-setup.js``) skips the "Ask Claude to do it"
     block rather than printing an empty one. When ``rec.why`` is set, the
     explainer's first row is "Why it's suggested": ``rec.why``.
     """
+    if rec.id in PLUGIN_AGENT_FILE_CARDS and plugin_of(rec.agent_type):
+        return []
     if rec.changes:
         return [build_fix(rec, change) for change in rec.changes]
     variant_id = f"{rec.id}:{rec.variant}" if rec.variant else rec.id
     workflow_entry = _WORKFLOW_EXPLAINER.get(variant_id, _WORKFLOW_EXPLAINER.get(rec.id))
-    template = _WORKFLOW_PROMPTS.get(variant_id, _WORKFLOW_PROMPTS.get(rec.id))
+    template = None if variant_id in _NO_PROMPT else _WORKFLOW_PROMPTS.get(variant_id, _WORKFLOW_PROMPTS.get(rec.id))
     if template is None and workflow_entry is None:
         return []
     explainer = (
@@ -1375,11 +1581,17 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     )
     if rec.why:
         explainer = [["Why it's suggested", rec.why]] + explainer
-    if template is not None:
+    if template is not None and _unusable_agent(rec.agent_type):
+        explainer = explainer + [list(NO_FIX_FOR_NAME)]
+        prompt = ""
+    elif template is not None:
         opening = _FINDING_OPEN.format(title=rec.title)
         if rec.why:
             opening = f"{opening} {rec.why}"
-        prompt = f"{opening} {template.format(agent=rec.agent_type or 'this agent', action=rec.action)}"
+        # The name is quoted where it stands as a word, bare inside a path.
+        agent = json.dumps(rec.agent_type) if rec.agent_type else "this agent"
+        agent_file = rec.agent_type or "this agent"
+        prompt = f"{opening} {template.format(agent=agent, agent_file=agent_file, action=rec.action)}"
     else:
         prompt = ""
     fix = {
@@ -1396,6 +1608,10 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     return [fix]
 
 
+#: Variants with no prompt: the change is a command only you can run in a
+#: session (/effort), so there is nothing for Claude to edit.
+_NO_PROMPT = frozenset({"effort-mismatch:session"})
+
 #: The file a workflow prompt (no setting to change) works in, keyed like
 #: :data:`_WORKFLOW_PROMPTS`; :func:`fix_file` uses it to group a
 #: project's fixes under one header per file. A scope prompt (see
@@ -1411,6 +1627,7 @@ _FIX_FILE: dict[str, str] = {
     "compaction-churn": "~/.claude/settings.json or .claude/settings.json",
     "compaction-window": "~/.claude/settings.json or .claude/settings.json",
     "effort-mismatch": "~/.claude/settings.json or .claude/settings.json",
+    "effort-mismatch:env": "Your shell profile or a settings file's env block",
     "model-tier": "~/.claude/settings.json or .claude/settings.json",
     "env-attribution-deprecated": "~/.claude/settings.json or .claude/settings.json",
     "plan-handoff": "~/.claude/CLAUDE.md",
@@ -1441,6 +1658,7 @@ _FIX_KIND: dict[str, str] = {
     "hook-context-carry": "several",
     "spawn-tools-list:workflow-script": "several",
     "agent-model-asked": "several",
+    "effort-mismatch:env": "several",
     # An instruction in ~/.claude/CLAUDE.md and, when the agent has a file, a line in it.
     "run-split": "rule",
     "discovery-share": "none",
@@ -1463,7 +1681,8 @@ def fix_group(rec: Recommendation, change: SettingChange | None) -> tuple[str | 
     if _NOTE_OVERRIDES.get(rec.id) == "scope":
         return "CLAUDE.md (Claude asks which)", "rule"
     label = _FIX_FILE.get(variant_id, _FIX_FILE.get(rec.id))
-    if label is None:
+    if label is None or ("{agent}" in label and plugin_of(rec.agent_type)):
+        # A plugin agent's file is the plugin's: no header names it.
         return "Other", "none"
     return label.format(agent=rec.agent_type or "this agent"), _FIX_KIND.get(variant_id, _FIX_KIND.get(rec.id, "file"))
 
@@ -1479,6 +1698,14 @@ _BUNDLE_OPEN = (
     "ClaudeGlass, which tracks my token use, found these open fixes for this project. "
     "Work through them file by file, in the order below."
 )
+
+#: Said after the opening when a fix sits under a file in ~/.claude.
+_BUNDLE_EVERY_PROJECT = "A file under ~/.claude is read in every project, so its changes reach beyond this one."
+
+#: Cards whose action asks you to try the change before keeping it: the
+#: bundle leaves them out, so pasting it never makes a model change lasting.
+_TRIAL_CARDS = frozenset({"model-tier-main", "model-tier"})
+
 _BUNDLE_CLOSE = (
     "For each file, restate its changes in one sentence each and show me one diff before saving; where an "
     "item says to show me the diff, that one diff covers it. Claude Code will ask my permission to edit "
@@ -1504,8 +1731,9 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
     it holds and ``keys`` names them (``rec.key``, in order), so a copy of
     the prompt can be recorded against them. Leaves out cards in
     ``skip_keys`` (ignored), cards whose fix has landed (the ``fixed``
-    variant), information-only cards, unconfirmed changes and managed
-    settings; ``left_out`` counts the cards with at least one fix left
+    variant), information-only cards, model changes the card says to try
+    first (``trial``), unconfirmed changes and managed settings;
+    ``left_out`` counts the cards with at least one fix left
     out for each reason (a card can count in both ``cards`` and
     ``left_out``). ``files`` lists the groups that hold a fix of one
     file, each with how many; ``several`` counts the prompts whose fix spans
@@ -1516,7 +1744,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
     groups: dict[str, list[str]] = {}
     #: Each group's prompts' kinds, in step with ``groups``.
     kinds: dict[str, list[str]] = {}
-    left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0}
+    left_out = {"fixed": 0, "info": 0, "unconfirmed": 0, "managed": 0, "trial": 0}
     cards = 0
     keys: list[str] = []
     scoped = False
@@ -1528,6 +1756,9 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             continue
         if rec.severity == "info":
             left_out["info"] += 1
+            continue
+        if rec.id in _TRIAL_CARDS:
+            left_out["trial"] += 1
             continue
         used = False
         reasons: set[str] = set()
@@ -1581,7 +1812,7 @@ def project_prompt(recs: list[Recommendation], skip_keys: set[str] = frozenset()
             "keys": keys,
             "left_out": left_out,
         }
-    parts = [_BUNDLE_OPEN]
+    parts = [_BUNDLE_OPEN + (" " + _BUNDLE_EVERY_PROJECT if any(f.startswith("~/") for f in ordered) else "")]
     parts += [f"## {file}\n\n" + "\n\n".join(groups[file]) for file in ordered]
     parts.append(_BUNDLE_CLOSE)
     if scoped:
@@ -1610,12 +1841,14 @@ def attach_fixes(recommendations: list[Recommendation]) -> None:
 __all__ = [
     "AGENT_FILE_ELSEWHERE",
     "LEVER_LABELS",
+    "PLUGIN_AGENT_FILE_CARDS",
     "PROFILE_SCOPE_WHERE",
     "PROMPT_RESTART",
     "PROMPT_SCOPE",
     "RESTART_NOTE",
     "SCOPE_NOTE",
     "SETTING_TEXT",
+    "USER_EFFORT_IGNORED",
     "already_set",
     "attach_fixes",
     "build_fix",
@@ -1625,6 +1858,7 @@ __all__ = [
     "fix_file",
     "fix_group",
     "fix_note",
+    "plugin_of",
     "profile_change_where",
     "profile_overridden_by",
     "profile_prompt",

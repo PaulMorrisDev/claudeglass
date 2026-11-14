@@ -835,6 +835,28 @@ def test_installed_specs_is_empty_without_a_readable_settings_file(tmp_path):
     assert hook_health.installed_specs(claude) == ()
 
 
+def test_the_leftover_entries_sentence_names_the_command_that_takes_them_out(tmp_path):
+    claude = tmp_path / "claude"
+    claude.mkdir()
+    stop, prompt = hook_health.HookSpec("capture-hook.py", "Stop"), hook_health.HookSpec("capture-hook.py", "UserPromptSubmit")
+    script = tmp_path / "hooks" / "capture-hook.py"
+    script.parent.mkdir()
+    script.write_text("# hook", encoding="utf-8")  # a needed entry is only "set up" when its script exists
+    commands = {"capture-hook.py": f'"{sys.executable}" -I -S "{script}" --config-dir "{tmp_path}"'}
+    (claude / "settings.json").write_text("{}", encoding="utf-8")
+    hook_health.connect(hook_health.plan_capture((stop, prompt), commands, claude_root=claude), now=NOW)
+    # Nothing needed: `capture connect` would do nothing, so the sentence names `capture remove`.
+    assert hook_health.check_capture((), claude_root=claude).summary() == (
+        "The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture remove' takes them out."
+    )
+    # Something needed and present, one entry left over: `capture connect` takes the leftover out.
+    assert hook_health.check_capture((stop,), claude_root=claude).summary() == (
+        "The capture hooks are set up. settings.json also runs capture hooks that nothing switched on uses. "
+        "They add nothing to Claude's context, but each still starts Python. 'claudeglass capture connect' takes them out."
+    )
+
+
 # -- settings policies that stop the user's own hooks running at all -------
 
 

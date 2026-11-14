@@ -128,7 +128,8 @@ if TYPE_CHECKING:
 #: See module docstring's tier-order deviation note: kept in lock-step
 #: with (never imported from) ``workstyle._TIER_FAMILIES`` — the
 #: family name at rank ``r`` is ``_TIER_FAMILIES[r]``, and
-#: ``workstyle.model_tier`` returns exactly that rank.
+#: ``workstyle.model_tier`` returns exactly that rank. Mythos ranks as
+#: Fable through ``workstyle._SAME_TIER_AS``.
 _TIER_FAMILIES: tuple[str, ...] = ("haiku", "sonnet", "opus", "fable")
 
 #: The exact phrase every "no cheaper alternative exists" state's label
