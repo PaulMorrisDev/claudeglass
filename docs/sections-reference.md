@@ -2617,7 +2617,9 @@ and managed-settings awareness (see
 `report --patch-set` renders the whole set as unified-diff-style text
 via `recommend.render_patch_set`, showing the before and after value for
 each lever. A managed-scope lever is marked
-`# managed by policy -- shown for reference only`.
+`# managed by policy -- shown for reference only`. A new Explore.md or Plan.md
+gets a comment line and an `omitClaudeMd: true` line, because Claude Code
+starts those two without CLAUDE.md files and only that line keeps it so.
 
 The `spawn-tools-list`, `spawn-unused-skills`, `spawn-unused-mcp`, `spawn-claude-md` and `agent-model-inherited` cards for a built-in agent type with no agent file (general-purpose, Explore, Plan, statusline-setup) say a file named like the agent replaces the built-in, so the change goes there, and name the file their fix writes: `~/.claude/agents/<agent>.md`, or `.claude/agents/<agent>.md` for a project fix. Claude Code starts Explore and Plan without CLAUDE.md files, so for those two the card and its prompt say so, say to set `omitClaudeMd: true` in the new file to keep that, and say you can leave it out if you want the agent to follow your CLAUDE.md rules, at the cost of carrying those files on every start. The `agent-model-asked` card does not: a model named in the call overrides an agent file's `model:` line.
 

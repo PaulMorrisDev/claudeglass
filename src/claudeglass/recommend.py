@@ -3399,7 +3399,10 @@ def render_patch_set(recs: list[Recommendation]) -> str:
     (e.g. both a TTL switch and ``omitClaudeMd``) into a single diff --
     and a bare settings-key stanza (no path -- see module docstring)
     for genuine top-level settings levers. Contains no path other than
-    ``.claude/agents/<agent_type>.md``.
+    ``.claude/agents/<agent_type>.md``. A new file for Explore or Plan, which
+    Claude Code starts without CLAUDE.md files, gets a comment and an
+    ``omitClaudeMd: true`` line, so the file keeps that start unless its
+    maker leaves the line out.
 
     Fix R13: agent routing now prefers ``rec.agent_type`` (set by every
     per-agent-type rule) over sniffing the agent name back out of
@@ -3412,7 +3415,7 @@ def render_patch_set(recs: list[Recommendation]) -> str:
     """
     lines: list[str] = []
     # agent_type -> ordered {settings_key: rendered_value}, plus whether
-    # any lever contributing to it is managed.
+    # any lever contributing to it is managed or is a new file.
     agent_stanzas: dict[str, dict] = {}
     seen_settings_keys: set[str] = set()
 
@@ -3433,6 +3436,7 @@ def render_patch_set(recs: list[Recommendation]) -> str:
                 if change.target == "agent" and change.agent:
                     stanza = agent_stanzas.setdefault(change.agent, {"managed": False, "keys": {}})
                     stanza["managed"] = stanza["managed"] or scope == "managed"
+                    stanza["new_file"] = stanza.get("new_file", False) or change.new_agent_file
                     stanza["keys"][change.key] = (old_text, new_text)
                     continue
                 if change.key in seen_settings_keys:
@@ -3514,10 +3518,25 @@ def render_patch_set(recs: list[Recommendation]) -> str:
         agent_lines.append(f"+++ {path}")
         if stanza["managed"]:
             agent_lines.append("# managed by policy -- shown for reference only")
+        # A new file replaces the built-in, which is started without CLAUDE.md
+        # files: only a line in the file keeps that.
+        keeps_start = (
+            stanza.get("new_file", False)
+            and starts_without_claude_md(agent_type)
+            and "omitClaudeMd" not in stanza["keys"]
+        )
+        if keeps_start:
+            agent_lines.append(
+                f"# a new file that replaces the built-in {agent_type}; omitClaudeMd: true keeps its start "
+                "without CLAUDE.md files, leave it out to load them"
+            )
         for key, value in stanza["keys"].items():
             old_text, new_text = value if isinstance(value, tuple) else ("(unset)", value)
             agent_lines.append(f"-{key}: {old_text}")
             agent_lines.append(f"+{key}: {new_text}")
+        if keeps_start:
+            agent_lines.append("-omitClaudeMd: (unset)")
+            agent_lines.append("+omitClaudeMd: true")
         agent_lines.append("")
 
     lines = agent_lines + lines

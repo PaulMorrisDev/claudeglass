@@ -1263,6 +1263,62 @@ def test_a_file_that_replaces_another_built_in_is_not_told_to_set_omit_claude_md
     assert not recommend_mod.starts_without_claude_md(None)
 
 
+def _mcp_patch_set(agent, snapshot=None):
+    big = (0, 25_000.0, 800.0, 300.0)
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)
+    recs = _recs(_report(builtin), snapshot=snapshot, units=Units())
+    return recommend_mod.render_patch_set([r for r in recs if r.agent_type == agent and r.id == "spawn-unused-mcp"])
+
+
+@pytest.mark.parametrize("agent", ["Explore", "Plan"])
+def test_the_patch_set_for_a_new_explore_or_plan_file_keeps_their_start_without_claude_md(agent):
+    assert _mcp_patch_set(agent) == (
+        f"--- .claude/agents/{agent}.md\n"
+        f"+++ .claude/agents/{agent}.md\n"
+        f"# a new file that replaces the built-in {agent}; omitClaudeMd: true keeps its start without CLAUDE.md "
+        "files, leave it out to load them\n"
+        "-disallowedTools: unknown (no config snapshot yet)\n"
+        "+disallowedTools: [mcp__playwright]\n"
+        "-omitClaudeMd: (unset)\n"
+        "+omitClaudeMd: true\n"
+    )
+
+
+def test_the_patch_set_for_another_stanza_has_no_omit_claude_md_pair():
+    text = _mcp_patch_set("general-purpose")
+    assert "omitClaudeMd" not in text and "#" not in text
+    # Explore with a file of its own is not a new file.
+    text = _mcp_patch_set("Explore", snapshot=_snapshot({"Explore": {"source": "user"}}))
+    assert "omitClaudeMd" not in text and "#" not in text
+
+
+def test_a_managed_stanza_for_a_new_explore_file_keeps_its_managed_comment_first():
+    change = SettingChange(
+        target="agent", key="disallowedTools", agent="Explore", value=["Edit"], current=None, new_agent_file=True
+    )
+    rec = Recommendation(
+        id="spawn-tools-list", severity="info", category="settings", archetypes=(), title="t", action="a",
+        lever=None, scope="managed", agent_type="Explore", changes=[change],
+    )  # fmt: skip
+    lines = recommend_mod.render_patch_set([rec]).splitlines()
+    assert lines[2] == "# managed by policy -- shown for reference only"
+    assert lines[3].startswith("# a new file that replaces the built-in Explore;")
+    assert lines[-1] == "+omitClaudeMd: true"
+
+
+def test_a_stanza_that_sets_omit_claude_md_itself_is_left_as_it_is():
+    changes = [
+        SettingChange(target="agent", key=key, agent="Explore", value=value, current=None, new_agent_file=True)
+        for key, value in (("disallowedTools", ["Edit"]), ("omitClaudeMd", False))
+    ]
+    rec = Recommendation(
+        id="spawn-tools-list", severity="info", category="settings", archetypes=(), title="t", action="a",
+        lever=None, agent_type="Explore", changes=changes,
+    )  # fmt: skip
+    text = recommend_mod.render_patch_set([rec])
+    assert "#" not in text and text.count("omitClaudeMd") == 2
+
+
 @pytest.mark.parametrize("agent", ["general-purpose", "claude", "searcher", None])
 def test_the_choice_about_claude_md_is_empty_for_an_agent_that_is_sent_it(agent):
     assert recommend_mod.claude_md_choice(agent) == ""
