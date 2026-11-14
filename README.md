@@ -533,13 +533,17 @@ See [`docs/mod.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/
   your words is kept.
 - **What it keeps.** Counts, token totals, costs and short labels such
   as tool and model names, in `~/.claude/claudeglass`. Never message
-  text, tool output, file contents or full commands. The dashboard's own
-  store keeps the paths of your transcript files, project folders and
-  profile files for its bookkeeping, and each project's folder name,
-  which can include your user name. Pages show a project by that name
-  with your user name taken out, and nothing else of those paths. The
-  settings snapshots keep only a hash of the name. A test checks every
-  field it reads from a transcript.
+  text, tool output or full commands, and no file contents except the
+  backups named below. The dashboard's store and the parse cache
+  (`cache/`) keep the paths of your transcript files, and the store also
+  keeps your project folders and profile files, for their bookkeeping.
+  Both keep each project's folder name, which can include your user
+  name. Saved baselines keep that name with your user name taken out,
+  and pages show a project the same way, with nothing else of those
+  paths. The settings snapshots keep only an unsalted hash of the name.
+  `apply` keeps a byte-for-byte backup of each file it changes, in
+  `backups/`, so it can undo the change. A test checks every field it
+  reads from a transcript.
 - **What goes online.** ClaudeGlass itself sends nothing, except
   `update`, which runs pip to download the new version from GitHub.
   There's no telemetry and no update check. The dashboard listens only
@@ -621,9 +625,12 @@ has the detail.
 - **Confidential projects.** `exclude_projects` in `config.toml` keeps a
   project's transcripts from ever being read. The SessionStart hook
   still records that project's settings (redacted as for any project),
-  the names of its agents, plugins and MCP servers, and the names and
-  sizes of its CLAUDE.md files, rules, commands and skills, under a hash
-  of its folder name. See
+  the names of its agents, plugins and MCP servers, the names and sizes
+  of its CLAUDE.md files, rules, commands and skills, its output style
+  names, the size of its auto-memory, and the id, cost, duration, token
+  counts and lines added and removed of its last session that
+  `~/.claude.json` keeps for it, under an unsalted hash of its folder
+  name. See
   [Settings for teams and enterprise](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/team.md#settings-for-teams-and-enterprise).
 
 ## Documentation

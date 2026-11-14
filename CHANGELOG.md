@@ -350,12 +350,14 @@ Coaching:
 Docs:
 
 - **The README, SECURITY.md, the capture, CLI, team and first-run pages
-  and the dashboard's glossary were corrected against the code.** Four
-  corrections are about privacy. The dashboard's own store keeps the paths
-  of your transcript, project and profile files for its bookkeeping, and
-  each project's folder name, which can include your user name. Pages show
-  a project by that name with your user name taken out, and the settings
-  snapshots keep only a hash of it. The Claude Code mod calls Claude Haiku
+  and the dashboard's glossary were corrected against the code.** Several
+  corrections are about privacy. The dashboard's store and the parse cache
+  keep the paths of your transcript files, and the store also keeps your
+  project folders and profile files, for their bookkeeping. Both keep each
+  project's folder name, which can include your user name; saved baselines
+  and pages show it with your user name taken out, and the settings
+  snapshots keep only an unsalted hash of it. `apply` keeps byte-for-byte
+  backups of the files it changes. The Claude Code mod calls Claude Haiku
   through Claude Code when you press `/glass tighten` or Check with a
   model, and SECURITY.md now says so. The excerpt Haiku reads about a
   finished agent run holds more than the README and `docs/capture.md`
@@ -363,9 +365,12 @@ Docs:
   run, a workflow's start line, and a short view of up to 4 earlier runs.
   `exclude_projects` keeps a project's transcripts from being read, but
   the SessionStart hook still records that project's settings (redacted as
-  for any project), the names of its agents, plugins and MCP servers, and
-  the names and sizes of its CLAUDE.md files, rules, commands and skills,
-  under a hash of its folder name. The rest include the version to
+  for any project), the names of its agents, plugins and MCP servers, the
+  names and sizes of its CLAUDE.md files, rules, commands and skills, its
+  output style names, the size of its auto-memory, and the id, cost,
+  duration, token counts and lines added and removed of its last session
+  that `~/.claude.json` keeps for it, under an unsalted hash of its folder
+  name. The rest include the version to
   expect, the status line running only in a terminal, the `apply`
   example, how to remove the mod, the retired capture metrics, the hooks
   capture and coaching add, what `capture remove` switches off, the
