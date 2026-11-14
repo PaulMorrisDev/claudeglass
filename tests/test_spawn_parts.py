@@ -1263,6 +1263,40 @@ def test_a_file_that_replaces_another_built_in_is_not_told_to_set_omit_claude_md
     assert not recommend_mod.starts_without_claude_md(None)
 
 
+_SKILLS_UNDOCUMENTED = (
+    "Whether that also drops the skills list from its startup isn't documented, so check the Skills list column "
+    "after a few new spawns."
+)
+
+
+def _skills_action(agent, snapshot=None):
+    builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, skills_used=0)
+    recs = _recs(_report(builtin), snapshot=snapshot, units=Units())
+    (rec,) = [r for r in recs if r.id == "spawn-unused-skills" and r.agent_type == agent]
+    return rec.action
+
+
+def test_the_skills_card_asks_whether_the_list_drops_before_it_says_a_file_replaces_the_built_in():
+    # "that" is the change just named, so the note about the file and CLAUDE.md files comes after the question.
+    assert _skills_action("Explore") == (
+        "Give Explore a tools list that leaves Skill out, or, to change nothing else, add Skill to its "
+        "disallowedTools. " + _SKILLS_UNDOCUMENTED + " A file at ~/.claude/agents/Explore.md replaces the "
+        "built-in Explore, so make the change there. The built-in Explore starts without your CLAUDE.md files. "
+        "Set omitClaudeMd: true in the file to keep that. Leave it out if you want Explore to follow your "
+        "CLAUDE.md rules: each start then carries those files too."
+    )
+    assert _skills_action("general-purpose") == (
+        "Leave Skill off the tools list for general-purpose, which stops it being sent the skills list. To change "
+        "nothing else, add Skill to its disallowedTools instead. " + _SKILLS_UNDOCUMENTED + " A file at "
+        "~/.claude/agents/general-purpose.md replaces the built-in general-purpose, so make the change there."
+    )
+    # An agent with a file of its own is given no note, so its card is as it was.
+    assert _skills_action("searcher", _snapshot({"searcher": {"source": "user"}})) == (
+        "Leave Skill off the tools list for searcher, which stops it being sent the skills list. To change "
+        "nothing else, add Skill to its disallowedTools instead. " + _SKILLS_UNDOCUMENTED
+    )
+
+
 def _mcp_patch_set(agent, snapshot=None):
     big = (0, 25_000.0, 800.0, 300.0)
     builtin = _diet_acc(agent, spawns=50, claude_md=6000.0, servers={"playwright": big}, skills_used=0)

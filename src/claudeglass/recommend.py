@@ -2445,8 +2445,9 @@ def _rule_spawn_parts(
                         else f"Give {agent_type} a tools list that leaves Skill out, or, to change nothing else, "
                         "add Skill to its disallowedTools."
                     )
-                    + ("" if has_file else " " + _built_in_note(agent_type, scope))
-                    + undocumented,
+                    # "that" is the change just named, so the note comes after it.
+                    + undocumented
+                    + ("" if has_file else " " + _built_in_note(agent_type, scope)),
                     lever=None,
                     scope=scope,
                     agent_type=agent_type,
