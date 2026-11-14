@@ -4148,12 +4148,15 @@ def render_markdown() -> str:
         + ", ".join(f"`{t}`" for t in AGENT_ANSWER_TOOLS)
         + f") is there, or the file has stopped growing for {AGENT_JUDGE_WAIT['quiet_s']:g} seconds, or "
         f"{AGENT_JUDGE_WAIT['cap_s']:g} seconds have passed, which is a `no_answer` and no call to Haiku. Then "
-        "it reads the transcript and hands Haiku an excerpt: the agent's type, its brief (up to "
-        f"{AGENT_JUDGE_LIMITS['brief']:,} characters), what it did (model calls, tools used, the files it "
-        f"changed, the first line of up to {AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end "
+        "it reads the transcript and hands Haiku an excerpt: the agent's type and the model it ran on, its "
+        f"brief (up to {AGENT_JUDGE_LIMITS['brief']:,} characters), what Claude said as it started the run "
+        f"(the last {AGENT_JUDGE_LIMITS['earlier_report']} characters), what it did (model calls, tools used, "
+        f"the files it changed, the first line of up to {AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end "
         f"of its report (up to {AGENT_JUDGE_LIMITS['report']:,} characters) and up to "
         f"{AGENT_JUDGE_LIMITS['earlier']} earlier agent runs of the session, read from the whole of the "
-        "session's transcript (their type and the start of their brief and the end of their report), so Haiku "
+        "session's transcript (their type and model, their brief cut to "
+        f"{AGENT_JUDGE_LIMITS['earlier_brief']} characters, its start and end, and the end of their report, the "
+        f"last {AGENT_JUDGE_LIMITS['earlier_report']} characters), so Haiku "
         "can tell a re-run. Tool output is never in it."
     )
     p(

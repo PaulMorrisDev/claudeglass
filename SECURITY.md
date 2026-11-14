@@ -704,6 +704,21 @@ ended without one; the call is Claude Code's, with your own login,
 and the hook imports no networking module (see "Claude Haiku as the
 tagger", "Claude Haiku as the fallback" and "Agent runs" above).
 
+**The Claude Code mod** ([docs/mod.md](docs/mod.md)) is a separate plugin
+that runs inside Claude Code and has no network code of its own. It has
+Claude Code call Claude Haiku only when you press it: `/glass tighten`
+sends your draft, and "Check with a model" sends the summary (up to
+12,000 characters) and the items it checks (`plugin/hooks/command.ts`,
+`plugin/hooks/pane.tsx`, `plugin/hooks/page-checkpoint.tsx`,
+`$.model.complete`). Every summary of the main session, including one you
+start with the mod's Summarise button, is given your keep list as
+instructions, and items you re-add go in a system-prompt section on each
+later request of the main session until a summary keeps them
+(`plugin/hooks/compaction.ts`, `plugin/hooks/readd.ts`). Once a session,
+after Claude's first reply, the mod asks Claude Code for the token count
+`/context` makes (`plugin/hooks/track.ts`); that is not a model reply.
+ClaudeGlass's own Python code is not involved in any of these.
+
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:
 `_cmd_update` (`cli.py`) shells out to `pip install --upgrade
@@ -731,9 +746,9 @@ both loopback-only as just described. The package has zero runtime
 Python dependencies (`pyproject.toml`'s `dependencies = []`). The
 dashboard vendors d3 and two fonts, pinned by sha256 in
 `service/static/THIRD_PARTY.sha256`, and makes no remote requests.
-`rich` is an optional, opt-in extra for nicer terminal output, not a
-networking dependency. Pricing comes from a user-edited local `pricing.toml`,
-never a live lookup — there is no code path that could fetch it.
+The `rich` extra declared in `pyproject.toml` is not imported by any
+code, and is not a networking dependency. Pricing comes from a
+user-edited local `pricing.toml`, never a live lookup — there is no code path that could fetch it.
 
 For the CLI's analytics/report subcommands this is a structural
 guarantee: nothing to call out to, because they contain no networking
@@ -887,7 +902,15 @@ slug matches is excluded from discovery entirely — never scanned, never
 parsed, never appearing in a cache file — not merely hidden from
 output. A malformed regex stops `config.toml` from loading, with an
 error naming the pattern, so a typo can't quietly stop a project being
-excluded.
+excluded. This covers reading transcripts, and the capture and coaching
+hooks. The SessionStart hook (`snapshot-config.py`) does not read
+`config.toml`, so it still records that project's settings (redacted as
+for any project), the names of its agents, plugins and MCP servers, and
+the names and sizes of its CLAUDE.md files, rules, commands and skills,
+under a hash of its folder name. The mod's coaching hints follow
+`exclude_projects`, but its band, keep list and sensor still run in an
+excluded project, and the dashboard reads the sensor's counts by session
+(`service/watcher.py`, `plugin/hooks/settings.ts`).
 
 ```toml
 exclude_projects = ["^confidential-", "client-acme$"]

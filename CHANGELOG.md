@@ -347,6 +347,31 @@ Coaching:
   older mod stays quiet for them too: the `muted` list ClaudeGlass writes for
   it holds them.
 
+Docs:
+
+- **The README, SECURITY.md, the capture, CLI, team and first-run pages
+  and the dashboard's glossary were corrected against the code.** Four
+  corrections are about privacy. The dashboard's own store keeps the paths
+  of your transcript, project and profile files for its bookkeeping, and
+  each project's folder name, which can include your user name. Pages show
+  a project by that name with your user name taken out, and the settings
+  snapshots keep only a hash of it. The Claude Code mod calls Claude Haiku
+  through Claude Code when you press `/glass tighten` or Check with a
+  model, and SECURITY.md now says so. The excerpt Haiku reads about a
+  finished agent run holds more than the README and `docs/capture.md`
+  said: the agent's type and model, what Claude said as it started the
+  run, a workflow's start line, and a short view of up to 4 earlier runs.
+  `exclude_projects` keeps a project's transcripts from being read, but
+  the SessionStart hook still records that project's settings (redacted as
+  for any project), the names of its agents, plugins and MCP servers, and
+  the names and sizes of its CLAUDE.md files, rules, commands and skills,
+  under a hash of its folder name. The rest include the version to
+  expect, the status line running only in a terminal, the `apply`
+  example, how to remove the mod, the retired capture metrics, the hooks
+  capture and coaching add, what `capture remove` switches off, the
+  tested Claude Code versions, the cache read price in the glossary and
+  how to write a commit subject.
+
 ### Changed
 
 - **The tools, skills and MCP cards read the agent's current `tools:` line.**

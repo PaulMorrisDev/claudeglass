@@ -516,7 +516,7 @@ export var GLOSSARY = [
   ["Context", "Everything Claude reads on a reply: system prompt, tools, CLAUDE.md files and the conversation so far."],
   ["Startup context", "What Claude reads before your first message, or before a subagent's task: system prompt, tool list, CLAUDE.md files, skills and more."],
   ["Prompt cache", "A copy of the start of the context kept on Anthropic's side, so the next reply can re-read it cheaply instead of paying full price."],
-  ["Cache read", "Re-reading context from the prompt cache, for a small part of the normal input price: a tenth or a twentieth, depending on the model."],
+  ["Cache read", "Re-reading context from the prompt cache, for a small part of the normal input price: from a tenth to a fortieth, depending on the model."],
   ["Cache write", "Putting context into the prompt cache. Costs more than normal input: 1.25 times for a 5-minute lifetime, 2 times for 1 hour."],
   ["Cache rebuild", "Writing context to the cache again because the cached copy expired or something early in the conversation changed."],
   ["Cache lifetime (TTL)", "How long the prompt cache stays warm after a reply: 5 minutes or 1 hour. On a Pro or Max plan within its usage limits, the main session gets 1 hour by default. Otherwise, and for subagents, the default is 5 minutes. A pause longer than this means a rebuild."],

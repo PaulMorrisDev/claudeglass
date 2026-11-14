@@ -233,14 +233,12 @@ diff first. Full detail: [`docs/onboarding.md`](onboarding.md).
 
 ## What to expect
 
-- **It uses no Claude tokens unless metrics capture is on.** With
-  capture off (the default), it only reads files Claude Code has
-  already written — it never calls Claude or any other service, so
-  there is no bump in usage from running it, however often. Metrics
-  capture (above) is the one opt-in exception: while it's on, Claude
-  spends a small number of tokens reading a note and writing a tag
-  inside your own session, never through a call this tool makes
-  itself.
+- **It uses no Claude tokens unless you turn on metrics capture,
+  coaching notes, `/cg-feedback`, the plan check, the rating reminder or
+  `/cg-brief`, or add the mod.** Otherwise it only reads files Claude
+  Code has already written. Metrics capture from Essentials up also asks
+  Claude Haiku about each finished subagent run, through your own Claude
+  Code login, and the mod calls Haiku only when you press it.
 - **The hook and statusline add nothing to your conversations.** The
   hook starts a short Python process in the background when a session
   starts (well under a second) and prints nothing. The statusline draws
@@ -249,7 +247,8 @@ diff first. Full detail: [`docs/onboarding.md`](onboarding.md).
 - **The first scan takes a while.** The service reads every transcript
   once (seconds to a few minutes for a large history), then only new or
   changed files. The dashboard opens straight away and shows the scan's
-  progress; figures fill in as it goes.
+  progress. When the scan is done, press **Redraw figures** to see all
+  of it.
 - **It reads; it doesn't change.** Nothing about how Claude works
   changes until you apply a change yourself, through a prompt you give
   Claude or `claudeglass apply`. A change takes effect in the next
@@ -374,8 +373,8 @@ discarding those edits.
 py -3 -m claudeglass uninstall --revert-changes --delete-data --dry-run
 ```
 
-Then run it without `--dry-run`. It shows each step and asks before
-making it:
+Then run it without `--dry-run`. It shows each step and asks before each
+removal (undoing an `apply` with `--revert-changes` does not ask):
 
 1. Removes this tool's `SessionStart` hook, any metrics-capture hook
    entries, and statusline from `settings.json`. The diff is shown, and
@@ -396,6 +395,8 @@ making it:
 `--yes` answers yes to every question (each change is still printed).
 Nothing removes the `settings.json.bak-*` copies; delete them yourself
 once you're happy.
+
+If you added the mod, remove it with `claude plugin uninstall claudeglass`.
 
 Finally, if installed via `pip`: `python -m pip uninstall claudeglass`. Via
 `.pyz`: delete the one file.
