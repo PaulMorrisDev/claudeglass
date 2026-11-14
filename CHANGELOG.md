@@ -96,6 +96,8 @@ Capture and dashboard:
 - **Copy buttons work in the desktop app's browser pane.** When the browser
   refuses the clipboard, the copy is tried again through a selected text
   field.
+- **The Changes page says "1 session before"**, where it said "1 sessions
+  before".
 - **The Overview's headline saving leaves out cards shown for information
   only.**
 - **Claude Haiku waits an hour when the `claude` command isn't signed in**,

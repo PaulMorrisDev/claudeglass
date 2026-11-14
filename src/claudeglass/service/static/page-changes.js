@@ -123,8 +123,9 @@ function mixNote(item) {
 }
 
 function countsText(measure) {
-  var noun = /spawn/.test(measure.label) ? "runs" : "sessions";
   if (measure.before_n === undefined || measure.after_n === undefined) return "";
+  // "1 session before", "3 sessions before": the noun follows the first count.
+  var noun = (/spawn/.test(measure.label) ? "run" : "session") + (measure.before_n === 1 ? "" : "s");
   return measure.before_n + " " + noun + " before, " + measure.after_n + " after";
 }
 

@@ -4658,3 +4658,18 @@ def test_start_from_leaves_out_a_profile_whose_file_fails_the_checks() -> None:
     editor = re.sub(r"\s+", " ", _function_source(_app_js(), "buildProfileEditor"))
     assert "startFromProfiles(profiles).forEach(function (p) { startSelect.appendChild(" in editor
     assert "profiles.forEach" not in editor
+
+
+def test_the_before_and_after_counts_say_one_session_and_one_run() -> None:
+    """Seen in the browser pass: "1 sessions before, 3 after"."""
+    from test_ui_figures_audit import _node
+
+    def counts(label, before, after):
+        measure = {"label": label, "before_n": before, "after_n": after}
+        return _node([("page-changes.js", "countsText")], f"countsText({json.dumps(measure)})")
+
+    assert counts("Cost per session", 1, 3) == "1 session before, 3 after"
+    assert counts("Cost per session", 3, 1) == "3 sessions before, 1 after"
+    assert counts("Cost per session", 0, 2) == "0 sessions before, 2 after"
+    assert counts("general-purpose: cost per spawn", 1, 18) == "1 run before, 18 after"
+    assert counts("general-purpose: cost per spawn", 13, 18) == "13 runs before, 18 after"
